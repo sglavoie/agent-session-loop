@@ -9,17 +9,16 @@ scanner sessions and the CLI/rendering session can share one shape.
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
-import json
+from datetime import UTC, datetime
 from pathlib import Path
-import sys
 from typing import Any
 
 from . import plans, responses, state, workspaces
 from .formatting import format_duration_seconds
-
 
 __all__ = [
     "RUNNING_KIND",
@@ -121,18 +120,18 @@ def _workspace_fields(
     root = _coerce_nonempty_str(payload.get("workspace_root"))
     digest = _coerce_nonempty_str(payload.get("registry_digest"))
     raw_rows = payload.get("repositories")
-    rows = tuple(
-        dict(row)
-        for row in raw_rows
-        if isinstance(row, dict)
-    ) if isinstance(raw_rows, list) else ()
+    rows = (
+        tuple(dict(row) for row in raw_rows if isinstance(row, dict))
+        if isinstance(raw_rows, list)
+        else ()
+    )
     cwd = _coerce_nonempty_str(payload.get("cwd"))
     if root is not None and rows:
         return cwd or root, root, digest, rows
     try:
         registry = plans.read_repository_registry(plan_dir)
         metadata = plans.load_plan_metadata(plan_dir)
-    except (plans.PlanError, OSError):
+    except plans.PlanError, OSError:
         return cwd, None, None, ()
     if registry is None or not isinstance(metadata, plans.WorkspacePlanMetadata):
         return cwd, None, None, ()
@@ -203,7 +202,7 @@ def parse_iso_timestamp(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -216,7 +215,7 @@ def parse_iso_timestamp(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -308,7 +307,7 @@ def _read_state_dir_plan_dir_fallbacks(
     if state_path.is_file():
         try:
             state_payload = _read_json_object(state_path)
-        except (OSError, ValueError, json.JSONDecodeError):
+        except OSError, ValueError, json.JSONDecodeError:
             state_payload = None
         if state_payload is not None:
             state_plan_dir = _coerce_nonempty_str(state_payload.get("plan_dir"))
@@ -316,7 +315,7 @@ def _read_state_dir_plan_dir_fallbacks(
     if lock_path.is_file():
         try:
             lock_payload = _read_json_object(lock_path)
-        except (OSError, ValueError, json.JSONDecodeError):
+        except OSError, ValueError, json.JSONDecodeError:
             lock_payload = None
         if lock_payload is not None:
             lock_plan_dir = _coerce_nonempty_str(lock_payload.get("plan_dir"))
@@ -343,7 +342,7 @@ def _resolve_recent_plan_dir(
             continue
         try:
             return plans.canonicalize_path(candidate)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
     return None
 
@@ -488,9 +487,7 @@ def scan_recent_rows(
     rows_by_result_path: dict[str, RecentRow] = {}
     skipped: list[SkippedArtifact] = []
     for state_dir in _iter_state_plan_dirs(state_root):
-        state_plan_dir, lock_plan_dir = _read_state_dir_plan_dir_fallbacks(
-            state_dir
-        )
+        state_plan_dir, lock_plan_dir = _read_state_dir_plan_dir_fallbacks(state_dir)
         for run_dir in _iter_run_dirs(state_dir):
             for result_path in _iter_turn_result_paths(run_dir):
                 key = str(result_path)
@@ -499,9 +496,7 @@ def scan_recent_rows(
                 try:
                     payload = _read_json_object(result_path)
                 except (OSError, ValueError, json.JSONDecodeError) as error:
-                    skipped.append(
-                        SkippedArtifact(path=result_path, reason=str(error))
-                    )
+                    skipped.append(SkippedArtifact(path=result_path, reason=str(error)))
                     continue
                 row = _build_recent_row(
                     payload,
@@ -572,21 +567,15 @@ def _build_running_row(
             _coerce_nonempty_str(active_verification.get("started_at"))
             or lock_info.created_at
         )
-        elapsed_seconds = _coerce_float(
-            active_verification.get("elapsed_seconds")
-        )
+        elapsed_seconds = _coerce_float(active_verification.get("elapsed_seconds"))
         idle_seconds = None
         last_activity_at = _coerce_nonempty_str(
             active_verification.get("current_check_started_at")
         ) or _coerce_nonempty_str(active_verification.get("started_at"))
         check_index = _coerce_int(active_verification.get("current_check_index"))
         check_count = _coerce_int(active_verification.get("check_count"))
-        check_name = _coerce_nonempty_str(
-            active_verification.get("current_check_name")
-        )
-        check_kind = _coerce_nonempty_str(
-            active_verification.get("current_check_kind")
-        )
+        check_name = _coerce_nonempty_str(active_verification.get("current_check_name"))
+        check_kind = _coerce_nonempty_str(active_verification.get("current_check_kind"))
     elif isinstance(active_turn, dict):
         kind = "turn"
         run_id = (
@@ -602,14 +591,11 @@ def _build_running_row(
         session_id = _resolve_session_id(active_turn)
         turn_index = _coerce_int(active_turn.get("turn_index"))
         started_at = (
-            _coerce_nonempty_str(active_turn.get("started_at"))
-            or lock_info.created_at
+            _coerce_nonempty_str(active_turn.get("started_at")) or lock_info.created_at
         )
         elapsed_seconds = _coerce_float(active_turn.get("elapsed_seconds"))
         idle_seconds = _coerce_float(active_turn.get("idle_seconds"))
-        last_activity_at = _coerce_nonempty_str(
-            active_turn.get("last_activity_at")
-        )
+        last_activity_at = _coerce_nonempty_str(active_turn.get("last_activity_at"))
     else:
         kind = "loop"
         run_id = _coerce_nonempty_str(state_payload.get("run_id")) or ""
@@ -703,9 +689,7 @@ def scan_running_rows(
                 )
             )
             continue
-        plan_dir_value, pid_value, created_at_value = _running_lock_metadata(
-            raw_lock
-        )
+        plan_dir_value, pid_value, created_at_value = _running_lock_metadata(raw_lock)
         if plan_dir_value is None:
             stale_locks.append(
                 StaleLock(
@@ -908,17 +892,14 @@ def _print_running_section(
             alias_text = ",".join(aliases)
             if omitted:
                 alias_text += f",+{omitted}"
-            workspace_suffix = (
-                f"  workspace {row['workspace_root']}"
-                + (f" [{alias_text}]" if alias_text else "")
+            workspace_suffix = f"  workspace {row['workspace_root']}" + (
+                f" [{alias_text}]" if alias_text else ""
             )
         if row.get("kind") == "verification":
             check_index = row.get("check_index")
             check_count = row.get("check_count")
             if check_index is None:
-                position = (
-                    f"-/{check_count}" if check_count is not None else "-"
-                )
+                position = f"-/{check_count}" if check_count is not None else "-"
             else:
                 position = (
                     f"{int(check_index) + 1}/{check_count}"
@@ -960,9 +941,7 @@ def _print_recent_section(
         kind = row.get("session_kind")
         kind_label = f" ({kind})" if kind else ""
         workspace_suffix = (
-            f"  workspace {row['workspace_root']}"
-            if row.get("workspace_root")
-            else ""
+            f"  workspace {row['workspace_root']}" if row.get("workspace_root") else ""
         )
         print(
             f"  finished {format_local_time(row['finished_at'])}"
@@ -1072,9 +1051,7 @@ def sessions_from_args(args: argparse.Namespace) -> int:
             )
             skipped_combined.extend(running_skipped)
         if show_recent:
-            recent_rows, recent_skipped = scan_recent_rows(
-                args.state_dir, limit=limit
-            )
+            recent_rows, recent_skipped = scan_recent_rows(args.state_dir, limit=limit)
             skipped_combined.extend(recent_skipped)
     except OSError as error:
         if args.json:

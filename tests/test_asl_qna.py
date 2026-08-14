@@ -5,64 +5,23 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
-import signal
-import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
-from unittest import mock
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime
+from pathlib import Path
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
-    config,
-    contracts,
-    control_queue,
     events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
     qna,
-    review,
-    review_repair,
-    run_control,
     runner,
     state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     REPO_ROOT,
@@ -113,7 +72,7 @@ class QnAContextLoaderTests(unittest.TestCase):
         if turn_overrides:
             turn.update(turn_overrides)
         payload: dict[str, object] = {
-            "ok": False if paused else True,
+            "ok": not paused,
             "paused": paused,
             "reason": "runner-pause",
             "pause_reason": "runner-pause",
@@ -237,9 +196,7 @@ class QnAContextLoaderTests(unittest.TestCase):
             )
             self.assertIn("## Resolution Choices", payload["rendered_prompt"])
             self.assertIn(payload["reply_command"], payload["rendered_prompt"])
-            self.assertIn(
-                payload["continue_command"], payload["rendered_prompt"]
-            )
+            self.assertIn(payload["continue_command"], payload["rendered_prompt"])
             self.assertIn(payload["pause_command"], payload["rendered_prompt"])
             self.assertIn("Choose blue or green?", payload["rendered_prompt"])
             self.assertIn(
@@ -383,12 +340,8 @@ class QnAContextLoaderTests(unittest.TestCase):
             runner._rebase_waiting_deadlines(
                 raw_payload,
                 question_id="question-1",
-                base_deadline=datetime(
-                    2999, 7, 24, 20, 3, 0, tzinfo=timezone.utc
-                ),
-                unsupervised_deadline_at=datetime(
-                    2999, 7, 24, 20, 28, 0, tzinfo=timezone.utc
-                ),
+                base_deadline=datetime(2999, 7, 24, 20, 3, 0, tzinfo=UTC),
+                unsupervised_deadline_at=datetime(2999, 7, 24, 20, 28, 0, tzinfo=UTC),
                 persistence=runner._RunPersistence(write_state=False),
             )
             waiting = raw_payload["waiting_for_reply"]
@@ -476,7 +429,9 @@ class QnAContextLoaderTests(unittest.TestCase):
             self.assertEqual("1", decoded["session_id"])
             self.assertEqual("1", decoded["next_pending_id"])
             self.assertEqual(last_message_path, decoded["last_message_path"])
-            self.assertEqual(str(plans.canonicalize_path(plan_dir)), decoded["plan_dir"])
+            self.assertEqual(
+                str(plans.canonicalize_path(plan_dir)), decoded["plan_dir"]
+            )
 
     def test_questions_payload_carries_resume_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -541,7 +496,9 @@ class QnAContextLoaderTests(unittest.TestCase):
             self.assertEqual(qna.REASON_NO_PAUSED_RUN, ctx.exception.reason)
             self.assertIn("state", ctx.exception.error.lower())
 
-    def test_load_qna_context_raises_no_paused_run_when_state_invalid_json(self) -> None:
+    def test_load_qna_context_raises_no_paused_run_when_state_invalid_json(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
@@ -583,7 +540,9 @@ class QnAContextLoaderTests(unittest.TestCase):
             self.assertEqual(qna.REASON_NO_PAUSED_RUN, ctx.exception.reason)
             self.assertIn("turn", ctx.exception.error.lower())
 
-    def test_load_qna_context_raises_missing_question_context_when_artifact_absent(self) -> None:
+    def test_load_qna_context_raises_missing_question_context_when_artifact_absent(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
@@ -593,14 +552,14 @@ class QnAContextLoaderTests(unittest.TestCase):
             with self.assertRaises(qna.QnAError) as ctx:
                 qna.load_qna_context(plan_dir, state_dir=state_dir)
 
-            self.assertEqual(
-                qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason
-            )
+            self.assertEqual(qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason)
             self.assertEqual(
                 last_message_path, ctx.exception.details["last_message_path"]
             )
 
-    def test_load_qna_context_raises_missing_question_context_when_artifact_empty(self) -> None:
+    def test_load_qna_context_raises_missing_question_context_when_artifact_empty(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
@@ -611,11 +570,11 @@ class QnAContextLoaderTests(unittest.TestCase):
             with self.assertRaises(qna.QnAError) as ctx:
                 qna.load_qna_context(plan_dir, state_dir=state_dir)
 
-            self.assertEqual(
-                qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason
-            )
+            self.assertEqual(qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason)
 
-    def test_load_qna_context_raises_missing_question_context_when_path_unset(self) -> None:
+    def test_load_qna_context_raises_missing_question_context_when_path_unset(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             plan_dir, state_dir, state_path = self._seed_plan(tmp_dir)
@@ -627,11 +586,11 @@ class QnAContextLoaderTests(unittest.TestCase):
             with self.assertRaises(qna.QnAError) as ctx:
                 qna.load_qna_context(plan_dir, state_dir=state_dir)
 
-            self.assertEqual(
-                qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason
-            )
+            self.assertEqual(qna.REASON_MISSING_QUESTION_CONTEXT, ctx.exception.reason)
 
-    def test_load_qna_context_raises_reply_context_mismatch_when_session_advanced(self) -> None:
+    def test_load_qna_context_raises_reply_context_mismatch_when_session_advanced(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             plan_dir = tmp_dir / "plan"
@@ -652,13 +611,13 @@ class QnAContextLoaderTests(unittest.TestCase):
             with self.assertRaises(qna.QnAError) as ctx:
                 qna.load_qna_context(plan_dir, state_dir=state_dir)
 
-            self.assertEqual(
-                qna.REASON_REPLY_CONTEXT_MISMATCH, ctx.exception.reason
-            )
+            self.assertEqual(qna.REASON_REPLY_CONTEXT_MISMATCH, ctx.exception.reason)
             self.assertEqual("1", ctx.exception.details["paused_session_id"])
             self.assertEqual("2", ctx.exception.details["next_pending_id"])
 
-    def test_load_qna_context_raises_no_paused_run_when_no_pending_session(self) -> None:
+    def test_load_qna_context_raises_no_paused_run_when_no_pending_session(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             plan_dir = tmp_dir / "plan"
@@ -669,9 +628,7 @@ class QnAContextLoaderTests(unittest.TestCase):
             state_path = plan_state / events.STATE_FILE_NAME
             last_message_path = str(tmp_dir / "last-message.txt")
             self._write_last_message(last_message_path)
-            self._write_state(
-                state_path, last_message_path=last_message_path
-            )
+            self._write_state(state_path, last_message_path=last_message_path)
 
             with self.assertRaises(qna.QnAError) as ctx:
                 qna.load_qna_context(plan_dir, state_dir=state_dir)
@@ -799,9 +756,7 @@ class QnAQuestionsCliTests(unittest.TestCase):
                 last_message_text="Pick 1a, 2b, or 3c?\n",
             )
 
-            code, out, err = self._run_questions(
-                plan_dir, state_dir, json_output=True
-            )
+            code, out, err = self._run_questions(plan_dir, state_dir, json_output=True)
 
             self.assertEqual(0, code, err)
             self.assertEqual("", err)
@@ -826,9 +781,7 @@ class QnAQuestionsCliTests(unittest.TestCase):
             self.assertEqual("run-1", payload["run_id"])
             self.assertEqual(2, payload["turn_index"])
             self.assertEqual("runner-pause", payload["pause_reason"])
-            self.assertEqual(
-                "agent asked a question", payload["pause_message"]
-            )
+            self.assertEqual("agent asked a question", payload["pause_message"])
             self.assertEqual("Pick 1a, 2b, or 3c?\n", payload["last_message"])
             self.assertEqual(
                 str(last_message_path),
@@ -838,9 +791,7 @@ class QnAQuestionsCliTests(unittest.TestCase):
                 "# Paused Agent Session - Resolver Prompt",
                 payload["rendered_prompt"],
             )
-            self.assertIn(
-                "Pick 1a, 2b, or 3c?", payload["rendered_prompt"]
-            )
+            self.assertIn("Pick 1a, 2b, or 3c?", payload["rendered_prompt"])
 
     def test_json_output_recovers_from_expired_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -850,8 +801,7 @@ class QnAQuestionsCliTests(unittest.TestCase):
                 paused=False,
             )
             state_path = (
-                state.plan_state_dir(plan_dir, state_dir)
-                / events.STATE_FILE_NAME
+                state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
             )
             raw = json.loads(state_path.read_text(encoding="utf-8"))
             raw["waiting_for_reply"] = {
@@ -903,9 +853,7 @@ class QnAQuestionsCliTests(unittest.TestCase):
             )
             self.assertEqual(
                 state.WAITING_FOR_REPLY_STATUS_EXPIRED,
-                status_payload["runner_state"][
-                    "waiting_for_reply_status"
-                ],
+                status_payload["runner_state"]["waiting_for_reply_status"],
             )
             status_output = io.StringIO()
             with redirect_stdout(status_output):
@@ -920,8 +868,7 @@ class QnAQuestionsCliTests(unittest.TestCase):
                 paused=False,
             )
             state_path = (
-                state.plan_state_dir(plan_dir, state_dir)
-                / events.STATE_FILE_NAME
+                state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
             )
             raw = json.loads(state_path.read_text(encoding="utf-8"))
             raw["waiting_for_reply"] = {
@@ -991,9 +938,7 @@ class QnAQuestionsCliTests(unittest.TestCase):
             plan_state = state.plan_state_dir(plan_dir, state_dir)
             plan_state.mkdir(parents=True)
 
-            code, out, err = self._run_questions(
-                plan_dir, state_dir, json_output=True
-            )
+            code, out, err = self._run_questions(plan_dir, state_dir, json_output=True)
 
             self.assertEqual(1, code)
             self.assertEqual("", err)
@@ -1013,20 +958,14 @@ class QnAQuestionsCliTests(unittest.TestCase):
                 paused_session_id="1",
             )
 
-            code, out, err = self._run_questions(
-                plan_dir, state_dir, json_output=True
-            )
+            code, out, err = self._run_questions(plan_dir, state_dir, json_output=True)
 
             self.assertEqual(1, code)
             self.assertEqual("", err)
             payload = json.loads(out)
             self.assertFalse(payload["ok"])
-            self.assertEqual(
-                qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"]
-            )
-            self.assertEqual(
-                "1", payload["details"]["paused_session_id"]
-            )
+            self.assertEqual(qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"])
+            self.assertEqual("1", payload["details"]["paused_session_id"])
             self.assertEqual("2", payload["details"]["next_pending_id"])
 
     def test_json_error_for_malformed_plan(self) -> None:
@@ -1052,9 +991,7 @@ class QnAQuestionsCliTests(unittest.TestCase):
             plan_dir, state_dir, _ = self._seed_paused_plan(tmp_dir)
 
             env = os.environ.copy()
-            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get(
-                "PYTHONPATH", ""
-            )
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             completed = subprocess.run(
                 [
                     sys.executable,

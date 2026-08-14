@@ -5,79 +5,52 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timedelta, timezone
 import errno
-import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
-import signal
 import socket
-import stat
 import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
-import urllib.parse
+from contextlib import contextmanager, redirect_stdout
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
     artifacts,
     authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
-    config,
     contracts,
-    control_queue,
     durability,
     events,
     harnesses,
-    install_verify,
     mailbox,
     mailbox_rendering,
     pause_policy,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
     responses,
     review,
-    review_repair,
-    run_control,
     runner,
     state,
     tail,
-    verification,
-    workbench,
-    workbench_server,
 )
-from agent_session_loop.workspaces import Repository, RepositoryRegistry
 from agent_session_loop.formatting import (
     format_duration_seconds,
     format_turn_finished_message,
     format_turn_started_message,
 )
+from agent_session_loop.workspaces import Repository, RepositoryRegistry
 from tests.support import (
+    _write_lock_file,
+    _write_state_payload,
+    fail_open_for_path,
     read_jsonl,
     write_plan,
     write_plan_with_ids,
-    fail_open_for_path,
-    _write_lock_file,
-    _write_state_payload,
 )
 
 
@@ -97,9 +70,7 @@ class PlanMetadataTests(unittest.TestCase):
                 plans.canonicalize_path(plan_dir) / plans.PLAN_METADATA_FILE_NAME,
                 path,
             )
-            self.assertEqual(
-                plans.PlanMetadata(cwd=str(cwd.resolve())), metadata
-            )
+            self.assertEqual(plans.PlanMetadata(cwd=str(cwd.resolve())), metadata)
             self.assertEqual(
                 {"cwd": str(cwd.resolve()), "version": 1},
                 json.loads(path.read_text(encoding="utf-8")),
@@ -127,9 +98,7 @@ class PlanMetadataTests(unittest.TestCase):
             plans.save_plan_metadata(plan_dir, cwd)
 
             self.assertEqual(content_before, plans.plan_content_sha256(plan_dir))
-            self.assertEqual(
-                readiness_before, plans.stable_readiness_sha256(plan_dir)
-            )
+            self.assertEqual(readiness_before, plans.stable_readiness_sha256(plan_dir))
 
 
 class EventPersistenceTests(unittest.TestCase):
@@ -166,20 +135,14 @@ class EventPersistenceTests(unittest.TestCase):
             artifact_path = Path(tmp) / "artifact.json"
             with (
                 mock.patch.object(durability.sys, "platform", "darwin"),
-                mock.patch.object(
-                    durability.fcntl, "F_FULLFSYNC", 123, create=True
-                ),
+                mock.patch.object(durability.fcntl, "F_FULLFSYNC", 123, create=True),
                 mock.patch.object(durability.fcntl, "fcntl", side_effect=unsupported),
                 mock.patch.object(
                     durability.os, "fsync", wraps=original_fsync
                 ) as fsync,
             ):
-                events.append_event(
-                    event_path, events.Event(name="probe", payload={})
-                )
-                artifacts.atomic_write_bytes(
-                    artifact_path, b"{}\n", durable=True
-                )
+                events.append_event(event_path, events.Event(name="probe", payload={}))
+                artifacts.atomic_write_bytes(artifact_path, b"{}\n", durable=True)
 
             self.assertTrue(event_path.read_text(encoding="utf-8").strip())
             self.assertEqual(b"{}\n", artifact_path.read_bytes())
@@ -218,11 +181,7 @@ class EventPersistenceTests(unittest.TestCase):
                 (record["payload"]["worker"], record["payload"]["index"])
                 for record in records
             }
-            expected = {
-                (worker, index)
-                for worker in range(8)
-                for index in range(50)
-            }
+            expected = {(worker, index) for worker in range(8) for index in range(50)}
             self.assertEqual(expected, observed)
 
 
@@ -269,9 +228,7 @@ class ParserAndStateTests(unittest.TestCase):
         )
         self.assertEqual(
             "session 7/7 started",
-            format_turn_started_message(
-                {"session_id": "7", "total_sessions": 7}
-            ),
+            format_turn_started_message({"session_id": "7", "total_sessions": 7}),
         )
 
     def test_format_turn_finished_message_includes_running_total_when_available(
@@ -292,8 +249,7 @@ class ParserAndStateTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            "session 2/7 finished "
-            "(status complete, return code 0, duration 6m13s)",
+            "session 2/7 finished (status complete, return code 0, duration 6m13s)",
             format_turn_finished_message(
                 {
                     "session_id": "2",
@@ -558,8 +514,7 @@ class ParserAndStateTests(unittest.TestCase):
 
     def test_session_id_helpers_parse_sort_and_reject_invalid_ids(self) -> None:
         parsed = [
-            plans.parse_session_id(value)
-            for value in ("2.10", "2", "10", "2.1", "2.2")
+            plans.parse_session_id(value) for value in ("2.10", "2", "10", "2.1", "2.2")
         ]
 
         self.assertEqual(
@@ -585,9 +540,7 @@ class ParserAndStateTests(unittest.TestCase):
 
     def test_session_filename_helpers_match_dotted_files_exactly(self) -> None:
         session_id = plans.session_id_from_filename("session-2.1.md")
-        expansion_id = plans.session_id_from_expansion_filename(
-            "session-2.1.expand.md"
-        )
+        expansion_id = plans.session_id_from_expansion_filename("session-2.1.expand.md")
 
         self.assertIsNotNone(session_id)
         self.assertIsNotNone(expansion_id)
@@ -596,9 +549,7 @@ class ParserAndStateTests(unittest.TestCase):
 
         self.assertIsNone(plans.session_id_from_filename("session-2.1.expand.md"))
         self.assertIsNone(plans.session_id_from_filename("session-02.md"))
-        self.assertIsNone(
-            plans.session_id_from_expansion_filename("session-2.1.md")
-        )
+        self.assertIsNone(plans.session_id_from_expansion_filename("session-2.1.md"))
         self.assertIsNone(
             plans.session_id_from_expansion_filename("session-2.01.expand.md")
         )
@@ -786,8 +737,7 @@ class ParserAndStateTests(unittest.TestCase):
         self.assertEqual(("SVC", "OAK"), scope.reads)
         self.assertEqual(("SVC",), scope.writes)
         self.assertEqual(
-            "**Reads repositories**: SVC, OAK\n"
-            "**Writes repositories**: SVC\n",
+            "**Reads repositories**: SVC, OAK\n**Writes repositories**: SVC\n",
             plans.render_session_scope(scope),
         )
         qualified = plans.parse_qualified_path("SVC:internal/foo.go", scope.reads)
@@ -800,9 +750,11 @@ class ParserAndStateTests(unittest.TestCase):
             "SVC:../foo",
             "OAK:./foo",
         ):
-            with self.subTest(invalid=invalid):
-                with self.assertRaises(ValueError):
-                    plans.parse_qualified_path(invalid, ("SVC",))
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaises(ValueError),
+            ):
+                plans.parse_qualified_path(invalid, ("SVC",))
 
     def test_completed_multi_repo_handoff_requires_qualified_write_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -838,9 +790,7 @@ class ParserAndStateTests(unittest.TestCase):
             session_path.write_text(
                 template.format(files="OAK:internal/foo.go"), encoding="utf-8"
             )
-            with self.assertRaisesRegex(
-                plans.PlanError, "outside Writes repositories"
-            ):
+            with self.assertRaisesRegex(plans.PlanError, "outside Writes repositories"):
                 plans.read_session_handoff(self._session_file(plan_dir))
 
             session_path.write_text(
@@ -1597,22 +1547,26 @@ class ParserAndStateTests(unittest.TestCase):
         )
 
         for relative_name in cases:
-            with self.subTest(relative_name=relative_name):
-                with tempfile.TemporaryDirectory() as tmp:
-                    plan_dir = Path(tmp) / "plan"
-                    write_plan(plan_dir, ("pending",))
-                    target = plan_dir / relative_name
-                    if not target.exists():
-                        target.write_text("extra plan metadata\n", encoding="utf-8")
+            with (
+                self.subTest(relative_name=relative_name),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                plan_dir = Path(tmp) / "plan"
+                write_plan(plan_dir, ("pending",))
+                target = plan_dir / relative_name
+                if not target.exists():
+                    target.write_text("extra plan metadata\n", encoding="utf-8")
 
-                    with fail_open_for_path(target):
-                        with self.assertRaises(plans.PlanError) as raised:
-                            plans.inspect_plan(plan_dir)
+                with (
+                    fail_open_for_path(target),
+                    self.assertRaises(plans.PlanError) as raised,
+                ):
+                    plans.inspect_plan(plan_dir)
 
-                    message = str(raised.exception)
-                    self.assertIn(str(plans.canonicalize_path(target)), message)
-                    self.assertIn("permission denied", message.lower())
-                    self.assertIsInstance(raised.exception.__cause__, PermissionError)
+                message = str(raised.exception)
+                self.assertIn(str(plans.canonicalize_path(target)), message)
+                self.assertIn("permission denied", message.lower())
+                self.assertIsInstance(raised.exception.__cause__, PermissionError)
 
     def test_inspect_plan_wraps_session_discovery_read_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1628,9 +1582,11 @@ class ParserAndStateTests(unittest.TestCase):
                     )
                 return original_iterdir(path)
 
-            with mock.patch.object(Path, "iterdir", failing_iterdir):
-                with self.assertRaises(plans.PlanError) as raised:
-                    plans.inspect_plan(plan_dir)
+            with (
+                mock.patch.object(Path, "iterdir", failing_iterdir),
+                self.assertRaises(plans.PlanError) as raised,
+            ):
+                plans.inspect_plan(plan_dir)
 
             message = str(raised.exception)
             self.assertIn(str(canonical_plan_dir), message)
@@ -1647,9 +1603,11 @@ class ParserAndStateTests(unittest.TestCase):
                 self.assertEqual(state_value, plans.parse_readiness_state(state_value))
         self.assertEqual("loop-ready", plans.parse_readiness_state("  LOOP-READY  "))
         for invalid in ("", "ready", "loop_ready", "DONE"):
-            with self.subTest(value=invalid):
-                with self.assertRaises(plans.PlanError):
-                    plans.parse_readiness_state(invalid)
+            with (
+                self.subTest(value=invalid),
+                self.assertRaises(plans.PlanError),
+            ):
+                plans.parse_readiness_state(invalid)
 
     def test_parse_readiness_metadata_reads_all_three_lines(self) -> None:
         manifest_text = "\n".join(
@@ -1707,9 +1665,11 @@ class ParserAndStateTests(unittest.TestCase):
         )
 
         for label, text in cases:
-            with self.subTest(label=label):
-                with self.assertRaises(plans.PlanError):
-                    plans.parse_readiness_metadata(text)
+            with (
+                self.subTest(label=label),
+                self.assertRaises(plans.PlanError),
+            ):
+                plans.parse_readiness_metadata(text)
 
     def test_write_readiness_metadata_inserts_after_front_matter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2151,9 +2111,7 @@ class ParserAndStateTests(unittest.TestCase):
         self.assertEqual("module-exists", file_check.name)
         self.assertEqual("agent_session_loop/contracts.py", file_check.path)
         self.assertEqual("check-2", command_check.name)
-        self.assertEqual(
-            ("python3", "-m", "unittest", "tests.t"), command_check.argv
-        )
+        self.assertEqual(("python3", "-m", "unittest", "tests.t"), command_check.argv)
         self.assertEqual(30.0, command_check.timeout_seconds)
         self.assertIsNone(command_check.cwd)
         self.assertEqual("check-3", regex_check.name)
@@ -2192,9 +2150,7 @@ class ParserAndStateTests(unittest.TestCase):
         }
         text = (
             "## Completion Contract\n\n### Done when\n\n- done\n\n"
-            "### Verify\n\n```json\n"
-            + json.dumps(payload)
-            + "\n```\n"
+            "### Verify\n\n```json\n" + json.dumps(payload) + "\n```\n"
         )
 
         contract = contracts.parse_completion_contract(
@@ -2224,13 +2180,15 @@ class ParserAndStateTests(unittest.TestCase):
             ("unknown", {**base, "repo": "OWL"}, "unknown repository alias"),
             ("malformed", {**base, "repo": "bad alias"}, "repo.*invalid"),
         ):
-            with self.subTest(label=label):
-                with self.assertRaisesRegex(plans.PlanError, pattern):
-                    contracts._parse_verify_payload(
-                        {"checks": [check]},
-                        session_id=plans.parse_session_id("1"),
-                        repository_registry=registry,
-                    )
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(plans.PlanError, pattern),
+            ):
+                contracts._parse_verify_payload(
+                    {"checks": [check]},
+                    session_id=plans.parse_session_id("1"),
+                    repository_registry=registry,
+                )
 
     def test_single_repository_contract_resolves_omitted_repo(self) -> None:
         registry = RepositoryRegistry(
@@ -2260,13 +2218,15 @@ class ParserAndStateTests(unittest.TestCase):
             ({"type": "command", "argv": ["true"], "cwd": "C:\\tmp"}, "cwd"),
         )
         for check, field in cases:
-            with self.subTest(check=check):
-                with self.assertRaisesRegex(plans.PlanError, field + ".*beneath"):
-                    contracts._parse_verify_payload(
-                        {"checks": [check]},
-                        session_id=plans.parse_session_id("1"),
-                        repository_registry=registry,
-                    )
+            with (
+                self.subTest(check=check),
+                self.assertRaisesRegex(plans.PlanError, field + ".*beneath"),
+            ):
+                contracts._parse_verify_payload(
+                    {"checks": [check]},
+                    session_id=plans.parse_session_id("1"),
+                    repository_registry=registry,
+                )
 
     def test_legacy_contract_keeps_absolute_paths_and_omitted_repo(self) -> None:
         recipe = contracts._parse_verify_payload(
@@ -2509,7 +2469,9 @@ class ParserAndStateTests(unittest.TestCase):
         contract = contracts.parse_completion_contract(text, session_id="1")
 
         check = contract.verify.checks[0]
-        self.assertEqual(contracts.DEFAULT_COMMAND_TIMEOUT_SECONDS, check.timeout_seconds)
+        self.assertEqual(
+            contracts.DEFAULT_COMMAND_TIMEOUT_SECONDS, check.timeout_seconds
+        )
         self.assertEqual("subdir", check.cwd)
 
     def test_parse_completion_contract_validates_file_exists_check(self) -> None:
@@ -2567,8 +2529,7 @@ class ParserAndStateTests(unittest.TestCase):
             ),
             (
                 "invalid regex",
-                '{"checks": [{"type": "regex_in_file", "path": "a", '
-                '"pattern": "("}]}',
+                '{"checks": [{"type": "regex_in_file", "path": "a", "pattern": "("}]}',
                 "not a valid regex",
             ),
         )
@@ -2624,9 +2585,7 @@ class ParserAndStateTests(unittest.TestCase):
 
     def _parallel_contract_text(self, parallel_literal: str | None) -> str:
         parallel_line = (
-            []
-            if parallel_literal is None
-            else [f'  "parallel": {parallel_literal},']
+            [] if parallel_literal is None else [f'  "parallel": {parallel_literal},']
         )
         return "\n".join(
             [
@@ -2659,13 +2618,13 @@ class ParserAndStateTests(unittest.TestCase):
 
     def test_parse_completion_contract_rejects_non_bool_parallel(self) -> None:
         for literal in ('"true"', "1", "null", "[]"):
-            with self.subTest(parallel=literal):
-                with self.assertRaisesRegex(
-                    plans.PlanError, "'parallel' must be a boolean"
-                ):
-                    contracts.parse_completion_contract(
-                        self._parallel_contract_text(literal), session_id="1"
-                    )
+            with (
+                self.subTest(parallel=literal),
+                self.assertRaisesRegex(plans.PlanError, "'parallel' must be a boolean"),
+            ):
+                contracts.parse_completion_contract(
+                    self._parallel_contract_text(literal), session_id="1"
+                )
 
     def test_render_completion_contract_round_trips_parallel_flag(self) -> None:
         contract = authoring.contract_from_payload(
@@ -2691,9 +2650,7 @@ class ParserAndStateTests(unittest.TestCase):
             "1", ["something"], {"checks": [{"type": "file_exists", "path": "a"}]}
         )
 
-        self.assertNotIn(
-            "parallel", authoring.render_completion_contract(contract)
-        )
+        self.assertNotIn("parallel", authoring.render_completion_contract(contract))
 
     def test_render_completion_contract_round_trips_failure_diagnostic(self) -> None:
         contract = authoring.contract_from_payload(
@@ -2719,7 +2676,9 @@ class ParserAndStateTests(unittest.TestCase):
         self.assertEqual((), reparsed.verify.checks[0].on_failure_of)
         self.assertEqual(("suite",), reparsed.verify.checks[1].on_failure_of)
 
-    def test_parse_completion_contract_rejects_invalid_failure_diagnostics(self) -> None:
+    def test_parse_completion_contract_rejects_invalid_failure_diagnostics(
+        self,
+    ) -> None:
         invalid_recipes = (
             (
                 {
@@ -2784,9 +2743,11 @@ class ParserAndStateTests(unittest.TestCase):
             ),
         )
         for payload, message in invalid_recipes:
-            with self.subTest(message=message):
-                with self.assertRaisesRegex(plans.PlanError, message):
-                    authoring.contract_from_payload("1", ["something"], payload)
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(plans.PlanError, message),
+            ):
+                authoring.contract_from_payload("1", ["something"], payload)
 
     def test_parse_completion_contract_reports_malformed_json(self) -> None:
         text = "\n".join(
@@ -2851,7 +2812,8 @@ class ParserAndStateTests(unittest.TestCase):
                     "```json",
                     "{",
                     '  "checks": [',
-                    '    {"type": "file_exists", "path": "agent_session_loop/contracts.py"}',
+                    '    {"type": "file_exists", "path": '
+                    '"agent_session_loop/contracts.py"}',
                     "  ]",
                     "}",
                     "```",
@@ -2913,9 +2875,7 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertTrue(payload["state_path"].endswith("/state.json"))
             self.assertTrue(payload["events_path"].endswith("/events.jsonl"))
             self.assertEqual(1, payload["counts"]["pending"])
-            self.assertEqual(
-                "initial-review", payload["review_resume"]["action"]
-            )
+            self.assertEqual("initial-review", payload["review_resume"]["action"])
             self.assertFalse(payload["review_resume"]["eligible"])
             self.assertEqual(
                 "review-harness-required",
@@ -3116,31 +3076,24 @@ class ParserAndStateTests(unittest.TestCase):
             ),
         )
         for label, runner_payload in cases:
-            with self.subTest(label):
-                with tempfile.TemporaryDirectory() as tmp:
-                    plan_dir = Path(tmp) / "plan"
-                    state_dir = Path(tmp) / "state"
-                    write_plan(plan_dir, ("pending",))
-                    mailbox.append_question(
-                        plan_dir,
-                        "abandoned when the wait timed out",
-                        state_dir=state_dir,
-                        run_id="RUN-LIVE",
-                    )
-                    _write_state_payload(
-                        plan_dir, state_dir, runner_payload
-                    )
-                    _write_lock_file(
-                        plan_dir, state_dir, pid=os.getpid()
-                    )
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                plan_dir = Path(tmp) / "plan"
+                state_dir = Path(tmp) / "state"
+                write_plan(plan_dir, ("pending",))
+                mailbox.append_question(
+                    plan_dir,
+                    "abandoned when the wait timed out",
+                    state_dir=state_dir,
+                    run_id="RUN-LIVE",
+                )
+                _write_state_payload(plan_dir, state_dir, runner_payload)
+                _write_lock_file(plan_dir, state_dir, pid=os.getpid())
 
-                    payload = state.status_payload(
-                        plans.inspect_plan(plan_dir), state_dir
-                    )
+                payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
 
-                    status = payload["mailbox"]
-                    self.assertEqual(1, status["unanswered_questions"])
-                    self.assertEqual(0, status["open_questions"])
+                status = payload["mailbox"]
+                self.assertEqual(1, status["unanswered_questions"])
+                self.assertEqual(0, status["open_questions"])
 
     def test_live_run_id_requires_a_readable_unfinished_lock_guarded_run(
         self,
@@ -3167,12 +3120,8 @@ class ParserAndStateTests(unittest.TestCase):
                 active,
             )
         )
-        self.assertIsNone(
-            state._live_run_id({**live, "error": "unreadable"}, active)
-        )
-        self.assertIsNone(
-            state._live_run_id({**live, "present": False}, active)
-        )
+        self.assertIsNone(state._live_run_id({**live, "error": "unreadable"}, active))
+        self.assertIsNone(state._live_run_id({**live, "present": False}, active))
         self.assertIsNone(state._live_run_id({"present": True}, active))
 
     def test_min_append_bytes_matches_generated_acknowledgement(self) -> None:
@@ -3181,7 +3130,7 @@ class ParserAndStateTests(unittest.TestCase):
             state_dir = Path(tmp) / "state"
             write_plan(plan_dir, ("pending",))
             message_id = "00000000-0000-4000-8000-000000000001"
-            now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+            now = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
             created_at = "2026-07-25T12:00:00.000000+00:00"
 
             with (
@@ -3209,7 +3158,7 @@ class ParserAndStateTests(unittest.TestCase):
             write_plan(plan_dir, ("pending",))
             question_id = "00000000-0000-4000-8000-000000000001"
             reply_id = "00000000-0000-4000-8000-000000000002"
-            now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+            now = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
             question = mailbox.append_question(
                 plan_dir,
                 "x",
@@ -3246,7 +3195,7 @@ class ParserAndStateTests(unittest.TestCase):
             write_plan(plan_dir, ("pending",))
             question_id = "00000000-0000-4000-8000-000000000001"
             resolution_id = "00000000-0000-4000-8000-000000000002"
-            now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+            now = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
             question = mailbox.append_question(
                 plan_dir,
                 "x",
@@ -3313,9 +3262,7 @@ class ParserAndStateTests(unittest.TestCase):
             empty_note_closure = view.closure_for(empty_note_question.id)
             empty_note_resolution = view.resolution_for(empty_note_question.id)
             omitted_note_closure = view.closure_for(omitted_note_question.id)
-            omitted_note_resolution = view.resolution_for(
-                omitted_note_question.id
-            )
+            omitted_note_resolution = view.resolution_for(omitted_note_question.id)
 
             self.assertIsNotNone(empty_note_closure)
             self.assertIsNotNone(empty_note_resolution)
@@ -3360,9 +3307,7 @@ class ParserAndStateTests(unittest.TestCase):
                 + b"\n"
             )
             target_size = (
-                mailbox.MAILBOX_MAX_BYTES
-                - mailbox.MAILBOX_MIN_APPEND_BYTES
-                + 1
+                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_MIN_APPEND_BYTES + 1
             )
             current_size = mailbox.read_mailbox(
                 plan_dir, state_dir=state_dir
@@ -3392,9 +3337,7 @@ class ParserAndStateTests(unittest.TestCase):
                     raised.exception.reason,
                 )
 
-            full_payload = state.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
-            )
+            full_payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
 
             full_status = full_payload["mailbox"]
             self.assertTrue(full_status["full"])
@@ -3539,15 +3482,11 @@ class ParserAndStateTests(unittest.TestCase):
                 )[0],
             )
             payload = unattributed.to_payload()
-            self.assertEqual(
-                mailbox.SUPERVISION_OUTCOME_COMPLETE, payload["outcome"]
-            )
+            self.assertEqual(mailbox.SUPERVISION_OUTCOME_COMPLETE, payload["outcome"])
             self.assertEqual("reason=complete", payload["text"])
             self.assertNotIn("run_id", payload)
             self.assertNotIn("supervision_id", payload)
-            self.assertEqual(
-                mailbox.MAILBOX_SCHEMA_VERSION, payload["version"]
-            )
+            self.assertEqual(mailbox.MAILBOX_SCHEMA_VERSION, payload["version"])
 
     def test_supervision_end_round_trips_a_launch_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3571,9 +3510,7 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(launch, appended.to_payload()["supervision_id"])
             self.assertEqual(
                 launch,
-                json.loads(mailbox_rendering.message_json(appended))[
-                    "supervision_id"
-                ],
+                json.loads(mailbox_rendering.message_json(appended))["supervision_id"],
             )
 
     def test_supervision_end_appends_reject_malformed_records(self) -> None:
@@ -3607,8 +3544,7 @@ class ParserAndStateTests(unittest.TestCase):
                     {
                         "text": "done",
                         "outcome": "complete",
-                        "run_id": "r"
-                        * (mailbox.MAILBOX_MAX_RUN_ID_CHARS + 1),
+                        "run_id": "r" * (mailbox.MAILBOX_MAX_RUN_ID_CHARS + 1),
                     },
                 ),
                 (
@@ -3701,9 +3637,7 @@ class ParserAndStateTests(unittest.TestCase):
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
 
             self.assertEqual((), view.messages)
-            self.assertEqual(
-                expected, [record.reason for record in view.rejected]
-            )
+            self.assertEqual(expected, [record.reason for record in view.rejected])
             self.assertIsNone(view.latest_supervision_end)
 
     def test_supervision_end_appends_where_a_notice_is_refused(self) -> None:
@@ -3729,8 +3663,7 @@ class ParserAndStateTests(unittest.TestCase):
                 + b"\n"
             )
             non_closure_cap = (
-                mailbox.MAILBOX_MAX_BYTES
-                - mailbox.MAILBOX_CLOSURE_RESERVE_BYTES
+                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_CLOSURE_RESERVE_BYTES
             )
             mailbox.append_guidance(
                 plan_dir,
@@ -3809,11 +3742,7 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(0, payload["receipts"])
             self.assertEqual(
                 legacy_payload,
-                {
-                    key: value
-                    for key, value in payload.items()
-                    if key in legacy_payload
-                },
+                {key: value for key, value in payload.items() if key in legacy_payload},
             )
 
     def test_supervision_end_outcome_can_be_resolved_at_commit(self) -> None:
@@ -4077,8 +4006,7 @@ class ParserAndStateTests(unittest.TestCase):
             # Fill exactly to the shared non-reply cap. Only replies may use
             # the final reserve below the physical file cap.
             non_reply_cap = (
-                mailbox.MAILBOX_MAX_BYTES
-                - mailbox.MAILBOX_REPLY_RESERVE_BYTES
+                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_REPLY_RESERVE_BYTES
             )
             current_size = mailbox.read_mailbox(
                 plan_dir, state_dir=state_dir
@@ -4110,9 +4038,7 @@ class ParserAndStateTests(unittest.TestCase):
             for append in (mailbox.append_guidance, mailbox.append_question):
                 with self.assertRaises(mailbox.MailboxError) as raised:
                     append(plan_dir, "one more?", state_dir=state_dir)
-                self.assertEqual(
-                    mailbox.ERROR_MAILBOX_FULL, raised.exception.reason
-                )
+                self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
             with self.assertRaises(mailbox.MailboxError) as raised:
                 mailbox.append_acknowledgement(
                     plan_dir, view.last_seq, state_dir=state_dir
@@ -4142,9 +4068,7 @@ class ParserAndStateTests(unittest.TestCase):
             )
             self.assertEqual(resolution_question.id, resolution.to)
 
-            payload = state.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
-            )
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
             status = payload["mailbox"]
             self.assertFalse(status["full"])
             self.assertFalse(status["accepts_questions"])
@@ -4224,9 +4148,7 @@ class ParserAndStateTests(unittest.TestCase):
                 )
             self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
 
-            payload = state.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
-            )
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
             status = payload["mailbox"]
             self.assertFalse(status["full"])
             self.assertFalse(status["accepts_replies"])
@@ -4260,12 +4182,8 @@ class ParserAndStateTests(unittest.TestCase):
                 "permission denied",
                 path=mailbox_path,
             )
-            with mock.patch.object(
-                mailbox, "read_mailbox", side_effect=read_error
-            ):
-                payload = state.status_payload(
-                    plans.inspect_plan(plan_dir), state_dir
-                )
+            with mock.patch.object(mailbox, "read_mailbox", side_effect=read_error):
+                payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
 
             status = payload["mailbox"]
             self.assertTrue(status["present"])
@@ -4323,9 +4241,7 @@ class ParserAndStateTests(unittest.TestCase):
             payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
 
             self.assertEqual(waiting, payload["waiting_for_reply"])
-            self.assertEqual(
-                waiting, payload["runner_state"]["waiting_for_reply"]
-            )
+            self.assertEqual(waiting, payload["runner_state"]["waiting_for_reply"])
             self.assertEqual(
                 state.WAITING_FOR_REPLY_STATUS_EXPIRED,
                 payload["waiting_for_reply_status"],
@@ -4391,9 +4307,7 @@ class ParserAndStateTests(unittest.TestCase):
                 state.release_lock(plan_dir, state_dir)
 
             self.assertEqual(waiting, payload["waiting_for_reply"])
-            self.assertEqual(
-                waiting, payload["runner_state"]["waiting_for_reply"]
-            )
+            self.assertEqual(waiting, payload["runner_state"]["waiting_for_reply"])
             self.assertTrue(lock_info.active)
             self.assertEqual(
                 state.WAITING_FOR_REPLY_STATUS_LIVE,
@@ -4477,15 +4391,13 @@ class ParserAndStateTests(unittest.TestCase):
         # Records persisted before the ceiling began rolling carry only the
         # bare timestamp; they must classify exactly as they always did.
         lock_info = self._active_lock()
-        started = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        started = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
         historical = {
             "question_id": "question-1",
             "started_at": started.isoformat(),
             "base_deadline": (started + timedelta(minutes=5)).isoformat(),
             "hard_deadline": (started + timedelta(minutes=30)).isoformat(),
-            "last_lease_activity_at": (
-                started + timedelta(minutes=29)
-            ).isoformat(),
+            "last_lease_activity_at": (started + timedelta(minutes=29)).isoformat(),
         }
 
         self.assertEqual(
@@ -4527,18 +4439,14 @@ class ParserAndStateTests(unittest.TestCase):
 
     def test_rolling_ceiling_keeps_supervised_wait_live(self) -> None:
         lock_info = self._active_lock()
-        started = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        started = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
         supervised = {
             "question_id": "question-1",
             "started_at": started.isoformat(),
             "base_deadline": (started + timedelta(minutes=5)).isoformat(),
-            "unsupervised_deadline_at": (
-                started + timedelta(minutes=30)
-            ).isoformat(),
+            "unsupervised_deadline_at": (started + timedelta(minutes=30)).isoformat(),
             "unsupervised_ceiling_seconds": 1800.0,
-            "last_lease_activity_at": (
-                started + timedelta(minutes=90)
-            ).isoformat(),
+            "last_lease_activity_at": (started + timedelta(minutes=90)).isoformat(),
         }
 
         # Two hours in, the persisted anchor is 90 minutes stale, but the last
@@ -4573,14 +4481,12 @@ class ParserAndStateTests(unittest.TestCase):
 
     def test_unwatched_wait_expires_at_its_persisted_ceiling(self) -> None:
         lock_info = self._active_lock()
-        started = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        started = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
         unwatched = {
             "question_id": "question-1",
             "started_at": started.isoformat(),
             "base_deadline": (started + timedelta(minutes=5)).isoformat(),
-            "unsupervised_deadline_at": (
-                started + timedelta(minutes=30)
-            ).isoformat(),
+            "unsupervised_deadline_at": (started + timedelta(minutes=30)).isoformat(),
             "unsupervised_ceiling_seconds": 1800.0,
             "last_lease_activity_at": None,
         }
@@ -4650,9 +4556,7 @@ class ParserAndStateTests(unittest.TestCase):
                             "turn_index": 2,
                             "started_at": "2026-07-24T12:00:00+00:00",
                             "base_deadline": "2026-07-24T12:05:00+00:00",
-                            "unsupervised_deadline_at": (
-                                "2026-07-24T12:30:00+00:00"
-                            ),
+                            "unsupervised_deadline_at": ("2026-07-24T12:30:00+00:00"),
                             "unsupervised_ceiling_seconds": 1800.0,
                             "last_lease_activity_at": None,
                         },
@@ -4862,7 +4766,7 @@ class ParserAndStateTests(unittest.TestCase):
                         "run_id": "20260619T120000Z-9",
                         "harness": "claude",
                         "reason": "",
-                        "run_started_at": datetime.now(timezone.utc).isoformat(),
+                        "run_started_at": datetime.now(UTC).isoformat(),
                         "run_finished_at": None,
                         "active_turn": None,
                     }
@@ -4937,9 +4841,7 @@ class ParserAndStateTests(unittest.TestCase):
             )
             lock_info = state.acquire_lock(plan_dir, state_dir)
             try:
-                payload = state.status_payload(
-                    plans.inspect_plan(plan_dir), state_dir
-                )
+                payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
             finally:
                 state.release_lock(plan_dir, state_dir)
 
@@ -4998,9 +4900,7 @@ class ParserAndStateTests(unittest.TestCase):
             # status backfill would (correctly) declare the run abandoned.
             state.acquire_lock(plan_dir, state_dir)
             try:
-                payload = state.status_payload(
-                    plans.inspect_plan(plan_dir), state_dir
-                )
+                payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
             finally:
                 state.release_lock(plan_dir, state_dir)
 
@@ -5079,9 +4979,7 @@ class ParserAndStateTests(unittest.TestCase):
                             "current_check_index": 0,
                             "current_check_name": "operator-surface-tests",
                             "current_check_kind": "command",
-                            "current_check_started_at": (
-                                "2026-06-20T10:00:01+00:00"
-                            ),
+                            "current_check_started_at": ("2026-06-20T10:00:01+00:00"),
                             "elapsed_seconds": 2.0,
                             "check_elapsed_seconds": 1.0,
                             "heartbeat_count": 0,
@@ -5136,7 +5034,7 @@ class ParserAndStateTests(unittest.TestCase):
                         "reason": "",
                         # Inside the no-lock grace window, so the orphan is
                         # reported without being declared dead.
-                        "run_started_at": datetime.now(timezone.utc).isoformat(),
+                        "run_started_at": datetime.now(UTC).isoformat(),
                         "run_finished_at": None,
                         "duration_seconds": None,
                         "active_turn": None,
@@ -5366,7 +5264,9 @@ class ParserAndStateTests(unittest.TestCase):
         paused = [r for r in records if r["name"] == events.RUN_PAUSED_EVENT][0]
         event_check = paused["payload"]["details"]["checks"][0]
         self.assertNotIn("stdout", event_check)
-        self.assertEqual("/artifacts/tests-stdout.gz", event_check["stdout_artifact_path"])
+        self.assertEqual(
+            "/artifacts/tests-stdout.gz", event_check["stdout_artifact_path"]
+        )
         event_failure = paused["payload"]["details"]["failures"][0]
         self.assertNotIn("stderr", event_failure)
         # Persisted state pause details are likewise bounded.
@@ -5539,9 +5439,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertEqual([events.RUN_FINISHED_EVENT], [r["name"] for r in records])
         self.assertEqual(events.EVENT_SCHEMA_VERSION, records[0]["version"])
         self.assertTrue(records[0]["payload"]["synthetic"])
-        self.assertEqual(
-            events.RUN_OUTCOME_ABANDONED, records[0]["payload"]["outcome"]
-        )
+        self.assertEqual(events.RUN_OUTCOME_ABANDONED, records[0]["payload"]["outcome"])
         self.assertEqual(
             persisted["run_finished_at"], records[0]["payload"]["run_finished_at"]
         )
@@ -5677,21 +5575,15 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.assertUntouched()
 
     def test_missing_lock_marks_abandoned_only_after_the_grace_window(self) -> None:
-        self.write_unfinished_state(
-            run_started_at=datetime.now(timezone.utc).isoformat()
-        )
+        self.write_unfinished_state(run_started_at=datetime.now(UTC).isoformat())
         self.assertFalse(
-            state.mark_run_abandoned(
-                self.plan_state, lock_info=None, trigger="test"
-            )
+            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
         )
         self.assertUntouched()
 
         self.write_unfinished_state()
         self.assertTrue(
-            state.mark_run_abandoned(
-                self.plan_state, lock_info=None, trigger="test"
-            )
+            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
         )
         self.assertIsNone(self.persisted_state()["abandoned"]["lock_reason"])
 
@@ -5700,9 +5592,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_lock(pid=os.getpid(), hostname=socket.gethostname())
 
         self.assertFalse(
-            state.mark_run_abandoned(
-                self.plan_state, lock_info=None, trigger="test"
-            )
+            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
         )
         self.assertUntouched()
 
@@ -5720,9 +5610,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         )
 
         self.assertFalse(
-            state.mark_run_abandoned(
-                self.plan_state, lock_info=None, trigger="test"
-            )
+            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
         )
         self.assertFalse(self.events_path.exists())
 
@@ -5735,9 +5623,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_unfinished_state(run_id="run-dead")
 
         self.assertTrue(
-            state.mark_run_abandoned(
-                self.plan_state, lock_info=None, trigger="test"
-            )
+            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
         )
 
         after = self.events_path.read_bytes()
@@ -5753,13 +5639,9 @@ class MarkRunAbandonedTests(unittest.TestCase):
 
         # The terminal state is durable even when the event cannot be appended.
         self.assertTrue(
-            state.mark_run_abandoned(
-                self.plan_state, lock_info=None, trigger="test"
-            )
+            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
         )
-        self.assertEqual(
-            state.ABANDONED_REASON, self.persisted_state()["reason"]
-        )
+        self.assertEqual(state.ABANDONED_REASON, self.persisted_state()["reason"])
         self.assertEqual("", self.events_path.read_text(encoding="utf-8"))
 
     def test_acquire_lock_takeover_marks_abandoned_and_records_hostname(self) -> None:
@@ -5832,7 +5714,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         # path, so only a stolen lock with a proven-dead owner can terminalize.
         self.write_unfinished_state(
             run_id="run-booting",
-            run_started_at=datetime.now(timezone.utc).isoformat(),
+            run_started_at=datetime.now(UTC).isoformat(),
         )
 
         state.acquire_lock(self.plan_dir, self.state_dir)
@@ -5857,9 +5739,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         )
 
         self.assertTrue(
-            state.mark_run_abandoned(
-                self.plan_state, lock_info=None, trigger="test"
-            )
+            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
         )
 
         record = self.pending_record("run-owing")
@@ -5895,9 +5775,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         self.write_unfinished_state(run_id="run-old")
 
         self.assertTrue(
-            state.mark_run_abandoned(
-                self.plan_state, lock_info=None, trigger="test"
-            )
+            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
         )
 
         self.assertEqual(
@@ -5951,9 +5829,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
         (runs_dir / "run-blocked").write_text("not a directory", encoding="utf-8")
 
         self.assertTrue(
-            state.mark_run_abandoned(
-                self.plan_state, lock_info=None, trigger="test"
-            )
+            state.mark_run_abandoned(self.plan_state, lock_info=None, trigger="test")
         )
 
         persisted = self.persisted_state()
@@ -6063,11 +5939,13 @@ class LockRepositoryClaimTests(unittest.TestCase):
         )
 
     def test_a_failed_payload_write_leaves_no_lock_at_the_lock_path(self) -> None:
-        with mock.patch.object(
-            state.json, "dump", side_effect=RuntimeError("disk gave up")
+        with (
+            mock.patch.object(
+                state.json, "dump", side_effect=RuntimeError("disk gave up")
+            ),
+            self.assertRaises(RuntimeError),
         ):
-            with self.assertRaises(RuntimeError):
-                state.acquire_lock(self.plan_dir, self.state_dir)
+            state.acquire_lock(self.plan_dir, self.state_dir)
 
         self.assertFalse(self.lock_path.exists())
         self.assertEqual(
@@ -6290,9 +6168,7 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             # A malformed state.json in the same entry must not block the
             # valid result.json fallback.
             entry = _plan_state_dir(state_root, plan_dir)
-            (entry / events.STATE_FILE_NAME).write_text(
-                "{ not json", encoding="utf-8"
-            )
+            (entry / events.STATE_FILE_NAME).write_text("{ not json", encoding="utf-8")
             _write_result_json_entry(state_root, plan_dir)
 
             resolved = state.resolve_plan_reference("good", state_root)
@@ -6312,11 +6188,11 @@ class ResolvePlanReferenceTests(unittest.TestCase):
             state_root = Path(tmp) / "state"
             state_root.mkdir()
 
-            with mock.patch.object(
-                Path, "iterdir", side_effect=OSError("boom")
+            with (
+                mock.patch.object(Path, "iterdir", side_effect=OSError("boom")),
+                self.assertRaises(state.StateError),
             ):
-                with self.assertRaises(state.StateError):
-                    state.resolve_plan_reference("label", state_root)
+                state.resolve_plan_reference("label", state_root)
 
 
 class HarnessSkillInvocationTests(unittest.TestCase):
@@ -6352,18 +6228,12 @@ class HarnessSkillInvocationTests(unittest.TestCase):
     def test_detect_invoking_harness_none_when_ambiguous_or_empty(self) -> None:
         self.assertIsNone(harnesses.detect_invoking_harness({}))
         self.assertIsNone(
-            harnesses.detect_invoking_harness(
-                {"CLAUDECODE": "1", "CODEX_SANDBOX": "1"}
-            )
+            harnesses.detect_invoking_harness({"CLAUDECODE": "1", "CODEX_SANDBOX": "1"})
         )
-        self.assertIsNone(
-            harnesses.detect_invoking_harness({"CLAUDECODE": ""})
-        )
+        self.assertIsNone(harnesses.detect_invoking_harness({"CLAUDECODE": ""}))
 
     def test_skill_invocations_applies_prefix_and_argument(self) -> None:
-        invocations = harnesses.skill_invocations(
-            "session-run", "/plans/p/", env={}
-        )
+        invocations = harnesses.skill_invocations("session-run", "/plans/p/", env={})
         self.assertEqual(
             {
                 "codex": "$session-run /plans/p/",
@@ -6544,7 +6414,9 @@ class PlanSnapshotCacheTests(unittest.TestCase):
 
             self.assertEqual(1, len(calls))
 
-    def test_unreadable_plan_raises_instead_of_serving_the_cached_snapshot(self) -> None:
+    def test_unreadable_plan_raises_instead_of_serving_the_cached_snapshot(
+        self,
+    ) -> None:
         with self._seeded_cache() as (plan_dir, cache):
             (plan_dir / "manifest.md").unlink()
 
@@ -6582,7 +6454,9 @@ class PlanSnapshotCacheTests(unittest.TestCase):
                 for index in range(40):
                     marker = "complete" if index % 2 else "pending"
                     session_path.write_text(
-                        template.replace("- **Status**: pending", f"- **Status**: {marker}"),
+                        template.replace(
+                            "- **Status**: pending", f"- **Status**: {marker}"
+                        ),
                         encoding="utf-8",
                     )
             finally:
@@ -6657,9 +6531,7 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
         self._append(events.REVIEW_CYCLE_EVENT, {"cycle": 1})
         self._append_retry("3", "fresh error")
 
-        priors = runner._read_prior_review_verdict_retries(
-            self.event_path, "3"
-        )
+        priors = runner._read_prior_review_verdict_retries(self.event_path, "3")
 
         self.assertEqual(["fresh error"], [p["error"] for p in priors])
 
@@ -6667,9 +6539,7 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
         self._append_retry("3", "other session error")
         self._append_retry("4", "target error")
 
-        priors = runner._read_prior_review_verdict_retries(
-            self.event_path, "4"
-        )
+        priors = runner._read_prior_review_verdict_retries(self.event_path, "4")
 
         self.assertEqual(["target error"], [p["error"] for p in priors])
 
@@ -6685,9 +6555,7 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
         )
 
     def test_exhaustion_on_repeat_fingerprint_or_over_budget(self) -> None:
-        self.assertFalse(
-            runner._is_review_verdict_repair_exhausted("fp-1", (), 1)
-        )
+        self.assertFalse(runner._is_review_verdict_repair_exhausted("fp-1", (), 1))
         self.assertFalse(
             runner._is_review_verdict_repair_exhausted(
                 "fp-2",
@@ -6719,9 +6587,7 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
         self._append_retry("3", "first error")
         self._append_retry("3", "second error")
 
-        references = runner._review_verdict_repair_references(
-            self.event_path, "3"
-        )
+        references = runner._review_verdict_repair_references(self.event_path, "3")
 
         joined = "\n".join(references)
         self.assertIn("attempt 2", joined)

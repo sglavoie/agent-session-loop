@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from datetime import datetime
 import select
 import sys
 import termios
 import threading
-from types import MappingProxyType
 import tty
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from types import MappingProxyType
 from typing import Any, Literal, TextIO
-
 
 HarnessName = Literal["codex", "claude", "copilot"]
 OverrideOperationName = Literal["unchanged", "set", "clear"]
@@ -64,15 +63,15 @@ class OverrideOperation:
             )
 
     @classmethod
-    def unchanged(cls) -> "OverrideOperation":
+    def unchanged(cls) -> OverrideOperation:
         return cls("unchanged")
 
     @classmethod
-    def set(cls, value: str) -> "OverrideOperation":
+    def set(cls, value: str) -> OverrideOperation:
         return cls("set", value)
 
     @classmethod
-    def clear(cls) -> "OverrideOperation":
+    def clear(cls) -> OverrideOperation:
         return cls("clear")
 
     def to_payload(self) -> dict[str, str | None]:
@@ -86,20 +85,13 @@ UNCHANGED_OVERRIDE_OPERATION = OverrideOperation.unchanged()
 
 
 def _copy_implementation_overrides(
-    overrides: Mapping[
-        HarnessName, Mapping[ImplementationOverrideField, str]
-    ],
+    overrides: Mapping[HarnessName, Mapping[ImplementationOverrideField, str]],
 ) -> dict[HarnessName, dict[ImplementationOverrideField, str]]:
-    return {
-        harness: dict(values)
-        for harness, values in overrides.items()
-    }
+    return {harness: dict(values) for harness, values in overrides.items()}
 
 
 def _freeze_implementation_overrides(
-    overrides: Mapping[
-        HarnessName, Mapping[ImplementationOverrideField, str]
-    ],
+    overrides: Mapping[HarnessName, Mapping[ImplementationOverrideField, str]],
 ) -> Mapping[HarnessName, Mapping[ImplementationOverrideField, str]]:
     return MappingProxyType(
         {
@@ -122,18 +114,16 @@ class RunControlAction:
     next_harness: HarnessName | None = None
     target_harness: HarnessName | None = None
     changed_fields: tuple[ImplementationOverrideField, ...] = ()
-    implementation_overrides: Mapping[
-        HarnessName, Mapping[ImplementationOverrideField, str]
-    ] | None = field(default=None, repr=False)
+    implementation_overrides: (
+        Mapping[HarnessName, Mapping[ImplementationOverrideField, str]] | None
+    ) = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.implementation_overrides is not None:
             object.__setattr__(
                 self,
                 "implementation_overrides",
-                _freeze_implementation_overrides(
-                    self.implementation_overrides
-                ),
+                _freeze_implementation_overrides(self.implementation_overrides),
             )
 
     def to_payload(self) -> dict[str, Any]:
@@ -150,9 +140,7 @@ class RunControlAction:
             "implementation_overrides": (
                 None
                 if self.implementation_overrides is None
-                else _copy_implementation_overrides(
-                    self.implementation_overrides
-                )
+                else _copy_implementation_overrides(self.implementation_overrides)
             ),
         }
 
@@ -168,7 +156,8 @@ class RunControlState:
         next_harness: HarnessName | None = None,
         implementation_overrides: dict[
             HarnessName, dict[ImplementationOverrideField, str]
-        ] | None = None,
+        ]
+        | None = None,
     ) -> None:
         self._lock = threading.Lock()
         self._stop_after_current = False
@@ -217,9 +206,7 @@ class RunControlState:
         self,
     ) -> dict[HarnessName, dict[ImplementationOverrideField, str]]:
         with self._lock:
-            return _copy_implementation_overrides(
-                self._implementation_overrides
-            )
+            return _copy_implementation_overrides(self._implementation_overrides)
 
     def _action(
         self,
@@ -260,9 +247,7 @@ class RunControlState:
     def toggle_stop_after_current(self) -> RunControlAction:
         with self._lock:
             self._stop_after_current = not self._stop_after_current
-            return self._action(
-                "request" if self._stop_after_current else "cancel"
-            )
+            return self._action("request" if self._stop_after_current else "cancel")
 
     def request_stop_after_current(self) -> RunControlAction | None:
         """Idempotently mark stop-after-current as requested.
@@ -349,32 +334,23 @@ class RunControlState:
         earlier harness-selection transition. This preserves queue order when
         a drain applies multiple commands in sequence.
         """
-        if (
-            model.operation == "unchanged"
-            and effort.operation == "unchanged"
-        ):
+        if model.operation == "unchanged" and effort.operation == "unchanged":
             raise ValueError(
                 "at least one model or effort override operation is required"
             )
 
         with self._lock:
             resolved_harness = (
-                target_harness
-                or self._next_harness
-                or self._current_harness
+                target_harness or self._next_harness or self._current_harness
             )
             if resolved_harness is None:
                 raise ValueError(
                     "an implementation harness is required to apply overrides"
                 )
             if resolved_harness not in HARNESS_SELECTION_KEYS.values():
-                raise ValueError(
-                    f"unknown implementation harness: {resolved_harness}"
-                )
+                raise ValueError(f"unknown implementation harness: {resolved_harness}")
 
-            current = dict(
-                self._implementation_overrides.get(resolved_harness, {})
-            )
+            current = dict(self._implementation_overrides.get(resolved_harness, {}))
             updated = dict(current)
             changed_fields: list[ImplementationOverrideField] = []
             for field_name, operation in (
@@ -433,7 +409,7 @@ def _stream_is_tty(stream: TextIO) -> bool:
         return False
     try:
         return bool(isatty())
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return False
 
 
@@ -525,7 +501,7 @@ class RunControlListener:
         stderr: TextIO = sys.stderr,
         on_action: ActionCallback | None = None,
         on_status: StatusCallback | None = None,
-    ) -> "RunControlListener":
+    ) -> RunControlListener:
         return cls(
             enabled=should_enable_run_controls(args, stdin=stdin, stderr=stderr),
             state=state,
@@ -535,7 +511,7 @@ class RunControlListener:
             on_status=on_status,
         )
 
-    def __enter__(self) -> "RunControlListener":
+    def __enter__(self) -> RunControlListener:
         self.start()
         return self
 
@@ -641,13 +617,13 @@ class RunControlListener:
                 return
             try:
                 readable, _, _ = select.select([fd], [], [], self._poll_interval)
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 return
             if not readable:
                 continue
             try:
                 raw_key = self._stdin.read(1)
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 return
             if not raw_key:
                 continue
@@ -675,7 +651,7 @@ class RunControlListener:
                 termios.TCSADRAIN,
                 self._original_settings,
             )
-        except (OSError, ValueError, termios.error):
+        except OSError, ValueError, termios.error:
             pass
         finally:
             self._fd = None

@@ -25,10 +25,16 @@ _WORKBENCH_DEFAULT_PORT = 8765  # workbench_server.DEFAULT_PORT
 _METRICS_DEFAULT_SINCE_DAYS = 7  # metrics.DEFAULT_SINCE_DAYS
 _RETENTION_DEFAULT_MAX_AGE_DAYS = 30.0  # retention.DEFAULT_MAX_AGE_DAYS
 _PREPARE_DEFAULT_VALIDATOR_JOBS = 2  # prepare.DEFAULT_VALIDATOR_JOBS
-_PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS = 900  # prepare.DEFAULT_VALIDATOR_TIMEOUT_SECONDS
-_PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS = 30  # prepare.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS
+_PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS = (
+    900  # prepare.DEFAULT_VALIDATOR_TIMEOUT_SECONDS
+)
+_PREPARE_DEFAULT_VALIDATOR_HEARTBEAT_SECONDS = (
+    30  # prepare.DEFAULT_VALIDATOR_HEARTBEAT_SECONDS
+)
 _CONTROL_DEFAULT_ABORT_GRACE_SECONDS = 120  # control_queue.DEFAULT_ABORT_GRACE_SECONDS
-_CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS = 60.0  # control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS
+_CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS = (
+    60.0  # control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS
+)
 
 
 _WORKBENCH_SERVE_CHILD_DESTS = {
@@ -101,21 +107,15 @@ def _add_workbench_serve_args(
     parser.add_argument(
         "--host",
         dest=_workbench_dest("host", child_parser=child_parser),
-        default=_workbench_default(
-            _WORKBENCH_DEFAULT_HOST, child_parser=child_parser
-        ),
+        default=_workbench_default(_WORKBENCH_DEFAULT_HOST, child_parser=child_parser),
         metavar="HOST",
-        help=(
-            f"Host interface to bind (default: {_WORKBENCH_DEFAULT_HOST})"
-        ),
+        help=(f"Host interface to bind (default: {_WORKBENCH_DEFAULT_HOST})"),
     )
     parser.add_argument(
         "--port",
         dest=_workbench_dest("port", child_parser=child_parser),
         type=int,
-        default=_workbench_default(
-            _WORKBENCH_DEFAULT_PORT, child_parser=child_parser
-        ),
+        default=_workbench_default(_WORKBENCH_DEFAULT_PORT, child_parser=child_parser),
         metavar="PORT",
         help=(
             f"TCP port to bind (default: {_WORKBENCH_DEFAULT_PORT}; "
@@ -136,8 +136,7 @@ def _add_workbench_serve_args(
         default=_workbench_default(None, child_parser=child_parser),
         metavar="DIR",
         help=(
-            "Extra plan root directory to scan for discoverable plans "
-            "(may be repeated)"
+            "Extra plan root directory to scan for discoverable plans (may be repeated)"
         ),
     )
     parser.add_argument(
@@ -204,7 +203,8 @@ def _add_unsafe_bypass_flags(parser: argparse.ArgumentParser) -> None:
         "--unsafe-bypass",
         dest="unsafe_bypass",
         action="store_true",
-        help="Use harness-specific bypass flags for sandbox and approval prompts (default)",
+        help="Use harness-specific bypass flags for sandbox and approval prompts "
+        "(default)",
     )
     parser.add_argument(
         "--no-unsafe-bypass",
@@ -566,7 +566,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         default=None,
         help=(
             "JSON file of completion contracts keyed by canonical session id "
-            "({\"1\": {\"done_when\": [...], \"verify\": {...}}, ...}); "
+            '({"1": {"done_when": [...], "verify": {...}}, ...}); '
             "required unless --check is given"
         ),
     )
@@ -1071,9 +1071,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Print the would-be journal contents to stdout without writing",
     )
-    backfill_parser.set_defaults(
-        handler_ref="progress_cli:backfill_progress_from_args"
-    )
+    backfill_parser.set_defaults(handler_ref="progress_cli:backfill_progress_from_args")
 
     progress_parser = subparsers.add_parser(
         "progress",
@@ -1118,8 +1116,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "--never-run",
         action="store_true",
         help=(
-            "Only show plans whose state_path file is absent "
-            "(no run state on disk yet)"
+            "Only show plans whose state_path file is absent (no run state on disk yet)"
         ),
     )
     plans_parser.add_argument(
@@ -1283,8 +1280,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     control_set_model_parser = control_sub.add_parser(
         "set-model",
         help=(
-            "Set or clear the model and effort used by the next "
-            "implementation turn."
+            "Set or clear the model and effort used by the next implementation turn."
         ),
     )
     _add_plan_reference_args(control_set_model_parser)
@@ -1541,10 +1537,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
 
     outbox_supervise_parser = outbox_sub.add_parser(
         "supervise",
-        help=(
-            "Wait on a resumable per-launch cursor and print one supervision "
-            "token."
-        ),
+        help=("Wait on a resumable per-launch cursor and print one supervision token."),
     )
     _add_plan_reference_args(outbox_supervise_parser)
     outbox_supervise_parser.add_argument(

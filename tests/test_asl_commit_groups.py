@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import commit_groups, events, runner
@@ -60,7 +60,9 @@ class CommitGroupCoordinatorTests(unittest.TestCase):
         self.assertEqual("SVC-sha", result["successful_repositories"][0]["commit_sha"])
         self.assertEqual("repository-failed", phases[-1])
 
-    def test_resume_skips_success_and_clean_repository_then_commits_remaining(self) -> None:
+    def test_resume_skips_success_and_clean_repository_then_commits_remaining(
+        self,
+    ) -> None:
         group = self.make_group()
         group["successful_repositories"] = [
             {

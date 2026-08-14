@@ -3,25 +3,21 @@
 from __future__ import annotations
 
 import ast
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import assurance_cli
+from agent_session_loop import assurance_cli, cli, harnesses, state
 from agent_session_loop import assurance_draft as draft
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
-from agent_session_loop import cli
-from agent_session_loop import harnesses
-from agent_session_loop import state
 from agent_session_loop.assurance_projection import AuditPublication
-
 
 RUN_ID = "20260810T101112123456Z-4242"
 OTHER_RUN_ID = "20260810T101112999999Z-4243"
@@ -82,9 +78,7 @@ class AssuranceCliTestCase(unittest.TestCase):
 
     def publish(self, publication: AuditPublication, **kwargs):
         kwargs.setdefault("recorded_at", TIMESTAMP)
-        return projection.publish_audit(
-            publication, state_dir=self.state_dir, **kwargs
-        )
+        return projection.publish_audit(publication, state_dir=self.state_dir, **kwargs)
 
     def open_three_issues(self) -> None:
         """ASI-1 seen first, then ASI-2, then ASI-3 as the newest sighting."""
@@ -131,9 +125,7 @@ class AssuranceCliTestCase(unittest.TestCase):
     # -- invocation -------------------------------------------------------
 
     def run_cli(self, argv: list[str]) -> tuple[int, str, str]:
-        args = self.parser.parse_args(
-            [*argv, "--state-dir", str(self.state_dir)]
-        )
+        args = self.parser.parse_args([*argv, "--state-dir", str(self.state_dir)])
         handler = cli.resolve_handler(args)
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -148,21 +140,15 @@ class AssuranceCliTestCase(unittest.TestCase):
     def list_rows(self, out: str) -> list[str]:
         """Return the issue IDs an operator can copy out of the text rows."""
         return [
-            line.split()[0]
-            for line in out.splitlines()
-            if line.startswith("  ASI-")
+            line.split()[0] for line in out.splitlines() if line.startswith("  ASI-")
         ]
 
 
 class AssuranceWiringTests(AssuranceCliTestCase):
     def test_list_subcommand_is_wired_with_documented_defaults(self) -> None:
         args = self.parser.parse_args(["assurance", "list"])
-        self.assertEqual(
-            "assurance_cli:assurance_list_from_args", args.handler_ref
-        )
-        self.assertIs(
-            cli.resolve_handler(args), assurance_cli.assurance_list_from_args
-        )
+        self.assertEqual("assurance_cli:assurance_list_from_args", args.handler_ref)
+        self.assertIs(cli.resolve_handler(args), assurance_cli.assurance_list_from_args)
         self.assertIsNone(args.limit)
         self.assertIsNone(args.state)
         self.assertIsNone(args.severity)
@@ -171,12 +157,8 @@ class AssuranceWiringTests(AssuranceCliTestCase):
 
     def test_show_subcommand_is_wired_and_takes_one_issue(self) -> None:
         args = self.parser.parse_args(["assurance", "show", "ASI-3"])
-        self.assertEqual(
-            "assurance_cli:assurance_show_from_args", args.handler_ref
-        )
-        self.assertIs(
-            cli.resolve_handler(args), assurance_cli.assurance_show_from_args
-        )
+        self.assertEqual("assurance_cli:assurance_show_from_args", args.handler_ref)
+        self.assertIs(cli.resolve_handler(args), assurance_cli.assurance_show_from_args)
         self.assertEqual("ASI-3", args.issue)
 
     def test_assurance_requires_a_subcommand(self) -> None:
@@ -203,9 +185,7 @@ class AssuranceListTests(AssuranceCliTestCase):
         self.open_three_issues()
         code, out, err = self.run_cli(["assurance", "list"])
         self.assertEqual(0, code, err)
-        row = next(
-            line for line in out.splitlines() if line.startswith("  ASI-3")
-        )
+        row = next(line for line in out.splitlines() if line.startswith("  ASI-3"))
         self.assertIn("low", row)
         self.assertIn("open", row)
         self.assertIn("x1", row)
@@ -231,19 +211,13 @@ class AssuranceListTests(AssuranceCliTestCase):
             ["assurance", "list", "--state", "dismissed"]
         )
         self.assertEqual(0, code, err)
-        self.assertEqual(
-            ["ASI-1"], [row["issue_id"] for row in payload["issues"]]
-        )
+        self.assertEqual(["ASI-1"], [row["issue_id"] for row in payload["issues"]])
 
     def test_severity_filter_narrows_within_the_default_state(self) -> None:
         self.open_three_issues()
-        code, payload, err = self.run_json(
-            ["assurance", "list", "--severity", "low"]
-        )
+        code, payload, err = self.run_json(["assurance", "list", "--severity", "low"])
         self.assertEqual(0, code, err)
-        self.assertEqual(
-            ["ASI-3"], [row["issue_id"] for row in payload["issues"]]
-        )
+        self.assertEqual(["ASI-3"], [row["issue_id"] for row in payload["issues"]])
         self.assertEqual("open", payload["filters"]["state"])
 
     def test_limit_caps_rows_and_reports_what_it_hid(self) -> None:
@@ -277,9 +251,7 @@ class AssuranceListTests(AssuranceCliTestCase):
     def test_all_refuses_to_guess_against_limit_or_state(self) -> None:
         for extra in (["--limit", "2"], ["--state", "open"]):
             with self.subTest(extra=extra):
-                code, payload, _ = self.run_json(
-                    ["assurance", "list", "--all", *extra]
-                )
+                code, payload, _ = self.run_json(["assurance", "list", "--all", *extra])
                 self.assertEqual(1, code)
                 self.assertEqual("input-error", payload["reason"])
 
@@ -341,9 +313,7 @@ class AssuranceShowTests(AssuranceCliTestCase):
         self.assertEqual(3, len(printed))
         for issue_id in printed:
             with self.subTest(issue_id=issue_id):
-                code, shown, err = self.run_json(
-                    ["assurance", "show", issue_id]
-                )
+                code, shown, err = self.run_json(["assurance", "show", issue_id])
                 self.assertEqual(0, code, err)
                 self.assertEqual(issue_id, shown["issue_id"])
 
@@ -451,9 +421,7 @@ class AssuranceDamagedLedgerTests(AssuranceCliTestCase):
         self.assertEqual(1, payload["warning_count"])
         self.assertEqual(0, payload["warnings_omitted"])
         self.assertEqual("rejected-line", payload["warnings"][0]["kind"])
-        self.assertEqual(
-            ledger.REJECT_INVALID_JSON, payload["warnings"][0]["reason"]
-        )
+        self.assertEqual(ledger.REJECT_INVALID_JSON, payload["warnings"][0]["reason"])
 
     def test_show_warns_before_reporting_an_id_it_cannot_resolve(self) -> None:
         self.corrupt_between_records()
@@ -475,9 +443,7 @@ class AssuranceReadOnlyTests(AssuranceCliTestCase):
     def state_digests(self) -> dict[str, str]:
         root = self.ledger_path.parent
         return {
-            str(path.relative_to(root)): hashlib.sha256(
-                path.read_bytes()
-            ).hexdigest()
+            str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(root.rglob("*"))
             if path.is_file()
         }
@@ -628,8 +594,9 @@ class AssuranceMergeTests(AssuranceCliTestCase):
     ) -> None:
         self.open_three_issues()
 
-        with mock.patch.object(assurance_cli, "_is_tty", return_value=True), (
-            mock.patch("builtins.input", return_value="n")
+        with (
+            mock.patch.object(assurance_cli, "_is_tty", return_value=True),
+            mock.patch("builtins.input", return_value="n"),
         ):
             code, out, err = self.run_cli(["assurance", "merge", "2", "1"])
 
@@ -640,8 +607,9 @@ class AssuranceMergeTests(AssuranceCliTestCase):
     def test_confirming_the_prompt_performs_the_merge(self) -> None:
         self.open_three_issues()
 
-        with mock.patch.object(assurance_cli, "_is_tty", return_value=True), (
-            mock.patch("builtins.input", return_value="y")
+        with (
+            mock.patch.object(assurance_cli, "_is_tty", return_value=True),
+            mock.patch("builtins.input", return_value="y"),
         ):
             code, _, _ = self.run_cli(["assurance", "merge", "2", "1"])
 
@@ -690,9 +658,8 @@ class AssuranceCloseoutTests(AssuranceCliTestCase):
         self.assertTrue(args.replace)
 
     def test_outcome_is_required(self) -> None:
-        with self.assertRaises(SystemExit):
-            with redirect_stderr(io.StringIO()):
-                self.parser.parse_args(["assurance", "closeout", RUN_ID])
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            self.parser.parse_args(["assurance", "closeout", RUN_ID])
 
     def test_a_closeout_records_the_outcome_rework_and_linked_issues(self) -> None:
         self.open_three_issues()
@@ -792,7 +759,13 @@ class AssuranceCloseoutTests(AssuranceCliTestCase):
         self.open_three_issues()
 
         code, payload, _ = self.run_json(
-            ["assurance", "closeout", "20260101T000000000000Z-1", "--outcome", "accepted"]
+            [
+                "assurance",
+                "closeout",
+                "20260101T000000000000Z-1",
+                "--outcome",
+                "accepted",
+            ]
         )
 
         self.assertEqual(1, code)
@@ -1070,12 +1043,15 @@ class AssurancePlanTests(AssuranceCliTestCase):
                 timed_out=timed_out,
             )
 
-        with mock.patch.object(harnesses, "run_harness", fake_run_harness), (
-            mock.patch.object(
-                harnesses,
-                "audit_read_only_unavailable_reason",
-                return_value=unavailable,
-            )
+        with (
+            mock.patch.object(harnesses, "run_harness", fake_run_harness),
+            (
+                mock.patch.object(
+                    harnesses,
+                    "audit_read_only_unavailable_reason",
+                    return_value=unavailable,
+                )
+            ),
         ):
             yield calls
 
@@ -1106,9 +1082,7 @@ class AssurancePlanTests(AssuranceCliTestCase):
         )
 
         self.assertEqual("assurance_cli:assurance_plan_from_args", args.handler_ref)
-        self.assertIs(
-            cli.resolve_handler(args), assurance_cli.assurance_plan_from_args
-        )
+        self.assertIs(cli.resolve_handler(args), assurance_cli.assurance_plan_from_args)
         self.assertEqual("ASI-1", args.issue)
         self.assertEqual("claude", args.harness)
         self.assertEqual("p.md", args.output)
@@ -1124,9 +1098,10 @@ class AssurancePlanTests(AssuranceCliTestCase):
             ["assurance", "plan", "--harness", "claude", "--output", "p.md"],
         ):
             with self.subTest(argv=argv):
-                with redirect_stderr(io.StringIO()), self.assertRaises(
-                    SystemExit
-                ) as raised:
+                with (
+                    redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit) as raised,
+                ):
                     self.parser.parse_args(argv)
                 self.assertEqual(2, raised.exception.code)
 
@@ -1163,8 +1138,9 @@ class AssurancePlanTests(AssuranceCliTestCase):
             observed["digest"] = hashlib.sha256(path.read_bytes()).hexdigest()
             return real(plan, **kwargs)
 
-        with self.drafting(), mock.patch.object(
-            projection, "record_improvement_plan_draft", spy
+        with (
+            self.drafting(),
+            mock.patch.object(projection, "record_improvement_plan_draft", spy),
         ):
             code, payload, err = self.run_json(self.plan_argv())
 
@@ -1180,8 +1156,11 @@ class AssurancePlanTests(AssuranceCliTestCase):
             ledger.ERROR_LEDGER_WRITE, "the ledger is read-only"
         )
 
-        with self.drafting(), mock.patch.object(
-            projection, "record_improvement_plan_draft", side_effect=failure
+        with (
+            self.drafting(),
+            mock.patch.object(
+                projection, "record_improvement_plan_draft", side_effect=failure
+            ),
         ):
             code, payload, _ = self.run_json(self.plan_argv())
 
@@ -1388,9 +1367,7 @@ class AssurancePlanTests(AssuranceCliTestCase):
             code, payload, err = self.run_json(self.plan_argv())
 
         self.assertEqual(0, code, err)
-        self.assertEqual(
-            _draft_document(), self.output.read_text(encoding="utf-8")
-        )
+        self.assertEqual(_draft_document(), self.output.read_text(encoding="utf-8"))
 
     # -- the boundary the draft rests on ----------------------------------
 

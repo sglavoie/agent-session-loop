@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-import json
 from typing import Any
 
 from . import mailbox
-
 
 MAILBOX_MESSAGE_BEGIN = "BEGIN ASL MAILBOX MESSAGE JSONL"
 MAILBOX_MESSAGE_END = "END ASL MAILBOX MESSAGE JSONL"
@@ -103,10 +102,7 @@ def render_bounded_messages(
             (),
             (),
         )
-        if (
-            len("\n".join(single_record_lines).encode("utf-8"))
-            > max_bytes
-        ):
+        if len("\n".join(single_record_lines).encode("utf-8")) > max_bytes:
             individually_oversized.append(record[0])
         else:
             fitting_records.append(record)
@@ -119,9 +115,7 @@ def render_bounded_messages(
         aggregate_budget_omitted,
     )
     while (
-        len("\n".join(rendered_lines).encode("utf-8"))
-        > max_bytes
-        and fitting_records
+        len("\n".join(rendered_lines).encode("utf-8")) > max_bytes and fitting_records
     ):
         aggregate_budget_omitted.append(fitting_records.pop(0)[0])
         rendered_lines = build_section(
@@ -131,13 +125,8 @@ def render_bounded_messages(
             aggregate_budget_omitted,
         )
 
-    if (
-        len("\n".join(rendered_lines).encode("utf-8"))
-        > max_bytes
-    ):
-        raise ValueError(
-            "mailbox section metadata exceeds its rendering budget"
-        )
+    if len("\n".join(rendered_lines).encode("utf-8")) > max_bytes:
+        raise ValueError("mailbox section metadata exceeds its rendering budget")
 
     return BoundedGuidance(
         lines=tuple(rendered_lines),

@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
-
 
 SKILL_INSTALL_DIRS = (
     ".claude/skills",
@@ -85,7 +84,9 @@ def _expected_skill_dirs(repo_root: Path) -> list[Path]:
     )
 
 
-def _check_asl_path(repo_root: Path, path_env: str | None) -> tuple[str | None, dict[str, Any]]:
+def _check_asl_path(
+    repo_root: Path, path_env: str | None
+) -> tuple[str | None, dict[str, Any]]:
     active_asl = shutil.which("asl", path=path_env)
     if active_asl is None:
         return None, _failure("asl-path", "asl was not found on PATH")
@@ -124,7 +125,10 @@ def _check_skill_links(repo_root: Path, home: Path) -> list[dict[str, Any]]:
             if resolved != expected:
                 installed_skill = installed / "SKILL.md"
                 expected_skill = expected / "SKILL.md"
-                if installed_skill.exists() and installed_skill.resolve() == expected_skill:
+                if (
+                    installed_skill.exists()
+                    and installed_skill.resolve() == expected_skill
+                ):
                     checks.append(
                         _success(
                             "skill-link",
@@ -167,7 +171,8 @@ def _check_session_run_content(home: Path) -> list[dict[str, Any]]:
             checks.append(
                 _failure(
                     "session-run-content",
-                    f"{skill_path} is missing the serial-only explicit-selector rejection text",
+                    f"{skill_path} is missing the serial-only explicit-selector "
+                    f"rejection text",
                 )
             )
             continue
@@ -177,7 +182,8 @@ def _check_session_run_content(home: Path) -> list[dict[str, Any]]:
             checks.append(
                 _failure(
                     "session-run-content",
-                    f"{skill_path} still contains stale explicit-session text: {forbidden[0]!r}",
+                    f"{skill_path} still contains stale explicit-session text: "
+                    f"{forbidden[0]!r}",
                 )
             )
             continue
@@ -210,8 +216,7 @@ def _check_status_smoke(
         completed = subprocess.run(
             [active_asl, "status", _readable_path(plan_dir), "--json"],
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             env=env,
             check=False,
         )
@@ -258,7 +263,9 @@ def verify_install(
     """Return a structured active-install verification payload."""
 
     resolved_repo = Path(repo_root).resolve() if repo_root is not None else _repo_root()
-    resolved_home = Path(home).expanduser().resolve() if home is not None else Path.home()
+    resolved_home = (
+        Path(home).expanduser().resolve() if home is not None else Path.home()
+    )
     active_asl, asl_check = _check_asl_path(resolved_repo, path_env)
     checks = [
         asl_check,
@@ -294,7 +301,8 @@ def _print_text(payload: dict[str, Any]) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Verify that active ASL wrappers and skills resolve to this checkout.",
+        description="Verify that active ASL wrappers and skills resolve to this "
+        "checkout.",
     )
     parser.add_argument(
         "--repo-root",

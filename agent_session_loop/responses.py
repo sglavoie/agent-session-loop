@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
 import json
 import shlex
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
-
 
 # Exact string ``session-run`` prints once every session is implemented; the
 # status ``next_command`` completion payload reuses it verbatim so the CLI and
@@ -46,9 +45,7 @@ def error_payload(
     return payload
 
 
-def invocation_step(
-    description: str, invocations: Mapping[str, str]
-) -> dict[str, Any]:
+def invocation_step(description: str, invocations: Mapping[str, str]) -> dict[str, Any]:
     """Build one next step offered as ready-to-paste per-harness invocations.
 
     ``invocations`` maps a harness name to the exact command a user pastes into

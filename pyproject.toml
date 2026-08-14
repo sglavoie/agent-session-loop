@@ -1,0 +1,27 @@
+# Repository tooling configuration. This repo is not a distributable package,
+# so it carries only tool tables and no PEP 621 packaging metadata: the suite
+# runs as `python3 -m tests.run_suite`.
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Compatibility shim: its imports exist only to re-export historical dotted
+# names such as tests.test_agent_session_loop.VerificationExecutorTests.
+"tests/test_agent_session_loop.py" = ["F401"]
+
+[tool.mypy]
+files = [
+    "agent_session_loop",
+    "tests",
+    "skills/asl/scripts",
+    "skills/gitsummary/scripts",
+    "skills/session-resplit/scripts",
+]
+# Hyphenated wrappers under skills/*/scripts/ are not importable module names.
+exclude = "scripts/[^/]*-[^/]*\\.py$"
+ignore_missing_imports = true

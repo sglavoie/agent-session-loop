@@ -4,71 +4,26 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
-import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
 import shlex
-import shutil
-import signal
-import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
-from unittest import mock
+from pathlib import Path
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
-    config,
-    contracts,
-    control_queue,
-    events,
     harnesses,
-    install_verify,
     mailbox,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
     qna,
-    review,
-    review_repair,
-    run_control,
     runner,
-    state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
     workspaces,
 )
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
-)
 from tests.support import (
-    REPO_ROOT,
     FAKE_CODEX_FIXTURE,
+    REPO_ROOT,
     write_plan,
 )
 
@@ -111,9 +66,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         )
 
     def test_packet_names_selected_session_and_file_path(self) -> None:
-        packet = runner.build_task_packet(
-            "codex", self.PLAN_DIR, session_id="9"
-        )
+        packet = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertEqual("9", packet.session_id)
         self.assertEqual(self._canon("session-9.md"), packet.session_path)
         rendered = packet.render()
@@ -122,15 +75,11 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("fixed — do not reinterpret", rendered)
 
     def test_packet_references_context_and_progress_as_paths(self) -> None:
-        packet = runner.build_task_packet(
-            "codex", self.PLAN_DIR, session_id="9"
-        )
+        packet = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertEqual(self._canon("context.md"), packet.context_path)
         self.assertEqual(self._canon("progress.md"), packet.progress_path)
         rendered = packet.render()
-        self.assertIn(
-            f"- Shared context: {self._canon('context.md')}", rendered
-        )
+        self.assertIn(f"- Shared context: {self._canon('context.md')}", rendered)
         self.assertIn(self._canon("progress.md"), rendered)
 
     def test_progress_reference_omitted_when_absent(self) -> None:
@@ -141,9 +90,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertNotIn("Progress journal", packet.render())
 
     def test_expansion_reference_only_when_present(self) -> None:
-        without = runner.build_task_packet(
-            "codex", self.PLAN_DIR, session_id="9"
-        )
+        without = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertIsNone(without.expansion_path)
         self.assertNotIn("session-9.expand.md", without.render())
         self.assertNotIn("Expansion notes", without.render())
@@ -158,9 +105,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("session-9.expand.md", with_expansion.render())
 
     def test_predecessor_handoff_only_when_applicable(self) -> None:
-        first = runner.build_task_packet(
-            "codex", self.PLAN_DIR, session_id="1"
-        )
+        first = runner.build_task_packet("codex", self.PLAN_DIR, session_id="1")
         self.assertIsNone(first.predecessor_path)
         self.assertNotIn("Predecessor handoff", first.render())
 
@@ -170,15 +115,11 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertEqual("8", later.predecessor_id)
         self.assertEqual(self._canon("session-8.md"), later.predecessor_path)
         rendered = later.render()
-        self.assertIn(
-            f"Predecessor handoff: {self._canon('session-8.md')}", rendered
-        )
+        self.assertIn(f"Predecessor handoff: {self._canon('session-8.md')}", rendered)
         self.assertIn("`## Handoff`", rendered)
 
     def test_repair_references_only_when_provided(self) -> None:
-        without = runner.build_task_packet(
-            "codex", self.PLAN_DIR, session_id="9"
-        )
+        without = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertNotIn("Verification repair references", without.render())
 
         with_refs = runner.build_task_packet(
@@ -245,9 +186,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertNotIn("session-run", lowered)
 
     def test_reply_context_only_when_provided(self) -> None:
-        without = runner.build_task_packet(
-            "codex", self.PLAN_DIR, session_id="9"
-        )
+        without = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertFalse(without.has_reply_context)
         self.assertNotIn(runner.REPLY_CONTEXT_HEADING, without.render())
 
@@ -266,9 +205,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("### Instructions", rendered)
 
     def test_reply_block_matches_reply_prompt_body(self) -> None:
-        context = self._make_reply_context(
-            pause_details={"question_index": 1}
-        )
+        context = self._make_reply_context(pause_details={"question_index": 1})
         packet = runner.build_task_packet(
             "codex",
             self.PLAN_DIR,
@@ -279,19 +216,13 @@ class TaskPacketBuilderTests(unittest.TestCase):
         reply_prompt = runner.build_reply_prompt(
             "codex", self.PLAN_DIR, reply="  1a  ", context=context
         )
-        _, _, reply_body = reply_prompt.partition(
-            runner.REPLY_CONTEXT_HEADING
-        )
-        _, _, packet_body = packet.render().partition(
-            runner.REPLY_CONTEXT_HEADING
-        )
+        _, _, reply_body = reply_prompt.partition(runner.REPLY_CONTEXT_HEADING)
+        _, _, packet_body = packet.render().partition(runner.REPLY_CONTEXT_HEADING)
         self.assertEqual(reply_body, packet_body)
 
     def test_reply_and_context_must_be_provided_together(self) -> None:
         with self.assertRaises(ValueError):
-            runner.build_task_packet(
-                "codex", self.PLAN_DIR, session_id="9", reply="1a"
-            )
+            runner.build_task_packet("codex", self.PLAN_DIR, session_id="9", reply="1a")
         with self.assertRaises(ValueError):
             runner.build_task_packet(
                 "codex",
@@ -301,9 +232,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             )
 
     def test_resolution_context_only_when_provided(self) -> None:
-        without = runner.build_task_packet(
-            "codex", self.PLAN_DIR, session_id="9"
-        )
+        without = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertFalse(without.has_resolution_context)
         self.assertNotIn(runner.RESOLUTION_CONTEXT_HEADING, without.render())
 
@@ -323,9 +252,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("No operator answer was supplied", rendered)
 
     def test_resolution_block_matches_resolution_prompt_body(self) -> None:
-        context = self._make_reply_context(
-            pause_details={"question_index": 1}
-        )
+        context = self._make_reply_context(pause_details={"question_index": 1})
         packet = runner.build_task_packet(
             "codex",
             self.PLAN_DIR,
@@ -344,9 +271,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         _, _, resolution_body = resolution_prompt.partition(
             runner.RESOLUTION_CONTEXT_HEADING
         )
-        _, _, packet_body = packet.render().partition(
-            runner.RESOLUTION_CONTEXT_HEADING
-        )
+        _, _, packet_body = packet.render().partition(runner.RESOLUTION_CONTEXT_HEADING)
         self.assertEqual(resolution_body, packet_body)
 
     def test_reply_and_resolution_contexts_are_mutually_exclusive(self) -> None:
@@ -400,28 +325,20 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertEqual(1, len(set(renders.values())))
 
     def test_unknown_harness_raises(self) -> None:
-        with self.assertRaises(Exception):
-            runner.build_task_packet(
-                "bogus", self.PLAN_DIR, session_id="9"
-            )
+        with self.assertRaises(harnesses.HarnessError):
+            runner.build_task_packet("bogus", self.PLAN_DIR, session_id="9")
 
     def test_plan_dir_is_canonicalized_with_trailing_slash(self) -> None:
-        packet = runner.build_task_packet(
-            "codex", "/tmp/plan/", session_id="9"
-        )
+        packet = runner.build_task_packet("codex", "/tmp/plan/", session_id="9")
         self.assertTrue(packet.plan_dir.endswith("/tmp/plan/"))
 
     def test_nested_session_id_is_preserved(self) -> None:
-        packet = runner.build_task_packet(
-            "codex", self.PLAN_DIR, session_id="2.1"
-        )
+        packet = runner.build_task_packet("codex", self.PLAN_DIR, session_id="2.1")
         self.assertEqual("2.1", packet.session_id)
         self.assertEqual(self._canon("session-2.1.md"), packet.session_path)
 
     def test_disabled_packet_keeps_historical_prompt(self) -> None:
-        packet = runner.build_task_packet(
-            "codex", self.PLAN_DIR, session_id="9"
-        )
+        packet = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertFalse(packet.mailbox_enabled)
         self.assertIsNone(packet.mailbox_read_command)
         self.assertIsNone(packet.mailbox_notify_command)
@@ -558,9 +475,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             lines = rendered.splitlines()
             begin = lines.index(runner.MAILBOX_GUIDANCE_BEGIN)
             end = lines.index(runner.MAILBOX_GUIDANCE_END)
-            rendered_records = [
-                json.loads(line) for line in lines[begin + 1 : end]
-            ]
+            rendered_records = [json.loads(line) for line in lines[begin + 1 : end]]
 
             self.assertEqual(
                 runner.MAX_RENDERED_GUIDANCE,
@@ -715,8 +630,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             jsonl_begin = lines.index(runner.MAILBOX_GUIDANCE_BEGIN)
             jsonl_end = lines.index(runner.MAILBOX_GUIDANCE_END)
             rendered_records = [
-                json.loads(line)
-                for line in lines[jsonl_begin + 1 : jsonl_end]
+                json.loads(line) for line in lines[jsonl_begin + 1 : jsonl_end]
             ]
 
             self.assertEqual(
@@ -777,8 +691,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             jsonl_begin = lines.index(runner.MAILBOX_GUIDANCE_BEGIN)
             jsonl_end = lines.index(runner.MAILBOX_GUIDANCE_END)
             rendered_records = [
-                json.loads(line)
-                for line in lines[jsonl_begin + 1 : jsonl_end]
+                json.loads(line) for line in lines[jsonl_begin + 1 : jsonl_end]
             ]
             rendered_ids = [record["id"] for record in rendered_records]
             self.assertLess(
@@ -831,12 +744,8 @@ class TaskPacketBuilderTests(unittest.TestCase):
 
 class MultiRepositoryTaskPacketTests(unittest.TestCase):
     def test_packet_renders_registry_scope_and_only_read_roots(self) -> None:
-        svc = workspaces.Repository(
-            "SVC", "svc", "git@github.com:example/svc.git"
-        )
-        oak = workspaces.Repository(
-            "OAK", "oak", "git@github.com:example/oak.git"
-        )
+        svc = workspaces.Repository("SVC", "svc", "git@github.com:example/svc.git")
+        oak = workspaces.Repository("OAK", "oak", "git@github.com:example/oak.git")
         workspace = workspaces.ResolvedWorkspace(
             root=Path("/tmp/workspace"),
             repositories=(
@@ -912,9 +821,7 @@ class ReplyPromptBuilderTests(unittest.TestCase):
         context = self._make_context()
         for harness in ("codex", "claude", "copilot"):
             with self.subTest(harness=harness):
-                expected_first_line = runner.build_session_prompt(
-                    harness, "/tmp/plan"
-                )
+                expected_first_line = runner.build_session_prompt(harness, "/tmp/plan")
                 prompt = runner.build_reply_prompt(
                     harness,
                     "/tmp/plan",
@@ -972,9 +879,7 @@ class ReplyPromptBuilderTests(unittest.TestCase):
         self.assertIn("- Run ID: run-abc", prompt)
         self.assertIn("### Pause details", prompt)
         self.assertIn(
-            json.dumps(
-                {"question_index": 1, "tag": "needs-input"}, sort_keys=True
-            ),
+            json.dumps({"question_index": 1, "tag": "needs-input"}, sort_keys=True),
             prompt,
         )
         self.assertIn("### Previous paused last message", prompt)
@@ -1029,9 +934,7 @@ class ReplyPromptBuilderTests(unittest.TestCase):
             context=context,
         )
         lines = prompt.splitlines()
-        reply_record = json.loads(
-            lines[lines.index(runner.REPLY_MESSAGE_BEGIN) + 1]
-        )
+        reply_record = json.loads(lines[lines.index(runner.REPLY_MESSAGE_BEGIN) + 1])
         self.assertEqual({"text": "1a, 2a"}, reply_record)
         self.assertNotIn("\n  1a, 2a  \n", prompt)
 
@@ -1063,13 +966,10 @@ class ReplyPromptBuilderTests(unittest.TestCase):
             [
                 line
                 for line in lines
-                if line.startswith("Runner status:")
-                or line.startswith("RUNNER_PAUSE:")
+                if line.startswith("Runner status:") or line.startswith("RUNNER_PAUSE:")
             ],
         )
-        reply_record = json.loads(
-            lines[lines.index(runner.REPLY_MESSAGE_BEGIN) + 1]
-        )
+        reply_record = json.loads(lines[lines.index(runner.REPLY_MESSAGE_BEGIN) + 1])
         self.assertEqual({"text": hostile}, reply_record)
         self.assertTrue(prompt.isascii())
 
@@ -1107,9 +1007,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
             artifact_dir=Path("/tmp/artifacts/turn-2"),
             stdout_path=Path("/tmp/artifacts/turn-2/stdout.log"),
             stderr_path=Path("/tmp/artifacts/turn-2/stderr.log"),
-            last_message_path=Path(
-                "/tmp/artifacts/turn-2/last-message.txt"
-            ),
+            last_message_path=Path("/tmp/artifacts/turn-2/last-message.txt"),
             result_path=Path("/tmp/artifacts/turn-2/result.json"),
             last_message="Choose A or B.\n",
         )
@@ -1222,8 +1120,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
             [
                 line
                 for line in lines
-                if line.startswith("Runner status:")
-                or line.startswith("RUNNER_PAUSE:")
+                if line.startswith("Runner status:") or line.startswith("RUNNER_PAUSE:")
             ],
         )
         self.assertEqual(
@@ -1431,9 +1328,7 @@ class SessionRunSkillReplyCompatibilityTests(unittest.TestCase):
     def test_skill_directs_skill_to_use_operator_reply_first(self) -> None:
         text = self._skill_text()
 
-        self.assertIn(
-            "use only its `text` value as the answer", text
-        )
+        self.assertIn("use only its `text` value as the answer", text)
         self.assertIn("Do not ask the user again", text)
 
     def test_skill_documents_resolution_context_independently(self) -> None:
@@ -1487,21 +1382,18 @@ class SessionRunSkillReplyCompatibilityTests(unittest.TestCase):
 
             result = self._run_fake(
                 mode="reply-blocked",
-                prompt_argv="/session-run "
-                + str(plan_dir)
-                + "/ --runner-managed",
+                prompt_argv="/session-run " + str(plan_dir) + "/ --runner-managed",
                 plan_dir=plan_dir,
                 last_message_path=last_message_path,
             )
 
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn(
-                "RUNNER_PAUSE: blocked - interactive decision gates require user answers",
+                "RUNNER_PAUSE: blocked - interactive decision gates require user "
+                "answers",
                 last_message_path.read_text(encoding="utf-8"),
             )
-            session_text = (plan_dir / "session-1.md").read_text(
-                encoding="utf-8"
-            )
+            session_text = (plan_dir / "session-1.md").read_text(encoding="utf-8")
             self.assertIn("- **Status**: pending", session_text)
 
     def test_fake_reply_aware_pauses_when_no_reply_context(self) -> None:
@@ -1513,21 +1405,18 @@ class SessionRunSkillReplyCompatibilityTests(unittest.TestCase):
 
             result = self._run_fake(
                 mode="reply-aware",
-                prompt_argv="/session-run "
-                + str(plan_dir)
-                + "/ --runner-managed",
+                prompt_argv="/session-run " + str(plan_dir) + "/ --runner-managed",
                 plan_dir=plan_dir,
                 last_message_path=last_message_path,
             )
 
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn(
-                "RUNNER_PAUSE: blocked - interactive decision gates require user answers",
+                "RUNNER_PAUSE: blocked - interactive decision gates require user "
+                "answers",
                 last_message_path.read_text(encoding="utf-8"),
             )
-            session_text = (plan_dir / "session-1.md").read_text(
-                encoding="utf-8"
-            )
+            session_text = (plan_dir / "session-1.md").read_text(encoding="utf-8")
             self.assertIn("- **Status**: pending", session_text)
 
     def test_fake_reply_aware_completes_when_reply_context_present(
@@ -1562,12 +1451,11 @@ class SessionRunSkillReplyCompatibilityTests(unittest.TestCase):
             last_message = last_message_path.read_text(encoding="utf-8")
             self.assertIn("Runner status: complete", last_message)
             self.assertNotIn(
-                "RUNNER_PAUSE: blocked - interactive decision gates require user answers",
+                "RUNNER_PAUSE: blocked - interactive decision gates require user "
+                "answers",
                 last_message,
             )
-            session_text = (plan_dir / "session-1.md").read_text(
-                encoding="utf-8"
-            )
+            session_text = (plan_dir / "session-1.md").read_text(encoding="utf-8")
             self.assertIn("- **Status**: complete", session_text)
 
 

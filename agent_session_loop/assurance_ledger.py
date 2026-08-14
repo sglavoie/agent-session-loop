@@ -30,13 +30,13 @@ around what a crash, a race, or a lost cache may do to it:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import fcntl
 import json
 import os
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -63,7 +63,6 @@ from .assurance_models import (
     parse_issue_merge,
     parse_issue_observation,
 )
-
 
 #: Canonical ledger, its lock, and its rebuildable cache, all directly under the
 #: state root because the inbox spans every plan rather than belonging to one.
@@ -495,7 +494,7 @@ def _read_index_file(path: Path) -> LedgerIndex | None:
         return None
     try:
         payload = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except ValueError, UnicodeDecodeError:
         return None
     return _parse_index_payload(payload, path=path)
 
@@ -512,10 +511,8 @@ def _write_index_file(index: LedgerIndex) -> None:
         tmp_path.write_bytes(canonical_json_bytes(index.to_payload()))
         os.replace(tmp_path, index.path)
     except OSError:
-        try:
+        with suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -545,10 +542,8 @@ def _ledger_lock(root: Path, *, exclusive: bool) -> Iterator[None]:
             ) from error
         yield
     finally:
-        try:
+        with suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
         os.close(fd)
 
 
@@ -571,19 +566,21 @@ def _physical_lines(data: bytes) -> list[bytes]:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _require_envelope_timestamp(value: object) -> str:
     if not isinstance(value, str) or not value.strip() or value != value.strip():
         raise AssuranceError(
-            f"record 'recorded_at' must be an unpadded ISO-8601 timestamp; got {value!r}"
+            f"record 'recorded_at' must be an unpadded ISO-8601 timestamp; got "
+            f"{value!r}"
         )
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
         raise AssuranceError(
-            f"record 'recorded_at' must be an ISO-8601 timestamp; got {value!r} ({error})"
+            f"record 'recorded_at' must be an ISO-8601 timestamp; got {value!r} "
+            f"({error})"
         ) from error
     if parsed.tzinfo is None:
         raise AssuranceError(
@@ -611,7 +608,9 @@ def _record_from_envelope(envelope: Mapping[str, Any], *, seq: int) -> LedgerRec
     issue_id = envelope.get("issue_id")
     if kind in ISSUE_ALLOCATING_KINDS:
         if issue_id is None:
-            raise AssuranceError(f"record kind {kind!r} must carry its allocated issue id")
+            raise AssuranceError(
+                f"record kind {kind!r} must carry its allocated issue id"
+            )
         issue_id = parse_issue_id(issue_id)
     elif issue_id is not None:
         raise AssuranceError(
@@ -827,10 +826,8 @@ def _append_locked(path: Path, blob: bytes) -> None:
             # already exists.
             durability.fullsync(fd)
         except OSError:
-            try:
+            with suppress(OSError):
                 os.ftruncate(fd, original_size)
-            except OSError:
-                pass
             raise
     except OSError as error:
         raise LedgerError(ERROR_LEDGER_WRITE, str(error), path=path) from error

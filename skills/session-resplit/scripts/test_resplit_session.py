@@ -3,17 +3,16 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stdout
-from datetime import datetime, timezone
 import importlib.util
 import io
 import json
 import os
-from pathlib import Path
 import sys
 import tempfile
 import unittest
-
+from contextlib import redirect_stdout
+from datetime import UTC, datetime
+from pathlib import Path
 
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "resplit-session.py")
 SPEC = importlib.util.spec_from_file_location("resplit_session", SCRIPT_PATH)
@@ -22,7 +21,11 @@ sys.modules[SPEC.name] = resplit
 assert SPEC.loader is not None
 SPEC.loader.exec_module(resplit)
 
-from agent_session_loop import contracts, plans, state  # noqa: E402
+from agent_session_loop import (  # noqa: E402 - sys.path insert above
+    contracts,
+    plans,
+    state,
+)
 
 
 def write_session(
@@ -59,7 +62,13 @@ def parent_contract_block(check_names: tuple[str, ...] = ("parent-suite",)) -> s
         {
             "name": name,
             "type": "command",
-            "argv": ["python3", "-m", "unittest", "-q", f"tests.{name.replace('-', '_')}"],
+            "argv": [
+                "python3",
+                "-m",
+                "unittest",
+                "-q",
+                f"tests.{name.replace('-', '_')}",
+            ],
             "timeout_seconds": 120,
         }
         for name in check_names
@@ -127,12 +136,14 @@ def write_resplit_plan(
                 "",
                 "### Session Ownership",
                 "",
-                "| Session | Classification | Owned write paths | Required prior sessions | "
+                "| Session | Classification | Owned write paths | Required prior "
+                "sessions | "
                 "Allowed concurrent sessions | Serial blockers |",
                 "|---|---|---|---|---|---|",
                 "| 1 | serial-required | setup.py | none | none | serial |",
                 "| 2 | serial-required | app.py, docs.md | 1 | none | serial |",
-                "| 3 | serial-required | wrap.py | 2 (serial work-session sequence) | none | serial |",
+                "| 3 | serial-required | wrap.py | 2 (serial work-session sequence) | "
+                "none | serial |",
                 "",
             ]
         ),
@@ -155,7 +166,8 @@ def write_resplit_plan(
                 "- **Required prior sessions**: 1",
                 "- **Allowed concurrent sessions**: none",
                 "- **Owned write paths**: app.py, docs.md",
-                "- **Forbidden/shared paths**: shared files require coordinator ownership",
+                "- **Forbidden/shared paths**: shared files require coordinator "
+                "ownership",
                 "- **Serial blockers**: run serially",
                 "- **Optional internal tracks**: none",
                 "",
@@ -244,7 +256,7 @@ class ResplitSessionTest(unittest.TestCase):
                 parts=2,
                 state_dir=Path(tmp) / "state",
                 skill_prefix="$",
-                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC),
             )
 
             self.assertTrue(result["ok"])
@@ -258,7 +270,9 @@ class ResplitSessionTest(unittest.TestCase):
                 self.assertEqual(("SVC", "OAK"), scope.reads)
                 self.assertEqual(("SVC",), scope.writes)
 
-    def test_resplit_success_generates_nested_children_archive_and_ledgers(self) -> None:
+    def test_resplit_success_generates_nested_children_archive_and_ledgers(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
@@ -270,7 +284,7 @@ class ResplitSessionTest(unittest.TestCase):
                 parts=3,
                 state_dir=state_dir,
                 skill_prefix="$",
-                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC),
             )
 
             self.assertTrue(result["ok"])
@@ -343,7 +357,9 @@ class ResplitSessionTest(unittest.TestCase):
                 ("python3", "-m", "unittest", "-q", "tests.parent_suite"),
                 child_one_contract.verify.checks[0].argv,
             )
-            self.assertNotIn("Parent deliverables ship together.", child_one_contract.done_when)
+            self.assertNotIn(
+                "Parent deliverables ship together.", child_one_contract.done_when
+            )
 
             child_three = (plan_dir / "session-2.3.md").read_text(encoding="utf-8")
             child_three_contract = contracts.parse_completion_contract(
@@ -376,7 +392,8 @@ class ResplitSessionTest(unittest.TestCase):
             )
             # Legacy parallel ownership table must be left untouched.
             self.assertIn(
-                "| 3 | serial-required | wrap.py | 2 (serial work-session sequence) | none | serial |",
+                "| 3 | serial-required | wrap.py | 2 (serial work-session sequence) | "
+                "none | serial |",
                 manifest,
             )
             # Legacy wave table row for the parent must be left untouched.
@@ -409,7 +426,7 @@ class ResplitSessionTest(unittest.TestCase):
                 session_id="2",
                 parts=2,
                 state_dir=state_dir,
-                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC),
             )
 
             self.assertTrue(result["ok"])
@@ -546,9 +563,7 @@ class ResplitSessionTest(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual("lock-contention", payload["reason"])
             remediation = payload["remediation"]
-            self.assertEqual(
-                resplit.PAUSE_REMEDIATION["lock-contention"], remediation
-            )
+            self.assertEqual(resplit.PAUSE_REMEDIATION["lock-contention"], remediation)
             lowered = remediation.lower()
             self.assertIn("wait", lowered)
             self.assertIn("active", lowered)
@@ -576,7 +591,7 @@ class ResplitSessionTest(unittest.TestCase):
                 session_id="2",
                 parts=2,
                 state_dir=state_dir,
-                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC),
             )
             self.assertTrue(result["ok"])
 
@@ -620,7 +635,9 @@ class ResplitSessionTest(unittest.TestCase):
             self.assertIn("--child-spec", raised.exception.detail)
             self.assert_plan_unmutated(plan_dir)
 
-    def test_child_specs_with_explicit_allocation_generate_meaningful_contracts(self) -> None:
+    def test_child_specs_with_explicit_allocation_generate_meaningful_contracts(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
@@ -653,7 +670,7 @@ class ResplitSessionTest(unittest.TestCase):
                     },
                 ],
                 state_dir=state_dir,
-                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+                now=datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC),
             )
 
             self.assertTrue(result["ok"])
@@ -737,9 +754,7 @@ class ResplitSessionTest(unittest.TestCase):
                 {**base_spec, "inherit_checks": ["unit-suite"]},
                 {
                     **base_spec,
-                    "checks": [
-                        {"type": "file_exists", "path": "docs/README.md"}
-                    ],
+                    "checks": [{"type": "file_exists", "path": "docs/README.md"}],
                 },
             ],
             "missing done_when": [
@@ -761,26 +776,26 @@ class ResplitSessionTest(unittest.TestCase):
         }
 
         for label, specs in cases.items():
-            with self.subTest(case=label):
-                with tempfile.TemporaryDirectory() as tmp:
-                    plan_dir = Path(tmp) / "plan"
-                    state_dir = Path(tmp) / "state"
-                    write_resplit_plan(
-                        plan_dir, parent_check_names=("unit-suite", "lint-suite")
+            with (
+                self.subTest(case=label),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                plan_dir = Path(tmp) / "plan"
+                state_dir = Path(tmp) / "state"
+                write_resplit_plan(
+                    plan_dir, parent_check_names=("unit-suite", "lint-suite")
+                )
+
+                with self.assertRaises(resplit.ResplitError) as raised:
+                    resplit.resplit_session(
+                        plan_dir,
+                        session_id="2",
+                        child_specs=specs,
+                        state_dir=state_dir,
                     )
 
-                    with self.assertRaises(resplit.ResplitError) as raised:
-                        resplit.resplit_session(
-                            plan_dir,
-                            session_id="2",
-                            child_specs=specs,
-                            state_dir=state_dir,
-                        )
-
-                    self.assertEqual(
-                        "ambiguous-contract", raised.exception.reason, label
-                    )
-                    self.assert_plan_unmutated(plan_dir)
+                self.assertEqual("ambiguous-contract", raised.exception.reason, label)
+                self.assert_plan_unmutated(plan_dir)
 
     def test_inherit_checks_without_parent_contract_is_ambiguous(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -843,7 +858,9 @@ class ResplitSessionTest(unittest.TestCase):
             self.assertIn("unknown keys", raised.exception.detail)
             self.assert_plan_unmutated(plan_dir)
 
-    def test_cli_target_parsing_accepts_dotted_explicit_and_direct_sessions(self) -> None:
+    def test_cli_target_parsing_accepts_dotted_explicit_and_direct_sessions(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             plan_dir.mkdir()

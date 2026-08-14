@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from agent_session_loop import assurance_models as models
 from agent_session_loop.assurance_models import AssuranceError
-
 
 RUN_ID = "20260810T101112123456Z-4242"
 TIMESTAMP = "2026-08-10T10:11:12+00:00"
@@ -234,9 +233,11 @@ class EvidenceReferenceTests(unittest.TestCase):
             "turns/../../escape.json",
             "./events.jsonl",
         ):
-            with self.subTest(locator=locator):
-                with self.assertRaises(AssuranceError):
-                    models.EvidenceRef(kind="artifact", locator=locator)
+            with (
+                self.subTest(locator=locator),
+                self.assertRaises(AssuranceError),
+            ):
+                models.EvidenceRef(kind="artifact", locator=locator)
 
     def test_a_reference_to_undeclared_evidence_is_rejected(self) -> None:
         lanes = list(_lanes())
@@ -516,9 +517,11 @@ class IssueIdTests(unittest.TestCase):
 
     def test_ambiguous_and_invalid_forms_are_rejected(self) -> None:
         for value in ("ASI-0", "0", "-1", "ASI-007", "asi-42", "ASI-", "", 0, True):
-            with self.subTest(value=value):
-                with self.assertRaises(AssuranceError):
-                    models.parse_issue_id(value)
+            with (
+                self.subTest(value=value),
+                self.assertRaises(AssuranceError),
+            ):
+                models.parse_issue_id(value)
 
 
 class SummaryInvariantTests(unittest.TestCase):
@@ -551,9 +554,7 @@ class SummaryInvariantTests(unittest.TestCase):
 
     def test_all_clear_creates_no_issue(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "creates no issues"):
-            self._summary(
-                state="all-clear", issue_ids=("ASI-1",), new_issue_count=1
-            )
+            self._summary(state="all-clear", issue_ids=("ASI-1",), new_issue_count=1)
 
     def test_pending_has_not_run_yet(self) -> None:
         with self.assertRaisesRegex(AssuranceError, "has not run"):
@@ -580,7 +581,9 @@ class SummaryInvariantTests(unittest.TestCase):
 
 
 class AuditRoleTests(unittest.TestCase):
-    def test_the_audit_harness_must_differ_from_the_implementation_harness(self) -> None:
+    def test_the_audit_harness_must_differ_from_the_implementation_harness(
+        self,
+    ) -> None:
         with self.assertRaisesRegex(AssuranceError, "must differ"):
             models.AuditRole(
                 harness="codex",
@@ -627,12 +630,19 @@ class ArtifactWriterTests(unittest.TestCase):
 
     def test_traversal_artifact_names_are_rejected_not_sanitized(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
-            for name in ("../escape.json", "nested/report.json", "/abs.json", ".hidden"):
-                with self.subTest(name=name):
-                    with self.assertRaises(AssuranceError):
-                        models.write_audit_artifact(
-                            Path(raw_dir), name, b"{}\n", durable=False
-                        )
+            for name in (
+                "../escape.json",
+                "nested/report.json",
+                "/abs.json",
+                ".hidden",
+            ):
+                with (
+                    self.subTest(name=name),
+                    self.assertRaises(AssuranceError),
+                ):
+                    models.write_audit_artifact(
+                        Path(raw_dir), name, b"{}\n", durable=False
+                    )
 
     def test_an_unbounded_payload_never_reaches_the_run_directory(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

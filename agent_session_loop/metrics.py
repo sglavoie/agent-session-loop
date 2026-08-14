@@ -27,20 +27,23 @@ via ``asl compact-state`` per plan).
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+import contextlib
 import json
-from pathlib import Path
 import sys
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
-from . import assurance_report
-from . import compact_state
-from . import events
-from . import plans
-from . import review_continuation
-from . import session_overview
-from . import state
+from . import (
+    assurance_report,
+    compact_state,
+    events,
+    plans,
+    review_continuation,
+    session_overview,
+    state,
+)
 
 DEFAULT_SINCE_DAYS = 7
 
@@ -127,7 +130,7 @@ def _read_event_records(events_path: Path) -> list[dict[str, Any]]:
 def _read_result_payload(result_path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(result_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -177,7 +180,7 @@ def collect_metrics(
     if since_days <= 0:
         raise ValueError("--since-days must be a positive integer")
     state_root = state.state_root(state_dir)
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     cutoff = now - timedelta(days=since_days)
 
     turns_total = 0
@@ -233,9 +236,7 @@ def collect_metrics(
     for plan_state_dir in sorted(session_overview._iter_state_plan_dirs(state_root)):
         state_dirs_scanned += 1
         dir_key = plan_state_dir.name
-        total_bytes, grown_bytes, grown_files = _directory_sizes(
-            plan_state_dir, cutoff
-        )
+        total_bytes, grown_bytes, grown_files = _directory_sizes(plan_state_dir, cutoff)
         artifact_total_bytes += total_bytes
         artifact_grown_bytes += grown_bytes
         artifact_grown_files += grown_files
@@ -249,18 +250,14 @@ def collect_metrics(
         plan_dir = _plan_dir_for_state_dir(plan_state_dir)
         snapshot = None
         if plan_dir is not None:
-            try:
+            # Metrics remain best-effort for stale state directories. The
+            # full event history still supplies an events-only fallback.
+            with contextlib.suppress(plans.PlanError, OSError):
                 snapshot = plans.inspect_plan(plan_dir)
-            except (plans.PlanError, OSError):
-                # Metrics remain best-effort for stale state directories. The
-                # full event history still supplies an events-only fallback.
-                pass
-        materialization_keys = (
-            review_continuation.reconciled_materialization_keys(
-                plan_state_dir / events.EVENTS_FILE_NAME,
-                snapshot,
-                since=cutoff,
-            )
+        materialization_keys = review_continuation.reconciled_materialization_keys(
+            plan_state_dir / events.EVENTS_FILE_NAME,
+            snapshot,
+            since=cutoff,
         )
         unique_materialization_keys.update(
             (dir_key, key) for key in materialization_keys
@@ -367,26 +364,18 @@ def collect_metrics(
                 source_disposition = payload.get("source_disposition")
                 source_disposition = (
                     source_disposition
-                    if isinstance(source_disposition, str)
-                    and source_disposition
+                    if isinstance(source_disposition, str) and source_disposition
                     else "unknown"
                 )
                 reopen_source_disposition_counts[source_disposition] = (
-                    reopen_source_disposition_counts.get(
-                        source_disposition, 0
-                    )
-                    + 1
+                    reopen_source_disposition_counts.get(source_disposition, 0) + 1
                 )
                 if payload.get("materialized") is True:
                     successful_reopen_materializations += 1
                 else:
                     reopen_failures += 1
                     result = payload.get("result")
-                    result = (
-                        result
-                        if isinstance(result, str) and result
-                        else "unknown"
-                    )
+                    result = result if isinstance(result, str) and result else "unknown"
                     reopen_failure_result_counts[result] = (
                         reopen_failure_result_counts.get(result, 0) + 1
                     )
@@ -401,8 +390,7 @@ def collect_metrics(
                 error_classification = payload.get("error_classification")
                 error_classification = (
                     error_classification
-                    if isinstance(error_classification, str)
-                    and error_classification
+                    if isinstance(error_classification, str) and error_classification
                     else "unknown"
                 )
                 agent_mux_error_counts[error_classification] = (
@@ -436,7 +424,7 @@ def collect_metrics(
     sessions_attempted = len(session_turns)
     sessions_completed = 0
     sessions_first_pass = 0
-    for key, tracker in session_turns.items():
+    for tracker in session_turns.values():
         ordered = tracker.sorted_turns()
         if any(ok for _, ok in ordered):
             sessions_completed += 1
@@ -500,9 +488,7 @@ def collect_metrics(
             "repairs_materialized": len(unique_materialization_keys),
             "unique_materializations": len(unique_materialization_keys),
             "reopen_attempts": reopen_attempts,
-            "successful_reopen_materializations": (
-                successful_reopen_materializations
-            ),
+            "successful_reopen_materializations": (successful_reopen_materializations),
             "reopen_failures": reopen_failures,
             "reopen_attempts_by_source_disposition": dict(
                 sorted(reopen_source_disposition_counts.items())
@@ -574,10 +560,7 @@ def _print_assurance_section(assurance: dict[str, Any]) -> None:
         f"({_format_rate(coverage['coverage_rate'])})"
     )
     states = assurance["audit_states"]
-    print(
-        "  states "
-        + ", ".join(f"{name} {states.get(name, 0)}" for name in states)
-    )
+    print("  states " + ", ".join(f"{name} {states.get(name, 0)}" for name in states))
     issues = assurance["issues"]
     print(
         f"  issues: {issues['observations']} sighting(s), "
@@ -641,9 +624,7 @@ def _print_assurance_section(assurance: dict[str, Any]) -> None:
 
 def _print_report(report: MetricsReport) -> None:
     print(f"Metrics for {report.state_root}")
-    print(
-        f"Window: last {report.since_days} day(s), since {report.window_start}"
-    )
+    print(f"Window: last {report.since_days} day(s), since {report.window_start}")
     print(
         f"State dirs: {report.state_dirs_scanned} scanned, "
         f"{report.state_dirs_active} active in window"
@@ -704,9 +685,7 @@ def _print_report(report: MetricsReport) -> None:
     )
     for disposition, count in cycles["by_disposition"].items():
         print(f"  {disposition}: {count}")
-    for disposition, count in cycles[
-        "reopen_attempts_by_source_disposition"
-    ].items():
+    for disposition, count in cycles["reopen_attempts_by_source_disposition"].items():
         print(f"  reopen source {disposition}: {count}")
     for result, count in cycles["reopen_failures_by_result"].items():
         print(f"  reopen failure {result}: {count}")

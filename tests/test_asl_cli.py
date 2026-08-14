@@ -5,87 +5,61 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timedelta, timezone
-import errno
-import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
 import shutil
-import signal
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
     authoring,
-    baseline,
-    baseline_cache,
     cli,
-    compact_state,
     config,
     contracts,
     control_cli,
     control_queue,
     events,
     harnesses,
-    install_verify,
     mailbox,
     mailbox_cli,
     metrics,
     plans,
     preflight,
     prepare,
-    progress_cli,
-    progress_repair,
-    qna,
     repository_registration,
     responses,
     retention,
     review,
-    review_repair,
-    run_control,
     run_flags,
     runner,
     state,
-    tail,
     verification,
     workbench,
     workbench_server,
 )
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
-)
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
+    _contract_block,
     _write_state_payload,
     git_stdout,
     init_multi_repo_workspace,
-    patched_env,
-    write_plan,
-    write_plan_with_ids,
     install_fake_codex,
     install_fake_spec,
+    patched_env,
     write_multi_repo_plan,
-    _contract_block,
+    write_plan,
+    write_plan_with_ids,
 )
 
 
@@ -251,7 +225,8 @@ class CommandAndConfigTests(unittest.TestCase):
                         "        'model': 'claude-test',",
                         "        'session_id': 'session-1',",
                         "    },",
-                        "    {'type': 'system', 'subtype': 'status', 'status': 'requesting'},",
+                        "    {'type': 'system', 'subtype': 'status', 'status': "
+                        "'requesting'},",
                         "    {",
                         "        'type': 'stream_event',",
                         "        'event': {",
@@ -263,7 +238,8 @@ class CommandAndConfigTests(unittest.TestCase):
                         "        'type': 'stream_event',",
                         "        'event': {",
                         "            'type': 'content_block_delta',",
-                        "            'delta': {'type': 'text_delta', 'text': 'Runner status: '},",
+                        "            'delta': {'type': 'text_delta', 'text': 'Runner "
+                        "status: '},",
                         "        },",
                         "    },",
                         "    {",
@@ -272,7 +248,8 @@ class CommandAndConfigTests(unittest.TestCase):
                         "            'type': 'content_block_delta',",
                         "            'delta': {",
                         "                'type': 'text_delta',",
-                        "                'text': 'complete\\nNext command: /session-run plan/\\n',",
+                        "                'text': 'complete\\nNext command: "
+                        "/session-run plan/\\n',",
                         "            },",
                         "        },",
                         "    },",
@@ -287,7 +264,8 @@ class CommandAndConfigTests(unittest.TestCase):
                         "                {",
                         "                    'type': 'text',",
                         "                    'text': 'Runner status: complete\\n'",
-                        "                        'Next command: /session-run plan/\\n',",
+                        "                        'Next command: /session-run "
+                        "plan/\\n',",
                         "                },",
                         "            ],",
                         "        },",
@@ -315,9 +293,7 @@ class CommandAndConfigTests(unittest.TestCase):
                 cwd=tmp_dir,
                 plan_dir=tmp_dir,
                 prompt="/session-run plan/",
-                stream_callback=lambda stream, text: callbacks.append(
-                    (stream, text)
-                ),
+                stream_callback=lambda stream, text: callbacks.append((stream, text)),
             )
 
         self.assertEqual(0, result.returncode, result.stderr)
@@ -494,9 +470,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual("last_message", signals["runner_pause_source"])
 
     def test_live_action_signal_ignores_noop_runner_pause(self) -> None:
-        self.assertIsNone(
-            runner._live_action_signal("stdout", "RUNNER_PAUSE: none\n")
-        )
+        self.assertIsNone(runner._live_action_signal("stdout", "RUNNER_PAUSE: none\n"))
         self.assertIsNotNone(
             runner._live_action_signal(
                 "stdout",
@@ -638,9 +612,7 @@ class CommandAndConfigTests(unittest.TestCase):
         run_explicit_args = parser.parse_args(["run", "/tmp/plan", "--unsafe-bypass"])
         self.assertTrue(run_explicit_args.unsafe_bypass)
 
-        run_safe_args = parser.parse_args(
-            ["run", "/tmp/plan", "--no-unsafe-bypass"]
-        )
+        run_safe_args = parser.parse_args(["run", "/tmp/plan", "--no-unsafe-bypass"])
         self.assertFalse(run_safe_args.unsafe_bypass)
 
         doctor_args = parser.parse_args(
@@ -664,9 +636,7 @@ class CommandAndConfigTests(unittest.TestCase):
         parser = cli.build_parser()
 
         default_args = parser.parse_args(["run", "/tmp/plan"])
-        disabled_args = parser.parse_args(
-            ["run", "/tmp/plan", "--no-mailbox"]
-        )
+        disabled_args = parser.parse_args(["run", "/tmp/plan", "--no-mailbox"])
 
         self.assertFalse(default_args.no_mailbox)
         self.assertTrue(disabled_args.no_mailbox)
@@ -696,9 +666,7 @@ class CommandAndConfigTests(unittest.TestCase):
             cli.resolve_handler(notify_args),
         )
 
-        stdin_args = parser.parse_args(
-            ["notify", "/tmp/plan", "--text-stdin"]
-        )
+        stdin_args = parser.parse_args(["notify", "/tmp/plan", "--text-stdin"])
         self.assertIsNone(stdin_args.text)
         self.assertTrue(stdin_args.text_stdin)
 
@@ -743,9 +711,11 @@ class CommandAndConfigTests(unittest.TestCase):
             ["outbox", "supervise", "/tmp/plan", "--since", "2"],
             ["outbox", "supervise", "/tmp/plan", "--include", "all"],
         ):
-            with self.subTest(argv=argv), redirect_stderr(
-                io.StringIO()
-            ), self.assertRaises(SystemExit) as raised:
+            with (
+                self.subTest(argv=argv),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as raised,
+            ):
                 parser.parse_args(argv)
             self.assertEqual(2, raised.exception.code)
 
@@ -815,9 +785,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertFalse(runner._review_guard_include_ignored(default_args))
         self.assertTrue(enabled_args.review_guard_include_ignored)
         self.assertTrue(runner._review_guard_include_ignored(enabled_args))
-        self.assertIn(
-            "review_guard_include_ignored", runner._RESUME_OVERLAY_DESTS
-        )
+        self.assertIn("review_guard_include_ignored", runner._RESUME_OVERLAY_DESTS)
 
     def test_review_guard_exclude_merges_env_and_flags(self) -> None:
         args = cli.build_parser().parse_args(
@@ -955,9 +923,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual("/tmp/state", args.state_dir)
         self.assertTrue(args.json)
         self.assertEqual("review:review_verdict_from_args", args.handler_ref)
-        self.assertIs(
-            cli.resolve_handler(args), review.review_verdict_from_args
-        )
+        self.assertIs(cli.resolve_handler(args), review.review_verdict_from_args)
 
     def test_contract_check_subcommand_registers_handler(self) -> None:
         parser = cli.build_parser()
@@ -971,9 +937,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual("3", args.session)
         self.assertEqual("/repo", args.cwd)
         self.assertEqual("verification:contract_check_from_args", args.handler_ref)
-        self.assertIs(
-            cli.resolve_handler(args), verification.contract_check_from_args
-        )
+        self.assertIs(cli.resolve_handler(args), verification.contract_check_from_args)
 
     def test_register_repositories_subcommand_registers_handler(self) -> None:
         parser = cli.build_parser()
@@ -1041,9 +1005,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual("/tmp/plan", args.plan_dir)
         self.assertEqual("/tmp/batch.json", args.batch_file)
         self.assertEqual("prepare:expand_ingest_from_args", args.handler_ref)
-        self.assertIs(
-            cli.resolve_handler(args), prepare.expand_ingest_from_args
-        )
+        self.assertIs(cli.resolve_handler(args), prepare.expand_ingest_from_args)
 
     def test_importing_cli_does_not_import_heavy_handler_modules(self) -> None:
         # Guard: `import agent_session_loop.cli` must not eagerly pull in the
@@ -1082,15 +1044,9 @@ class CommandAndConfigTests(unittest.TestCase):
         # cli.py mirrors these defaults locally so building the parser does not
         # import the heavy `workbench_server`/`metrics` modules. Keep the copies
         # honest against their authoritative definitions.
-        self.assertEqual(
-            workbench_server.DEFAULT_HOST, cli._WORKBENCH_DEFAULT_HOST
-        )
-        self.assertEqual(
-            workbench_server.DEFAULT_PORT, cli._WORKBENCH_DEFAULT_PORT
-        )
-        self.assertEqual(
-            metrics.DEFAULT_SINCE_DAYS, cli._METRICS_DEFAULT_SINCE_DAYS
-        )
+        self.assertEqual(workbench_server.DEFAULT_HOST, cli._WORKBENCH_DEFAULT_HOST)
+        self.assertEqual(workbench_server.DEFAULT_PORT, cli._WORKBENCH_DEFAULT_PORT)
+        self.assertEqual(metrics.DEFAULT_SINCE_DAYS, cli._METRICS_DEFAULT_SINCE_DAYS)
         self.assertEqual(
             retention.DEFAULT_MAX_AGE_DAYS, cli._RETENTION_DEFAULT_MAX_AGE_DAYS
         )
@@ -1138,9 +1094,7 @@ class CommandAndConfigTests(unittest.TestCase):
     def test_control_wait_timeout_must_be_a_number(self) -> None:
         parser = cli.build_parser()
 
-        with redirect_stderr(io.StringIO()), self.assertRaises(
-            SystemExit
-        ) as raised:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
             parser.parse_args(
                 ["control", "abort", "/tmp/plan", "--wait", "--timeout", "soon"]
             )
@@ -1157,13 +1111,9 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual("/tmp/plan", defaults.plan_dir)
         self.assertIsNone(defaults.state_dir)
         self.assertFalse(defaults.json)
-        self.assertEqual(
-            control_queue.DEFAULT_ABORT_GRACE_SECONDS, defaults.grace
-        )
+        self.assertEqual(control_queue.DEFAULT_ABORT_GRACE_SECONDS, defaults.grace)
         self.assertIsNone(defaults.reason)
-        self.assertEqual(
-            "control_cli:control_abort_from_args", defaults.handler_ref
-        )
+        self.assertEqual("control_cli:control_abort_from_args", defaults.handler_ref)
 
         overridden = parser.parse_args(
             [
@@ -1193,9 +1143,10 @@ class CommandAndConfigTests(unittest.TestCase):
             ["control", "abort", "/tmp/plan", "--grace", "soon"],
         ):
             with self.subTest(argv=argv):
-                with redirect_stderr(io.StringIO()), self.assertRaises(
-                    SystemExit
-                ) as raised:
+                with (
+                    redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit) as raised,
+                ):
                     parser.parse_args(argv)
                 self.assertEqual(2, raised.exception.code)
 
@@ -1253,8 +1204,7 @@ class CommandAndConfigTests(unittest.TestCase):
             if action.dest not in ("help", "handler")
         }
         expected = {
-            (tuple(flag.option_strings), flag.dest)
-            for flag in run_flags.RUN_FLAG_SPEC
+            (tuple(flag.option_strings), flag.dest) for flag in run_flags.RUN_FLAG_SPEC
         }
 
         self.assertEqual(expected, real)
@@ -1346,9 +1296,7 @@ class CommandAndConfigTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
-            parser.parse_args(
-                ["run", "/tmp/plan", "--review-harness", "not-a-harness"]
-            )
+            parser.parse_args(["run", "/tmp/plan", "--review-harness", "not-a-harness"])
 
         self.assertEqual(2, raised.exception.code)
         self.assertIn("--review-harness", stderr.getvalue())
@@ -1383,9 +1331,7 @@ class CommandAndConfigTests(unittest.TestCase):
                 commit_mode=None,
             )
 
-            cwd, timeout, max_sessions, commit_mode = runner._validate_run_inputs(
-                args
-            )
+            cwd, timeout, max_sessions, commit_mode = runner._validate_run_inputs(args)
 
             self.assertEqual(Path(tmp).resolve(), cwd)
             self.assertIsNone(timeout)
@@ -1475,9 +1421,7 @@ class CommandAndConfigTests(unittest.TestCase):
         )
 
         self.assertTrue(runner.contains_review_session_marker(body_with_marker))
-        self.assertFalse(
-            runner.contains_review_session_marker(body_without_marker)
-        )
+        self.assertFalse(runner.contains_review_session_marker(body_without_marker))
 
     def test_is_generated_review_session_file_reads_marker_from_disk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1490,12 +1434,8 @@ class CommandAndConfigTests(unittest.TestCase):
             )
             other_path.write_text("# Session 1\n", encoding="utf-8")
 
-            self.assertTrue(
-                runner.is_generated_review_session_file(review_path)
-            )
-            self.assertFalse(
-                runner.is_generated_review_session_file(other_path)
-            )
+            self.assertTrue(runner.is_generated_review_session_file(review_path))
+            self.assertFalse(runner.is_generated_review_session_file(other_path))
             self.assertFalse(
                 runner.is_generated_review_session_file(plan_dir / "missing.md")
             )
@@ -1559,18 +1499,13 @@ class CommandAndConfigTests(unittest.TestCase):
             "Status line must be the final non-empty line",
         ):
             runner.parse_review_verdict(
-                "## Findings\n"
-                "Status: All clear, no findings\n"
-                "- trailing note\n"
+                "## Findings\nStatus: All clear, no findings\n- trailing note\n"
             )
 
     def test_parse_review_verdict_rejects_malformed_status(self) -> None:
-        with self.assertRaisesRegex(
-            runner.ReviewVerdictError, "malformed Status line"
-        ):
+        with self.assertRaisesRegex(runner.ReviewVerdictError, "malformed Status line"):
             runner.parse_review_verdict(
-                "## Findings\n"
-                "Status: 1 Finding (1 high, 0 med, 0 low)\n"
+                "## Findings\nStatus: 1 Finding (1 high, 0 med, 0 low)\n"
             )
 
     def test_parse_review_verdict_rejects_count_mismatch(self) -> None:
@@ -1578,8 +1513,7 @@ class CommandAndConfigTests(unittest.TestCase):
             runner.ReviewVerdictError, "severity counts do not add up"
         ):
             runner.parse_review_verdict(
-                "## Findings\n"
-                "Status: 5 Findings (2 high, 2 med, 0 low)\n"
+                "## Findings\nStatus: 5 Findings (2 high, 2 med, 0 low)\n"
             )
 
     def test_next_top_level_session_id_returns_one_for_empty_plan(self) -> None:
@@ -1657,9 +1591,7 @@ class CommandAndConfigTests(unittest.TestCase):
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("pending", "complete"))
 
-            self.assertIsNone(
-                runner.find_pending_generated_review_session(plan_dir)
-            )
+            self.assertIsNone(runner.find_pending_generated_review_session(plan_dir))
 
     def test_find_pending_generated_review_session_returns_pending_marked_session(
         self,
@@ -1699,9 +1631,7 @@ class CommandAndConfigTests(unittest.TestCase):
             ).replace("- **Status**: pending", "- **Status**: complete")
             review_path.write_text(body, encoding="utf-8")
 
-            self.assertIsNone(
-                runner.find_pending_generated_review_session(plan_dir)
-            )
+            self.assertIsNone(runner.find_pending_generated_review_session(plan_dir))
 
     def test_ensure_generated_review_session_creates_new_when_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1718,9 +1648,7 @@ class CommandAndConfigTests(unittest.TestCase):
                 plans.canonicalize_path(plan_dir / "session-3.md"),
                 session_file.path,
             )
-            self.assertTrue(
-                runner.is_generated_review_session_file(session_file.path)
-            )
+            self.assertTrue(runner.is_generated_review_session_file(session_file.path))
             status = plans.read_session_status(session_file)
             self.assertEqual("pending", status.status)
 
@@ -1790,9 +1718,7 @@ class CommandAndConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (plan_dir / runner.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
-                json.dumps(
-                    {"version": 2, "outcome": "all-clear", "findings": []}
-                ),
+                json.dumps({"version": 2, "outcome": "all-clear", "findings": []}),
                 encoding="utf-8",
             )
 
@@ -2152,9 +2078,7 @@ class JsonCliTests(unittest.TestCase):
             )
             env = os.environ.copy()
             env["XDG_CONFIG_HOME"] = str(tmp_dir / "config")
-            env["PYTHONPATH"] = (
-                str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            )
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             base_argv = [
                 sys.executable,
                 "-m",
@@ -2293,7 +2217,7 @@ class JsonCliTests(unittest.TestCase):
         turn_dir = run_dir / "turn-0001-session-1"
         turn_dir.mkdir(parents=True)
         (turn_dir / "stderr.log").write_bytes(b"x" * log_bytes)
-        finished_at = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        finished_at = datetime.now(UTC) - timedelta(days=days_ago)
         (turn_dir / "result.json").write_text(
             json.dumps(
                 {"finished_at": finished_at.isoformat(), "status_result": "ok"},
@@ -2430,9 +2354,7 @@ class JsonCliTests(unittest.TestCase):
                 entry["plan_dir"]: entry["reclaimable_bytes"]
                 for entry in payload["plans"]
             }
-            self.assertEqual(
-                0, by_plan[str(plans.canonicalize_path(locked))]
-            )
+            self.assertEqual(0, by_plan[str(plans.canonicalize_path(locked))])
             self.assertEqual(
                 payload["reclaimable_bytes"],
                 by_plan[str(plans.canonicalize_path(sweepable))],
@@ -2465,9 +2387,7 @@ class JsonCliTests(unittest.TestCase):
             )
             # A pid this host can prove dead: the lock every other command
             # reclaims on sight, and the one `gc` has promised not to touch.
-            lock_path = (
-                state.plan_state_dir(plan_dir, state_dir) / state.LOCK_FILE_NAME
-            )
+            lock_path = state.plan_state_dir(plan_dir, state_dir) / state.LOCK_FILE_NAME
             lock_path.write_text(
                 json.dumps(
                     {
@@ -2535,7 +2455,9 @@ class JsonCliTests(unittest.TestCase):
             state_dir = tmp_dir / "state"
             write_plan_with_ids(plan_dir, (("1", "complete"), ("1.1", "pending")))
 
-            status_payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+            status_payload = state.status_payload(
+                plans.inspect_plan(plan_dir), state_dir
+            )
             self.assertEqual("1.1", status_payload["next_pending"])
             self.assertEqual("1.1", status_payload["next_pending_id"])
             integer_session = status_payload["sessions"][0]
@@ -2588,17 +2510,13 @@ class JsonCliTests(unittest.TestCase):
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("complete", "pending"))
 
-            payload = state.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
-            )
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
             next_command = payload["next_command"]
             self.assertFalse(next_command["complete"])
             self.assertEqual("2", next_command["next_pending_id"])
             invocations = next_command["next_steps"][0]["invocations"]
             resolved_plan_dir = payload["plan_dir"]
-            self.assertEqual(
-                f"$session-run {resolved_plan_dir}/", invocations["codex"]
-            )
+            self.assertEqual(f"$session-run {resolved_plan_dir}/", invocations["codex"])
             self.assertEqual(
                 f"/session-run {resolved_plan_dir}/", invocations["claude"]
             )
@@ -2615,9 +2533,7 @@ class JsonCliTests(unittest.TestCase):
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("complete", "complete"))
 
-            payload = state.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
-            )
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
             self.assertEqual(
                 {
                     "complete": True,
@@ -3015,9 +2931,7 @@ class JsonCliTests(unittest.TestCase):
             )
             env = os.environ.copy()
             env["XDG_CONFIG_HOME"] = str(config_home)
-            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get(
-                "PYTHONPATH", ""
-            )
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
 
             completed = subprocess.run(
                 [
@@ -3275,9 +3189,7 @@ class JsonCliTests(unittest.TestCase):
                 {"running": 0, "recent": 0, "stale_locks": 0, "skipped": 0},
                 payload["counts"],
             )
-            self.assertEqual(
-                {"running": True, "recent": True}, payload["filters"]
-            )
+            self.assertEqual({"running": True, "recent": True}, payload["filters"])
 
     def test_sessions_json_negative_limit_returns_input_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3481,13 +3393,16 @@ class SplitCliTests(unittest.TestCase):
             self.assertTrue((output_dir / "manifest.md").is_file())
             self.assertTrue((output_dir / "progress.md").is_file())
             self.assertEqual(
-                sorted(str(output_dir / name) for name in (
-                    "context.md",
-                    "manifest.md",
-                    "progress.md",
-                    "session-1.md",
-                    "session-2.md",
-                )),
+                sorted(
+                    str(output_dir / name)
+                    for name in (
+                        "context.md",
+                        "manifest.md",
+                        "progress.md",
+                        "session-1.md",
+                        "session-2.md",
+                    )
+                ),
                 sorted(payload["files"]),
             )
 
@@ -3591,31 +3506,33 @@ class SplitCliTests(unittest.TestCase):
             ),
         )
         for index, (contract_payload, expected_reason) in enumerate(cases):
-            with self.subTest(reason=expected_reason):
-                with tempfile.TemporaryDirectory() as tmp:
-                    tmp_dir = Path(tmp)
-                    plan = tmp_dir / "PLAN.md"
-                    plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
-                    contracts_file = tmp_dir / "contracts.json"
-                    contracts_file.write_text(
-                        json.dumps(contract_payload), encoding="utf-8"
-                    )
-                    base = tmp_dir / f"out{index}"
+            with (
+                self.subTest(reason=expected_reason),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                tmp_dir = Path(tmp)
+                plan = tmp_dir / "PLAN.md"
+                plan.write_text(self._TWO_SESSION_PLAN, encoding="utf-8")
+                contracts_file = tmp_dir / "contracts.json"
+                contracts_file.write_text(
+                    json.dumps(contract_payload), encoding="utf-8"
+                )
+                base = tmp_dir / f"out{index}"
 
-                    code, out, _ = self._run_split(
-                        self._split_args(
-                            plan_file=str(plan),
-                            contracts_file=str(contracts_file),
-                            base_dir=str(base),
-                        )
+                code, out, _ = self._run_split(
+                    self._split_args(
+                        plan_file=str(plan),
+                        contracts_file=str(contracts_file),
+                        base_dir=str(base),
                     )
+                )
 
-                    self.assertEqual(1, code)
-                    payload = json.loads(out)
-                    self.assertFalse(payload["ok"])
-                    self.assertEqual(expected_reason, payload["reason"])
-                    self.assertIn("invalid contract", payload["error"])
-                    self.assertFalse(base.exists())
+                self.assertEqual(1, code)
+                payload = json.loads(out)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(expected_reason, payload["reason"])
+                self.assertIn("invalid contract", payload["error"])
+                self.assertFalse(base.exists())
 
     def test_split_inline_stdin_captures_durable_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3802,9 +3719,7 @@ class SplitCliTests(unittest.TestCase):
             base = tmp_dir / "out"
 
             code, out, _ = self._run_split(
-                self._split_args(
-                    plan_file=str(plan), check=True, base_dir=str(base)
-                )
+                self._split_args(plan_file=str(plan), check=True, base_dir=str(base))
             )
 
             self.assertEqual(1, code)
@@ -3830,9 +3745,7 @@ class SplitCliTests(unittest.TestCase):
             self.assertIsNone(payload["findings"][2]["suggested_line"])
             self.assertEqual(payload["findings"][0]["message"], payload["error"])
             self.assertFalse(base.exists())
-            self.assertEqual(
-                self._BROKEN_PLAN, plan.read_text(encoding="utf-8")
-            )
+            self.assertEqual(self._BROKEN_PLAN, plan.read_text(encoding="utf-8"))
 
     def test_check_clean_plan_reports_canonical_session_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3879,9 +3792,7 @@ class SplitCliTests(unittest.TestCase):
             contract_payload = json.loads(contracts_file.read_text(encoding="utf-8"))
             contract_payload["1"]["verify"]["checks"][0]["repo"] = "SVC"
             contract_payload["2"]["verify"]["checks"][0]["repo"] = "OAK"
-            contracts_file.write_text(
-                json.dumps(contract_payload), encoding="utf-8"
-            )
+            contracts_file.write_text(json.dumps(contract_payload), encoding="utf-8")
 
             code, out, err = self._run_split(
                 self._split_args(
@@ -3903,17 +3814,15 @@ class SplitCliTests(unittest.TestCase):
             first_session = (output_dir / "session-1.md").read_text(encoding="utf-8")
             second_session = (output_dir / "session-2.md").read_text(encoding="utf-8")
             self.assertIn("## Repositories", manifest)
-            self.assertIn("| SVC | tundra_svc | github.com/tundra/SVC |", manifest)
+            self.assertIn(
+                "| SVC | tundra_svc | github.com/tundra/SVC |", manifest
+            )
             self.assertNotIn("## Repositories", context)
             self.assertNotIn("| Alias | Path | Origin |", context)
-            self.assertEqual(
-                1, first_session.count("**Reads repositories**: SVC, OAK")
-            )
+            self.assertEqual(1, first_session.count("**Reads repositories**: SVC, OAK"))
             self.assertEqual(1, first_session.count("**Writes repositories**: SVC"))
             self.assertEqual(1, second_session.count("**Reads repositories**: OAK"))
-            self.assertEqual(
-                1, second_session.count("**Writes repositories**: (none)")
-            )
+            self.assertEqual(1, second_session.count("**Writes repositories**: (none)"))
             self.assertEqual(
                 plans.stable_readiness_sha256(output_dir),
                 payload["readiness"]["readiness_sha256"],
@@ -3936,9 +3845,7 @@ class SplitCliTests(unittest.TestCase):
     def test_check_missing_plan_file_is_input_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             code, out, _ = self._run_split(
-                self._split_args(
-                    plan_file=str(Path(tmp) / "nope.md"), check=True
-                )
+                self._split_args(plan_file=str(Path(tmp) / "nope.md"), check=True)
             )
 
             self.assertEqual(1, code)
@@ -3949,9 +3856,7 @@ class SplitCliTests(unittest.TestCase):
             base = Path(tmp) / "base"
 
             code, out, _ = self._run_split(
-                self._split_args(
-                    inline_stdin=True, check=True, base_dir=str(base)
-                ),
+                self._split_args(inline_stdin=True, check=True, base_dir=str(base)),
                 stdin=self._BROKEN_PLAN,
             )
 
@@ -4014,7 +3919,9 @@ class SplitCliTests(unittest.TestCase):
 class StatusLabelResolutionCliTests(unittest.TestCase):
     """End-to-end coverage for `asl status PLAN_DIR_OR_ID` label resolution."""
 
-    def _run_status(self, args: list[str], *, check: bool) -> subprocess.CompletedProcess:
+    def _run_status(
+        self, args: list[str], *, check: bool
+    ) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, "-m", "agent_session_loop", "status", *args],
             cwd=REPO_ROOT,
@@ -4167,9 +4074,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
                     str(plans.canonicalize_path(second)),
                 ]
             )
-            self.assertEqual(
-                expected_candidates, payload["details"]["candidates"]
-            )
+            self.assertEqual(expected_candidates, payload["details"]["candidates"])
             self.assertEqual(
                 str(plans.canonicalize_path(state_dir)),
                 payload["details"]["state_root"],
@@ -4219,7 +4124,9 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
         self.assertEqual(0, raised.exception.code)
         help_text = " ".join(stdout.getvalue().split())
         self.assertIn("PLAN_DIR_OR_ID", help_text)
-        self.assertIn("compact plan label printed after 'plan' by 'asl sessions'", help_text)
+        self.assertIn(
+            "compact plan label printed after 'plan' by 'asl sessions'", help_text
+        )
 
 
 class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
@@ -4244,10 +4151,8 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
         session_text = session_path.read_text(encoding="utf-8")
         session_path.write_text(
             session_text.replace(
-                "**Reads repositories**: SVC, OAK\n"
-                "**Writes repositories**: SVC, OAK",
-                "**Reads repositories**: SVC\n"
-                "**Writes repositories**: SVC",
+                "**Reads repositories**: SVC, OAK\n**Writes repositories**: SVC, OAK",
+                "**Reads repositories**: SVC\n**Writes repositories**: SVC",
             ),
             encoding="utf-8",
         )
@@ -4322,9 +4227,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertEqual(root, payload["run_config"]["workspace_root"])
             self.assertEqual(root, payload["planned"]["workspace_root"])
             self.assertNotIn("workspace_inventory_excludes", payload)
-            self.assertNotIn(
-                "workspace_inventory_excludes", payload["run_config"]
-            )
+            self.assertNotIn("workspace_inventory_excludes", payload["run_config"])
             invocation = payload["planned"]["invocation"]
             self.assertEqual(root, invocation["cwd"])
             self.assertEqual(root, invocation["workspace_root"])
@@ -4359,9 +4262,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
     def _fake_review_env(self, tmp_dir: Path, **extra: str) -> dict[str, str]:
         env = self._fake_codex_env(tmp_dir, **extra)
         config_path = (
-            Path(env["XDG_CONFIG_HOME"])
-            / config.APP_NAME
-            / config.HARNESS_CONFIG_NAME
+            Path(env["XDG_CONFIG_HOME"]) / config.APP_NAME / config.HARNESS_CONFIG_NAME
         )
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         payload["claude"] = dict(payload["codex"])
@@ -4495,9 +4396,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             finding = payload["turns"][-1]["review_verdict"]["findings"][0]
             self.assertEqual("SVC", finding["repo"])
             self.assertTrue(finding["evidence"][0]["path"].startswith("SVC:"))
-            self.assertEqual(
-                "SVC", finding["verification_checks"][0]["repo"]
-            )
+            self.assertEqual("SVC", finding["verification_checks"][0]["repo"])
 
     def test_multi_repo_review_repairs_persist_scopes_and_qualified_lineage(
         self,
@@ -4532,9 +4431,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             )
             self.assertEqual("SVC", first_cycle["findings"][0]["repo"])
             self.assertTrue(
-                first_cycle["findings"][0]["evidence"][0]["path"].startswith(
-                    "SVC:"
-                )
+                first_cycle["findings"][0]["evidence"][0]["path"].startswith("SVC:")
             )
             group = first_cycle["repair_groups"][0]
             self.assertEqual(["SVC", "OAK"], group["read_repositories"])
@@ -4877,9 +4774,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             workspace_root, plan_dir, repositories = self._workspace_plan(tmp_dir)
             install_fake_spec(tmp_dir)
-            (repositories["OAK"] / "dirty.txt").write_text(
-                "dirty\n", encoding="utf-8"
-            )
+            (repositories["OAK"] / "dirty.txt").write_text("dirty\n", encoding="utf-8")
             env = self._fake_codex_env(
                 tmp_dir,
                 PATH=str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
@@ -5038,9 +4933,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 state_dir,
                 env_overrides=self._fake_codex_env(
                     tmp_dir,
-                    FAKE_CODEX_MUTATION_PATH=str(
-                        repositories["OAK"] / "README.md"
-                    ),
+                    FAKE_CODEX_MUTATION_PATH=str(repositories["OAK"] / "README.md"),
                 ),
             )
             self.assertEqual(1, first.returncode, first.stderr)
@@ -5103,8 +4996,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             ]
             self.assertTrue(
                 any(
-                    record["name"]
-                    == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT
+                    record["name"] == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT
                     for record in records
                 )
             )
@@ -5124,15 +5016,11 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 state_dir,
                 env_overrides=self._fake_codex_env(
                     tmp_dir,
-                    FAKE_CODEX_MUTATION_PATH=str(
-                        repositories["OAK"] / "README.md"
-                    ),
+                    FAKE_CODEX_MUTATION_PATH=str(repositories["OAK"] / "README.md"),
                 ),
             )
             self.assertEqual(1, first.returncode, first.stderr)
-            first_guard = json.loads(first.stdout)["turns"][0][
-                "workspace_write_guard"
-            ]
+            first_guard = json.loads(first.stdout)["turns"][0]["workspace_write_guard"]
             self.assertEqual(
                 "outside-read-scope",
                 first_guard["violations"][0]["kind"],
@@ -5235,9 +5123,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             )
 
             self.assertEqual(1, completed.returncode, completed.stderr)
-            guard = json.loads(completed.stdout)["turns"][0][
-                "workspace_write_guard"
-            ]
+            guard = json.loads(completed.stdout)["turns"][0]["workspace_write_guard"]
             self.assertEqual([], guard["write_aliases"])
             self.assertEqual(
                 "read-only-repository",
@@ -5266,9 +5152,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             )
 
             self.assertEqual(0, completed.returncode, completed.stderr)
-            guard = json.loads(completed.stdout)["turns"][0][
-                "workspace_write_guard"
-            ]
+            guard = json.loads(completed.stdout)["turns"][0]["workspace_write_guard"]
             self.assertTrue(guard["passed"])
             self.assertEqual([], guard["write_aliases"])
             self.assertEqual({}, guard["changed"])
@@ -5341,9 +5225,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                     tmp_dir,
                     FAKE_CODEX_MODE="timeout",
                     FAKE_CODEX_SLEEP="30",
-                    FAKE_CODEX_MUTATION_PATH=str(
-                        repositories["OAK"] / "README.md"
-                    ),
+                    FAKE_CODEX_MUTATION_PATH=str(repositories["OAK"] / "README.md"),
                 ),
             )
 
@@ -5374,9 +5256,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             )
 
             self.assertEqual(0, completed.returncode, completed.stderr)
-            guard = json.loads(completed.stdout)["turns"][0][
-                "workspace_write_guard"
-            ]
+            guard = json.loads(completed.stdout)["turns"][0]["workspace_write_guard"]
             self.assertEqual(["tundra_svc"], list(guard["changed"]))
 
     def test_multi_repo_guard_ignores_git_ignored_build_output(self) -> None:
@@ -5409,9 +5289,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             )
 
             self.assertEqual(0, completed.returncode, completed.stderr)
-            guard = json.loads(completed.stdout)["turns"][0][
-                "workspace_write_guard"
-            ]
+            guard = json.loads(completed.stdout)["turns"][0]["workspace_write_guard"]
             self.assertTrue(guard["passed"])
             self.assertEqual({}, guard["changed"])
             self.assertTrue(target.is_file())
@@ -5447,9 +5325,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             )
 
             self.assertEqual(1, completed.returncode, completed.stderr)
-            guard = json.loads(completed.stdout)["turns"][0][
-                "workspace_write_guard"
-            ]
+            guard = json.loads(completed.stdout)["turns"][0]["workspace_write_guard"]
             self.assertTrue(guard["include_ignored"])
             self.assertEqual(
                 ["OAK:cache/build.bin"],
@@ -5464,9 +5340,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             before = metadata_path.read_bytes()
             moved_root = tmp_dir / "moved-workspace"
             shutil.copytree(workspace_root, moved_root)
-            completed = self._run(
-                plan_dir, moved_root, tmp_dir / "state", "--dry-run"
-            )
+            completed = self._run(plan_dir, moved_root, tmp_dir / "state", "--dry-run")
 
             self.assertEqual(1, completed.returncode)
             payload = json.loads(completed.stdout)
@@ -5498,9 +5372,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             )
             self.assertEqual(before_run["workspace_root"], before_run["cwd"])
             self.assertNotIn("workspace_inventory_excludes", before_run)
-            run_completed = self._run(
-                plan_dir, workspace_root, state_dir, "--dry-run"
-            )
+            run_completed = self._run(plan_dir, workspace_root, state_dir, "--dry-run")
             self.assertEqual(0, run_completed.returncode, run_completed.stderr)
 
             status_completed = subprocess.run(
@@ -5666,9 +5538,7 @@ class RegisterRepositoriesCommandTests(unittest.TestCase):
 
         self.assertEqual(0, code, stderr)
         payload = json.loads(stdout)
-        for field in dataclasses.fields(
-            repository_registration.RegistrationResult
-        ):
+        for field in dataclasses.fields(repository_registration.RegistrationResult):
             self.assertIn(field.name, payload)
         self.assertTrue(payload["ok"])
         self.assertEqual("register-repositories", payload["command"])
@@ -5711,13 +5581,9 @@ class RegisterRepositoriesCommandTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual("refused", payload["reason"])
         self.assertEqual("refused", payload["status"])
-        self.assertEqual(
-            "contract-path-outside-registry", payload["missing_fact"]
-        )
+        self.assertEqual("contract-path-outside-registry", payload["missing_fact"])
         self.assertIn("'stray'", payload["detail"])
-        self.assertIn(
-            "missing fact: contract-path-outside-registry", payload["error"]
-        )
+        self.assertIn("missing fact: contract-path-outside-registry", payload["error"])
         self.assertEqual([], payload["files"])
         self.assertIsNone(plans.read_repository_registry(self.plan_dir))
 
@@ -5813,9 +5679,7 @@ class RegisterRepositoriesSourcePlanTests(unittest.TestCase):
         path.write_text(self._source_plan(**kwargs), encoding="utf-8")
         return path
 
-    def _register(
-        self, *extra: str, stdin: str | None = None
-    ) -> tuple[int, str, str]:
+    def _register(self, *extra: str, stdin: str | None = None) -> tuple[int, str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
         argv = [
             "register-repositories",
@@ -5866,8 +5730,7 @@ class RegisterRepositoriesSourcePlanTests(unittest.TestCase):
         migrated = output.read_text(encoding="utf-8")
         self.assertIn("## Repositories", migrated)
         self.assertIn(
-            "| tundra_svc | tundra_svc "
-            "| https://github.com/tundra/SVC |",
+            "| tundra_svc | tundra_svc | https://github.com/tundra/SVC |",
             migrated,
         )
         parsed = authoring.parse_plan_document(migrated)
@@ -5911,9 +5774,7 @@ class RegisterRepositoriesSourcePlanTests(unittest.TestCase):
         self.assertEqual("applied", payload["status"])
         self.assertEqual(str(source), payload["source_path"])
         self.assertEqual(str(output), payload["output_path"])
-        self.assertEqual(
-            output.read_text(encoding="utf-8"), payload["markdown"]
-        )
+        self.assertEqual(output.read_text(encoding="utf-8"), payload["markdown"])
         self.assertEqual(["1", "2"], payload["sessions_changed"])
 
     def test_refusal_emits_no_markdown_and_writes_no_output_file(self) -> None:
@@ -5927,9 +5788,7 @@ class RegisterRepositoriesSourcePlanTests(unittest.TestCase):
         self.assertEqual(1, code)
         payload = json.loads(stdout)
         self.assertEqual("refused", payload["reason"])
-        self.assertEqual(
-            "contract-path-outside-registry", payload["missing_fact"]
-        )
+        self.assertEqual("contract-path-outside-registry", payload["missing_fact"])
         self.assertIsNone(payload["markdown"])
         self.assertFalse(output.exists())
 

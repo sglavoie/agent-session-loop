@@ -19,7 +19,7 @@ malformed file is simply replaced.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import plans
@@ -50,7 +50,7 @@ def handoff_to_progress_entry(
 
 def utc_iso_from_mtime(path: Path) -> str:
     """Return `path`'s mtime as a UTC ISO-8601 timestamp."""
-    moment = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    moment = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
     return moment.isoformat()
 
 
@@ -109,8 +109,6 @@ def repair_progress_journal(
         action="rewrite",
         path=path,
         entries_written=len(entries),
-        completed_session_ids=tuple(
-            entry.session_id.value for entry in entries
-        ),
+        completed_session_ids=tuple(entry.session_id.value for entry in entries),
         journal_replaced=journal_replaced,
     )

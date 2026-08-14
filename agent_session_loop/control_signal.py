@@ -53,7 +53,6 @@ from typing import Any
 
 from . import plans, state
 
-
 ENDPOINT_FILENAME = "control-wakeup.fifo"
 
 REASON_DELIVERED = "delivered"
@@ -133,16 +132,12 @@ def open_wakeup_endpoint(
         # already inside its own open, and one that arrives after finds nothing
         # to open. Either way it reports rather than blocks.
         _unlink_quietly(path)
-        try:
+        with contextlib.suppress(OSError):
             os.write(stop_fd_write, b"\0")
-        except OSError:
-            pass
         reader.join(timeout=5.0)
         for descriptor in (keepalive_fd, stop_fd_write, stop_fd_read, read_fd):
-            try:
+            with contextlib.suppress(OSError):
                 os.close(descriptor)
-            except OSError:
-                pass
 
 
 def _create_endpoint(path: Path) -> int:
@@ -165,9 +160,7 @@ def _create_endpoint(path: Path) -> int:
         raise
 
 
-def _serve_wakeups(
-    read_fd: int, stop_fd: int, event: threading.Event
-) -> None:
+def _serve_wakeups(read_fd: int, stop_fd: int, event: threading.Event) -> None:
     """Set ``event`` for every byte written to the endpoint until stopped."""
     selector = selectors.DefaultSelector()
     try:
@@ -211,7 +204,7 @@ def notify_runner(
     """
     try:
         lock = state.inspect_lock_info(plan_dir, state_dir)
-    except (plans.PlanError, state.StateError, OSError):
+    except plans.PlanError, state.StateError, OSError:
         return NotifyResult(False, REASON_NO_RUNNER)
 
     if lock is None:
@@ -265,7 +258,5 @@ def _deliver_wakeup(endpoint: Path) -> NotifyResult:
 
 
 def _unlink_quietly(path: Path) -> None:
-    try:
+    with contextlib.suppress(OSError):
         path.unlink()
-    except OSError:
-        pass

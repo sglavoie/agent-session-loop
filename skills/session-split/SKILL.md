@@ -127,10 +127,11 @@ authority the runner will enforce.
 1. Group work items that share files or directories into one session (use surface-scan data when available).
 2. Estimate session weight: plan text lines + files touched + existing LoC + subsystem spread.
 3. Balance sessions by weight — a session touching 15 files across 4 subsystems is far heavier than one editing 3 files in the same package; split heavy sessions, merge lightweight ones.
-4. Present the proposed structure with per-session summaries: `<Title> -- <N> files, ~<L> existing lines, <subsystem(s)>`.
-5. If the surface scan was skipped (< 5 file references), fall back to heading/affinity grouping.
-6. Ask the user for approval before proceeding.
-7. Once approved, write the restructured plan — original content unchanged, organized under canonical `## Session N: <title>` headings — save it as a new source markdown file, and pass that path to `asl split --plan-file` in Step 6 so the generated directory traces to a real source file.
+4. Prefer **six sessions or fewer**. When the weights land on a seventh, narrow the plan's scope rather than splitting more finely — the long repair tails appeared in the larger splits, so a finer split buys nothing. Name the scope you are proposing to cut when you present the structure in step 5, and let the user decide it in step 7.
+5. Present the proposed structure with per-session summaries: `<Title> -- <N> files, ~<L> existing lines, <subsystem(s)>`.
+6. If the surface scan was skipped (< 5 file references), fall back to heading/affinity grouping.
+7. Ask the user for approval before proceeding.
+8. Once approved, write the restructured plan — original content unchanged, organized under canonical `## Session N: <title>` headings — save it as a new source markdown file, and pass that path to `asl split --plan-file` in Step 6 so the generated directory traces to a real source file.
 
 **Single session found**: `asl split --check` (and `asl split`) reports reason `single-session`. Tell the user "Only 1 session found — splitting is not needed." and stop.
 
@@ -156,6 +157,7 @@ Contracts are the only generated content this skill authors; everything else is 
 
 Contract authoring rules (validated by `agent_session_loop.authoring.contract_from_payload`, which fails closed on any malformed entry):
 
+- Every session states its own verification command and its own done-condition: one contract per session, `done_when` naming what is true when that session ends and `verify.checks` carrying a command that proves it. Never defer either to a later session's contract — a session a successor has to finish cannot converge on its own.
 - `done_when` needs at least one non-trivial bullet derived from the session's own goal (title or first sentence); never leave generic placeholders that read like `<criterion>`.
 - `verify.checks` must be non-empty. `type` is one of `command`, `file_exists`, `regex_in_file`; `command` checks take a non-empty `argv` list (no shell strings) and `timeout_seconds <= 3600`; `file_exists` / `regex_in_file` take a path (and a Python-`re`-valid `pattern`). In a registered plan, put `"repo": "Alias"` on every check and keep every `path` and command `cwd` repository-relative, non-absolute, and free of upward `..` traversal; the alias must be in that session's read scope. In a legacy plan, checks may omit `repo` and retain repo-relative or absolute `path` / `cwd` behavior. `name` is optional and auto-assigned as `check-<index>`.
 - Author one authoritative gate for each logical verification surface. A check without `on_failure_of` is a gate and determines whether the contract passes. Do not emit both a focused test command and a broader command that already includes those tests as unconditional gates; prefer the repo's evidenced aggregate command when it is appropriately scoped to the session.
@@ -210,7 +212,7 @@ Echo the `asl split --json` output as a concise summary:
 3. Output directory (`output_dir`) and its `Plan ID` (`plan_id`). For a registered plan, also print the ordered alias/path registry from `repositories` and its credential-free `registry_digest`; never print credentials.
 4. File listing (`files`) with approximate sizes.
 5. The ready-to-paste serial execution command (the `## Execution` block from `manifest.md`).
-6. Estimated token savings percentage; if an Execution Weight table was generated, highlight any "heavy" session and suggest splitting it further.
+6. Estimated token savings percentage; if an Execution Weight table was generated, highlight any "heavy" session. Suggest splitting it further only while the plan stays at six sessions or fewer; at that ceiling, suggest narrowing the heavy session's scope instead.
 7. State that the plan ships as `**Readiness**: draft` with a stable readiness SHA-256, that a skeleton runner-managed `progress.md` was written (inspect with `asl progress <plan-dir>`, `--tail`, `--json`; `asl backfill-progress [--force] <plan-dir>` is the manual recovery path), and that `session-expand` will run final preflight with `--mark-loop-ready`.
 8. Suggest running `<skill-prefix>session-expand <output-dir>` next (the `next_steps` field already renders the per-harness invocation) to validate paths, signatures, contracts, assumptions, and final loop-ready preflight before execution. After expansion, `asl run` is the normal entry point and self-heals derived progress/readiness drift before pausing, so an operator only needs `asl preflight --mark-loop-ready` (or `plan-preflight-iterate`) when a non-derived blocker remains.
 

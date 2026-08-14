@@ -22,14 +22,13 @@ actually reclaimed on disk.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
 import json
-from pathlib import Path
 import sys
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from . import artifacts, events, plans, runner, state
-
 
 # Subdirectory (relative to a turn artifact directory) where failed-command
 # gzip artifacts live, matching the runner-managed verification convention.
@@ -219,9 +218,7 @@ def _compact_event_record(record: dict[str, Any]) -> dict[str, Any]:
             nested = new_payload.get(nested_key)
             if isinstance(nested, dict):
                 new_payload = dict(new_payload)
-                new_payload[nested_key] = runner._bounded_verification_details(
-                    nested
-                )
+                new_payload[nested_key] = runner._bounded_verification_details(nested)
     compact["payload"] = new_payload
     return compact
 
@@ -341,8 +338,7 @@ def _print_report(report: CompactionReport) -> None:
     print(f"Compact state ({mode}) for {report.plan_dir}")
     print(f"State dir: {report.state_dir}")
     print(
-        f"Files: {report.files_rewritten} rewritten of "
-        f"{report.files_scanned} scanned"
+        f"Files: {report.files_rewritten} rewritten of {report.files_scanned} scanned"
     )
     print(f"Projected bytes reclaimed: {report.projected_bytes_reclaimed}")
     if report.artifact_bytes_added:

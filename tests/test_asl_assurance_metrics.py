@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import ast
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import tempfile
 import unittest
+from datetime import UTC, datetime
+from pathlib import Path
 
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
 from agent_session_loop import assurance_report
 from agent_session_loop.assurance_projection import AuditPublication
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,7 +27,7 @@ T0 = "2026-08-10T10:00:00+00:00"
 T1 = "2026-08-10T11:00:00+00:00"
 T2 = "2026-08-10T12:00:00+00:00"
 
-SINCE = datetime(2026, 8, 10, tzinfo=timezone.utc)
+SINCE = datetime(2026, 8, 10, tzinfo=UTC)
 
 INPUT_DIGEST = "a" * 64
 OTHER_INPUT_DIGEST = "b" * 64
@@ -100,9 +99,7 @@ class AssuranceReportTestCase(unittest.TestCase):
 
     def publish(self, publication: AuditPublication, **kwargs):
         kwargs.setdefault("recorded_at", T0)
-        return projection.publish_audit(
-            publication, state_dir=self.state_dir, **kwargs
-        )
+        return projection.publish_audit(publication, state_dir=self.state_dir, **kwargs)
 
     def metrics(self, since: datetime = SINCE) -> dict:
         return assurance_report.collect_assurance_metrics(
@@ -256,9 +253,7 @@ class IssueMetricsTests(AssuranceReportTestCase):
         self.assertEqual(issues["issues_recurring_after_resolution"], 1)
         self.assertEqual(issues["open_total"], 1)
 
-        later = self.metrics(
-            since=datetime(2026, 8, 11, tzinfo=timezone.utc)
-        )["issues"]
+        later = self.metrics(since=datetime(2026, 8, 11, tzinfo=UTC))["issues"]
         self.assertEqual(later["recurrence_after_resolution"], 0)
         self.assertEqual(later["issues_recurring_after_resolution"], 0)
 
@@ -266,9 +261,7 @@ class IssueMetricsTests(AssuranceReportTestCase):
         findings = (
             _finding(),
             _finding(invariant_key="retry.no-double-launch"),
-            _finding(
-                category="scope", invariant_key="scope.no-escape", severity="low"
-            ),
+            _finding(category="scope", invariant_key="scope.no-escape", severity="low"),
         )
         self.publish(_publication(run_id=RUN_A, findings=findings))
         for issue_id in ("ASI-1", "ASI-2", "ASI-3"):
@@ -293,9 +286,7 @@ class IssueMetricsTests(AssuranceReportTestCase):
         self.assertEqual(issues["recurrence_after_resolution"], 3)
         self.assertEqual(issues["issues_recurring_after_resolution"], 3)
 
-        later = self.metrics(
-            since=datetime(2026, 8, 11, tzinfo=timezone.utc)
-        )["issues"]
+        later = self.metrics(since=datetime(2026, 8, 11, tzinfo=UTC))["issues"]
         self.assertEqual(later["recurrence_after_resolution_by_category"], {})
 
     def test_recurrence_after_dismissal_is_not_a_reopen(self) -> None:
@@ -513,9 +504,7 @@ class RunReportTests(AssuranceReportTestCase):
             )
         )
         self.assertEqual(len(lines), 3)
-        self.assertEqual(
-            lines[0], "Assurance issues: 1 new, 1 recurring; ASI-1, ASI-2"
-        )
+        self.assertEqual(lines[0], "Assurance issues: 1 new, 1 recurring; ASI-1, ASI-2")
         self.assertEqual(lines[1], "Assurance inbox: 1 open; `asl assurance list`")
         self.assertEqual(
             lines[2],

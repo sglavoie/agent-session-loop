@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stderr
 import io
 import json
 import os
-from pathlib import Path
 import socket
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import plans, run_contention, session_overview, state
-
 
 DEAD_PID = 4_242_424
 
@@ -180,12 +179,14 @@ class DetectConflictsTests(unittest.TestCase):
         _make_lock(
             self.state_root,
             self.other_plan_dir,
-            lock={"version": 2, "pid": DEAD_PID, "repositories": [self._root("shared")]},
+            lock={
+                "version": 2,
+                "pid": DEAD_PID,
+                "repositories": [self._root("shared")],
+            },
         )
 
-        with mock.patch.object(
-            state, "is_pid_running", side_effect=_force_pid_alive
-        ):
+        with mock.patch.object(state, "is_pid_running", side_effect=_force_pid_alive):
             self.assertEqual((), self._detect())
 
     def test_foreign_host_overlap_is_reported(self) -> None:
@@ -201,9 +202,7 @@ class DetectConflictsTests(unittest.TestCase):
 
         self.assertEqual(1, len(conflicts))
         conflict = conflicts[0]
-        self.assertEqual(
-            run_contention.LIVENESS_FOREIGN_HOST, conflict.liveness
-        )
+        self.assertEqual(run_contention.LIVENESS_FOREIGN_HOST, conflict.liveness)
         self.assertEqual("some-other-host", conflict.hostname)
         self.assertEqual("", conflict.run_id)
         self.assertEqual("2026-08-12T00:00:00+00:00", conflict.started_at)
@@ -223,9 +222,7 @@ class DetectConflictsTests(unittest.TestCase):
 
         self.assertEqual((), conflicts)
         warning = stderr.getvalue()
-        self.assertIn(
-            str(state_dir / session_overview.LOCK_JSON_NAME), warning
-        )
+        self.assertIn(str(state_dir / session_overview.LOCK_JSON_NAME), warning)
         self.assertIn("asl unlock", warning)
         self.assertIn("some-other-host", warning)
 
@@ -270,9 +267,7 @@ class ConflictRenderingTests(unittest.TestCase):
         return run_contention.RepositoryConflict(**fields)  # type: ignore[arg-type]
 
     def test_message_names_owner_and_shared_repositories(self) -> None:
-        message = run_contention.conflict_message(
-            "/plans/mine", (self._conflict(),)
-        )
+        message = run_contention.conflict_message("/plans/mine", (self._conflict(),))
 
         self.assertIn("/plans/theirs", message)
         self.assertIn("pid 4321", message)

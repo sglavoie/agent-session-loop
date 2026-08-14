@@ -15,20 +15,20 @@ still render usable state when the file has been edited by hand.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
-from pathlib import Path
 import secrets
-import shutil
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 from . import (
@@ -44,7 +44,6 @@ from . import (
     runner,
     state,
 )
-
 
 FINAL_REVIEW_FILE_NAME = "final-review.md"
 FINAL_REVIEW_ARTIFACT_FILE_NAME = "final-review.json"
@@ -116,16 +115,15 @@ def _workspace_payload(
         "workspace_root": workspace_root,
         "registry_digest": workspace.get("registry_digest"),
         "repositories": [
-            dict(row)
-            for row in _repository_rows(workspace.get("repositories"))
+            dict(row) for row in _repository_rows(workspace.get("repositories"))
         ],
         "repository_count": int(workspace.get("repository_count") or 0),
     }
 
 
 def _workspace_launch_profile(
-    plan_dir: Path, profile: "LaunchProfile"
-) -> tuple["LaunchProfile", dict[str, Any]]:
+    plan_dir: Path, profile: LaunchProfile
+) -> tuple[LaunchProfile, dict[str, Any]]:
     """Bind a registered Workbench launch to its prepared workspace root."""
     workspace = _workspace_projection(plan_dir)
     bound_root = workspace.get("workspace_root")
@@ -405,7 +403,7 @@ class WorkbenchRegistry:
             payload = pin.to_payload()
             try:
                 workspace = _workspace_projection(pin.plan_dir)
-            except (plans.PlanError, OSError, ValueError):
+            except plans.PlanError, OSError, ValueError:
                 workspace = {}
             if workspace:
                 payload.update(workspace)
@@ -673,7 +671,7 @@ def _canonical_plan_dir(value: Any) -> str | None:
         return None
     try:
         return str(plans.canonicalize_path(text))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 
@@ -710,9 +708,7 @@ def _coerce_max_review_fix_cycles(
     """Return a persisted review-fix cap only when it is non-negative."""
     cap = _coerce_optional_int(value)
     if cap is not None and cap < 0:
-        warnings.append(
-            f"{context}: ignoring negative max_review_fix_cycles {cap!r}"
-        )
+        warnings.append(f"{context}: ignoring negative max_review_fix_cycles {cap!r}")
         return None
     return cap
 
@@ -759,9 +755,7 @@ def _coerce_profile(
         )
     return LaunchProfile(
         cwd=_coerce_optional_str(raw.get("cwd")),
-        harness=_coerce_harness(
-            raw.get("harness"), warnings=warnings, context=context
-        ),
+        harness=_coerce_harness(raw.get("harness"), warnings=warnings, context=context),
         harness_model=_coerce_optional_str(raw.get("harness_model")),
         effort=_coerce_optional_str(raw.get("effort")),
         timeout=_coerce_optional_int(raw.get("timeout")),
@@ -802,9 +796,7 @@ def _coerce_pin(
     return RegistryPin(plan_dir=plan_dir, label=label, profile=profile)
 
 
-def _coerce_plan_roots(
-    raw: Any, *, warnings: list[str]
-) -> tuple[str, ...]:
+def _coerce_plan_roots(raw: Any, *, warnings: list[str]) -> tuple[str, ...]:
     if raw is None:
         return ()
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
@@ -815,9 +807,7 @@ def _coerce_plan_roots(
     for index, entry in enumerate(raw):
         canonical = _canonical_plan_dir(entry)
         if canonical is None:
-            warnings.append(
-                f"plan_roots[{index}]: invalid path {entry!r}; skipping"
-            )
+            warnings.append(f"plan_roots[{index}]: invalid path {entry!r}; skipping")
             continue
         if canonical in seen:
             continue
@@ -901,7 +891,9 @@ def load_registry(path: str | Path | None = None) -> WorkbenchRegistry:
         )
 
     warnings: list[str] = []
-    schema_version = _coerce_schema_version(raw.get("schema_version"), warnings=warnings)
+    schema_version = _coerce_schema_version(
+        raw.get("schema_version"), warnings=warnings
+    )
 
     raw_pins = raw.get("pins", [])
     if raw_pins is None:
@@ -945,13 +937,9 @@ def load_registry(path: str | Path | None = None) -> WorkbenchRegistry:
     )
 
 
-def save_registry(
-    registry: WorkbenchRegistry, path: str | Path | None = None
-) -> Path:
+def save_registry(registry: WorkbenchRegistry, path: str | Path | None = None) -> Path:
     """Write the registry atomically, returning the path that was written."""
-    registry_path = _coerce_registry_path(
-        path if path is not None else registry.path
-    )
+    registry_path = _coerce_registry_path(path if path is not None else registry.path)
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": REGISTRY_SCHEMA_VERSION,
@@ -969,10 +957,8 @@ def save_registry(
             handle.write(serialized)
         os.replace(tmp_path, registry_path)
     except OSError as error:
-        try:
+        with suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise WorkbenchError(
             f"cannot write workbench registry {registry_path}: {error}"
         ) from error
@@ -1004,9 +990,7 @@ def upsert_pin(
     return replace(registry, pins=tuple(existing))
 
 
-def remove_pin(
-    registry: WorkbenchRegistry, plan_dir: str | Path
-) -> WorkbenchRegistry:
+def remove_pin(registry: WorkbenchRegistry, plan_dir: str | Path) -> WorkbenchRegistry:
     """Return a new registry without any pin for ``plan_dir``."""
     canonical = _canonical_plan_dir(str(plan_dir))
     if canonical is None:
@@ -1080,9 +1064,7 @@ def workbench_pin_from_args(args: Any) -> int:
     try:
         updated, written_path = mutate_registry(
             None,
-            lambda current: upsert_pin(
-                current, plan_dir, label=label, profile=profile
-            ),
+            lambda current: upsert_pin(current, plan_dir, label=label, profile=profile),
         )
     except WorkbenchError as error:
         print(
@@ -1203,7 +1185,7 @@ def _plan_readiness_payload(
 
 
 def _plan_effective_activity_at(
-    summary: "WorkbenchSummary",
+    summary: WorkbenchSummary,
     readiness: Mapping[str, str] | None,
 ) -> str | None:
     if summary.last_activity_at:
@@ -1214,7 +1196,7 @@ def _plan_effective_activity_at(
     return checked_at if isinstance(checked_at, str) and checked_at else None
 
 
-def _plan_has_no_run_state(summary: "WorkbenchSummary") -> bool:
+def _plan_has_no_run_state(summary: WorkbenchSummary) -> bool:
     state_path = summary.state_path
     if state_path is None:
         return True
@@ -1225,7 +1207,7 @@ def _plan_has_no_run_state(summary: "WorkbenchSummary") -> bool:
 
 
 def _plan_matches_stale_days(
-    summary: "WorkbenchSummary",
+    summary: WorkbenchSummary,
     *,
     stale_days: float,
     now: datetime,
@@ -1241,12 +1223,12 @@ def _plan_matches_stale_days(
     except ValueError:
         return False
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return now - parsed >= timedelta(days=stale_days)
 
 
 def _print_plan_listing(
-    rows: Sequence[tuple["WorkbenchSummary", dict[str, str] | None]],
+    rows: Sequence[tuple[WorkbenchSummary, dict[str, str] | None]],
     *,
     warnings: Sequence[str],
     show_readiness: bool,
@@ -1265,8 +1247,7 @@ def _print_plan_listing(
             f"unknown={counts.get('unknown', 0)}"
         )
         print(
-            "  run state: "
-            f"{'absent' if _plan_has_no_run_state(summary) else 'present'}"
+            f"  run state: {'absent' if _plan_has_no_run_state(summary) else 'present'}"
         )
         print(
             "  activity: "
@@ -1326,7 +1307,7 @@ def plans_from_args(args: Any) -> int:
         state_dir=getattr(args, "state_dir", None),
     )
     warnings = list(discovery.warnings)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows: list[tuple[WorkbenchSummary, dict[str, str] | None]] = []
     payloads: list[dict[str, Any]] = []
 
@@ -1341,9 +1322,7 @@ def plans_from_args(args: Any) -> int:
             )
 
         if readiness_filter is not None:
-            readiness_state = (
-                readiness.get("state") if readiness is not None else None
-            )
+            readiness_state = readiness.get("state") if readiness is not None else None
             if readiness_state != readiness_filter:
                 continue
 
@@ -1360,9 +1339,7 @@ def plans_from_args(args: Any) -> int:
 
         payload = summary.to_payload()
         if readiness_filter is not None:
-            payload["readiness"] = (
-                dict(readiness) if readiness is not None else None
-            )
+            payload["readiness"] = dict(readiness) if readiness is not None else None
         rows.append((summary, readiness))
         payloads.append(payload)
 
@@ -1422,15 +1399,11 @@ def _scan_plan_root(
             try:
                 found.append(plans.canonicalize_path(child))
             except (OSError, ValueError) as error:
-                warnings.append(
-                    f"{context}: could not canonicalize {child}: {error}"
-                )
+                warnings.append(f"{context}: could not canonicalize {child}: {error}")
     return tuple(found)
 
 
-def _iter_state_plan_dirs(
-    state_root: Path, *, warnings: list[str]
-) -> tuple[Path, ...]:
+def _iter_state_plan_dirs(state_root: Path, *, warnings: list[str]) -> tuple[Path, ...]:
     if not state_root.exists():
         return ()
     try:
@@ -1455,7 +1428,7 @@ def _iter_state_plan_dirs(
                 continue
             try:
                 raw = json.loads(payload_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except OSError, json.JSONDecodeError:
                 continue
             if not isinstance(raw, Mapping):
                 continue
@@ -1653,9 +1626,7 @@ def _validate_plan_for_mutation(
     try:
         registry = load_registry(registry_path)
     except WorkbenchError as error:
-        raise error_cls(
-            "registry-unreadable", str(error), status=500
-        ) from error
+        raise error_cls("registry-unreadable", str(error), status=500) from error
 
     discovered = _is_discovered_plan(
         canonical,
@@ -1750,9 +1721,7 @@ def delete_plan(
     try:
         _updated, written_path = mutate_registry(registry_path, remove_matching_pin)
     except WorkbenchError as error:
-        raise PlanDeleteError(
-            "registry-unreadable", str(error), status=500
-        ) from error
+        raise PlanDeleteError("registry-unreadable", str(error), status=500) from error
 
     return DeletePlanResult(
         plan_dir=canonical,
@@ -1791,34 +1760,26 @@ def new_archive_id() -> str:
     name) with random hex so concurrent archives in the same second cannot
     collide.
     """
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"{stamp}-{secrets.token_hex(6)}"
 
 
-def archive_entry_dir(
-    archive_id: str, state_dir: str | Path | None = None
-) -> Path:
+def archive_entry_dir(archive_id: str, state_dir: str | Path | None = None) -> Path:
     """Return the directory that holds one archive entry."""
     if not _is_valid_archive_id(archive_id):
         raise WorkbenchError(f"invalid archive id: {archive_id!r}")
     return archive_root(state_dir) / archive_id
 
 
-def archive_metadata_path(
-    archive_id: str, state_dir: str | Path | None = None
-) -> Path:
+def archive_metadata_path(archive_id: str, state_dir: str | Path | None = None) -> Path:
     return archive_entry_dir(archive_id, state_dir) / ARCHIVE_METADATA_FILE_NAME
 
 
-def archive_plan_path(
-    archive_id: str, state_dir: str | Path | None = None
-) -> Path:
+def archive_plan_path(archive_id: str, state_dir: str | Path | None = None) -> Path:
     return archive_entry_dir(archive_id, state_dir) / ARCHIVE_PLAN_DIR_NAME
 
 
-def archive_state_path(
-    archive_id: str, state_dir: str | Path | None = None
-) -> Path:
+def archive_state_path(archive_id: str, state_dir: str | Path | None = None) -> Path:
     return archive_entry_dir(archive_id, state_dir) / ARCHIVE_STATE_DIR_NAME
 
 
@@ -1908,10 +1869,8 @@ def save_archive_metadata(
             handle.write(serialized)
         os.replace(tmp_path, meta_path)
     except OSError as error:
-        try:
+        with suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise WorkbenchError(
             f"cannot write archive metadata {meta_path}: {error}"
         ) from error
@@ -1949,8 +1908,7 @@ def load_archive_metadata(
     )
     if metadata is None:
         raise WorkbenchError(
-            f"archive metadata {meta_path} is malformed: "
-            + "; ".join(warnings)
+            f"archive metadata {meta_path} is malformed: " + "; ".join(warnings)
         )
     return replace(metadata, warnings=tuple(warnings))
 
@@ -1990,7 +1948,9 @@ def list_archive_entries(
             continue
         meta_path = child / ARCHIVE_METADATA_FILE_NAME
         if not meta_path.is_file():
-            warnings.append(f"{context}: missing {ARCHIVE_METADATA_FILE_NAME}; skipping")
+            warnings.append(
+                f"{context}: missing {ARCHIVE_METADATA_FILE_NAME}; skipping"
+            )
             continue
         try:
             raw = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -2010,9 +1970,7 @@ def list_archive_entries(
     return ArchiveListing(entries=tuple(entries), warnings=tuple(warnings))
 
 
-def remove_archive_entry(
-    archive_id: str, state_dir: str | Path | None = None
-) -> bool:
+def remove_archive_entry(archive_id: str, state_dir: str | Path | None = None) -> bool:
     """Remove one archive entry directory, returning whether it existed."""
     entry_dir = archive_entry_dir(archive_id, state_dir)
     if not entry_dir.exists():
@@ -2033,10 +1991,10 @@ def _parse_archive_timestamp(value: str) -> datetime | None:
     """Parse an archive ISO timestamp, normalizing naive values to UTC."""
     try:
         parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
+        return parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -2075,7 +2033,7 @@ def archive_plan(
     )
 
     archive_id = new_archive_id()
-    archived_at = datetime.now(timezone.utc).isoformat()
+    archived_at = datetime.now(UTC).isoformat()
     expires_at = compute_expires_at(archived_at, registry.archive_retention_days)
     entry_dir = archive_entry_dir(archive_id, state_dir)
     entry_dir.mkdir(parents=True, exist_ok=True)
@@ -2083,9 +2041,7 @@ def archive_plan(
     plan_archived = False
     if canonical.is_dir():
         try:
-            shutil.move(
-                str(canonical), str(archive_plan_path(archive_id, state_dir))
-            )
+            shutil.move(str(canonical), str(archive_plan_path(archive_id, state_dir)))
         except OSError as error:
             raise ArchiveError(
                 "os-error",
@@ -2098,9 +2054,7 @@ def archive_plan(
     state_archived = False
     if plan_state.is_dir():
         try:
-            shutil.move(
-                str(plan_state), str(archive_state_path(archive_id, state_dir))
-            )
+            shutil.move(str(plan_state), str(archive_state_path(archive_id, state_dir)))
         except OSError as error:
             raise ArchiveError(
                 "os-error",
@@ -2134,9 +2088,7 @@ def archive_plan(
     try:
         _updated, written_path = mutate_registry(registry_path, _remove_matching_pin)
     except WorkbenchError as error:
-        raise ArchiveError(
-            "registry-unreadable", str(error), status=500
-        ) from error
+        raise ArchiveError("registry-unreadable", str(error), status=500) from error
 
     return ArchivePlanResult(
         archive_id=archive_id,
@@ -2171,9 +2123,7 @@ def restore_archive(
     except WorkbenchError as error:
         raise ArchiveError("invalid-archive", str(error), status=500) from error
     if metadata is None:
-        raise ArchiveError(
-            "not-found", f"no archive entry {archive_id!r}", status=404
-        )
+        raise ArchiveError("not-found", f"no archive entry {archive_id!r}", status=404)
 
     try:
         original = plans.canonicalize_path(metadata.original_plan_dir)
@@ -2237,16 +2187,12 @@ def restore_archive(
         def _restore_pin(current: WorkbenchRegistry) -> WorkbenchRegistry:
             nonlocal pin_restored
             pin_restored = True
-            return upsert_pin(
-                current, original, label=pin.label, profile=pin.profile
-            )
+            return upsert_pin(current, original, label=pin.label, profile=pin.profile)
 
         try:
             _updated, written_path = mutate_registry(registry_path, _restore_pin)
         except WorkbenchError as error:
-            raise ArchiveError(
-                "registry-unreadable", str(error), status=500
-            ) from error
+            raise ArchiveError("registry-unreadable", str(error), status=500) from error
 
     try:
         remove_archive_entry(archive_id, state_dir)
@@ -2311,14 +2257,12 @@ def maintain_archive(
     try:
         registry = load_registry(registry_path)
     except WorkbenchError as error:
-        raise ArchiveError(
-            "registry-unreadable", str(error), status=500
-        ) from error
+        raise ArchiveError("registry-unreadable", str(error), status=500) from error
     retention = timedelta(days=max(0, registry.archive_retention_days))
 
-    resolved_now = now if now is not None else datetime.now(timezone.utc)
+    resolved_now = now if now is not None else datetime.now(UTC)
     if resolved_now.tzinfo is None:
-        resolved_now = resolved_now.replace(tzinfo=timezone.utc)
+        resolved_now = resolved_now.replace(tzinfo=UTC)
 
     listing = list_archive_entries(state_dir)
     warnings = list(listing.warnings)
@@ -2336,9 +2280,7 @@ def maintain_archive(
         try:
             removed = remove_archive_entry(entry.archive_id, state_dir)
         except WorkbenchError as error:
-            outcomes.append(
-                ArchivePurgeOutcome(entry.archive_id, False, str(error))
-            )
+            outcomes.append(ArchivePurgeOutcome(entry.archive_id, False, str(error)))
             continue
         outcomes.append(ArchivePurgeOutcome(entry.archive_id, removed))
     return ArchivePurgeResult(outcomes=tuple(outcomes), warnings=tuple(warnings))
@@ -2435,15 +2377,11 @@ class WorkbenchSummary:
             "counts": dict(self.counts),
             "state_path": str(self.state_path) if self.state_path else None,
             "events_path": str(self.events_path) if self.events_path else None,
-            "progress_path": (
-                str(self.progress_path) if self.progress_path else None
-            ),
+            "progress_path": (str(self.progress_path) if self.progress_path else None),
             "final_review_path": (
                 str(self.final_review_path) if self.final_review_path else None
             ),
-            "artifact_dir": (
-                str(self.artifact_dir) if self.artifact_dir else None
-            ),
+            "artifact_dir": (str(self.artifact_dir) if self.artifact_dir else None),
             "stdout_path": str(self.stdout_path) if self.stdout_path else None,
             "stderr_path": str(self.stderr_path) if self.stderr_path else None,
             "last_message_path": (
@@ -2724,9 +2662,7 @@ class WorkbenchRecovery:
             "severity": self.severity,
             "recoverable": self.recoverable,
             "primary_action": (
-                primary_action.to_payload()
-                if primary_action is not None
-                else None
+                primary_action.to_payload() if primary_action is not None else None
             ),
             "artifact_count": len(self.artifacts),
             "command_count": len(self.commands),
@@ -2823,7 +2759,7 @@ def _verification_position(active_verification: Mapping[str, Any]) -> str:
         return f"-/{check_count}" if check_count is not None else "-"
     try:
         position = int(check_index) + 1
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "-"
     if check_count is not None:
         return f"{position}/{check_count}"
@@ -2943,7 +2879,9 @@ def _payload_mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any] 
     return None
 
 
-def _payload_mappings(payload: Mapping[str, Any], key: str) -> tuple[Mapping[str, Any], ...]:
+def _payload_mappings(
+    payload: Mapping[str, Any], key: str
+) -> tuple[Mapping[str, Any], ...]:
     value = payload.get(key)
     if not isinstance(value, list):
         return ()
@@ -3022,9 +2960,7 @@ def _build_recovery_context(
         snapshot.plan_dir,
         runtime=raw_state if raw_state.get("workspace_root") else runner_state,
     )
-    stale_unfinished, stale_reason = state._stale_runner_state(
-        runner_state, lock_info
-    )
+    stale_unfinished, stale_reason = state._stale_runner_state(runner_state, lock_info)
     base_artifacts = _recovery_base_artifacts(
         state_path=state_path,
         events_path=events_path,
@@ -3189,8 +3125,7 @@ def _latest_relevant_turn(
                 return turn
         turn = _latest_turn_matching(
             raw_state,
-            lambda candidate: _payload_mapping(candidate, "verification")
-            is not None,
+            lambda candidate: _payload_mapping(candidate, "verification") is not None,
         )
         if turn is not None:
             return turn
@@ -3414,8 +3349,7 @@ def _retry_run_action(plan_dir_payload: Mapping[str, Any]) -> RecoveryActionCard
         action_id="retry-run",
         label="Retry run",
         description=(
-            "Launch the existing runner flow after applying the recovery "
-            "guidance."
+            "Launch the existing runner flow after applying the recovery guidance."
         ),
         endpoint="/api/launch",
         payload=plan_dir_payload,
@@ -3444,8 +3378,7 @@ def _preflight_repair_commands(plan_dir: Path) -> tuple[RecoveryCopyCommand, ...
             label="Repair readiness",
             command=f"asl preflight {quoted_plan} --mark-loop-ready",
             description=(
-                "Copy this into a shell after repairing plan-readiness "
-                "findings."
+                "Copy this into a shell after repairing plan-readiness findings."
             ),
         ),
         RecoveryCopyCommand(
@@ -3582,9 +3515,7 @@ def _verification_check_artifacts(
         return ()
     refs: list[RecoveryArtifactReference] = []
     for check in _payload_mappings(verification, "checks"):
-        if check.get("status") == "pass" and not _payload_str(
-            check, "failure_reason"
-        ):
+        if check.get("status") == "pass" and not _payload_str(check, "failure_reason"):
             continue
         name = _payload_str(check, "name") or "check"
         for key, stream in _VERIFICATION_ARTIFACT_STREAMS:
@@ -3677,9 +3608,7 @@ def _recovery_common_context(
         _payload_str(raw_state, "run_id")
         or _payload_str(runner_state, "run_id")
         or (
-            _payload_str(selected_turn, "run_id")
-            if selected_turn is not None
-            else None
+            _payload_str(selected_turn, "run_id") if selected_turn is not None else None
         )
         or (
             _payload_str(selected_commit, "run_id")
@@ -3696,9 +3625,7 @@ def _recovery_common_context(
         details = _pause_details(raw_state)
         session_id = _session_identifier_from_payload(details)
     turn_index = (
-        _payload_int(selected_turn, "turn_index")
-        if selected_turn is not None
-        else None
+        _payload_int(selected_turn, "turn_index") if selected_turn is not None else None
     )
     commit_index = (
         _payload_int(selected_commit, "commit_index")
@@ -3714,12 +3641,8 @@ def _runtime_recovery_evidence(
     details: Mapping[str, Any],
     verification: Mapping[str, Any] | None,
 ) -> tuple[RecoveryEvidenceRow, ...]:
-    rows = [
-        RecoveryEvidenceRow(label="Pause reason", value=reason, severity="error")
-    ]
-    failure_reason = _runtime_failure_reason(
-        details=details, verification=verification
-    )
+    rows = [RecoveryEvidenceRow(label="Pause reason", value=reason, severity="error")]
+    failure_reason = _runtime_failure_reason(details=details, verification=verification)
     if failure_reason is not None:
         rows.append(
             RecoveryEvidenceRow(
@@ -3811,9 +3734,7 @@ def _commit_failed_evidence(
         else None
     )
     returncode = (
-        _payload_int(failed_commit, "returncode")
-        if failed_commit is not None
-        else None
+        _payload_int(failed_commit, "returncode") if failed_commit is not None else None
     )
     repository = (
         _payload_str(failed_commit, "repository_alias")
@@ -3829,11 +3750,7 @@ def _commit_failed_evidence(
         RecoveryEvidenceRow(
             label="Commit status",
             value=status_result,
-            detail=(
-                f"return code {returncode}"
-                if returncode is not None
-                else None
-            ),
+            detail=(f"return code {returncode}" if returncode is not None else None),
             severity="error",
         ),
     ]
@@ -3862,11 +3779,15 @@ def _commit_group_evidence(
     ]
     for group in unresolved[:3]:
         successful = group.get("successful_repositories")
-        shas = [
-            f"{row.get('alias') or row.get('key')}={row.get('commit_sha')}"
-            for row in successful
-            if isinstance(row, Mapping) and row.get("commit_sha")
-        ] if isinstance(successful, Sequence) else []
+        shas = (
+            [
+                f"{row.get('alias') or row.get('key')}={row.get('commit_sha')}"
+                for row in successful
+                if isinstance(row, Mapping) and row.get("commit_sha")
+            ]
+            if isinstance(successful, Sequence)
+            else []
+        )
         remaining = group.get("remaining_aliases")
         remaining_text = (
             ", ".join(str(alias) for alias in remaining[:6])
@@ -3881,7 +3802,9 @@ def _commit_group_evidence(
         rows.append(
             RecoveryEvidenceRow(
                 label="Pending commit group",
-                value=str(group.get("failed_alias") or group.get("status") or "pending"),
+                value=str(
+                    group.get("failed_alias") or group.get("status") or "pending"
+                ),
                 detail="; ".join(detail_parts) or None,
                 severity="error" if group.get("failed_alias") else "warning",
             )
@@ -4079,19 +4002,15 @@ def _build_not_loop_ready_recovery(
     context: _RecoveryBuildContext,
 ) -> WorkbenchRecovery:
     gate = (
-        _payload_mapping(context.raw_state, "readiness_gate")
-        or context.pause_details
+        _payload_mapping(context.raw_state, "readiness_gate") or context.pause_details
     )
     evidence = (
-        (
-            RecoveryEvidenceRow(
-                label="Pause message",
-                value=context.pause_message,
-                severity="warning",
-            ),
-        )
-        + _readiness_gate_evidence(gate)
-    )
+        RecoveryEvidenceRow(
+            label="Pause message",
+            value=context.pause_message,
+            severity="warning",
+        ),
+    ) + _readiness_gate_evidence(gate)
     return _build_context_recovery_payload(
         context,
         kind="not-loop-ready",
@@ -4101,9 +4020,7 @@ def _build_not_loop_ready_recovery(
         recoverable=True,
         artifacts=context.base_artifacts,
         evidence=evidence,
-        actions=(
-            _retry_run_action(context.plan_dir_payload),
-        ),
+        actions=(_retry_run_action(context.plan_dir_payload),),
         commands=_preflight_repair_commands(context.snapshot.plan_dir),
     )
 
@@ -4113,12 +4030,10 @@ def _build_verification_failure_recovery(
     *,
     reason: str,
 ) -> WorkbenchRecovery:
-    selected_turn, verification, selected_session_id = (
-        _selected_verification_context(
-            context.raw_state,
-            context.pause_details,
-            reason=reason,
-        )
+    selected_turn, verification, selected_session_id = _selected_verification_context(
+        context.raw_state,
+        context.pause_details,
+        reason=reason,
     )
     artifacts = (
         context.base_artifacts
@@ -4221,9 +4136,7 @@ def _build_commit_failed_recovery(
         actions=(
             _inspect_action("Open the failed commit logs and result JSON."),
             _retry_run_action(context.plan_dir_payload),
-            _profile_action(
-                "Review commit mode and launch profile before retrying."
-            ),
+            _profile_action("Review commit mode and launch profile before retrying."),
         ),
     )
 
@@ -4275,9 +4188,7 @@ def _build_harness_config_recovery(
         ),
         actions=(
             _profile_action("Review harness and profile fields before retrying."),
-            _inspect_action(
-                "Open runner state, events, and harness config artifacts."
-            ),
+            _inspect_action("Open runner state, events, and harness config artifacts."),
             _retry_run_action(context.plan_dir_payload),
         ),
     )
@@ -4393,9 +4304,7 @@ def _build_stale_lock_recovery(
             RecoveryEvidenceRow(
                 label="Lock reason",
                 value=lock_info.reason,
-                detail=(
-                    f"pid {lock_info.pid}" if lock_info.pid is not None else None
-                ),
+                detail=(f"pid {lock_info.pid}" if lock_info.pid is not None else None),
                 severity="warning",
             ),
         ),
@@ -4513,8 +4422,7 @@ def _build_review_continuation_recovery(
         return None
     if (
         resume.action == "terminal"
-        and resume.blocker
-        in review_continuation.TERMINAL_REVIEW_DISPOSITIONS
+        and resume.blocker in review_continuation.TERMINAL_REVIEW_DISPOSITIONS
     ):
         return None
 
@@ -4555,9 +4463,7 @@ def _build_review_continuation_recovery(
                 f"{resume.minimum_required_cap} or higher."
             )
             cap_detail = "No review-fix cap has been recorded"
-            action_description = (
-                profile_guidance(include_cap=True)
-            )
+            action_description = profile_guidance(include_cap=True)
         else:
             title = "Higher review-fix cap required"
             summary = (
@@ -4566,9 +4472,7 @@ def _build_review_continuation_recovery(
                 f"to {resume.minimum_required_cap} or higher."
             )
             cap_detail = f"Selected cap: {resume.selected_cap}"
-            action_description = (
-                profile_guidance(include_cap=True)
-            )
+            action_description = profile_guidance(include_cap=True)
         summary += (
             " Configure a review harness distinct from the implementation "
             "harness; without --review-harness, review continuation will not "
@@ -4583,9 +4487,7 @@ def _build_review_continuation_recovery(
                 severity="warning",
             )
         )
-        actions = (
-            _profile_action(action_description),
-        )
+        actions = (_profile_action(action_description),)
     elif resume.blocker == "artifact-invalid":
         title = "Review artifact needs correction"
         summary = resume.artifact_error or (
@@ -4619,9 +4521,7 @@ def _build_review_continuation_recovery(
                 severity="error",
             )
         )
-        actions = (
-            _inspect_action("Inspect review events and generated sessions."),
-        )
+        actions = (_inspect_action("Inspect review events and generated sessions."),)
     else:
         title = "Review continuation ready"
         if resume.action == "materialize-repairs":
@@ -4632,9 +4532,7 @@ def _build_review_continuation_recovery(
         elif resume.action == "run-repairs":
             summary = "Rerun the plan to execute pending review repairs."
         else:
-            summary = (
-                "Rerun the plan to review the completed repair sessions again."
-            )
+            summary = "Rerun the plan to review the completed repair sessions again."
         summary += (
             " Configure a review harness distinct from the implementation "
             "harness before launching; without --review-harness, review "
@@ -4642,13 +4540,10 @@ def _build_review_continuation_recovery(
         )
         cap_exceeds_default = (
             resume.action == "materialize-repairs"
-            and resume.minimum_required_cap
-            > runner.DEFAULT_MAX_REVIEW_FIX_CYCLES
+            and resume.minimum_required_cap > runner.DEFAULT_MAX_REVIEW_FIX_CYCLES
         )
         exhausted_group = (
-            review_continuation.exhausted_repair_group_details(
-                resume.to_payload()
-            )
+            review_continuation.exhausted_repair_group_details(resume.to_payload())
             if cap_exceeds_default
             else None
         )
@@ -4656,7 +4551,7 @@ def _build_review_continuation_recovery(
             repair_group, attempts = exhausted_group
             summary += (
                 f' The recurring repair group "{repair_group}" already hit '
-                f'{attempts} {"attempt" if attempts == 1 else "attempts"}; '
+                f"{attempts} {'attempt' if attempts == 1 else 'attempts'}; "
                 "fix it manually or re-split instead of raising "
                 "--max-review-fix-cycles."
             )
@@ -4674,11 +4569,7 @@ def _build_review_continuation_recovery(
                 ),
             )
             if exhausted_group is not None
-            else (
-                _profile_action(
-                    profile_guidance(include_cap=cap_exceeds_default)
-                ),
-            )
+            else (_profile_action(profile_guidance(include_cap=cap_exceeds_default)),)
         )
 
     return _build_context_recovery_payload(
@@ -4781,16 +4672,17 @@ def build_workbench_recovery(
             pause_reason=expired_wait_context.pause_reason,
             pause_details=expired_wait_context.pause_details,
             pause_message=(
-                expired_wait_context.pause_message
-                or qna.EXPIRED_WAIT_PAUSE_REASON
+                expired_wait_context.pause_message or qna.EXPIRED_WAIT_PAUSE_REASON
             ),
         )
 
     active_turn = _payload_mapping(context.raw_state, "active_turn")
     active_verification = _payload_mapping(context.raw_state, "active_verification")
     lock_info = context.lock_info
-    if lock_info is not None and lock_info.active and (
-        active_turn is not None or active_verification is not None
+    if (
+        lock_info is not None
+        and lock_info.active
+        and (active_turn is not None or active_verification is not None)
     ):
         return _build_active_run_recovery(context, selected_turn=active_turn)
 
@@ -4811,9 +4703,7 @@ def build_workbench_recovery(
             return _build_not_loop_ready_recovery(context)
 
         if recovery_kind in _VERIFICATION_FAILURE_REASONS:
-            return _build_verification_failure_recovery(
-                context, reason=recovery_kind
-            )
+            return _build_verification_failure_recovery(context, reason=recovery_kind)
 
         if recovery_kind == "commit-preflight":
             return _build_commit_preflight_recovery(context)
@@ -4849,9 +4739,7 @@ def build_workbench_recovery(
             return _build_commit_failed_recovery(context)
 
         if recovery_kind in _VERIFICATION_FAILURE_REASONS:
-            return _build_verification_failure_recovery(
-                context, reason=recovery_kind
-            )
+            return _build_verification_failure_recovery(context, reason=recovery_kind)
 
         return _build_failed_finished_recovery(context, reason=reason)
 
@@ -4871,7 +4759,7 @@ def _build_invalid_summary(
 ) -> WorkbenchSummary:
     try:
         workspace = _workspace_projection(plan.plan_dir) if exists else {}
-    except (plans.PlanError, OSError, ValueError):
+    except plans.PlanError, OSError, ValueError:
         workspace = {}
     if state_paths is not None:
         state_path, events_path, progress_path = state_paths
@@ -4919,7 +4807,9 @@ def _build_invalid_summary(
         state_path=state_path,
         events_path=events_path,
         progress_path=progress_path,
-        final_review_path=_final_review_path_if_exists(plan.plan_dir) if exists else None,
+        final_review_path=_final_review_path_if_exists(plan.plan_dir)
+        if exists
+        else None,
         artifact_dir=None,
         stdout_path=None,
         stderr_path=None,
@@ -5007,9 +4897,7 @@ def build_workbench_summary(
         lock_info=lock_info,
     )
     try:
-        workspace = _workspace_projection(
-            snapshot.plan_dir, runtime=runner_state
-        )
+        workspace = _workspace_projection(snapshot.plan_dir, runtime=runner_state)
     except (plans.PlanError, OSError, ValueError) as error:
         return _build_invalid_summary(
             replace(plan, plan_dir=snapshot.plan_dir, exists=True),
@@ -5028,9 +4916,7 @@ def build_workbench_summary(
         runner_state,
         state_dir,
     )
-    stale_unfinished, stale_reason = state._stale_runner_state(
-        runner_state, lock_info
-    )
+    stale_unfinished, stale_reason = state._stale_runner_state(runner_state, lock_info)
     recovery = build_workbench_recovery(
         replace(plan, plan_dir=snapshot.plan_dir, exists=True),
         state_dir=state_dir,
@@ -5056,9 +4942,7 @@ def build_workbench_summary(
         artifact_dir = _coerce_path_value(active_turn.get("artifact_dir"))
         stdout_path = _coerce_path_value(active_turn.get("stdout_path"))
         stderr_path = _coerce_path_value(active_turn.get("stderr_path"))
-        last_message_path = _coerce_path_value(
-            active_turn.get("last_message_path")
-        )
+        last_message_path = _coerce_path_value(active_turn.get("last_message_path"))
         result_path = _coerce_path_value(active_turn.get("result_path"))
 
     def base_kwargs(
@@ -5089,9 +4973,7 @@ def build_workbench_summary(
             activity_label or ACTIVITY_LABEL_BY_STATE[primary_state]
         )
         resolved_reason = concise_reason or detail or next_action_hint
-        next_pending_session_id = (
-            next_pending.id if next_pending is not None else None
-        )
+        next_pending_session_id = next_pending.id if next_pending is not None else None
         searchable_text = _searchable_text(
             plan_dir=snapshot.plan_dir,
             label=plan.label,
@@ -5154,34 +5036,33 @@ def build_workbench_summary(
             searchable_text=searchable_text,
             recovery=recovery,
             review_resume=review_resume,
-            assurance=assurance_report.bounded_summary(
-                runner_state.get("assurance")
-            ),
+            assurance=assurance_report.bounded_summary(runner_state.get("assurance")),
             warnings=warnings,
         )
 
-    if lock_info is not None and lock_info.active and isinstance(
-        active_verification, dict
+    if (
+        lock_info is not None
+        and lock_info.active
+        and isinstance(active_verification, dict)
     ):
-        session_label = (
-            _session_identifier_from_payload(active_verification) or "?"
-        )
+        session_label = _session_identifier_from_payload(active_verification) or "?"
         position = _verification_position(active_verification)
         check_name = active_verification.get("current_check_name") or "pending"
-        verifying_activity, verifying_source = _first_activity((
+        verifying_activity, verifying_source = _first_activity(
             (
-                active_verification.get("current_check_started_at"),
-                "active-verification",
-            ),
-            (active_verification.get("started_at"), "active-verification"),
-            (runner_state.get("run_started_at"), "run-started"),
-        ))
+                (
+                    active_verification.get("current_check_started_at"),
+                    "active-verification",
+                ),
+                (active_verification.get("started_at"), "active-verification"),
+                (runner_state.get("run_started_at"), "run-started"),
+            )
+        )
         return base_kwargs(
             primary_state="verifying",
             recommended_action="watch",
             next_action_hint=(
-                f"Verifying session {session_label} check {position} "
-                f"({check_name})"
+                f"Verifying session {session_label} check {position} ({check_name})"
             ),
             detail=f"Active verification on session {session_label}",
             last_activity_at=verifying_activity,
@@ -5194,40 +5075,38 @@ def build_workbench_summary(
     if lock_info is not None and lock_info.active and isinstance(active_turn, dict):
         session_label = _session_identifier_from_payload(active_turn) or "?"
         turn_index = active_turn.get("turn_index")
-        running_activity, running_source = _first_activity((
-            (active_turn.get("last_activity_at"), "active-turn"),
-            (active_turn.get("started_at"), "active-turn"),
-            (runner_state.get("run_started_at"), "run-started"),
-        ))
+        running_activity, running_source = _first_activity(
+            (
+                (active_turn.get("last_activity_at"), "active-turn"),
+                (active_turn.get("started_at"), "active-turn"),
+                (runner_state.get("run_started_at"), "run-started"),
+            )
+        )
         return base_kwargs(
             primary_state="running",
             recommended_action="watch",
-            next_action_hint=(
-                f"Running session {session_label} turn {turn_index}"
-            ),
+            next_action_hint=(f"Running session {session_label} turn {turn_index}"),
             detail=f"Active turn on session {session_label}",
             last_activity_at=running_activity,
             last_activity_source=running_source,
-            concise_reason=(
-                f"Session {session_label}, turn {turn_index}"
-            ),
+            concise_reason=(f"Session {session_label}, turn {turn_index}"),
         )
 
     if runner_state.get("paused") is True or expired_wait_context is not None:
         pause_reason = (
-            runner_state.get("pause_reason")
-            or runner_state.get("reason")
-            or None
+            runner_state.get("pause_reason") or runner_state.get("reason") or None
         )
         if (
             pause_reason == events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR
             and active_turn is None
             and recovery.get("kind") == "review-continuation"
         ):
-            failed_activity, failed_source = _first_activity((
-                (runner_state.get("run_finished_at"), "run-finished"),
-                (runner_state.get("run_started_at"), "run-started"),
-            ))
+            failed_activity, failed_source = _first_activity(
+                (
+                    (runner_state.get("run_finished_at"), "run-finished"),
+                    (runner_state.get("run_started_at"), "run-started"),
+                )
+            )
             if (
                 recovery.get("severity") == "info"
                 and review_resume.get("eligible") is True
@@ -5266,9 +5145,9 @@ def build_workbench_summary(
         pause_message = None
         preview = None
         qna_last_message_path = last_message_path
-        paused_activity, paused_source = _first_activity((
-            (runner_state.get("run_started_at"), "run-started"),
-        ))
+        paused_activity, paused_source = _first_activity(
+            ((runner_state.get("run_started_at"), "run-started"),)
+        )
         try:
             context = expired_wait_context or qna.load_qna_context(
                 snapshot.plan_dir,
@@ -5278,9 +5157,7 @@ def build_workbench_summary(
             warnings.append(
                 f"paused-q&a context unreadable ({error.reason}): {error.error}"
             )
-            session_label = (
-                next_pending.id if next_pending is not None else "?"
-            )
+            session_label = next_pending.id if next_pending is not None else "?"
             hint = f"Reply needed for session {session_label}"
             detail = "Paused without readable last-message context"
         else:
@@ -5336,27 +5213,25 @@ def build_workbench_summary(
             last_message_preview=preview,
             last_activity_at=paused_activity,
             last_activity_source=paused_source,
-            concise_reason=(
-                pause_message or pause_reason or "Awaiting operator reply"
-            ),
+            concise_reason=(pause_message or pause_reason or "Awaiting operator reply"),
         )
 
     if stale_unfinished or (lock_info is not None and lock_info.stale):
         if stale_unfinished:
             reason_text = stale_reason or "Runner state has not finished"
         else:
-            reason_text = (
-                lock_info.reason if lock_info is not None else "stale lock"
-            )
+            reason_text = lock_info.reason if lock_info is not None else "stale lock"
         lock_created_at = (
             lock_info.created_at
             if lock_info is not None and lock_info.created_at
             else None
         )
-        stale_activity, stale_source = _first_activity((
-            (lock_created_at, "lock-created"),
-            (runner_state.get("run_started_at"), "run-started"),
-        ))
+        stale_activity, stale_source = _first_activity(
+            (
+                (lock_created_at, "lock-created"),
+                (runner_state.get("run_started_at"), "run-started"),
+            )
+        )
         return base_kwargs(
             primary_state="stale",
             recommended_action="unlock",
@@ -5373,10 +5248,12 @@ def build_workbench_summary(
         and runner_state.get("ok") is False
     ):
         reason_text = runner_state.get("reason") or "Last run finished with errors"
-        failed_activity, failed_source = _first_activity((
-            (runner_state.get("run_finished_at"), "run-finished"),
-            (runner_state.get("run_started_at"), "run-started"),
-        ))
+        failed_activity, failed_source = _first_activity(
+            (
+                (runner_state.get("run_finished_at"), "run-finished"),
+                (runner_state.get("run_started_at"), "run-started"),
+            )
+        )
         return base_kwargs(
             primary_state="failed",
             recommended_action="inspect-failure",
@@ -5388,10 +5265,12 @@ def build_workbench_summary(
         )
 
     if next_pending is None:
-        complete_activity, complete_source = _first_activity((
-            (_last_progress_entry_at(snapshot.plan_dir), "progress-journal"),
-            (runner_state.get("run_finished_at"), "run-finished"),
-        ))
+        complete_activity, complete_source = _first_activity(
+            (
+                (_last_progress_entry_at(snapshot.plan_dir), "progress-journal"),
+                (runner_state.get("run_finished_at"), "run-finished"),
+            )
+        )
         review_action = review_resume.get("action")
         if review_resume.get("eligible") and review_action in {
             "materialize-repairs",
@@ -5438,9 +5317,7 @@ def build_workbench_summary(
             and review_resume.get("blocker")
             not in review_continuation.TERMINAL_REVIEW_DISPOSITIONS
         ):
-            hint = recovery.get("title") or (
-                "Inspect inconsistent review continuation"
-            )
+            hint = recovery.get("title") or ("Inspect inconsistent review continuation")
             detail = recovery.get("summary") or (
                 "Recorded review repair history cannot be resumed safely: "
                 f"{review_resume.get('blocker') or 'unknown blocker'}."
@@ -5460,9 +5337,9 @@ def build_workbench_summary(
         )
 
     if runner_state.get("present") and runner_state.get("run_finished_at"):
-        recent_activity, recent_source = _first_activity((
-            (runner_state.get("run_finished_at"), "run-finished"),
-        ))
+        recent_activity, recent_source = _first_activity(
+            ((runner_state.get("run_finished_at"), "run-finished"),)
+        )
         review_hint = (
             f"Resume review repairs with session {next_pending.id}"
             if review_resume.get("action") == "run-repairs"
@@ -5480,9 +5357,9 @@ def build_workbench_summary(
             ),
         )
 
-    ready_activity, ready_source = _first_activity((
-        (_last_progress_entry_at(snapshot.plan_dir), "progress-journal"),
-    ))
+    ready_activity, ready_source = _first_activity(
+        ((_last_progress_entry_at(snapshot.plan_dir), "progress-journal"),)
+    )
     ready_hint = (
         f"Start review repairs with session {next_pending.id}"
         if review_resume.get("action") == "run-repairs"
@@ -5635,10 +5512,7 @@ def _validate_launch_profile(profile: LaunchProfile | None) -> LaunchProfile:
             LAUNCH_REASON_INVALID_PROFILE,
             f"timeout must be positive: {profile.timeout!r}",
         )
-    if (
-        profile.max_review_fix_cycles is not None
-        and profile.max_review_fix_cycles < 0
-    ):
+    if profile.max_review_fix_cycles is not None and profile.max_review_fix_cycles < 0:
         raise LaunchError(
             LAUNCH_REASON_INVALID_PROFILE,
             "max_review_fix_cycles must be zero or a positive integer: "
@@ -5684,9 +5558,7 @@ def build_launch_argv(
     if validated.timeout is not None:
         argv.extend(["--timeout", str(validated.timeout)])
     if validated.max_review_fix_cycles is not None:
-        argv.extend(
-            ["--max-review-fix-cycles", str(validated.max_review_fix_cycles)]
-        )
+        argv.extend(["--max-review-fix-cycles", str(validated.max_review_fix_cycles)])
     if validated.commit_mode == "per-session":
         argv.append("--commit-per-session")
     elif validated.commit_mode == "end":
@@ -5770,7 +5642,7 @@ def launch_plan(
             stderr=stderr,
             env=popen_env,
             cwd=str(child_cwd) if child_cwd is not None else None,
-            text=True if reply_via_stdin else False,
+            text=bool(reply_via_stdin),
         )
     except (OSError, ValueError) as error:
         raise LaunchError(

@@ -4,70 +4,23 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
-import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
-import signal
-import stat
-import subprocess
-import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
-from unittest import mock
+from datetime import UTC, datetime
+from pathlib import Path
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
     config,
-    contracts,
-    control_queue,
-    events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
-    review_repair,
-    run_control,
-    runner,
     state,
-    tail,
-    verification,
     workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
-    patched_env,
-    _write_plan_dir,
     _seed_archivable_plan,
+    _write_plan_dir,
+    patched_env,
 )
 
 
@@ -217,9 +170,7 @@ class WorkbenchRegistryTests(unittest.TestCase):
 
             registry = workbench.load_registry(registry_path)
 
-            self.assertEqual(
-                workbench.REGISTRY_SCHEMA_VERSION, registry.schema_version
-            )
+            self.assertEqual(workbench.REGISTRY_SCHEMA_VERSION, registry.schema_version)
             self.assertIsNone(registry.pins[0].profile.harness_model)
             self.assertEqual(
                 (
@@ -327,9 +278,7 @@ class WorkbenchRegistryTests(unittest.TestCase):
             self.assertEqual("codex", alpha_pin.profile.harness)
             self.assertEqual(600, alpha_pin.profile.timeout)
 
-            updated = workbench.upsert_pin(
-                reloaded, plan_dir, label="Renamed alpha"
-            )
+            updated = workbench.upsert_pin(reloaded, plan_dir, label="Renamed alpha")
             self.assertEqual(2, len(updated.pins))
             renamed_pin = next(
                 pin for pin in updated.pins if pin.plan_dir == str(plan_dir)
@@ -475,9 +424,7 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
     def test_load_missing_entry_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp) / "state"
-            self.assertIsNone(
-                workbench.load_archive_metadata("nope", state_root)
-            )
+            self.assertIsNone(workbench.load_archive_metadata("nope", state_root))
 
     def test_list_skips_malformed_entry_with_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -516,18 +463,14 @@ class WorkbenchArchiveStorageTests(unittest.TestCase):
                 workbench.remove_archive_entry(metadata.archive_id, state_root)
             )
             self.assertFalse(
-                workbench.archive_entry_dir(
-                    metadata.archive_id, state_root
-                ).exists()
+                workbench.archive_entry_dir(metadata.archive_id, state_root).exists()
             )
             self.assertFalse(
                 workbench.remove_archive_entry(metadata.archive_id, state_root)
             )
 
     def test_compute_expires_at_adds_retention_days(self) -> None:
-        expires = workbench.compute_expires_at(
-            "2026-07-03T12:00:00+00:00", 30
-        )
+        expires = workbench.compute_expires_at("2026-07-03T12:00:00+00:00", 30)
         self.assertEqual("2026-08-02T12:00:00+00:00", expires)
 
     def test_archived_entries_excluded_from_discovery(self) -> None:
@@ -576,9 +519,7 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
             self.assertTrue(
                 workbench.archive_state_path(result.archive_id, state_dir).is_dir()
             )
-            self.assertTrue(
-                (entry / workbench.ARCHIVE_METADATA_FILE_NAME).is_file()
-            )
+            self.assertTrue((entry / workbench.ARCHIVE_METADATA_FILE_NAME).is_file())
             self.assertIsNotNone(result.metadata.pin)
             assert result.metadata.pin is not None
             self.assertEqual("Alpha", result.metadata.pin.label)
@@ -634,9 +575,7 @@ class WorkbenchArchivePlanTests(unittest.TestCase):
             self.assertEqual("active-lock", ctx.exception.reason)
             self.assertEqual(409, ctx.exception.status)
             self.assertTrue(canonical.exists())
-            self.assertEqual(
-                1, len(workbench.load_registry(registry_path).pins)
-            )
+            self.assertEqual(1, len(workbench.load_registry(registry_path).pins))
 
     def test_archive_rejects_non_plan_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -699,9 +638,7 @@ class WorkbenchRestoreArchiveTests(unittest.TestCase):
     def test_restore_returns_plan_state_and_pin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()
-            state_dir, registry_path, canonical, archive_id = self._archive(
-                tmp_path
-            )
+            state_dir, registry_path, canonical, archive_id = self._archive(tmp_path)
             plan_state = state.plan_state_dir(canonical, state_dir)
 
             result = workbench.restore_archive(
@@ -736,9 +673,7 @@ class WorkbenchRestoreArchiveTests(unittest.TestCase):
     def test_restore_conflict_on_existing_plan_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()
-            state_dir, registry_path, canonical, archive_id = self._archive(
-                tmp_path
-            )
+            state_dir, registry_path, canonical, archive_id = self._archive(tmp_path)
             _write_plan_dir(canonical)
 
             with self.assertRaises(workbench.ArchiveError) as ctx:
@@ -748,16 +683,12 @@ class WorkbenchRestoreArchiveTests(unittest.TestCase):
 
             self.assertEqual("restore-conflict", ctx.exception.reason)
             self.assertEqual(409, ctx.exception.status)
-            self.assertTrue(
-                workbench.archive_entry_dir(archive_id, state_dir).exists()
-            )
+            self.assertTrue(workbench.archive_entry_dir(archive_id, state_dir).exists())
 
     def test_restore_conflict_on_existing_state_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp).resolve()
-            state_dir, registry_path, canonical, archive_id = self._archive(
-                tmp_path
-            )
+            state_dir, registry_path, canonical, archive_id = self._archive(tmp_path)
             plan_state = state.plan_state_dir(canonical, state_dir)
             plan_state.mkdir(parents=True, exist_ok=True)
 
@@ -768,9 +699,7 @@ class WorkbenchRestoreArchiveTests(unittest.TestCase):
 
             self.assertEqual("restore-conflict", ctx.exception.reason)
             self.assertFalse(canonical.exists())
-            self.assertTrue(
-                workbench.archive_entry_dir(archive_id, state_dir).exists()
-            )
+            self.assertTrue(workbench.archive_entry_dir(archive_id, state_dir).exists())
 
 
 class WorkbenchPurgeArchiveTests(unittest.TestCase):
@@ -818,9 +747,7 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
             good_b = "20260703T130000Z-bbbbbbbbbbbb"
             for archive_id in (good_a, good_b):
                 workbench.save_archive_metadata(
-                    self._metadata(
-                        tmp_path, archive_id, "2026-07-03T12:00:00+00:00"
-                    ),
+                    self._metadata(tmp_path, archive_id, "2026-07-03T12:00:00+00:00"),
                     state_dir,
                 )
 
@@ -850,7 +777,7 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
                 self._metadata(tmp_path, new_id, "2026-07-01T12:00:00+00:00"),
                 state_dir,
             )
-            now = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
+            now = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)
 
             result = workbench.maintain_archive(
                 state_dir=state_dir, registry_path=registry_path, now=now
@@ -858,12 +785,8 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
 
             self.assertEqual(1, result.removed_count)
             self.assertEqual(old_id, result.outcomes[0].archive_id)
-            self.assertFalse(
-                workbench.archive_entry_dir(old_id, state_dir).exists()
-            )
-            self.assertTrue(
-                workbench.archive_entry_dir(new_id, state_dir).exists()
-            )
+            self.assertFalse(workbench.archive_entry_dir(old_id, state_dir).exists())
+            self.assertTrue(workbench.archive_entry_dir(new_id, state_dir).exists())
 
     def test_maintain_respects_shortened_retention(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -879,7 +802,7 @@ class WorkbenchPurgeArchiveTests(unittest.TestCase):
                 self._metadata(tmp_path, archive_id, "2026-07-01T12:00:00+00:00"),
                 state_dir,
             )
-            now = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
+            now = datetime(2026, 7, 3, 12, 0, 0, tzinfo=UTC)
 
             result = workbench.maintain_archive(
                 state_dir=state_dir, registry_path=registry_path, now=now
@@ -986,9 +909,7 @@ class WorkbenchDiscoveryTests(unittest.TestCase):
             hash_only_plan = _write_plan_dir(plan_root / "9e3ab88dedcf-7d2caa1117db")
             agent_dir = tmp_path / "agent-plans"
             agent_dir.mkdir()
-            default_hash_only = _write_plan_dir(
-                agent_dir / "9e3ab88dedcf-7d2caa1117db"
-            )
+            default_hash_only = _write_plan_dir(agent_dir / "9e3ab88dedcf-7d2caa1117db")
 
             with patched_env(
                 AGENT_PLANS_DIR=str(agent_dir),
@@ -1000,15 +921,11 @@ class WorkbenchDiscoveryTests(unittest.TestCase):
                     include_default_dirs=True,
                 )
 
-            paths_to_sources = {
-                plan.plan_dir: plan.sources for plan in result.plans
-            }
+            paths_to_sources = {plan.plan_dir: plan.sources for plan in result.plans}
             self.assertIn(hash_only_plan, paths_to_sources)
             self.assertEqual(("plan-root",), paths_to_sources[hash_only_plan])
             self.assertIn(default_hash_only, paths_to_sources)
-            self.assertEqual(
-                ("agent-plans-dir",), paths_to_sources[default_hash_only]
-            )
+            self.assertEqual(("agent-plans-dir",), paths_to_sources[default_hash_only])
 
     def test_discovers_plans_from_environment_default_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1036,9 +953,7 @@ class WorkbenchDiscoveryTests(unittest.TestCase):
                     include_default_dirs=True,
                 )
 
-            paths_to_sources = {
-                plan.plan_dir: plan.sources for plan in result.plans
-            }
+            paths_to_sources = {plan.plan_dir: plan.sources for plan in result.plans}
             self.assertIn(plan_a, paths_to_sources)
             self.assertIn(plan_b, paths_to_sources)
             self.assertIn(plan_c, paths_to_sources)
@@ -1077,9 +992,7 @@ class WorkbenchDiscoveryTests(unittest.TestCase):
             self.assertEqual(1, len(result.plans))
             discovered = result.plans[0]
             self.assertEqual(plan_dir, discovered.plan_dir)
-            self.assertEqual(
-                ("state", "registry", "plan-root"), discovered.sources
-            )
+            self.assertEqual(("state", "registry", "plan-root"), discovered.sources)
             self.assertEqual("Alpha", discovered.label)
             self.assertEqual("codex", discovered.profile.harness)
 

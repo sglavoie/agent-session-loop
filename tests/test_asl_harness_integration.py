@@ -5,21 +5,12 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timedelta, timezone
 import errno
-import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
 import pty
 import select
-import shlex
-import shutil
 import signal
 import stat
 import subprocess
@@ -28,63 +19,45 @@ import tempfile
 import threading
 import time
 import unittest
-import urllib.parse
+from collections.abc import Callable
+from contextlib import redirect_stderr, suppress
+from datetime import timedelta
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
     config,
     contracts,
     control_queue,
     events,
     harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
     process_tree,
-    progress_cli,
     progress_repair,
-    qna,
-    review,
-    review_repair,
     run_control,
     runner,
     state,
-    tail,
     verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     FAKE_CODEX_FIXTURE,
     REPO_ROOT,
+    FakeRunControlListener,
     assert_marked_pids_alive,
     assert_marked_pids_exited,
-    kill_marked_pids,
-    patched_env,
-    write_plan,
-    write_process_tree_scripts,
-    write_plan_with_ids,
+    git_stdout,
+    init_git_repo,
+    install_fake_amx,
     install_fake_codex,
     install_fake_harness,
-    install_fake_amx,
     install_fake_spec,
-    init_git_repo,
-    git_stdout,
+    kill_marked_pids,
+    patched_env,
     read_jsonl,
     wait_until,
-    FakeRunControlListener,
+    write_plan,
+    write_plan_with_ids,
+    write_process_tree_scripts,
 )
 
 
@@ -254,7 +227,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "XDG_CONFIG_HOME": str(config_home),
             "FAKE_CODEX_MODE": mode,
             "FAKE_CODEX_SLEEP": "5",
-            "PYTHONPATH": str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            "PYTHONPATH": str(REPO_ROOT)
+            + os.pathsep
+            + os.environ.get("PYTHONPATH", ""),
         }
         if extra_env is not None:
             env_updates.update(extra_env)
@@ -457,7 +432,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         observed: list[tuple[str, object]] = []
 
         def read_state_payload(payload: dict[str, object]) -> dict[str, object]:
-            return json.loads(Path(str(payload["state_path"])).read_text(encoding="utf-8"))
+            return json.loads(
+                Path(str(payload["state_path"])).read_text(encoding="utf-8")
+            )
 
         def notify_started(
             payload: dict[str, object],
@@ -488,7 +465,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         ) -> None:
             state_payload = read_state_payload(payload)
             observed.append(("finished", state_payload["run_finished_at"]))
-            self.assertEqual(payload["run_finished_at"], state_payload["run_finished_at"])
+            self.assertEqual(
+                payload["run_finished_at"], state_payload["run_finished_at"]
+            )
             self.assertIsNone(state_payload["active_turn"])
 
         with (
@@ -565,9 +544,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     # take longer than the 1s production timeout to start,
                     # which silently drops the notification record.
                     runner.AGENT_MUX_NOTIFY_TIMEOUT_ENV_VAR: "30",
-                    "PATH": str(tmp_dir)
-                    + os.pathsep
-                    + os.environ.get("PATH", ""),
+                    "PATH": str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
                     "PYTHONPATH": str(REPO_ROOT)
                     + os.pathsep
                     + env.get("PYTHONPATH", ""),
@@ -619,9 +596,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 {record["cwd"] for record in amx_records},
             )
 
-            hook_payloads = [
-                json.loads(str(record["stdin"])) for record in amx_records
-            ]
+            hook_payloads = [json.loads(str(record["stdin"])) for record in amx_records]
             self.assertEqual(
                 [
                     runner.AGENT_MUX_START_REASON,
@@ -639,10 +614,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             # sequence: strings, starting at 1, monotonic across the run.
             self.assertEqual(
                 ["1", "2", "3", "4"],
-                [
-                    hook_payload["source_sequence"]
-                    for hook_payload in hook_payloads
-                ],
+                [hook_payload["source_sequence"] for hook_payload in hook_payloads],
             )
             for hook_payload in hook_payloads:
                 self.assertEqual("agent_session_loop", hook_payload["source"])
@@ -843,10 +815,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-            try:
+            with suppress(OSError):
                 os.close(master_fd)
-            except OSError:
-                pass
 
         self.addCleanup(cleanup_process)
         return process, master_fd
@@ -1184,9 +1154,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
         )
 
-        self.assertIn(
-            "status: verifying session 1/2 turn 1 check 2/2 compile", text
-        )
+        self.assertIn("status: verifying session 1/2 turn 1 check 2/2 compile", text)
         self.assertIn("elapsed 15.0s, check elapsed 5.0s, total 20.0s", text)
         self.assertIn("sessions 0/2 complete, 2 pending", text)
         self.assertNotIn("status: active session", text)
@@ -1242,9 +1210,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
         )
 
-        self.assertIn(
-            "status: verifying session 1/1 turn 1 check -/3 pending", text
-        )
+        self.assertIn("status: verifying session 1/1 turn 1 check -/3 pending", text)
         self.assertNotIn("check elapsed", text)
         self.assertIn("elapsed 0.5s", text)
 
@@ -1362,7 +1328,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "abort_grace_seconds": None,
                 "abort_reason": None,
                 "abort_deadline": None,
-                "tail_enabled":False,
+                "tail_enabled": False,
                 "next_harness": None,
                 "target_harness": None,
                 "changed_fields": [],
@@ -1445,7 +1411,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "abort_grace_seconds": None,
                 "abort_reason": None,
                 "abort_deadline": None,
-                "tail_enabled":False,
+                "tail_enabled": False,
                 "next_harness": None,
                 "target_harness": None,
                 "changed_fields": [],
@@ -1681,7 +1647,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "abort_grace_seconds": None,
                 "abort_reason": None,
                 "abort_deadline": None,
-                "tail_enabled":False,
+                "tail_enabled": False,
                 "next_harness": "copilot",
                 "target_harness": None,
                 "changed_fields": [],
@@ -1696,15 +1662,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         # Autonomous turns default to packet mode, so the prompt is the
         # harness-neutral task packet, not the `session-run` skill invocation.
         codex_prompt = turns[0]["argv"][-1]
-        self.assertTrue(
-            codex_prompt.startswith(runner.TASK_PACKET_HEADING_PREFIX)
-        )
+        self.assertTrue(codex_prompt.startswith(runner.TASK_PACKET_HEADING_PREFIX))
         self.assertNotIn("session-run", codex_prompt)
         self.assertIn("-p", turns[1]["argv"])
         copilot_prompt = turns[1]["argv"][turns[1]["argv"].index("-p") + 1]
-        self.assertTrue(
-            copilot_prompt.startswith(runner.TASK_PACKET_HEADING_PREFIX)
-        )
+        self.assertTrue(copilot_prompt.startswith(runner.TASK_PACKET_HEADING_PREFIX))
         self.assertNotIn("session-run", copilot_prompt)
 
         control_events = [
@@ -1778,11 +1740,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             stderr_path = Path(active_turn["stderr_path"])
             if not stdout_path.exists() or not stderr_path.exists():
                 return None
-            if (
-                "session 1 stdout before completion"
-                in stdout_path.read_text(encoding="utf-8")
-                and "session 1 stderr before completion"
-                in stderr_path.read_text(encoding="utf-8")
+            if "session 1 stdout before completion" in stdout_path.read_text(
+                encoding="utf-8"
+            ) and "session 1 stderr before completion" in stderr_path.read_text(
+                encoding="utf-8"
             ):
                 return active_turn
             return None
@@ -1870,7 +1831,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "abort_grace_seconds": None,
                 "abort_reason": None,
                 "abort_deadline": None,
-                "tail_enabled":False,
+                "tail_enabled": False,
                 "next_harness": None,
                 "target_harness": None,
                 "changed_fields": [],
@@ -2014,7 +1975,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "abort_grace_seconds": None,
                 "abort_reason": None,
                 "abort_deadline": None,
-                "tail_enabled":False,
+                "tail_enabled": False,
                 "next_harness": None,
                 "target_harness": None,
                 "changed_fields": [],
@@ -2154,7 +2115,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     XDG_CONFIG_HOME=str(config_home),
                     FAKE_CODEX_MODE="success",
                     FAKE_CODEX_SLEEP="5",
-                    PYTHONPATH=str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                    PYTHONPATH=str(REPO_ROOT)
+                    + os.pathsep
+                    + os.environ.get("PYTHONPATH", ""),
                 ),
                 mock.patch.object(
                     runner.run_control.RunControlListener,
@@ -2287,7 +2250,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     XDG_CONFIG_HOME=str(config_home),
                     FAKE_CODEX_MODE="success",
                     FAKE_CODEX_SLEEP="5",
-                    PYTHONPATH=str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                    PYTHONPATH=str(REPO_ROOT)
+                    + os.pathsep
+                    + os.environ.get("PYTHONPATH", ""),
                 ),
                 mock.patch.object(
                     runner.run_control.RunControlListener,
@@ -2412,7 +2377,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     XDG_CONFIG_HOME=str(config_home),
                     FAKE_CODEX_MODE="success",
                     FAKE_CODEX_SLEEP="5",
-                    PYTHONPATH=str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                    PYTHONPATH=str(REPO_ROOT)
+                    + os.pathsep
+                    + os.environ.get("PYTHONPATH", ""),
                 ),
                 mock.patch.object(
                     runner.run_control.RunControlListener,
@@ -2488,7 +2455,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "abort_grace_seconds": None,
                 "abort_reason": None,
                 "abort_deadline": None,
-                "tail_enabled":False,
+                "tail_enabled": False,
                 "next_harness": "claude",
                 "target_harness": None,
                 "changed_fields": [],
@@ -2516,9 +2483,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
     def test_harness_selection_does_not_carry_explicit_model_and_effort(self) -> None:
         exit_code, payload, calls, _plan_dir, _state_dir = (
-            self.run_with_mocked_harness_switch(
-                harness_model="gpt-5", effort="high"
-            )
+            self.run_with_mocked_harness_switch(harness_model="gpt-5", effort="high")
         )
 
         self.assertEqual(0, exit_code)
@@ -2669,9 +2634,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             ],
             [event["action"] for event in control_events],
         )
-        self.assertEqual(
-            "claude", control_events[3]["target_harness"]
-        )
+        self.assertEqual("claude", control_events[3]["target_harness"])
 
     def test_model_control_expires_when_a_new_runner_process_starts(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
@@ -2722,15 +2685,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
             statuses=("complete",)
         )
-        config_path = (
-            config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         configured = json.loads(config_path.read_text(encoding="utf-8"))
         configured["claude"] = {"executable": str(fake_codex)}
         config_path.write_text(json.dumps(configured), encoding="utf-8")
-        runner.ensure_generated_review_session(
-            plan_dir, review_harness="claude"
-        )
+        runner.ensure_generated_review_session(plan_dir, review_harness="claude")
         control_queue.append_command(
             plan_dir,
             control_queue.COMMAND_SET_IMPLEMENTATION_MODEL,
@@ -2761,9 +2720,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             "claude-review", turn["argv"][turn["argv"].index("--model") + 1]
         )
-        self.assertEqual(
-            "medium", turn["argv"][turn["argv"].index("--effort") + 1]
-        )
+        self.assertEqual("medium", turn["argv"][turn["argv"].index("--effort") + 1])
 
     def test_missing_switched_harness_pauses_before_next_turn(self) -> None:
         listener = FakeRunControlListener()
@@ -2853,11 +2810,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             1,
             len(
-                [
-                    record
-                    for record in event_records
-                    if record["name"] == "turn_started"
-                ]
+                [record for record in event_records if record["name"] == "turn_started"]
             ),
         )
         paused_event = event_records[
@@ -2928,7 +2881,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "abort_grace_seconds": None,
                 "abort_reason": None,
                 "abort_deadline": None,
-                "tail_enabled":False,
+                "tail_enabled": False,
                 "next_harness": None,
                 "target_harness": None,
                 "changed_fields": [],
@@ -3159,60 +3112,62 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self,
     ) -> None:
         prompts = (
-            f"$session-run <plan-dir>/ --session 2.1 --runner-managed",
-            f"$session-run <plan-dir>/session-2.1.md --runner-managed",
-            f"$session-run <plan-dir>/session-3.md --runner-managed",
+            "$session-run <plan-dir>/ --session 2.1 --runner-managed",
+            "$session-run <plan-dir>/session-2.1.md --runner-managed",
+            "$session-run <plan-dir>/session-3.md --runner-managed",
         )
         for prompt_template in prompts:
-            with self.subTest(prompt=prompt_template):
-                with tempfile.TemporaryDirectory() as tmp:
-                    tmp_dir = Path(tmp)
-                    plan_dir = tmp_dir / "plan"
-                    write_plan_with_ids(
-                        plan_dir,
-                        (
-                            ("2", "pending"),
-                            ("2.1", "pending"),
-                            ("3", "pending"),
-                        ),
-                    )
-                    fake_codex = install_fake_codex(tmp_dir)
-                    last_message = tmp_dir / "last-message.txt"
-                    prompt = prompt_template.replace("<plan-dir>", str(plan_dir))
+            with (
+                self.subTest(prompt=prompt_template),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                tmp_dir = Path(tmp)
+                plan_dir = tmp_dir / "plan"
+                write_plan_with_ids(
+                    plan_dir,
+                    (
+                        ("2", "pending"),
+                        ("2.1", "pending"),
+                        ("3", "pending"),
+                    ),
+                )
+                fake_codex = install_fake_codex(tmp_dir)
+                last_message = tmp_dir / "last-message.txt"
+                prompt = prompt_template.replace("<plan-dir>", str(plan_dir))
 
-                    completed = subprocess.run(
-                        [
-                            str(fake_codex),
-                            "exec",
-                            "--add-dir",
-                            str(plan_dir),
-                            "-o",
-                            str(last_message),
-                            prompt,
-                        ],
-                        cwd=REPO_ROOT,
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
+                completed = subprocess.run(
+                    [
+                        str(fake_codex),
+                        "exec",
+                        "--add-dir",
+                        str(plan_dir),
+                        "-o",
+                        str(last_message),
+                        prompt,
+                    ],
+                    cwd=REPO_ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
 
-                    self.assertEqual(0, completed.returncode, completed.stderr)
-                    self.assertIn(
-                        "- **Status**: complete",
-                        (plan_dir / "session-2.md").read_text(encoding="utf-8"),
-                    )
-                    self.assertIn(
-                        "- **Status**: pending",
-                        (plan_dir / "session-2.1.md").read_text(encoding="utf-8"),
-                    )
-                    self.assertIn(
-                        "- **Status**: pending",
-                        (plan_dir / "session-3.md").read_text(encoding="utf-8"),
-                    )
-                    self.assertIn(
-                        "Runner status: complete",
-                        last_message.read_text(encoding="utf-8"),
-                    )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertIn(
+                    "- **Status**: complete",
+                    (plan_dir / "session-2.md").read_text(encoding="utf-8"),
+                )
+                self.assertIn(
+                    "- **Status**: pending",
+                    (plan_dir / "session-2.1.md").read_text(encoding="utf-8"),
+                )
+                self.assertIn(
+                    "- **Status**: pending",
+                    (plan_dir / "session-3.md").read_text(encoding="utf-8"),
+                )
+                self.assertIn(
+                    "Runner status: complete",
+                    last_message.read_text(encoding="utf-8"),
+                )
 
     def test_unexpected_dotted_progress_reports_expected_and_observed_ids(
         self,
@@ -3561,7 +3516,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 (plan_dir / "session-2.md").read_text(encoding="utf-8"),
             )
 
-    def test_legacy_failed_commit_is_retried_before_next_session_on_resume(self) -> None:
+    def test_legacy_failed_commit_is_retried_before_next_session_on_resume(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
@@ -3622,9 +3579,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     "XDG_CONFIG_HOME": str(config_home),
                     "FAKE_CODEX_MODE": "success",
                     "FAKE_SPEC_LOG": str(spec_log),
-                    "PATH": str(tmp_dir)
-                    + os.pathsep
-                    + os.environ.get("PATH", ""),
+                    "PATH": str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
                     "PYTHONPATH": str(REPO_ROOT)
                     + os.pathsep
                     + os.environ.get("PYTHONPATH", ""),
@@ -3686,9 +3641,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 if record["name"] == events.COMMIT_FINISHED_EVENT
                 and record["payload"].get("session") == 1
             ][-1]
-            turn_2_started = self.event_index(
-                event_records, "turn_started", session=2
-            )
+            turn_2_started = self.event_index(event_records, "turn_started", session=2)
             self.assertLess(recovery_commit, turn_2_started)
 
     def test_unchanged_head_commit_pauses_with_commit_failed(self) -> None:
@@ -3799,8 +3752,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             + r"\(status complete, return code 0, duration [^,]+, total [^)]+\)",
         )
         self.assertIn(
-            "session 1/1 finished "
-            "(status complete, return code 0, duration ",
+            "session 1/1 finished (status complete, return code 0, duration ",
             completed.stderr,
         )
         self.assertIn("run finished: run ", completed.stderr)
@@ -4104,7 +4056,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 for record in event_records
                 if record["name"] == events.TURN_HEARTBEAT_EVENT
             ]
-            self.assertEqual({"codex"}, {payload["harness"] for payload in heartbeat_payloads})
+            self.assertEqual(
+                {"codex"}, {payload["harness"] for payload in heartbeat_payloads}
+            )
             stderr_text = stderr.getvalue()
             timestamp = r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
             self.assertRegex(
@@ -4150,9 +4104,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 note=None,
                 allow_not_loop_ready=False,
             )
-            mailbox_activation = runner._mailbox_activation_payload(
-                args, plan_dir
-            )
+            mailbox_activation = runner._mailbox_activation_payload(args, plan_dir)
             payload = runner._initial_payload(
                 args=args,
                 snapshot=snapshot,
@@ -4423,9 +4375,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
 
             live_verification.start()
-            after_start_state = json.loads(
-                state_path.read_text(encoding="utf-8")
-            )["active_verification"]
+            after_start_state = json.loads(state_path.read_text(encoding="utf-8"))[
+                "active_verification"
+            ]
             self.assertEqual(2, after_start_state["check_count"])
             self.assertEqual(
                 ["file_exists", "regex_in_file"], after_start_state["check_kinds"]
@@ -4441,9 +4393,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 cwd=None,
                 repo="SVC",
             )
-            mid_state = json.loads(
-                state_path.read_text(encoding="utf-8")
-            )["active_verification"]
+            mid_state = json.loads(state_path.read_text(encoding="utf-8"))[
+                "active_verification"
+            ]
             self.assertEqual(0, mid_state["current_check_index"])
             self.assertEqual("readme", mid_state["current_check_name"])
             self.assertEqual("file_exists", mid_state["current_check_kind"])
@@ -4459,9 +4411,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 returncode=None,
                 repo="SVC",
             )
-            after_check_state = json.loads(
-                state_path.read_text(encoding="utf-8")
-            )["active_verification"]
+            after_check_state = json.loads(state_path.read_text(encoding="utf-8"))[
+                "active_verification"
+            ]
             self.assertIsNone(after_check_state["current_check_started_at"])
             self.assertEqual(0, after_check_state["current_check_index"])
 
@@ -4826,8 +4778,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     passed=False, passed_count=0, reason="interrupted"
                 )
             )
-            with redirect_stderr(stderr), mock.patch.object(
-                progress, "verification_heartbeat", parked_heartbeat
+            with (
+                redirect_stderr(stderr),
+                mock.patch.object(progress, "verification_heartbeat", parked_heartbeat),
             ):
                 live_verification.start()
                 live_verification.check_started(
@@ -4941,8 +4894,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     passed=False, passed_count=0, reason="interrupted"
                 )
             )
-            with redirect_stderr(stderr), mock.patch.object(
-                progress, "verification_check_finished", parked_check_finished
+            with (
+                redirect_stderr(stderr),
+                mock.patch.object(
+                    progress, "verification_check_finished", parked_check_finished
+                ),
             ):
                 live_verification.start()
                 live_verification.check_started(
@@ -4961,8 +4917,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     # lifecycle block and can only be waiting for the stalled
                     # write to release the output.
                     wait_until(
-                        lambda: read_jsonl(event_path)[-1]["name"]
-                        == events.VERIFICATION_FINISHED_EVENT
+                        lambda: (
+                            read_jsonl(event_path)[-1]["name"]
+                            == events.VERIFICATION_FINISHED_EVENT
+                        )
                     )
                     self.assertTrue(finisher.is_alive())
                 finally:
@@ -5081,33 +5039,31 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 raise KeyboardInterrupt
 
             live_verification.start()
-            with mock.patch.object(
-                verification, "as_completed", interrupt_once_all_running
+            with (
+                mock.patch.object(
+                    verification, "as_completed", interrupt_once_all_running
+                ),
+                self.assertRaises(KeyboardInterrupt),
             ):
-                with self.assertRaises(KeyboardInterrupt):
-                    verification.run_verification(
-                        contract,
-                        repo_root=repo_root,
-                        observer=verification.VerificationObserver(
-                            on_check_started=on_check_started,
-                            on_check_finished=on_check_finished,
-                        ),
-                    )
+                verification.run_verification(
+                    contract,
+                    repo_root=repo_root,
+                    observer=verification.VerificationObserver(
+                        on_check_started=on_check_started,
+                        on_check_finished=on_check_finished,
+                    ),
+                )
 
             # Every process the interrupt abandoned — command and grandchild
             # alike — is already dead, so nothing can report back or touch the
             # repository after control returned.
             started_markers = sorted(started_dir.iterdir())
             assert_marked_pids_exited(started_dir, label="command process")
-            assert_marked_pids_exited(
-                tmp_dir / "grandchildren", label="grandchild"
-            )
+            assert_marked_pids_exited(tmp_dir / "grandchildren", label="grandchild")
             self.assertEqual([], list((tmp_dir / "late").iterdir()))
             self.assertEqual([], finishes)
 
-            live_verification.finish(
-                passed=False, passed_count=0, reason="interrupted"
-            )
+            live_verification.finish(passed=False, passed_count=0, reason="interrupted")
             events_at_finish = read_jsonl(event_path)
 
             # The two futures still queued behind the four workers were
@@ -5116,9 +5072,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 events.VERIFICATION_FINISHED_EVENT, events_at_finish[-1]["name"]
             )
-            self.assertEqual(
-                "interrupted", events_at_finish[-1]["payload"]["reason"]
-            )
+            self.assertEqual("interrupted", events_at_finish[-1]["payload"]["reason"])
             self.assertEqual(events_at_finish, read_jsonl(event_path))
             self.assertIsNone(
                 json.loads(state_path.read_text(encoding="utf-8"))[
@@ -5292,7 +5246,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     and control.get("next_harness") is None
                 ):
                     delayed_once = True
-                    serialized = json.dumps(payload_arg, sort_keys=True, indent=2) + "\n"
+                    serialized = (
+                        json.dumps(payload_arg, sort_keys=True, indent=2) + "\n"
+                    )
                     activity_write_started.set()
                     release_activity_write.wait(timeout=2)
                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -5349,15 +5305,21 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 raise thread_errors[0]
 
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
-            self.assertEqual("stdout", state_payload["active_turn"]["last_activity_stream"])
+            self.assertEqual(
+                "stdout", state_payload["active_turn"]["last_activity_stream"]
+            )
             self.assertEqual("claude", state_payload["control"]["next_harness"])
-            self.assertEqual("harness-selected", state_payload["control"]["last_action"])
+            self.assertEqual(
+                "harness-selected", state_payload["control"]["last_action"]
+            )
             control_events = [
                 record["payload"]
                 for record in read_jsonl(event_path)
                 if record["name"] == events.RUN_CONTROL_EVENT
             ]
-            self.assertEqual(["harness-selected"], [event["action"] for event in control_events])
+            self.assertEqual(
+                ["harness-selected"], [event["action"] for event in control_events]
+            )
 
     def test_retry_after_failed_turn_keeps_first_run_artifacts(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
@@ -5797,9 +5759,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         # alive, so the reader threads never saw EOF: control returned through
         # the bounded join instead of waiting out the grandchild's 60s sleep.
         self.assertLess(elapsed, 30.0)
-        assert_marked_pids_alive(
-            root / "grandchildren", label="detached grandchild"
-        )
+        assert_marked_pids_alive(root / "grandchildren", label="detached grandchild")
         # The passthrough processor never reports a final result, so the hook
         # stays silent for harnesses without structured output.
         self.assertEqual([], fired)
@@ -5863,9 +5823,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
             )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(
-            [int(pid_path.read_text(encoding="utf-8"))], spawn_pids
-        )
+        self.assertEqual([int(pid_path.read_text(encoding="utf-8"))], spawn_pids)
         # Two stdout reads follow the result record; a second fire would have
         # landed there if the Event guard did not hold.
         self.assertEqual(1, len(fired))
@@ -5999,9 +5957,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         state_before = state_path.read_bytes()
         events_before = event_path.read_bytes() if event_path.exists() else b""
         stdout_log_before = stdout_log.read_bytes()
-        stderr_log_before = (
-            stderr_log.read_bytes() if stderr_log.exists() else b""
-        )
+        stderr_log_before = stderr_log.read_bytes() if stderr_log.exists() else b""
 
         (root / "trigger").write_text("go", encoding="utf-8")
         wait_until((root / "late" / "harness").exists)
@@ -6037,9 +5993,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp_dir = Path(tmp.name)
         self.root = self.tmp_dir / "trees"
-        _parent_script, self.grandchild_script = write_process_tree_scripts(
-            self.root
-        )
+        _parent_script, self.grandchild_script = write_process_tree_scripts(self.root)
         # Registered after the tempdir cleanup so it runs first: a survivor is
         # killed while its PID marker still exists.
         self.addCleanup(kill_marked_pids, self.root / "grandchildren")
@@ -6078,9 +6032,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         return path
 
     def _grandchild_pid(self) -> int:
-        return int(
-            (self.root / "grandchildren" / "turn").read_text(encoding="utf-8")
-        )
+        return int((self.root / "grandchildren" / "turn").read_text(encoding="utf-8"))
 
     def _wait_for_grandchild_on_spawn(self, _pid: int) -> None:
         """Start the turn timeout only after the synthetic tree is live."""
@@ -6119,14 +6071,10 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         )
         self.assertEqual([lingering], result.process_sweep["killed"])
         self.assertEqual([], result.process_sweep["survivors_after"])
-        assert_marked_pids_exited(
-            self.root / "grandchildren", label="lingering child"
-        )
+        assert_marked_pids_exited(self.root / "grandchildren", label="lingering child")
 
     def test_timeout_kills_the_whole_process_group(self) -> None:
-        fake_harness = self._fake_harness(
-            detached=False, tail=("time.sleep(60)",)
-        )
+        fake_harness = self._fake_harness(detached=False, tail=("time.sleep(60)",))
         spawn_pids: list[int] = []
 
         def on_spawn(pid: int) -> None:
@@ -6169,9 +6117,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         descendant walk can reach it, so a snapshot taken while the turn's root
         was still alive is the sweep's only route to the 2h20m hang class.
         """
-        fake_harness = self._fake_harness(
-            detached=True, tail=("time.sleep(60)",)
-        )
+        fake_harness = self._fake_harness(detached=True, tail=("time.sleep(60)",))
 
         result = _PythonScriptCopilotAdapter(fake_harness).run(
             cwd=self.tmp_dir,
@@ -6225,9 +6171,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         def on_spawn(pid: int) -> None:
             turn_pids.append(pid)
             wait_until((self.root / "grandchildren" / "turn").exists, timeout=30)
-            process_tree.record_process_tree(
-                pid, process_tree.sample_process_tree(pid)
-            )
+            process_tree.record_process_tree(pid, process_tree.sample_process_tree(pid))
             gate.write_text("go", encoding="utf-8")
 
         result = _PythonScriptCopilotAdapter(fake_harness).run(
@@ -6251,9 +6195,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
         # same pid cannot union it either.
         self.assertEqual((), process_tree.last_process_tree(escapee))
         self.assertEqual((), process_tree.last_process_tree(turn_pids[0]))
-        assert_marked_pids_exited(
-            self.root / "grandchildren", label="sampled escapee"
-        )
+        assert_marked_pids_exited(self.root / "grandchildren", label="sampled escapee")
 
     def _interrupting_popen(self, ready: Path):
         """Patch ``Popen`` so the first ``wait`` raises once ``ready`` exists.
@@ -6283,9 +6225,7 @@ class HarnessProcessGroupSweepTests(unittest.TestCase):
 
     def test_interrupt_path_stays_intact_and_sweeps_the_group(self) -> None:
         """Explicit signalling is unchanged; the sweep takes what it left."""
-        fake_harness = self._fake_harness(
-            detached=False, tail=("time.sleep(60)",)
-        )
+        fake_harness = self._fake_harness(detached=False, tail=("time.sleep(60)",))
         spawn_pids: list[int] = []
         ready = self.root / "grandchildren" / "turn"
 
@@ -6392,9 +6332,7 @@ class HarnessAbortSignalTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp_dir = Path(tmp.name)
         self.root = self.tmp_dir / "trees"
-        _parent_script, self.grandchild_script = write_process_tree_scripts(
-            self.root
-        )
+        _parent_script, self.grandchild_script = write_process_tree_scripts(self.root)
         self.addCleanup(kill_marked_pids, self.root / "grandchildren")
         self.started = self.tmp_dir / "harness-started"
 
@@ -6449,9 +6387,7 @@ class HarnessAbortSignalTests(unittest.TestCase):
         return on_spawn
 
     def _grandchild_pid(self) -> int:
-        return int(
-            (self.root / "grandchildren" / "turn").read_text(encoding="utf-8")
-        )
+        return int((self.root / "grandchildren" / "turn").read_text(encoding="utf-8"))
 
     def test_abort_deadline_kills_the_turn_and_empties_its_group(self) -> None:
         fake_harness = self._fake_harness(
@@ -6729,7 +6665,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             cleared[0]["payload"]["hang_suspected"]["reason"],
         )
 
-    def _live_turn(self, sample_tree) -> "runner._LiveTurn":
+    def _live_turn(self, sample_tree) -> runner._LiveTurn:
         sentinel = runner._HangSentinel(
             sample_tree=sample_tree,
             monotonic=time.monotonic,
@@ -6912,18 +6848,43 @@ class AuditAccessProfileTests(unittest.TestCase):
 
     def test_worker_argv_is_byte_for_byte_what_it_always_was(self) -> None:
         expected = {
-            "codex": (
-                "codex exec -C /work --add-dir /plan -s workspace-write "
-                "-o /work/last.txt prompt"
-            ).split(),
-            "claude": (
-                "claude --print --verbose --output-format stream-json "
-                "--include-partial-messages --add-dir /plan "
-                "--permission-mode dontAsk prompt"
-            ).split(),
-            "copilot": (
-                "copilot -C /work --add-dir /plan --no-ask-user --silent -p prompt"
-            ).split(),
+            "codex": [
+                "codex",
+                "exec",
+                "-C",
+                "/work",
+                "--add-dir",
+                "/plan",
+                "-s",
+                "workspace-write",
+                "-o",
+                "/work/last.txt",
+                "prompt",
+            ],
+            "claude": [
+                "claude",
+                "--print",
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+                "--add-dir",
+                "/plan",
+                "--permission-mode",
+                "dontAsk",
+                "prompt",
+            ],
+            "copilot": [
+                "copilot",
+                "-C",
+                "/work",
+                "--add-dir",
+                "/plan",
+                "--no-ask-user",
+                "--silent",
+                "-p",
+                "prompt",
+            ],
         }
 
         for name, argv in expected.items():

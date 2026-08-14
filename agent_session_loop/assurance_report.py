@@ -24,17 +24,16 @@ deliberately unable to do anything else:
 
 from __future__ import annotations
 
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-import statistics
 from typing import Any
 
 from . import assurance_ledger as ledger
 from . import assurance_models as models
 from . import assurance_projection as projection
-
 
 __all__ = [
     "LIST_COMMAND",
@@ -243,7 +242,9 @@ def report_lines(report: Mapping[str, Any] | None) -> list[str]:
         and issue_ids
         else "none"
     )
-    label = "Assurance issues (partial)" if report.get("partial") else "Assurance issues"
+    label = (
+        "Assurance issues (partial)" if report.get("partial") else "Assurance issues"
+    )
     lines = [
         f"{label}: {report.get('new_issue_count', 0)} new, "
         f"{report.get('recurring_issue_count', 0)} recurring; {listed}"
@@ -340,9 +341,7 @@ def open_issue_run_ids(state_dir: str | Path | None = None) -> OpenIssueRuns:
         )
     open_issues = inbox.open_issues
     return OpenIssueRuns(
-        run_ids=frozenset(
-            run_id for issue in open_issues for run_id in issue.run_ids
-        ),
+        run_ids=frozenset(run_id for issue in open_issues for run_id in issue.run_ids),
         open_issue_count=len(open_issues),
         available=True,
     )
@@ -486,9 +485,7 @@ def _recurrence_after_resolution(
                 events_in_window += 1
                 issues_in_window.add(canonical)
                 finding = record.payload.finding
-                by_category[finding.category] = (
-                    by_category.get(finding.category, 0) + 1
-                )
+                by_category[finding.category] = by_category.get(finding.category, 0) + 1
     return (
         events_in_window,
         len(issues_in_window),
@@ -564,9 +561,7 @@ def collect_assurance_metrics(
     )
     report["issues"] = {
         "observations": observations,
-        "new": sum(
-            audit.summary.new_issue_count for audit in windowed_runs.values()
-        ),
+        "new": sum(audit.summary.new_issue_count for audit in windowed_runs.values()),
         "recurring": sum(
             audit.summary.recurring_issue_count for audit in windowed_runs.values()
         ),
@@ -594,9 +589,7 @@ def collect_assurance_metrics(
         "total": disposition_total,
         "by_kind": dict(sorted(by_kind.items())),
         "dismissal_rate": _rate(by_kind.get("dismiss", 0), disposition_total),
-        "accepted_risk_rate": _rate(
-            by_kind.get("accept-risk", 0), disposition_total
-        ),
+        "accepted_risk_rate": _rate(by_kind.get("accept-risk", 0), disposition_total),
         "time_to_disposition": {
             "count": len(latencies),
             "mean_hours": (

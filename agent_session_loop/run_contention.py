@@ -12,15 +12,14 @@ semantics are testable without spawning runs.
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
-import os
 from pathlib import Path
-import sys
 from typing import Any
 
 from . import plans, session_overview
-
 
 __all__ = [
     "LIVENESS_RUNNING",
@@ -59,7 +58,7 @@ def _canonical_roots(roots: Iterable[Any]) -> frozenset[str]:
             continue
         try:
             canonical.add(str(plans.canonicalize_path(text)))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
     return frozenset(canonical)
 
@@ -207,9 +206,7 @@ def conflict_message(
             f"  - {conflict.plan_dir} ({_describe_owner(conflict)}) claims "
             f"{repositories}"
         )
-    if any(
-        conflict.liveness == LIVENESS_FOREIGN_HOST for conflict in ordered
-    ):
+    if any(conflict.liveness == LIVENESS_FOREIGN_HOST for conflict in ordered):
         lines.append(
             "  A lock recorded on another host is never stolen; clear it with "
             "'asl unlock' once you have confirmed that runner is gone."

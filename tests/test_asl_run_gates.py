@@ -5,82 +5,47 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
 import shutil
-import signal
 import socket
-import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
     baseline,
-    baseline_cache,
     cli,
-    compact_state,
     config,
-    contracts,
-    control_queue,
     events,
     harnesses,
-    install_verify,
     plans,
     preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
-    review_repair,
-    run_control,
     runner,
     session_overview,
     state,
-    tail,
     verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
-    _load_script_module,
-    agent_mux_notify_enabled,
-    patched_env,
-    write_plan,
-    install_fake_amx,
-    install_fake_codex,
-    init_git_repo,
-    init_multi_repo_workspace,
-    read_jsonl,
-    write_multi_repo_plan,
     _command_contract,
     _contract_block,
+    _load_script_module,
+    agent_mux_notify_enabled,
+    init_git_repo,
+    init_multi_repo_workspace,
+    install_fake_amx,
+    install_fake_codex,
+    patched_env,
+    read_jsonl,
+    write_multi_repo_plan,
+    write_plan,
 )
 
 
@@ -98,10 +63,7 @@ class RunFlagValidationTests(unittest.TestCase):
     def test_cycle_cap_above_ceiling_is_rejected_identically_by_runner_and_helper(
         self,
     ) -> None:
-        message = (
-            "--max-review-fix-cycles 9 exceeds "
-            "--max-review-fix-cycles-ceiling 8"
-        )
+        message = "--max-review-fix-cycles 9 exceeds --max-review-fix-cycles-ceiling 8"
         args = argparse.Namespace(
             cwd=str(REPO_ROOT),
             max_review_fix_cycles=9,
@@ -129,9 +91,7 @@ class RunFlagValidationTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         args = result["run_args"]
         self.assertEqual(args[args.index("--max-repair-group-attempts") + 1], "3")
-        self.assertEqual(
-            args[args.index("--max-review-fix-cycles-ceiling") + 1], "12"
-        )
+        self.assertEqual(args[args.index("--max-review-fix-cycles-ceiling") + 1], "12")
 
     def test_resume_overlay_restores_new_review_cap_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,9 +137,7 @@ class RunReadinessGateTests(unittest.TestCase):
         self.config_home = self.tmp_path / "config"
         init_git_repo(self.repo_root)
         self.fake_codex = install_fake_codex(self.tmp_path)
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps({"codex": {"executable": str(self.fake_codex)}}),
@@ -248,9 +206,7 @@ class RunReadinessGateTests(unittest.TestCase):
                 "XDG_CONFIG_HOME": str(self.config_home),
                 "FAKE_CODEX_MODE": mode,
                 "FAKE_CODEX_SLEEP": "5",
-                "PYTHONPATH": str(REPO_ROOT)
-                + os.pathsep
-                + env.get("PYTHONPATH", ""),
+                "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
             }
         )
         completed = subprocess.run(
@@ -280,9 +236,7 @@ class RunReadinessGateTests(unittest.TestCase):
             if path.is_file()
         }
 
-    def _write_cross_repo_plan(
-        self, statuses: tuple[str, ...] = ("pending",)
-    ) -> Path:
+    def _write_cross_repo_plan(self, statuses: tuple[str, ...] = ("pending",)) -> Path:
         """A legacy plan whose session 1 check lives in a second repository."""
         other_repo = self.tmp_path / "other"
         init_git_repo(other_repo)
@@ -328,9 +282,7 @@ class RunReadinessGateTests(unittest.TestCase):
         repair = repair_payload["auto_repairs"][0]
         self.assertEqual("rewrite", repair["action"])
         self.assertEqual("manifest-readiness", repair["category"])
-        self.assertEqual(
-            str((self.plan_dir / "manifest.md").resolve()), repair["path"]
-        )
+        self.assertEqual(str((self.plan_dir / "manifest.md").resolve()), repair["path"])
         self.assertEqual(0, repair["entries_written"])
         self.assertEqual([], repair["completed_session_ids"])
         self.assertFalse(repair["journal_replaced"])
@@ -361,9 +313,7 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertTrue(repair_payload["ok"])
         # Metadata was rewritten to ``loop-ready`` and then lifecycled to
         # ``complete`` once the only pending session finished.
-        self.assertEqual(
-            "complete", plans.read_readiness_metadata(self.plan_dir).state
-        )
+        self.assertEqual("complete", plans.read_readiness_metadata(self.plan_dir).state)
 
     def test_run_auto_repairs_when_state_is_complete_on_pending_plan(self) -> None:
         self._write_plan(("pending",), readiness="complete")
@@ -382,9 +332,7 @@ class RunReadinessGateTests(unittest.TestCase):
         repair = repair_payload["auto_repairs"][0]
         self.assertEqual("manifest-readiness", repair["category"])
         self.assertEqual("loop-ready", repair["target_state"])
-        self.assertEqual(
-            "complete", plans.read_readiness_metadata(self.plan_dir).state
-        )
+        self.assertEqual("complete", plans.read_readiness_metadata(self.plan_dir).state)
 
     def test_run_auto_repairs_when_state_is_running_on_pending_plan(self) -> None:
         self._write_plan(("pending",), readiness="running")
@@ -403,9 +351,7 @@ class RunReadinessGateTests(unittest.TestCase):
         repair = repair_payload["auto_repairs"][0]
         self.assertEqual("manifest-readiness", repair["category"])
         self.assertEqual("loop-ready", repair["target_state"])
-        self.assertEqual(
-            "complete", plans.read_readiness_metadata(self.plan_dir).state
-        )
+        self.assertEqual("complete", plans.read_readiness_metadata(self.plan_dir).state)
 
     def test_run_auto_repairs_when_recorded_sha_does_not_match(self) -> None:
         self._write_plan(
@@ -484,8 +430,7 @@ class RunReadinessGateTests(unittest.TestCase):
             sha_override=sha_override,
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}',
                     session="1",
                 ),
                 "2": _contract_block(
@@ -695,9 +640,7 @@ class RunReadinessGateTests(unittest.TestCase):
         repairs = payload["pause_details"]["auto_repairs"]
         self.assertEqual(1, len(repairs))
         self.assertEqual("repository-registry", repairs[0]["action"])
-        self.assertEqual(
-            "repository-registry-required", repairs[0]["category"]
-        )
+        self.assertEqual("repository-registry-required", repairs[0]["category"])
         self.assertEqual(
             str(plans.canonicalize_path(self.plan_dir)), repairs[0]["path"]
         )
@@ -741,9 +684,7 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertEqual([], payload["turns"])
         registration = payload["pause_details"]["repository_registration"]
         self.assertEqual("refused", registration["status"])
-        self.assertEqual(
-            "completed-handoff-paths", registration["missing_fact"]
-        )
+        self.assertEqual("completed-handoff-paths", registration["missing_fact"])
         self.assertIn("session-1.md", registration["detail"])
         self.assertNotIn("auto_repairs", payload["pause_details"])
         self.assertIn("completed-handoff-paths", payload["pause_message"])
@@ -834,8 +775,7 @@ class RunReadinessGateTests(unittest.TestCase):
         init_git_repo(other_repo)
         self._write_plan(("pending",))
         (self.plan_dir / "session-1.expand.md").write_text(
-            "# Session 1 Expansion\n\n"
-            f"- Corrected location: {other_repo}/src/new.py\n",
+            f"# Session 1 Expansion\n\n- Corrected location: {other_repo}/src/new.py\n",
             encoding="utf-8",
         )
 
@@ -997,9 +937,7 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertTrue(payload["readiness_gate"]["ok"])
         self.assertTrue(progress_file.exists())
         entries = plans.read_progress_entries(self.plan_dir)
-        self.assertEqual(
-            ["1", "2"], [entry.session_id.value for entry in entries]
-        )
+        self.assertEqual(["1", "2"], [entry.session_id.value for entry in entries])
 
         event_path = (
             state.plan_state_dir(self.plan_dir, self.state_dir)
@@ -1031,12 +969,8 @@ class RunReadinessGateTests(unittest.TestCase):
         )
         self.assertEqual([], repair_payload["errors"])
         self.assertTrue(repair_payload["ok"])
-        categories = [
-            repair["category"] for repair in repair_payload["auto_repairs"]
-        ]
-        self.assertEqual(
-            ["progress-journal-missing", "manifest-readiness"], categories
-        )
+        categories = [repair["category"] for repair in repair_payload["auto_repairs"]]
+        self.assertEqual(["progress-journal-missing", "manifest-readiness"], categories)
         self.assertTrue(plans.progress_path(self.plan_dir).exists())
         metadata = plans.read_readiness_metadata(self.plan_dir)
         self.assertIsNotNone(metadata)
@@ -1121,8 +1055,7 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertTrue(payload["paused"])
         self.assertEqual("not-loop-ready", payload["pause_reason"])
         categories = {
-            finding["category"]
-            for finding in payload["readiness_gate"]["findings"]
+            finding["category"] for finding in payload["readiness_gate"]["findings"]
         }
         self.assertIn("baseline-missing", categories)
         # Baseline evidence is outside the readiness SHA, so the loop-ready
@@ -1142,8 +1075,7 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["paused"])
         categories = {
-            finding["category"]
-            for finding in payload["readiness_gate"]["findings"]
+            finding["category"] for finding in payload["readiness_gate"]["findings"]
         }
         self.assertNotIn("baseline-missing", categories)
 
@@ -1170,14 +1102,18 @@ class ResumeGateTests(unittest.TestCase):
         )
 
     def test_resume_gate_accepts_every_resumable_readiness_state(self) -> None:
-        for state in preflight.RESUME_READINESS_STATES:
-            with self.subTest(state=state):
-                self.assertTrue(runner._resume_gate_passed(self._report(state=state)))
+        for readiness_state in preflight.RESUME_READINESS_STATES:
+            with self.subTest(state=readiness_state):
+                self.assertTrue(
+                    runner._resume_gate_passed(self._report(state=readiness_state))
+                )
 
     def test_resume_gate_rejects_other_states_and_findings(self) -> None:
-        for state in ("draft", "reviewed", "complete"):
-            with self.subTest(state=state):
-                self.assertFalse(runner._resume_gate_passed(self._report(state=state)))
+        for readiness_state in ("draft", "reviewed", "complete"):
+            with self.subTest(state=readiness_state):
+                self.assertFalse(
+                    runner._resume_gate_passed(self._report(state=readiness_state))
+                )
         self.assertFalse(runner._resume_gate_passed(self._report(state=None)))
         for severity in ("red", "yellow"):
             with self.subTest(severity=severity):
@@ -1194,12 +1130,8 @@ class ResumeGateTests(unittest.TestCase):
                 self.assertFalse(runner._resume_gate_passed(report))
 
     def test_readiness_gate_still_requires_loop_ready(self) -> None:
-        self.assertTrue(
-            runner._readiness_gate_passed(self._report(state="loop-ready"))
-        )
-        self.assertFalse(
-            runner._readiness_gate_passed(self._report(state="running"))
-        )
+        self.assertTrue(runner._readiness_gate_passed(self._report(state="loop-ready")))
+        self.assertFalse(runner._readiness_gate_passed(self._report(state="running")))
 
 
 class RunVerificationEnforcementTests(unittest.TestCase):
@@ -1213,9 +1145,7 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self.config_home = self.tmp_path / "config"
         init_git_repo(self.repo_root)
         self.fake_codex = install_fake_codex(self.tmp_path)
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps({"codex": {"executable": str(self.fake_codex)}}),
@@ -1269,9 +1199,7 @@ class RunVerificationEnforcementTests(unittest.TestCase):
                 "XDG_CONFIG_HOME": str(self.config_home),
                 "FAKE_CODEX_MODE": "success",
                 "FAKE_CODEX_SLEEP": "5",
-                "PYTHONPATH": str(REPO_ROOT)
-                + os.pathsep
-                + env.get("PYTHONPATH", ""),
+                "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
             }
         )
         completed = subprocess.run(
@@ -1288,8 +1216,7 @@ class RunVerificationEnforcementTests(unittest.TestCase):
     def test_verify_passing_contract_allows_session_to_complete(self) -> None:
         contracts_by_id = {
             "1": _contract_block(
-                '{"type": "file_exists", "path": "README.md", '
-                '"name": "readme"}',
+                '{"type": "file_exists", "path": "README.md", "name": "readme"}',
                 session="1",
             )
         }
@@ -1315,8 +1242,7 @@ class RunVerificationEnforcementTests(unittest.TestCase):
     ) -> None:
         contracts_by_id = {
             "1": _contract_block(
-                '{"type": "file_exists", "path": "README.md", '
-                '"name": "readme"}',
+                '{"type": "file_exists", "path": "README.md", "name": "readme"}',
                 session="1",
             )
         }
@@ -1380,8 +1306,7 @@ class RunVerificationEnforcementTests(unittest.TestCase):
     def test_verify_failing_contract_pauses_and_reverts_status(self) -> None:
         contracts_by_id = {
             "1": _contract_block(
-                '{"type": "file_exists", "path": "MISSING.md", '
-                '"name": "missing"}',
+                '{"type": "file_exists", "path": "MISSING.md", "name": "missing"}',
                 session="1",
             )
         }
@@ -1416,8 +1341,7 @@ class RunVerificationEnforcementTests(unittest.TestCase):
     ) -> None:
         contracts_by_id = {
             "1": _contract_block(
-                '{"type": "file_exists", "path": "MISSING.md", '
-                '"name": "missing"}',
+                '{"type": "file_exists", "path": "MISSING.md", "name": "missing"}',
                 session="1",
             )
         }
@@ -1528,9 +1452,7 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         self.assertEqual("not-loop-ready", payload["pause_reason"])
 
     def test_verify_missing_contract_is_skipped_when_gate_bypassed(self) -> None:
-        self._write_plan(
-            ("pending",), contracts_by_id=None, readiness=None
-        )
+        self._write_plan(("pending",), contracts_by_id=None, readiness=None)
 
         completed, payload = self._run(allow_not_loop_ready=True)
 
@@ -1606,10 +1528,8 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
         session_path = self.plan_dir / "session-1.md"
         session_path.write_text(
             session_path.read_text(encoding="utf-8").replace(
-                "**Reads repositories**: SVC, OAK\n"
-                "**Writes repositories**: SVC, OAK",
-                "**Reads repositories**: SVC\n"
-                "**Writes repositories**: SVC",
+                "**Reads repositories**: SVC, OAK\n**Writes repositories**: SVC, OAK",
+                "**Reads repositories**: SVC\n**Writes repositories**: SVC",
             ),
             encoding="utf-8",
         )
@@ -1697,11 +1617,14 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             target.write_text("retained unexpected mutation\n", encoding="utf-8")
             raise RuntimeError("synthetic harness crash")
 
-        with mock.patch.object(
-            runner.harnesses,
-            "run_harness",
-            side_effect=mutate_then_raise,
-        ), self.assertRaisesRegex(RuntimeError, "synthetic harness crash"):
+        with (
+            mock.patch.object(
+                runner.harnesses,
+                "run_harness",
+                side_effect=mutate_then_raise,
+            ),
+            self.assertRaisesRegex(RuntimeError, "synthetic harness crash"),
+        ):
             self._invoke("exception-run")
 
         event_path = (
@@ -1744,9 +1667,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
         sibling = self.workspace_root / "unrelated-active-work"
         init_git_repo(sibling)
 
-        def mutate_sibling(
-            *args: object, **kwargs: object
-        ) -> harnesses.HarnessResult:
+        def mutate_sibling(*args: object, **kwargs: object) -> harnesses.HarnessResult:
             (sibling / "concurrent.txt").write_text(
                 "another run is working here\n", encoding="utf-8"
             )
@@ -1842,15 +1763,19 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             target.write_text("retained system-exit mutation\n", encoding="utf-8")
             raise SystemExit(9)
 
-        with mock.patch.object(
-            runner.harnesses,
-            "run_harness",
-            side_effect=self._completed_harness_result,
-        ), mock.patch.object(
-            runner,
-            "_write_turn_artifacts",
-            side_effect=mutate_then_exit,
-        ), self.assertRaises(SystemExit) as raised:
+        with (
+            mock.patch.object(
+                runner.harnesses,
+                "run_harness",
+                side_effect=self._completed_harness_result,
+            ),
+            mock.patch.object(
+                runner,
+                "_write_turn_artifacts",
+                side_effect=mutate_then_exit,
+            ),
+            self.assertRaises(SystemExit) as raised,
+        ):
             self._invoke("system-exit-run")
 
         self.assertEqual(9, raised.exception.code)
@@ -1870,14 +1795,17 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             target.write_text("retained interrupted mutation\n", encoding="utf-8")
             raise KeyboardInterrupt
 
-        with mock.patch.object(
-            runner.harnesses,
-            "run_harness",
-            side_effect=self._completed_harness_result,
-        ), mock.patch.object(
-            runner,
-            "_write_turn_artifacts",
-            side_effect=mutate_then_interrupt,
+        with (
+            mock.patch.object(
+                runner.harnesses,
+                "run_harness",
+                side_effect=self._completed_harness_result,
+            ),
+            mock.patch.object(
+                runner,
+                "_write_turn_artifacts",
+                side_effect=mutate_then_interrupt,
+            ),
         ):
             exit_code, payload = self._invoke("keyboard-interrupt-run")
 
@@ -1914,8 +1842,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
                 session_path.read_text(encoding="utf-8").replace(
                     "**Reads repositories**: SVC, OAK\n"
                     "**Writes repositories**: SVC, OAK",
-                    "**Reads repositories**: SVC\n"
-                    "**Writes repositories**: SVC",
+                    "**Reads repositories**: SVC\n**Writes repositories**: SVC",
                 ),
                 encoding="utf-8",
             )
@@ -1933,9 +1860,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
 
         reached: list[str] = []
 
-        def complete_session(
-            name: str, **kwargs: object
-        ) -> harnesses.HarnessResult:
+        def complete_session(name: str, **kwargs: object) -> harnesses.HarnessResult:
             prompt = str(kwargs.get("prompt", ""))
             session_id = "2" if "session-2.md" in prompt else "1"
             reached.append(session_id)
@@ -2038,9 +1963,7 @@ class RunRepositoryContentionGateTests(unittest.TestCase):
             registry.digest,
         )
         fake_codex = install_fake_codex(self.tmp_path)
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps({"codex": {"executable": str(fake_codex)}}),
@@ -2111,11 +2034,16 @@ class RunRepositoryContentionGateTests(unittest.TestCase):
         ]
         args = cli.build_parser().parse_args(argv)
         out, err = io.StringIO(), io.StringIO()
-        with patched_env(XDG_CONFIG_HOME=str(self.config_home)), mock.patch.object(
-            runner.harnesses,
-            "run_harness",
-            side_effect=harness_side_effect,
-        ), redirect_stdout(out), redirect_stderr(err):
+        with (
+            patched_env(XDG_CONFIG_HOME=str(self.config_home)),
+            mock.patch.object(
+                runner.harnesses,
+                "run_harness",
+                side_effect=harness_side_effect,
+            ),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
             code = runner.run_from_args(args, run_argv=argv)
         return code, json.loads(out.getvalue())
 
@@ -2143,9 +2071,7 @@ class RunRepositoryContentionGateTests(unittest.TestCase):
         )
         self.assertEqual(1, len(contention["conflicts"]))
         conflict = contention["conflicts"][0]
-        self.assertEqual(
-            self._root(self.other_plan_dir), conflict["plan_dir"]
-        )
+        self.assertEqual(self._root(self.other_plan_dir), conflict["plan_dir"])
         self.assertEqual(os.getpid(), conflict["pid"])
         self.assertEqual(socket.gethostname(), conflict["hostname"])
         self.assertEqual("20260812T000000Z-1", conflict["run_id"])
@@ -2177,9 +2103,7 @@ class RunRepositoryContentionGateTests(unittest.TestCase):
         )
 
     def test_an_overlapping_claim_from_a_dead_pid_does_not_refuse(self) -> None:
-        self._publish_rival_claim(
-            (self.repositories["SVC"],), pid=self.DEAD_PID
-        )
+        self._publish_rival_claim((self.repositories["SVC"],), pid=self.DEAD_PID)
 
         with mock.patch.object(
             state,
@@ -2216,9 +2140,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
         self.config_home = self.tmp_path / "config"
         init_git_repo(self.repo_root)
         self.fake_codex = install_fake_codex(self.tmp_path)
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps({"codex": {"executable": str(self.fake_codex)}}),
@@ -2300,9 +2222,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
         self.assertIsInstance(payload["run_finished_at"], str)
         self.assertNotEqual("", payload["run_finished_at"])
         # The session was reverted to pending.
-        session_text = (
-            self.plan_dir / "session-1.md"
-        ).read_text(encoding="utf-8")
+        session_text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
         self.assertIn("- **Status**: pending", session_text)
         self.assertNotIn("- **Status**: complete", session_text)
         self.assertIn("verification interrupted by user", session_text)
@@ -2323,15 +2243,11 @@ class RunVerificationInterruptTests(unittest.TestCase):
             if record["name"] == events.VERIFICATION_FINISHED_EVENT
         ]
         self.assertEqual(1, len(finished_records))
-        self.assertEqual(
-            "interrupted", finished_records[0]["payload"]["reason"]
-        )
+        self.assertEqual("interrupted", finished_records[0]["payload"]["reason"])
         self.assertFalse(finished_records[0]["payload"]["passed"])
         # `run_finished` was still emitted as the final lifecycle event.
         run_finished_records = [
-            record
-            for record in event_records
-            if record["name"] == "run_finished"
+            record for record in event_records if record["name"] == "run_finished"
         ]
         self.assertEqual(1, len(run_finished_records))
 
@@ -2389,9 +2305,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
             if record["name"] == events.RUN_PAUSED_EVENT
         ]
         self.assertEqual(1, len(pause_records))
-        self.assertEqual(
-            "interrupted", pause_records[0]["payload"]["reason"]
-        )
+        self.assertEqual("interrupted", pause_records[0]["payload"]["reason"])
 
 
 class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
@@ -2421,9 +2335,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         self.config_home = self.tmp_path / "config"
         init_git_repo(self.repo_root)
         self.fake_codex = install_fake_codex(self.tmp_path)
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps({"codex": {"executable": str(self.fake_codex)}}),
@@ -2486,9 +2398,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
             f'"argv": {json.dumps(sleep_argv)}, "timeout_seconds": 30}}'
         )
         contract = _contract_block(check_payload, session="1")
-        write_plan(
-            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
-        )
+        write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
 
         real_enforce = runner._enforce_session_verification
 
@@ -2533,9 +2443,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
 
         # Heartbeats happened strictly between check_started and
         # check_finished for the same check.
-        check_started_index = event_names.index(
-            events.VERIFICATION_CHECK_STARTED_EVENT
-        )
+        check_started_index = event_names.index(events.VERIFICATION_CHECK_STARTED_EVENT)
         check_finished_index = event_names.index(
             events.VERIFICATION_CHECK_FINISHED_EVENT
         )
@@ -2592,9 +2500,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
             f'"argv": {json.dumps(sleep_argv)}, "timeout_seconds": 30}}'
         )
         contract = _contract_block(check_payload, session="1")
-        write_plan(
-            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
-        )
+        write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
 
         real_enforce = runner._enforce_session_verification
 
@@ -2605,9 +2511,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         with (
             agent_mux_notify_enabled(),
             patched_env(
-                PATH=str(self.tmp_path)
-                + os.pathsep
-                + os.environ.get("PATH", ""),
+                PATH=str(self.tmp_path) + os.pathsep + os.environ.get("PATH", ""),
                 FAKE_AMX_LOG=str(amx_log),
                 # Slow interpreter start under parallel-shard load must not
                 # silently drop a notification record.
@@ -2626,22 +2530,19 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
 
         amx_records = read_jsonl(amx_log)
         notified_events = [record["argv"][-1] for record in amx_records]
-        hook_payloads = [
-            json.loads(str(record["stdin"])) for record in amx_records
-        ]
+        hook_payloads = [json.loads(str(record["stdin"])) for record in amx_records]
 
         # At least one verification heartbeat notification fired inside the
         # synthetic 0.3s check window (0.05s interval).
         verification_heartbeats = [
             hook_payload
-            for event, hook_payload in zip(notified_events, hook_payloads)
+            for event, hook_payload in zip(notified_events, hook_payloads, strict=False)
             if event == runner.AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT
         ]
         self.assertGreaterEqual(
             len(verification_heartbeats),
             1,
-            f"expected verification heartbeat notifications; got: "
-            f"{notified_events}",
+            f"expected verification heartbeat notifications; got: {notified_events}",
         )
 
         # The notification stream, with consecutive same-event runs
@@ -2667,7 +2568,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         # Every notification carries the run identity, the daemon phase for
         # its event, and one strictly monotonic string-encoded sequence.
         run_id = payload["run_id"]
-        for event, hook_payload in zip(notified_events, hook_payloads):
+        for event, hook_payload in zip(notified_events, hook_payloads, strict=False):
             self.assertEqual(run_id, hook_payload["run_id"])
             self.assertEqual(
                 runner.AGENT_MUX_PHASE_BY_EVENT[event],
@@ -2679,8 +2580,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
             )
             self.assertTrue(hook_payload["emitted_time"].isdigit())
         sequences = [
-            int(hook_payload["source_sequence"])
-            for hook_payload in hook_payloads
+            int(hook_payload["source_sequence"]) for hook_payload in hook_payloads
         ]
         self.assertEqual(list(range(1, len(sequences) + 1)), sequences)
 
@@ -2720,16 +2620,14 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
             for record in read_jsonl(event_path)
             if record["name"] in internal_phase_by_event
         ]
-        collapse = lambda values: [  # noqa: E731
+        collapse = lambda values: [  # noqa: E731 - one-off local, reads better inline
             value
             for index, value in enumerate(values)
             if index == 0 or value != values[index - 1]
         ]
         self.assertEqual(
             collapse(internal_phases),
-            collapse(
-                [hook_payload["phase"] for hook_payload in hook_payloads]
-            ),
+            collapse([hook_payload["phase"] for hook_payload in hook_payloads]),
         )
 
         # `active_verification.last_heartbeat_at` was persisted while the
@@ -2809,9 +2707,7 @@ class RunProgressJournalIntegrationTests(unittest.TestCase):
         self.config_home = self.tmp_path / "config"
         init_git_repo(self.repo_root)
         self.fake_codex = install_fake_codex(self.tmp_path)
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps({"codex": {"executable": str(self.fake_codex)}}),
@@ -2860,9 +2756,7 @@ class RunProgressJournalIntegrationTests(unittest.TestCase):
                 "XDG_CONFIG_HOME": str(self.config_home),
                 "FAKE_CODEX_MODE": "success",
                 "FAKE_CODEX_SLEEP": "5",
-                "PYTHONPATH": str(REPO_ROOT)
-                + os.pathsep
-                + env.get("PYTHONPATH", ""),
+                "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
             }
         )
         completed = subprocess.run(
@@ -2879,8 +2773,7 @@ class RunProgressJournalIntegrationTests(unittest.TestCase):
     def _passing_contracts(self, count: int) -> dict[str, str]:
         return {
             str(i): _contract_block(
-                '{"type": "file_exists", "path": "README.md", '
-                f'"name": "readme-{i}"}}',
+                f'{{"type": "file_exists", "path": "README.md", "name": "readme-{i}"}}',
                 session=str(i),
             )
             for i in range(1, count + 1)
@@ -2900,12 +2793,8 @@ class RunProgressJournalIntegrationTests(unittest.TestCase):
 
         entries = plans.read_progress_entries(self.plan_dir)
         self.assertEqual(2, len(entries))
-        self.assertEqual(
-            ["1", "2"], [entry.session_id.value for entry in entries]
-        )
-        self.assertEqual(
-            ["complete", "complete"], [entry.status for entry in entries]
-        )
+        self.assertEqual(["1", "2"], [entry.session_id.value for entry in entries])
+        self.assertEqual(["complete", "complete"], [entry.status for entry in entries])
 
         self.assertEqual(2, len(payload["turns"]))
         for turn in payload["turns"]:
@@ -2915,8 +2804,7 @@ class RunProgressJournalIntegrationTests(unittest.TestCase):
     def test_verification_failure_short_circuits_progress_append(self) -> None:
         contracts_by_id = {
             "1": _contract_block(
-                '{"type": "file_exists", "path": "MISSING.md", '
-                '"name": "missing"}',
+                '{"type": "file_exists", "path": "MISSING.md", "name": "missing"}',
                 session="1",
             )
         }
@@ -2945,8 +2833,7 @@ class RunProgressJournalIntegrationTests(unittest.TestCase):
         # Pre-write progress.md with a future schema version so the real
         # append helper raises PlanError without crashing the run.
         plans.progress_path(self.plan_dir).write_text(
-            "# Progress Journal\n"
-            "<!-- agent-session-loop progress-journal v999 -->\n",
+            "# Progress Journal\n<!-- agent-session-loop progress-journal v999 -->\n",
             encoding="utf-8",
         )
 

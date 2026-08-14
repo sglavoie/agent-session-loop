@@ -13,29 +13,29 @@ cannot launch an auditor, and no canonical ledger operation deletes history.
 from __future__ import annotations
 
 import ast
-from datetime import datetime, timezone
 import hashlib
 import importlib
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from datetime import UTC, datetime
+from pathlib import Path
 
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
-from agent_session_loop import assurance_report
-from agent_session_loop import events
-from agent_session_loop import harnesses
-from agent_session_loop import plans
-from agent_session_loop import state
-from agent_session_loop import supervisor_audit
+from agent_session_loop import (
+    assurance_report,
+    events,
+    harnesses,
+    plans,
+    state,
+    supervisor_audit,
+)
 from agent_session_loop.assurance_models import RUBRIC_LANES, AuditRole
 from agent_session_loop.assurance_projection import AuditPublication
-
 from tests import run_suite
 from tests.support import REPO_ROOT, init_git_repo
-
 
 #: Every acceptance criterion of the assurance work, mapped to the regressions
 #: that execute it. A reference is ``tests.module:Class.method`` for a package
@@ -75,8 +75,7 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        "Every eligible persisted loop ends with exactly one truthful "
-        "assurance state.",
+        "Every eligible persisted loop ends with exactly one truthful assurance state.",
         (
             "tests.test_asl_assurance_lifecycle:"
             "TerminalBranchRoutingTests."
@@ -359,29 +358,33 @@ class AuditAccessProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             for name in harnesses.HARNESS_NAMES:
-                with self.subTest(harness=name):
-                    with self.assertRaises(harnesses.HarnessError):
-                        harnesses.get_adapter(name).check_access(
-                            harnesses.audit_read_only_access((Path(tmp),)),
-                            plan_dir=plan_dir,
-                            unsafe_bypass=False,
-                        )
+                with (
+                    self.subTest(harness=name),
+                    self.assertRaises(harnesses.HarnessError),
+                ):
+                    harnesses.get_adapter(name).check_access(
+                        harnesses.audit_read_only_access((Path(tmp),)),
+                        plan_dir=plan_dir,
+                        unsafe_bypass=False,
+                    )
 
     def test_no_adapter_lets_an_audit_inherit_unsafe_bypass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             for name in harnesses.HARNESS_NAMES:
-                with self.subTest(harness=name):
-                    with self.assertRaises(harnesses.HarnessError):
-                        harnesses.get_adapter(name).check_access(
-                            harnesses.audit_read_only_access((Path(tmp),)),
-                            plan_dir=None,
-                            unsafe_bypass=True,
-                        )
+                with (
+                    self.subTest(harness=name),
+                    self.assertRaises(harnesses.HarnessError),
+                ):
+                    harnesses.get_adapter(name).check_access(
+                        harnesses.audit_read_only_access((Path(tmp),)),
+                        plan_dir=None,
+                        unsafe_bypass=True,
+                    )
 
 
 RUN_ID = "20260810T101112123456Z-4242"
 
-FIXED_CLOCK = datetime(2026, 8, 10, 10, 11, 12, tzinfo=timezone.utc)
+FIXED_CLOCK = datetime(2026, 8, 10, 10, 11, 12, tzinfo=UTC)
 
 MANIFEST = (
     "# Manifest\n\n## Repositories\n\n"
@@ -474,9 +477,7 @@ class AdvisoryVerdictTests(unittest.TestCase):
                     # no guard result is the gap the audit is supposed to find.
                     "verification": {
                         "passed": True,
-                        "checks": [
-                            {"name": "tests", "passed": True, "returncode": 0}
-                        ],
+                        "checks": [{"name": "tests", "passed": True, "returncode": 0}],
                         "skipped_checks": [],
                     },
                 }
@@ -539,9 +540,7 @@ class AdvisoryVerdictTests(unittest.TestCase):
             reason=None,
         )
 
-    def _audit(
-        self, history: tuple[Path, Path, Path, Path]
-    ) -> models.AssuranceSummary:
+    def _audit(self, history: tuple[Path, Path, Path, Path]) -> models.AssuranceSummary:
         workspace, plan_dir, state_dir, run_dir = history
         bundle = supervisor_audit.collect_audit_input(
             run_id=RUN_ID,
@@ -624,7 +623,12 @@ class ObservationalStatusTests(unittest.TestCase):
     #: Modules that start an agent turn. The read path may borrow a name from
     #: ``harnesses`` — the harness-name tuple is a vocabulary, not a launcher —
     #: so importing it is allowed and calling into it is not.
-    FORBIDDEN_IMPORTS = ("subprocess", "supervisor_audit", "assurance_catchup", "runner")
+    FORBIDDEN_IMPORTS = (
+        "subprocess",
+        "supervisor_audit",
+        "assurance_catchup",
+        "runner",
+    )
 
     #: The call names that actually start something. Generic names such as
     #: ``run`` are left out on purpose: the read path calls ``inbox.run(...)``
@@ -672,7 +676,7 @@ RUN_A = "20260810T100000000000Z-4241"
 RUN_B = "20260810T110000000000Z-4242"
 T0 = "2026-08-10T10:00:00+00:00"
 #: A metrics window wide enough that nothing these tests write falls outside it.
-WHOLE_HISTORY = datetime(2000, 1, 1, tzinfo=timezone.utc)
+WHOLE_HISTORY = datetime(2000, 1, 1, tzinfo=UTC)
 
 
 def _artifacts(digest: str) -> tuple[models.EvidenceRef, ...]:

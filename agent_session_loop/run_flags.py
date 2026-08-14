@@ -464,16 +464,12 @@ def validate_run_namespace(
 
     max_pending = getattr(ns, "max_pending_sessions", None)
     if max_pending is not None and max_pending <= 0:
-        errors.append(
-            FlagError("--max-pending-sessions must be a positive integer")
-        )
+        errors.append(FlagError("--max-pending-sessions must be a positive integer"))
 
     max_repair_group_attempts = getattr(ns, "max_repair_group_attempts", None)
     if max_repair_group_attempts is not None and max_repair_group_attempts < 0:
         errors.append(
-            FlagError(
-                "--max-repair-group-attempts must be zero or a positive integer"
-            )
+            FlagError("--max-repair-group-attempts must be zero or a positive integer")
         )
 
     cycles = getattr(ns, "max_review_fix_cycles", None)
@@ -524,8 +520,7 @@ def validate_run_namespace(
     if review_harness is not None and review_harness == harness:
         errors.append(
             FlagError(
-                "--review-harness must differ from --harness "
-                f"(both set to {harness!r})"
+                f"--review-harness must differ from --harness (both set to {harness!r})"
             )
         )
 
@@ -550,8 +545,7 @@ def validate_run_namespace(
     if audit_harness is not None and audit_harness == harness:
         errors.append(
             FlagError(
-                "--audit-harness must differ from --harness "
-                f"(both set to {harness!r})"
+                f"--audit-harness must differ from --harness (both set to {harness!r})"
             )
         )
 

@@ -9,8 +9,8 @@ from drifting into subtly different JSON envelopes.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import sys
+from dataclasses import dataclass
 from typing import Any
 
 from . import plans, responses, state

@@ -12,10 +12,7 @@ happens before the ledger re-inspect.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Mapping, Sequence
 import contextlib
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
@@ -27,9 +24,12 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
-import uuid
 
 from . import (
     agent_mux_delivery,
@@ -71,7 +71,6 @@ from .formatting import (
     format_turn_finished_message,
     format_turn_started_message,
 )
-
 
 NOT_IMPLEMENTED_EXIT = 2
 INTERRUPTED_EXIT = 130
@@ -171,9 +170,7 @@ AGENT_MUX_TURN_FINISH_EVENT = agent_mux_delivery.TURN_FINISH_EVENT
 AGENT_MUX_TURN_HANG_SUSPECTED_EVENT = agent_mux_delivery.TURN_HANG_SUSPECTED_EVENT
 AGENT_MUX_TURN_HANG_CLEARED_EVENT = agent_mux_delivery.TURN_HANG_CLEARED_EVENT
 AGENT_MUX_VERIFICATION_START_EVENT = agent_mux_delivery.VERIFICATION_START_EVENT
-AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT = (
-    agent_mux_delivery.VERIFICATION_HEARTBEAT_EVENT
-)
+AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT = agent_mux_delivery.VERIFICATION_HEARTBEAT_EVENT
 AGENT_MUX_VERIFICATION_FINISH_EVENT = agent_mux_delivery.VERIFICATION_FINISH_EVENT
 AGENT_MUX_WAIT_START_EVENT = agent_mux_delivery.WAIT_START_EVENT
 AGENT_MUX_WAIT_END_EVENT = agent_mux_delivery.WAIT_END_EVENT
@@ -185,17 +182,13 @@ AGENT_MUX_START_REASON = agent_mux_delivery.START_REASON
 AGENT_MUX_TURN_START_REASON = agent_mux_delivery.TURN_START_REASON
 AGENT_MUX_TURN_HEARTBEAT_REASON = agent_mux_delivery.TURN_HEARTBEAT_REASON
 AGENT_MUX_TURN_FINISH_REASON = agent_mux_delivery.TURN_FINISH_REASON
-AGENT_MUX_TURN_HANG_SUSPECTED_REASON = (
-    agent_mux_delivery.TURN_HANG_SUSPECTED_REASON
-)
+AGENT_MUX_TURN_HANG_SUSPECTED_REASON = agent_mux_delivery.TURN_HANG_SUSPECTED_REASON
 AGENT_MUX_TURN_HANG_CLEARED_REASON = agent_mux_delivery.TURN_HANG_CLEARED_REASON
 AGENT_MUX_VERIFICATION_START_REASON = agent_mux_delivery.VERIFICATION_START_REASON
 AGENT_MUX_VERIFICATION_HEARTBEAT_REASON = (
     agent_mux_delivery.VERIFICATION_HEARTBEAT_REASON
 )
-AGENT_MUX_VERIFICATION_FINISH_REASON = (
-    agent_mux_delivery.VERIFICATION_FINISH_REASON
-)
+AGENT_MUX_VERIFICATION_FINISH_REASON = agent_mux_delivery.VERIFICATION_FINISH_REASON
 AGENT_MUX_WAIT_START_REASON = agent_mux_delivery.WAIT_START_REASON
 AGENT_MUX_WAIT_END_REASON = agent_mux_delivery.WAIT_END_REASON
 AGENT_MUX_PAUSE_REASON = agent_mux_delivery.PAUSE_REASON
@@ -275,9 +268,7 @@ MAILBOX_REPLY_WAIT_SUSPEND_SKEW_SECONDS = 5.0
 # unsupervised ceiling. Like the skew threshold above, this is a detection
 # bound rather than an operator budget, exercised through the injected clock
 # seams, so it deliberately has no environment override.
-MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS = (
-    mailbox.MAILBOX_LEASE_FRESH_SECONDS
-)
+MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS = mailbox.MAILBOX_LEASE_FRESH_SECONDS
 # A question body is the worker's last-message artifact, which is unbounded,
 # while the mailbox log is capped at 4 MiB with no rotation — one oversized
 # message could consume it. Longer bodies are truncated deterministically to
@@ -314,9 +305,7 @@ MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR = (
     "ASL_MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS"
 )
 MAILBOX_REPLY_WAIT_POLL_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_POLL_SECONDS"
-MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR = (
-    "ASL_MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS"
-)
+MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS"
 _MAILBOX_TOKEN_UNSEEN = object()
 
 # Verification-repair loop control. A verify-failed session is reverted to
@@ -360,9 +349,7 @@ DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING = 8
 REVIEW_CYCLE_DISPOSITION_ALL_CLEAR = (
     review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
 )
-REVIEW_CYCLE_DISPOSITION_REPAIRS = (
-    review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS
-)
+REVIEW_CYCLE_DISPOSITION_REPAIRS = review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS
 REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED = (
     review_continuation.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED
 )
@@ -517,10 +504,13 @@ _GENERATED_REVIEW_VERIFY_SOURCE = "\n".join(
         ),
         "refs = {match.group(0).rstrip('.,);]') for match in path_re.finditer(text)}",
         "nonempty_lines = [line.strip() for line in text.splitlines() if line.strip()]",
-        "status_lines = [line.strip() for line in text.splitlines() if line.strip().startswith('Status:')]",
-        "if len(status_lines) != 1 or status_lines[0] != nonempty_lines[-1]: sys.exit(1)",
+        "status_lines = [line.strip() for line in text.splitlines() if "
+        "line.strip().startswith('Status:')]",
+        "if len(status_lines) != 1 or status_lines[0] != nonempty_lines[-1]: "
+        "sys.exit(1)",
         "status = status_lines[0]",
-        f"if status == {REVIEW_STATUS_ALL_CLEAR!r}: sys.exit(0 if len(refs) >= 3 else 1)",
+        f"if status == {REVIEW_STATUS_ALL_CLEAR!r}: sys.exit(0 if len(refs) >= 3 else "
+        f"1)",
         (
             "match = re.fullmatch("
             "r'Status: ([0-9]+) Findings "
@@ -575,10 +565,7 @@ _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE = "\n".join(
         "    if finding['severity'] not in tally: sys.exit(1)",
         "    tally[finding['severity']] += 1",
         "if (outcome == 'findings') != bool(findings): sys.exit(1)",
-        (
-            "nonempty = [line.strip() for line in md.splitlines() "
-            "if line.strip()]"
-        ),
+        ("nonempty = [line.strip() for line in md.splitlines() if line.strip()]"),
         "status = nonempty[-1] if nonempty else ''",
         f"if status == {review.REVIEW_STATUS_ALL_CLEAR!r}:",
         "    sys.exit(0 if outcome == 'all-clear' else 1)",
@@ -685,10 +672,7 @@ def _review_scope_preamble_lines(*, narrowed: bool) -> list[str]:
             "- Verify each fix below actually closes its finding; report any "
             "that is unresolved as a finding again."
         ),
-        (
-            "- Report newly introduced problems inside this scope as new "
-            "findings."
-        ),
+        ("- Report newly introduced problems inside this scope as new findings."),
         "",
     ]
 
@@ -786,9 +770,7 @@ def _delta_review_scope_lines(delta: Mapping[str, Any]) -> list[str]:
     lines.append(REVIEW_PRIOR_FINDINGS_HEADING)
     lines.append("")
     for finding in delta.get("prior_findings") or ():
-        lines.append(
-            f"- `{finding['id']}` ({finding['severity']}): {finding['title']}"
-        )
+        lines.append(f"- `{finding['id']}` ({finding['severity']}): {finding['title']}")
         for evidence in finding.get("evidence") or ():
             symbol = evidence.get("symbol")
             if symbol:
@@ -885,9 +867,7 @@ def build_generated_review_session_body(
         ),
         indent=2,
     )
-    scope_lines = (
-        _delta_review_scope_lines(delta) if delta is not None else []
-    )
+    scope_lines = _delta_review_scope_lines(delta) if delta is not None else []
     header_lines = [f"# {session_id.display_label}: Final Review", ""]
     repository_lines: list[str] = []
     if workspace is not None:
@@ -897,9 +877,7 @@ def build_generated_review_session_body(
         )
         header_lines.extend(plans.render_session_scope(scope).rstrip().splitlines())
         header_lines.append("")
-        repository_lines = _repository_review_base_lines(
-            workspace, review_bases
-        )
+        repository_lines = _repository_review_base_lines(workspace, review_bases)
     return "\n".join(
         [
             *header_lines,
@@ -937,9 +915,9 @@ def build_generated_review_session_body(
             (
                 "- Also write the structured review artifact "
                 f"`{FINAL_REVIEW_ARTIFACT_FILENAME}` inside this plan "
-                "directory: a JSON object with `\"version\": "
-                f"{artifact_version}`, `\"outcome\"` "
-                "(`\"all-clear\"` or `\"findings\"`), and `\"findings\"` "
+                'directory: a JSON object with `"version": '
+                f'{artifact_version}`, `"outcome"` '
+                '(`"all-clear"` or `"findings"`), and `"findings"` '
                 "(a list, empty for all-clear)."
             ),
             *(
@@ -1187,9 +1165,7 @@ def _claimed_repository_roots(
     """Return the resolved repository roots this run is about to claim."""
     if context.workspace is None:
         return ()
-    return tuple(
-        str(repository.root) for repository in context.workspace.repositories
-    )
+    return tuple(str(repository.root) for repository in context.workspace.repositories)
 
 
 def _workspace_payload_fields(
@@ -1243,8 +1219,7 @@ def _workspace_prompt_lines(
     ]
     for repository in workspace.registry.repositories:
         lines.append(
-            f"- {repository.alias}: path={repository.path}; "
-            f"origin={repository.origin}"
+            f"- {repository.alias}: path={repository.path}; origin={repository.origin}"
         )
     lines.extend(
         [
@@ -1369,9 +1344,7 @@ def _mailbox_protocol_lines(
     def record_references(
         messages: Sequence[mailbox.MailboxMessage],
     ) -> str:
-        return ", ".join(
-            f"seq {message.seq} (id {message.id})" for message in messages
-        )
+        return ", ".join(f"seq {message.seq} (id {message.id})" for message in messages)
 
     def guidance_section(
         records: Sequence[tuple[mailbox.MailboxMessage, str]],
@@ -1420,9 +1393,7 @@ def _mailbox_protocol_lines(
                 )
         if aggregate_budget_omitted:
             record_word = (
-                "record was"
-                if len(aggregate_budget_omitted) == 1
-                else "records were"
+                "record was" if len(aggregate_budget_omitted) == 1 else "records were"
             )
             omission_notices.append(
                 f"{len(aggregate_budget_omitted)} oldest remaining pending "
@@ -1455,8 +1426,7 @@ def _mailbox_protocol_lines(
                     "these records and merge any guidance appended after this "
                     "packet was built."
                     if records
-                    else
-                    "Run the inbox-read command above immediately to read and "
+                    else "Run the inbox-read command above immediately to read and "
                     "acknowledge the omitted records and merge any guidance "
                     "appended after this packet was built."
                 ),
@@ -1504,9 +1474,7 @@ def build_session_prompt(
         _mailbox_protocol_lines(
             read_command=_mailbox_read_command_text(plan_dir, state_dir),
             notify_command=_mailbox_notify_command_text(plan_dir, state_dir),
-            ask_command=_mailbox_ask_command_text(
-                plan_dir, state_dir, resume=False
-            ),
+            ask_command=_mailbox_ask_command_text(plan_dir, state_dir, resume=False),
             resume_ask_command=_mailbox_ask_command_text(
                 plan_dir, state_dir, resume=True
             ),
@@ -1646,9 +1614,7 @@ def build_reply_prompt(
     return "\n".join(lines)
 
 
-def _reply_context_body(
-    reply_text: str, context: qna.QnAContext
-) -> list[str]:
+def _reply_context_body(reply_text: str, context: qna.QnAContext) -> list[str]:
     """Render the ``## ASL reply context`` body (heading excluded).
 
     Shared by :func:`build_reply_prompt` and :func:`build_task_packet` so
@@ -1758,8 +1724,7 @@ def _resolution_context_body(
     """Render the resolution context body shared by both worker modes."""
     if action not in mailbox.RESOLUTION_ACTIONS:
         raise ValueError(
-            "resolution action must be one of: "
-            + ", ".join(mailbox.RESOLUTION_ACTIONS)
+            "resolution action must be one of: " + ", ".join(mailbox.RESOLUTION_ACTIONS)
         )
     if note is not None and not isinstance(note, str):
         raise ValueError("resolution note must be a string or None")
@@ -1917,9 +1882,7 @@ class SessionTaskPacket:
             )
         lines.append("")
 
-        lines.append(
-            "## Read before implementing (open these paths; not embedded)"
-        )
+        lines.append("## Read before implementing (open these paths; not embedded)")
         lines.append(f"- Shared context: {self.context_path}")
         if self.progress_path is not None:
             lines.append(
@@ -1933,9 +1896,7 @@ class SessionTaskPacket:
         lines.append("")
 
         if self.workspace is not None and self.session_scope is not None:
-            lines.extend(
-                _workspace_prompt_lines(self.workspace, self.session_scope)
-            )
+            lines.extend(_workspace_prompt_lines(self.workspace, self.session_scope))
             lines.append("")
 
         if self.repair_references:
@@ -1972,9 +1933,7 @@ class SessionTaskPacket:
         )
         lines.append("")
 
-        lines.append(
-            "## Allowed mutation (the only write that completes this session)"
-        )
+        lines.append("## Allowed mutation (the only write that completes this session)")
         lines.append(
             f"- In {self.session_path}, set `- **Status**: complete` and fill "
             "the `## Handoff` fields for this session only."
@@ -1985,8 +1944,7 @@ class SessionTaskPacket:
             "(flat, top-level bullets)."
         )
         lines.append(
-            "- Do not edit progress.md, manifest readiness metadata, or any "
-            "lock file."
+            "- Do not edit progress.md, manifest readiness metadata, or any lock file."
         )
         lines.append("")
 
@@ -1999,8 +1957,7 @@ class SessionTaskPacket:
 
         lines.append("## Runner signal protocol")
         lines.append(
-            "- After writing the `complete` handoff, print "
-            "`Runner status: complete`."
+            "- After writing the `complete` handoff, print `Runner status: complete`."
         )
         lines.append(
             "- To stop without completing, print `Runner status: paused` then "
@@ -2085,9 +2042,7 @@ def build_task_packet(
     resolution_block: tuple[str, ...] = ()
     if reply_context is not None or reply is not None:
         if reply_context is None or reply is None:
-            raise ValueError(
-                "reply and reply_context must be provided together"
-            )
+            raise ValueError("reply and reply_context must be provided together")
         reply_text = reply.strip()
         if not reply_text:
             raise ValueError("reply must contain non-whitespace content")
@@ -2103,13 +2058,10 @@ def build_task_packet(
     )
     if resolution_requested:
         if reply_block:
-            raise ValueError(
-                "reply and resolution contexts are mutually exclusive"
-            )
+            raise ValueError("reply and resolution contexts are mutually exclusive")
         if resolution_action is None or resolution_context is None:
             raise ValueError(
-                "resolution_action and resolution_context must be provided "
-                "together"
+                "resolution_action and resolution_context must be provided together"
             )
         resolution_block = (
             RESOLUTION_CONTEXT_HEADING,
@@ -2128,14 +2080,10 @@ def build_task_packet(
         session_path=str(canonical_dir / selected.filename),
         context_path=str(canonical_dir / "context.md"),
         progress_path=(
-            str(canonical_dir / plans.PROGRESS_FILE_NAME)
-            if has_progress
-            else None
+            str(canonical_dir / plans.PROGRESS_FILE_NAME) if has_progress else None
         ),
         expansion_path=(
-            str(canonical_dir / selected.expansion_filename)
-            if has_expansion
-            else None
+            str(canonical_dir / selected.expansion_filename) if has_expansion else None
         ),
         predecessor_id=predecessor_value,
         predecessor_path=predecessor_path,
@@ -2230,9 +2178,7 @@ def _resolution_source_metadata(
         "resolution_message_id": pending.resolution_message_id,
         "resolution_seq": pending.resolution_seq,
         "action": pending.action,
-        "note_length": (
-            len(pending.note) if pending.note is not None else None
-        ),
+        "note_length": (len(pending.note) if pending.note is not None else None),
     }
 
 
@@ -2241,10 +2187,7 @@ def _resolution_argv_placeholder(
     note_length: int | None,
 ) -> str:
     note_label = "omitted" if note_length is None else f"{note_length} chars"
-    return (
-        "<asl resolution prompt redacted: "
-        f"action={action}, note={note_label}>"
-    )
+    return f"<asl resolution prompt redacted: action={action}, note={note_label}>"
 
 
 def _sanitize_resolution_argv(
@@ -2275,9 +2218,7 @@ def _persisted_result_argv(
     prompt_kind = live_turn.get("prompt_kind")
     reply_source = live_turn.get("reply_source")
     reply_length = (
-        reply_source.get("reply_length")
-        if isinstance(reply_source, dict)
-        else None
+        reply_source.get("reply_length") if isinstance(reply_source, dict) else None
     )
     if prompt_kind == "reply" and type(reply_length) is int:
         return _sanitize_reply_argv(
@@ -2288,9 +2229,7 @@ def _persisted_result_argv(
 
     resolution_source = live_turn.get("resolution_source")
     action = (
-        resolution_source.get("action")
-        if isinstance(resolution_source, dict)
-        else None
+        resolution_source.get("action") if isinstance(resolution_source, dict) else None
     )
     note_length = (
         resolution_source.get("note_length")
@@ -2342,7 +2281,7 @@ def _build_interactive_help(
     state_dir_arg = getattr(args, "state_dir", None)
     try:
         context = qna.load_qna_context(plan_dir, state_dir=state_dir_arg)
-    except (qna.QnAError, plans.PlanError, OSError):
+    except qna.QnAError, plans.PlanError, OSError:
         return None
     return {
         "questions_command": _questions_command_text(plan_dir, state_dir_arg),
@@ -2376,9 +2315,7 @@ def _requested_model(
     *,
     harness: str,
     is_review_turn: bool = False,
-    implementation_overrides: Mapping[
-        str, Mapping[str, str]
-    ] | None = None,
+    implementation_overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> str | None:
     """Return the raw model request appropriate for one harness turn.
 
@@ -2404,17 +2341,11 @@ def _requested_effort(
     *,
     harness: str,
     is_review_turn: bool = False,
-    implementation_overrides: Mapping[
-        str, Mapping[str, str]
-    ] | None = None,
+    implementation_overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> str | None:
     """Return the raw effort request appropriate for one harness turn."""
     if not is_review_turn:
-        override = (
-            (implementation_overrides or {})
-            .get(harness, {})
-            .get("effort")
-        )
+        override = (implementation_overrides or {}).get(harness, {}).get("effort")
         if override is not None:
             return override
     return getattr(args, "effort", None)
@@ -2425,9 +2356,7 @@ def _selected_model_effort_payload(
     *,
     harness: str | None = None,
     is_review_turn: bool = False,
-    implementation_overrides: Mapping[
-        str, Mapping[str, str]
-    ] | None = None,
+    implementation_overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, str | None]:
     selected_harness = args.harness if harness is None else harness
     selected = config.model_effort_payload(
@@ -2446,9 +2375,7 @@ def _selected_model_effort_payload(
         ),
     )
     if not is_review_turn:
-        harness_overrides = (implementation_overrides or {}).get(
-            selected_harness, {}
-        )
+        harness_overrides = (implementation_overrides or {}).get(selected_harness, {})
         if "model" in harness_overrides:
             selected["model_source"] = config.MODEL_SOURCE_CONTROL
         if "effort" in harness_overrides:
@@ -2518,8 +2445,7 @@ def _harness_preflight_failure(
 
     if executable_path is None:
         message = (
-            f"{requested_harness} executable not found on PATH: "
-            f"{adapter.executable}"
+            f"{requested_harness} executable not found on PATH: {adapter.executable}"
         )
         details.update(
             {
@@ -2534,12 +2460,12 @@ def _harness_preflight_failure(
 
 
 def _utc_run_id() -> str:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     return f"{timestamp}-{os.getpid()}"
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _utc_iso_now() -> str:
@@ -2579,8 +2505,8 @@ def _parse_datetime(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _unsafe_bypass(args: argparse.Namespace) -> bool:
@@ -2656,7 +2582,7 @@ def _pending_guidance_snapshot(
         return ()
     try:
         return mailbox.pending_guidance(plan_dir, state_dir=state_dir_arg)
-    except (OSError, mailbox.MailboxError):
+    except OSError, mailbox.MailboxError:
         return ()
 
 
@@ -3021,8 +2947,7 @@ def _resolve_run_verification_context(
             )
         if isinstance(metadata, plans.PlanMetadata) and metadata.cwd != str(cwd):
             raise plans.PlanError(
-                "run cwd does not match stored plan metadata: "
-                f"{cwd} != {metadata.cwd}"
+                f"run cwd does not match stored plan metadata: {cwd} != {metadata.cwd}"
             )
         return verification.VerificationContext.legacy(cwd, plan_dir=plan_dir)
 
@@ -3320,8 +3245,7 @@ def _run_git(
         return subprocess.run(
             ["git", "-C", str(cwd), *args],
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     except FileNotFoundError as error:
@@ -3342,8 +3266,7 @@ def _run_git_bytes(
     try:
         return subprocess.run(
             ["git", "-C", str(cwd), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     except FileNotFoundError as error:
@@ -3393,9 +3316,7 @@ def _default_excludes_file() -> Path | None:
     return repository_evidence.default_excludes_file()
 
 
-def _effective_excludes_file(
-    cwd: Path, repo_root: Path
-) -> tuple[str, Path | None]:
+def _effective_excludes_file(cwd: Path, repo_root: Path) -> tuple[str, Path | None]:
     """Compatibility wrapper for effective global exclude resolution."""
     return repository_evidence.effective_excludes_file(
         cwd, repo_root, _run_git_bytes_fn=_run_git_bytes
@@ -3423,6 +3344,7 @@ def _review_guard_changed_paths(
 def _review_guard_changed_summary(changed_paths: Mapping[str, Any]) -> str:
     """Compatibility wrapper for the historical bounded change summary."""
     return repository_evidence.format_repository_changes(changed_paths)
+
 
 def _validate_git_worktree(cwd: Path) -> None:
     result = _run_git(cwd, ["rev-parse", "--is-inside-work-tree"])
@@ -3534,9 +3456,18 @@ def _prepare_stream_logs(paths: dict[str, Path]) -> harnesses.StreamCallback:
     return stream_callback
 
 
-def _turn_paths(
-    run_dir: Path, *, turn_index: int, session_id: str
-) -> dict[str, Path]:
+def _live_stream_callback(
+    log_stream_callback: harnesses.StreamCallback,
+    live_turn: _LiveTurn,
+) -> harnesses.StreamCallback:
+    def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
+        log_stream_callback(stream_name, text)
+        live_turn.record_activity(stream_name, text)
+
+    return stream_callback
+
+
+def _turn_paths(run_dir: Path, *, turn_index: int, session_id: str) -> dict[str, Path]:
     artifact_dir = run_dir / f"turn-{turn_index:04d}-{_session_path_label(session_id)}"
     return {
         "artifact_dir": artifact_dir,
@@ -3685,9 +3616,7 @@ _RETRY_AT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"retry-after:\s*(\d+)", re.IGNORECASE),
     re.compile(r"resets?\s+(?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
     re.compile(r"reset\s+(?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
-    re.compile(
-        r"try again\s+(?:at|after|in|on)\s+([^\n.]{1,48})", re.IGNORECASE
-    ),
+    re.compile(r"try again\s+(?:at|after|in|on)\s+([^\n.]{1,48})", re.IGNORECASE),
     re.compile(r"will reset (?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
 )
 
@@ -3890,9 +3819,7 @@ def _write_turn_artifacts(
         "run_id": run_id,
         "turn_index": turn_index,
         **_session_identity_payload(session_id),
-        "session_kind": live_turn.get(
-            "session_kind", SESSION_KIND_IMPLEMENTATION
-        ),
+        "session_kind": live_turn.get("session_kind", SESSION_KIND_IMPLEMENTATION),
         "total_sessions": live_turn.get("total_sessions"),
         "artifact_dir": str(paths["artifact_dir"]),
         "harness": result.name,
@@ -3934,9 +3861,7 @@ def _write_turn_artifacts(
         and not result.timed_out
         and runner_signals.get("runner_pause") is None
     ):
-        payload["failure_classification"] = classify_harness_failure(
-            result
-        ).to_dict()
+        payload["failure_classification"] = classify_harness_failure(result).to_dict()
     if live_turn.get("action_required") is not None:
         payload["action_required"] = live_turn["action_required"]
     if plan_error is not None:
@@ -3967,9 +3892,7 @@ def _write_json_file(
     )
     try:
         with temporary_path.open("w", encoding="utf-8") as temporary_file:
-            temporary_file.write(
-                json.dumps(payload, sort_keys=True, indent=2) + "\n"
-            )
+            temporary_file.write(json.dumps(payload, sort_keys=True, indent=2) + "\n")
             if durable:
                 temporary_file.flush()
                 durability.fullsync(temporary_file.fileno())
@@ -3981,10 +3904,8 @@ def _write_json_file(
             finally:
                 os.close(directory_fd)
     finally:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             temporary_path.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def _write_bytes_file(path: Path, payload: bytes) -> None:
@@ -4005,10 +3926,8 @@ def _read_optional_bytes(path: Path) -> bytes | None:
 
 def _restore_optional_bytes(path: Path, payload: bytes | None) -> None:
     if payload is None:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             path.unlink()
-        except FileNotFoundError:
-            pass
         return
     _write_bytes_file(path, payload)
 
@@ -4073,8 +3992,7 @@ def _run_spec_commit(
             argv,
             cwd=canonical_cwd,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     except FileNotFoundError as error:
@@ -4245,9 +4163,7 @@ def _compact_snapshot(snapshot: Any) -> Any:
     """
     if not isinstance(snapshot, dict):
         return snapshot
-    return {
-        key: value for key, value in snapshot.items() if key != "sessions"
-    }
+    return {key: value for key, value in snapshot.items() if key != "sessions"}
 
 
 def _compact_turn_summary(turn: Any) -> Any:
@@ -4581,9 +4497,7 @@ def _notify_agent_mux_loop_wait_ended(
         extra={
             "question_id": question_id,
             "wait_reason": wait_reason,
-            "delivery_state": (
-                "consumed" if closure_id is not None else "unconsumed"
-            ),
+            "delivery_state": ("consumed" if closure_id is not None else "unconsumed"),
             "closure_consumed": closure_id is not None,
             **({"closure_id": closure_id} if closure_id is not None else {}),
         },
@@ -4865,9 +4779,7 @@ def _clear_waiting_for_reply(
         resolution_seq,
     )
     if any(value is not None for value in resolution_values):
-        if reason != "resolution" or any(
-            value is None for value in resolution_values
-        ):
+        if reason != "resolution" or any(value is None for value in resolution_values):
             raise ValueError(
                 "resolution metadata must be complete and use reason resolution"
             )
@@ -4996,7 +4908,7 @@ def _finite_positive_env(
         return default
     try:
         value = float(raw.strip())
-    except (AttributeError, ValueError):
+    except AttributeError, ValueError:
         return default
     if not math.isfinite(value) or value <= 0:
         return default
@@ -5054,8 +4966,7 @@ def _mailbox_question_id(
 ) -> str:
     """Return the retry-stable UUID5 identity for one completed turn."""
     identity = (
-        f"asl-mailbox-question:{plan_dir.resolve()}:{run_id}:"
-        f"{session_id}:{turn_index}"
+        f"asl-mailbox-question:{plan_dir.resolve()}:{run_id}:{session_id}:{turn_index}"
     )
     return str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
 
@@ -5090,7 +5001,7 @@ def _worker_pause_resolution_for_turn(
     """
     try:
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir_arg)
-    except (OSError, mailbox.MailboxError):
+    except OSError, mailbox.MailboxError:
         return None
 
     worker_question_ids = {
@@ -5144,11 +5055,7 @@ def _ensure_mailbox_question(
         view: mailbox.MailboxView,
     ) -> mailbox.MailboxMessage | None:
         existing = next(
-            (
-                message
-                for message in view.messages
-                if message.id == question_id
-            ),
+            (message for message in view.messages if message.id == question_id),
             None,
         )
         if existing is None:
@@ -5161,14 +5068,9 @@ def _ensure_mailbox_question(
             or existing.session_id != session_id
             or existing.turn_index != turn_index
             or existing.waiter_origin != mailbox.WAITER_ORIGIN_RUNNER
-            or (
-                existing.delivery_mode != mailbox.DELIVERY_MODE_WAIT
-                and closed is None
-            )
+            or (existing.delivery_mode != mailbox.DELIVERY_MODE_WAIT and closed is None)
         ):
-            raise _MailboxReplyWaitUnavailable(
-                qna.REASON_MISSING_QUESTION_CONTEXT
-            )
+            raise _MailboxReplyWaitUnavailable(qna.REASON_MISSING_QUESTION_CONTEXT)
         return existing
 
     try:
@@ -5184,13 +5086,10 @@ def _ensure_mailbox_question(
     if existing is not None:
         if (
             existing.delivery_mode == mailbox.DELIVERY_MODE_WAIT
-            and
-            view.active_wait_for(existing.id) is None
-            and closed is None
+            and view.active_wait_for(existing.id) is None
+            and view.closure_for(existing.id) is None
         ):
-            mailbox.append_wait_start(
-                plan_dir, existing.id, state_dir=state_dir_arg
-            )
+            mailbox.append_wait_start(plan_dir, existing.id, state_dir=state_dir_arg)
         return existing
     # A question append is refused at the reduced question cap, not the file
     # cap; the wait loop's own guard stays on ``view.full`` because there the
@@ -5227,9 +5126,7 @@ def _ensure_mailbox_question(
         raise _MailboxReplyWaitUnavailable(reason) from error
     raced = existing_question(raced_view)
     if raced is None:
-        raise _MailboxReplyWaitUnavailable(
-            qna.REASON_MISSING_QUESTION_CONTEXT
-        )
+        raise _MailboxReplyWaitUnavailable(qna.REASON_MISSING_QUESTION_CONTEXT)
     return raced
 
 
@@ -5261,9 +5158,7 @@ def _prepare_mailbox_reply_wait(
         )
         raise _MailboxReplyWaitUnavailable(reason) from error
     if not lease.fresh:
-        raise _MailboxReplyWaitUnavailable(
-            lease.reason or mailbox.ERROR_LEASE_READ
-        )
+        raise _MailboxReplyWaitUnavailable(lease.reason or mailbox.ERROR_LEASE_READ)
 
     settings = _mailbox_reply_wait_settings(environ)
     started_monotonic = monotonic()
@@ -5279,9 +5174,7 @@ def _prepare_mailbox_reply_wait(
         session_id=session_id,
         turn_index=turn_index,
         started_at=resolved_started_at,
-        base_deadline=(
-            resolved_started_at + timedelta(seconds=settings.base_seconds)
-        ),
+        base_deadline=(resolved_started_at + timedelta(seconds=settings.base_seconds)),
         unsupervised_deadline_at=(
             resolved_started_at
             + timedelta(seconds=settings.unsupervised_ceiling_seconds)
@@ -5470,17 +5363,14 @@ def _wait_for_mailbox_reply(
         # itself is deliberately not extended.
         skew_monotonic = monotonic()
         skew_wall = wall_clock()
-        skew = (
-            (skew_wall - last_skew_wall).total_seconds()
-            - (skew_monotonic - last_skew_monotonic)
+        skew = (skew_wall - last_skew_wall).total_seconds() - (
+            skew_monotonic - last_skew_monotonic
         )
         last_skew_monotonic = skew_monotonic
         last_skew_wall = skew_wall
         if skew > MAILBOX_REPLY_WAIT_SUSPEND_SKEW_SECONDS:
             suspend_skew_seconds += skew
-            suspend_lease_grace_seconds = (
-                MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS
-            )
+            suspend_lease_grace_seconds = MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS
             lease_grace_until = (
                 skew_monotonic + MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS
             )
@@ -5492,13 +5382,9 @@ def _wait_for_mailbox_reply(
                 payload,
                 question_id=question_id,
                 base_deadline=skew_wall
-                + timedelta(
-                    seconds=max(0.0, active_deadline - skew_monotonic)
-                ),
+                + timedelta(seconds=max(0.0, active_deadline - skew_monotonic)),
                 unsupervised_deadline_at=skew_wall
-                + timedelta(
-                    seconds=max(0.0, unsupervised_deadline() - skew_monotonic)
-                ),
+                + timedelta(seconds=max(0.0, unsupervised_deadline() - skew_monotonic)),
                 persistence=persistence,
             )
 
@@ -5550,9 +5436,7 @@ def _wait_for_mailbox_reply(
                     **_lease_evidence(
                         last_lease,
                         suspend_skew_seconds=suspend_skew_seconds,
-                        suspend_lease_grace_seconds=(
-                            suspend_lease_grace_seconds
-                        ),
+                        suspend_lease_grace_seconds=(suspend_lease_grace_seconds),
                         unsupervised_seconds=unsupervised_elapsed(),
                     ),
                 )
@@ -5572,9 +5456,7 @@ def _wait_for_mailbox_reply(
                     **_lease_evidence(
                         last_lease,
                         suspend_skew_seconds=suspend_skew_seconds,
-                        suspend_lease_grace_seconds=(
-                            suspend_lease_grace_seconds
-                        ),
+                        suspend_lease_grace_seconds=(suspend_lease_grace_seconds),
                         unsupervised_seconds=unsupervised_elapsed(),
                     ),
                 )
@@ -5618,9 +5500,7 @@ def _wait_for_mailbox_reply(
                         **_lease_evidence(
                             last_lease,
                             suspend_skew_seconds=suspend_skew_seconds,
-                            suspend_lease_grace_seconds=(
-                                suspend_lease_grace_seconds
-                            ),
+                            suspend_lease_grace_seconds=(suspend_lease_grace_seconds),
                             unsupervised_seconds=unsupervised_elapsed(),
                         ),
                     )
@@ -5714,9 +5594,7 @@ def _finish_mailbox_reply_wait_lifecycle(
     }
     if closure.kind == mailbox.KIND_REPLY:
         return _MailboxReplyWaitResult(reason="reply", reply=closure, **common)
-    return _MailboxReplyWaitResult(
-        reason="resolution", resolution=closure, **common
-    )
+    return _MailboxReplyWaitResult(reason="resolution", resolution=closure, **common)
 
 
 class _ReplyStatePreserver:
@@ -5910,7 +5788,7 @@ def _note_lines(payload: dict[str, Any], *, prefix: str) -> list[str]:
 class _CoordinatedStderrStream:
     """Line-buffering stream proxy that shares the runner output lock."""
 
-    def __init__(self, coordinator: "_StderrOutputCoordinator") -> None:
+    def __init__(self, coordinator: _StderrOutputCoordinator) -> None:
         self._coordinator = coordinator
 
     def write(self, text: str) -> int:
@@ -5955,7 +5833,7 @@ class _StderrOutputCoordinator:
             return False
         try:
             return bool(isatty())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return False
 
     def fileno(self) -> int:
@@ -5971,7 +5849,7 @@ class _StderrOutputCoordinator:
                     file=self._target_stream(),
                     flush=True,
                 )
-            except (BrokenPipeError, OSError):
+            except BrokenPipeError, OSError:
                 # The sink reader is gone (e.g. an escalating helper exited
                 # and abandoned this run's pipe). Disable the sink for the
                 # rest of the run; durable truth stays in state.json /
@@ -5989,7 +5867,7 @@ class _StderrOutputCoordinator:
                         file=self._target_stream(),
                         flush=True,
                     )
-            except (BrokenPipeError, OSError):
+            except BrokenPipeError, OSError:
                 self.enabled = False
 
     def write_unprefixed(self, text: str) -> int:
@@ -6015,7 +5893,7 @@ class _StderrOutputCoordinator:
                     for line in complete_lines:
                         stream.write(line)
                     stream.flush()
-                except (BrokenPipeError, OSError):
+                except BrokenPipeError, OSError:
                     self.enabled = False
         return len(text)
 
@@ -6032,7 +5910,7 @@ class _StderrOutputCoordinator:
                 if buffered:
                     stream.write(buffered)
                 stream.flush()
-            except (BrokenPipeError, OSError):
+            except BrokenPipeError, OSError:
                 self.enabled = False
 
 
@@ -6100,7 +5978,8 @@ class _ProgressReporter:
             f"session {_format_session_label(heartbeat)} heartbeat "
             f"(elapsed {format_duration_seconds(heartbeat['elapsed_seconds'])}, "
             f"idle {format_duration_seconds(heartbeat['idle_seconds'])}, "
-            f"last activity {_format_local_datetime(heartbeat.get('last_activity_at'))}, "
+            f"last activity "
+            f"{_format_local_datetime(heartbeat.get('last_activity_at'))}, "
             f"stream {stream})"
         )
 
@@ -6136,7 +6015,8 @@ class _ProgressReporter:
             f"check {payload['check_index'] + 1}/{payload['check_count']} "
             f"{payload['name']} "
             f"(elapsed {format_duration_seconds(payload['elapsed_seconds'])}, "
-            f"check elapsed {format_duration_seconds(payload['check_elapsed_seconds'])})"
+            f"check elapsed "
+            f"{format_duration_seconds(payload['check_elapsed_seconds'])})"
         )
 
     def verification_check_finished(self, payload: dict[str, Any]) -> None:
@@ -6339,9 +6219,7 @@ def _compact_status_lines(
     if not isinstance(active_verification, dict):
         active_verification = None
 
-    fallback_snapshot = payload.get("final_snapshot") or payload.get(
-        "initial_snapshot"
-    )
+    fallback_snapshot = payload.get("final_snapshot") or payload.get("initial_snapshot")
     if not isinstance(fallback_snapshot, dict):
         fallback_snapshot = None
     counts = _compact_status_counts(snapshot, fallback_snapshot)
@@ -6384,9 +6262,7 @@ def _compact_status_lines(
         check_elapsed = active_verification.get("check_elapsed_seconds")
         timing_parts = []
         if elapsed is not None:
-            timing_parts.append(
-                f"elapsed {format_duration_seconds(elapsed)}"
-            )
+            timing_parts.append(f"elapsed {format_duration_seconds(elapsed)}")
         if check_elapsed is not None:
             timing_parts.append(
                 f"check elapsed {format_duration_seconds(check_elapsed)}"
@@ -6426,15 +6302,11 @@ def _compact_status_lines(
             f"turn {next_turn_index}; {counts_text}"
         )
         if total_duration_seconds is not None:
-            current_text += (
-                f"; total {format_duration_seconds(total_duration_seconds)}"
-            )
+            current_text += f"; total {format_duration_seconds(total_duration_seconds)}"
     else:
         current_text = f"status: no active turn; {counts_text}; next session none"
         if total_duration_seconds is not None:
-            current_text += (
-                f"; total {format_duration_seconds(total_duration_seconds)}"
-            )
+            current_text += f"; total {format_duration_seconds(total_duration_seconds)}"
 
     active_harness = (
         active_turn.get("harness")
@@ -6473,8 +6345,7 @@ def _compact_status_lines(
     stop_state = "on" if control.get("stop_after_current") else "off"
     tail_state = "on" if control.get("tail_enabled") else "off"
     control_line = (
-        "status: controls "
-        f"stop-after-current {stop_state}; live tail {tail_state}"
+        f"status: controls stop-after-current {stop_state}; live tail {tail_state}"
     )
 
     artifact_source = _compact_artifact_source(payload, active_turn)
@@ -6683,8 +6554,7 @@ class _HangSentinel:
 
         result_grace_hit = (
             result_seen_monotonic is not None
-            and self._monotonic() - result_seen_monotonic
-            >= self._result_grace_seconds
+            and self._monotonic() - result_seen_monotonic >= self._result_grace_seconds
         )
         should_sample = pid is not None and (
             result_grace_hit
@@ -6770,9 +6640,7 @@ class _HangSentinel:
                 block: dict[str, Any] = {
                     "reason": reason,
                     "detected_at": (
-                        previous["detected_at"]
-                        if previous is not None
-                        else checked_at
+                        previous["detected_at"] if previous is not None else checked_at
                     ),
                     "idle_seconds": idle_seconds,
                     "harness_pid": pid,
@@ -6874,10 +6742,9 @@ class _LiveTurn:
         self._last_activity_at = self._started_at
 
     def start(self) -> None:
-        with self._lock:
-            with self._persistence.lock:
-                self._payload["active_turn"] = dict(self._active_turn)
-                self._persistence.write_state(self._payload)
+        with self._lock, self._persistence.lock:
+            self._payload["active_turn"] = dict(self._active_turn)
+            self._persistence.write_state(self._payload)
         self._progress.turn_started(self._active_turn)
         self._thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self._thread.start()
@@ -6995,9 +6862,7 @@ class _LiveTurn:
 
         while not self._stop.is_set():
             deadline = (
-                next_heartbeat
-                if next_poll is None
-                else min(next_heartbeat, next_poll)
+                next_heartbeat if next_poll is None else min(next_heartbeat, next_poll)
             )
             delay = max(0.0, deadline - self._monotonic())
             woken = self._wait(delay)
@@ -7277,9 +7142,7 @@ class _LiveVerification:
         self._check_count = check_count
         self._check_names = check_names
         self._check_kinds = check_kinds
-        self._check_repos = (
-            check_repos if check_repos else (None,) * check_count
-        )
+        self._check_repos = check_repos if check_repos else (None,) * check_count
         self._parallel = parallel
         self._heartbeat_interval = heartbeat_interval
         self._lock = threading.Lock()
@@ -7797,9 +7660,9 @@ def _registered_session_commit_targets(
 ) -> list[dict[str, Any]]:
     if guard.get("passed") is not True:
         raise RunError("workspace write guard did not pass")
-    for field in ("added", "removed", "violations"):
-        if guard.get(field):
-            raise RunError(f"workspace write guard has unsafe {field} evidence")
+    for guard_field in ("added", "removed", "violations"):
+        if guard.get(guard_field):
+            raise RunError(f"workspace write guard has unsafe {guard_field} evidence")
     if guard.get("unavailable"):
         raise RunError("workspace write guard evidence is unavailable")
     aliases = guard.get("authorized_aliases")
@@ -7831,9 +7694,7 @@ def _registered_session_commit_targets(
         if repository.alias in changed_aliases
     ]
     if aliases != expected_aliases:
-        raise RunError(
-            "workspace write guard changed and authorized aliases disagree"
-        )
+        raise RunError("workspace write guard changed and authorized aliases disagree")
     targets = _commit_targets(
         verification_context,
         aliases=aliases,
@@ -8005,7 +7866,9 @@ def _finish_run(
         payload["run_finished_at"] = _isoformat(finished_at)
         started_at = _parse_datetime(payload.get("run_started_at"))
         payload["duration_seconds"] = (
-            _duration_seconds(started_at, finished_at) if started_at is not None else None
+            _duration_seconds(started_at, finished_at)
+            if started_at is not None
+            else None
         )
         payload["active_turn"] = None
         payload["active_verification"] = None
@@ -8268,9 +8131,7 @@ def _pause_run(
                 "reason": reason,
                 "message": message,
                 "details": (
-                    {}
-                    if details is None
-                    else _bounded_verification_details(details)
+                    {} if details is None else _bounded_verification_details(details)
                 ),
             },
         )
@@ -8378,7 +8239,9 @@ def _arm_requested_abort(
     control_payload["abort_deadline"] = deadline
     if not mailbox_enabled:
         return
-    try:
+    # The kill is already armed; failing to warn the worker must not
+    # terminate the turn or lose the abort.
+    with contextlib.suppress(OSError, mailbox.MailboxError):
         mailbox.append_guidance(
             plan_dir,
             _abort_turn_guidance_text(
@@ -8388,10 +8251,6 @@ def _arm_requested_abort(
             ),
             state_dir=state_dir_arg,
         )
-    except (OSError, mailbox.MailboxError):
-        # The kill is already armed; failing to warn the worker must not
-        # terminate the turn or lose the abort.
-        pass
 
 
 def _degrade_abort_to_stop_after_current(
@@ -8419,9 +8278,7 @@ def _degrade_abort_to_stop_after_current(
             action=consumed,
             context=context,
             persistence=persistence,
-            message=(
-                "turn abort degraded to stop-after-current: no turn in flight"
-            ),
+            message=("turn abort degraded to stop-after-current: no turn in flight"),
         )
     requested = control_state.request_stop_after_current()
     if requested is not None:
@@ -8620,7 +8477,7 @@ class _MailboxPoll:
                 self._plan_dir,
                 state_dir=self._state_dir_arg,
             )
-        except (OSError, mailbox.MailboxError):
+        except OSError, mailbox.MailboxError:
             # Mailbox status remains authoritative through its own direct read;
             # a live observation failure must not terminate the harness turn.
             return
@@ -8857,9 +8714,7 @@ def _readiness_gate_passed(report: preflight.PreflightReport) -> bool:
     readiness = report.readiness
     if readiness is None:
         return False
-    if readiness.state != "loop-ready":
-        return False
-    return True
+    return readiness.state == "loop-ready"
 
 
 def _resume_gate_passed(report: preflight.PreflightReport) -> bool:
@@ -8903,9 +8758,7 @@ def _review_only_complete_start(
         return False
     if readiness.state != "complete":
         return False
-    if readiness.readiness_sha256 != report.expected_readiness_sha256:
-        return False
-    return True
+    return readiness.readiness_sha256 == report.expected_readiness_sha256
 
 
 def _readiness_gate_failure_message(
@@ -8993,9 +8846,7 @@ def _strip_own_lock_findings(
             return False
         if finding.path != own_lock_path:
             return False
-        if lock_info.pid is not None and lock_info.pid != own_pid:
-            return False
-        return True
+        return not (lock_info.pid is not None and lock_info.pid != own_pid)
 
     filtered = tuple(
         finding for finding in report.findings if not is_self_lock(finding)
@@ -9019,9 +8870,7 @@ def _readiness_gate_blockers(
     report: preflight.PreflightReport,
 ) -> tuple[preflight.PreflightFinding, ...]:
     return tuple(
-        finding
-        for finding in report.findings
-        if finding.severity in {"red", "yellow"}
+        finding for finding in report.findings if finding.severity in {"red", "yellow"}
     )
 
 
@@ -9122,9 +8971,7 @@ def _repair_readiness_gate(
                 )
                 if reduced is not None:
                     return reduced
-            rerun_report = preflight.run_preflight(
-                plan_dir, **preflight_kwargs
-            )
+            rerun_report = preflight.run_preflight(plan_dir, **preflight_kwargs)
         except plans.PlanError:
             return None
         core_skipped = False
@@ -9167,9 +9014,7 @@ def _repair_readiness_gate(
 
     blockers = _readiness_gate_blockers(report)
     non_readiness_blockers = tuple(
-        blocker
-        for blocker in blockers
-        if blocker.category != "manifest-readiness"
+        blocker for blocker in blockers if blocker.category != "manifest-readiness"
     )
     if (
         not _readiness_gate_passed(report)
@@ -9238,14 +9083,9 @@ def _verification_failure_summary(
 ) -> str:
     failures = result.failures
     total = result.gate_count
-    parts = [
-        f"{check.name} ({check.failure_reason or 'failed'})"
-        for check in failures
-    ]
+    parts = [f"{check.name} ({check.failure_reason or 'failed'})" for check in failures]
     rendered = "; ".join(parts) if parts else "no checks reported"
-    return (
-        f"{len(failures)} of {total} verification check(s) failed: {rendered}"
-    )
+    return f"{len(failures)} of {total} verification check(s) failed: {rendered}"
 
 
 def _verification_failure_details(
@@ -9269,9 +9109,7 @@ def _verification_failure_details(
         "checks": [asdict(check) for check in result.checks],
         "skipped_checks": [asdict(check) for check in result.skipped_checks],
         "failures": [asdict(check) for check in result.failures],
-        "diagnostic_failures": [
-            asdict(check) for check in result.diagnostic_failures
-        ],
+        "diagnostic_failures": [asdict(check) for check in result.diagnostic_failures],
     }
 
 
@@ -9561,9 +9399,7 @@ def _review_cycle_state(
     snapshot_or_plan_dir: plans.PlanSnapshot | str | Path | None = None,
 ) -> dict[str, Any]:
     """Compatibility wrapper for shared cross-process cap accounting."""
-    return review_continuation.review_cycle_state(
-        event_path, snapshot_or_plan_dir
-    )
+    return review_continuation.review_cycle_state(event_path, snapshot_or_plan_dir)
 
 
 def _review_artifact_digests(plan_dir: Path) -> tuple[str | None, str | None]:
@@ -9700,9 +9536,7 @@ def _compute_review_delta_context(
             return degraded, "base-not-ancestor"
         # Both probes are pinned to repository-wide, root-relative, rename-free
         # output; see :data:`_DELTA_DIFF_FLAGS` for what each flag rules out.
-        names = _run_git(
-            cwd, ["diff", "--name-only", *_DELTA_DIFF_FLAGS, base]
-        )
+        names = _run_git(cwd, ["diff", "--name-only", *_DELTA_DIFF_FLAGS, base])
         if names.returncode != 0:
             return degraded, "base-diff-failed"
         index_names = _run_git(
@@ -9736,9 +9570,7 @@ def _compute_review_delta_context(
         # Every flagged path therefore joins the scope wholesale: the same
         # blindness that hides the repair also makes it impossible to tell
         # which flagged entries moved.
-        index_flags = _run_git(
-            cwd, ["ls-files", "-v", "--full-name", "--", ":(top)"]
-        )
+        index_flags = _run_git(cwd, ["ls-files", "-v", "--full-name", "--", ":(top)"])
         if index_flags.returncode != 0:
             return degraded, "index-flags-scan-failed"
     except RunError:
@@ -9870,9 +9702,7 @@ def _compute_registered_review_delta_context(
                 if line
             }
         )
-        qualified_paths = [
-            f"{repository.alias}:{path}" for path in relative_paths
-        ]
+        qualified_paths = [f"{repository.alias}:{path}" for path in relative_paths]
         all_changed.extend(qualified_paths)
         repository_deltas.append(
             {
@@ -9939,12 +9769,8 @@ def _refresh_pending_review_scope(
         {
             "run_id": run_id,
             "session_id": session.id,
-            "scope": (
-                delta["mode"] if delta is not None else REVIEW_SCOPE_FULL
-            ),
-            "base_sha": (
-                delta.get("base_sha") if delta is not None else None
-            ),
+            "scope": (delta["mode"] if delta is not None else REVIEW_SCOPE_FULL),
+            "base_sha": (delta.get("base_sha") if delta is not None else None),
             **(
                 {"repositories": delta.get("repositories")}
                 if delta is not None and "repositories" in delta
@@ -9966,10 +9792,7 @@ def _prior_review_cap(
     for cycle in reversed(_read_prior_review_cycles(event_path)):
         cycle_number = cycle.get("cycle")
         cycle_session = cycle.get("review_session_id")
-        if (
-            resume.source_cycle is not None
-            and cycle_number != resume.source_cycle
-        ):
+        if resume.source_cycle is not None and cycle_number != resume.source_cycle:
             continue
         if (
             resume.review_session_id is not None
@@ -10020,13 +9843,9 @@ def _review_reopen_record(
             else None
         ),
         "source_review_output_sha256": resume.source_review_output_sha256,
-        "source_review_artifact_sha256": (
-            resume.source_review_artifact_sha256
-        ),
+        "source_review_artifact_sha256": (resume.source_review_artifact_sha256),
         "current_review_output_sha256": resume.current_review_output_sha256,
-        "current_review_artifact_sha256": (
-            resume.current_review_artifact_sha256
-        ),
+        "current_review_artifact_sha256": (resume.current_review_artifact_sha256),
         "repair_session_ids": list(repair_session_ids),
         "materialized": materialized,
         "recovered": recovered,
@@ -10035,9 +9854,7 @@ def _review_reopen_record(
         "historical_materializations_before": before_count,
         "historical_materializations_after": after_count,
         "minimum_required_cap": resume.minimum_required_cap,
-        "before_max_review_fix_cycles": _prior_review_cap(
-            event_path, resume
-        ),
+        "before_max_review_fix_cycles": _prior_review_cap(event_path, resume),
         "after_max_review_fix_cycles": max_review_fix_cycles,
     }
     if resume.source_findings is not None:
@@ -10061,7 +9878,7 @@ def _record_review_reopen(
     *,
     event_path: Path,
     payload: dict[str, Any],
-    persistence: "_RunPersistence",
+    persistence: _RunPersistence,
     record: dict[str, Any],
 ) -> None:
     """Persist an append-only reopen attempt and expose it in run JSON."""
@@ -10098,7 +9915,7 @@ def _set_review_resume(
     snapshot: plans.PlanSnapshot,
     event_path: Path,
     payload: dict[str, Any],
-    persistence: "_RunPersistence",
+    persistence: _RunPersistence,
     max_repair_group_attempts: int,
     max_review_fix_cycles: int,
     review_requested: bool,
@@ -10118,9 +9935,7 @@ def _set_review_resume(
     return resume
 
 
-def _set_existing_review_verdict(
-    payload: dict[str, Any], plan_dir: Path
-) -> None:
+def _set_existing_review_verdict(payload: dict[str, Any], plan_dir: Path) -> None:
     """Project the persisted verdict when a continuation stops before a turn."""
 
     verdict = _read_review_verdict(plan_dir)
@@ -10141,7 +9956,7 @@ def _record_review_cycle(
     *,
     event_path: Path,
     payload: dict[str, Any],
-    persistence: "_RunPersistence",
+    persistence: _RunPersistence,
     cycle_record: dict[str, Any],
     disposition: str,
 ) -> None:
@@ -10150,9 +9965,7 @@ def _record_review_cycle(
     with persistence.lock:
         payload.setdefault("review_cycles", []).append(cycle_record)
         payload["review_fix_disposition"] = disposition
-        persistence.append_event(
-            event_path, events.REVIEW_CYCLE_EVENT, cycle_record
-        )
+        persistence.append_event(event_path, events.REVIEW_CYCLE_EVENT, cycle_record)
         persistence.write_state(payload)
 
 
@@ -10160,7 +9973,7 @@ def _advance_review_cycle(
     *,
     event_path: Path,
     payload: dict[str, Any],
-    persistence: "_RunPersistence",
+    persistence: _RunPersistence,
     args: argparse.Namespace,
     cwd: Path,
     session_id: str,
@@ -10282,15 +10095,11 @@ def _advance_review_cycle(
             None,
         )
         if exhausted_group is not None:
-            cycle_record["exhausted_repair_group"] = (
+            cycle_record["exhausted_repair_group"] = exhausted_group.repair_group
+            cycle_record["exhausted_repair_group_attempts"] = historical_attempts[
                 exhausted_group.repair_group
-            )
-            cycle_record["exhausted_repair_group_attempts"] = (
-                historical_attempts[exhausted_group.repair_group]
-            )
-            return record_and_complete(
-                REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED
-            )
+            ]
+            return record_and_complete(REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED)
 
     repair_result = review_repair.materialize_review_repair_sessions(
         snapshot.plan_dir,
@@ -10449,9 +10258,7 @@ def _append_progress_entry(
         None,
     )
     if session_status is None:
-        raise plans.PlanError(
-            f"session {session_id!r} not found in plan snapshot"
-        )
+        raise plans.PlanError(f"session {session_id!r} not found in plan snapshot")
     handoff = plans.read_session_handoff(session_status.session)
     files_modified: tuple[str, ...] = ()
     if handoff.files_modified:
@@ -10534,9 +10341,7 @@ def _mailbox_completion_guard_evidence(
         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir_arg)
     except (OSError, mailbox.MailboxError) as error:
         return {
-            "mailbox_path": str(
-                mailbox.mailbox_path_for_plan(plan_dir, state_dir_arg)
-            ),
+            "mailbox_path": str(mailbox.mailbox_path_for_plan(plan_dir, state_dir_arg)),
             "mailbox_schema_version": mailbox.MAILBOX_SCHEMA_VERSION,
             "projection_seq": None,
             "read_error": (
@@ -10559,11 +10364,7 @@ def _mailbox_completion_guard_evidence(
         ):
             continue
         closure = view.closure_for(question.id)
-        receipt = (
-            None
-            if closure is None
-            else view.receipt_for_closure(closure.id)
-        )
+        receipt = None if closure is None else view.receipt_for_closure(closure.id)
         if closure is None:
             violation = "unanswered"
         elif receipt is None:
@@ -10664,9 +10465,7 @@ def _enforce_mailbox_completion_guard(
 def _read_review_verdict(
     plan_dir: Path, *, require_artifact: bool = False
 ) -> dict[str, Any]:
-    return review.load_review_verdict(
-        plan_dir, require_artifact=require_artifact
-    )
+    return review.load_review_verdict(plan_dir, require_artifact=require_artifact)
 
 
 def _enforce_review_mutation_guard(
@@ -10707,9 +10506,7 @@ def _enforce_review_mutation_guard(
     unavailable = _review_guard_unavailable_detail(fingerprint_after)
     if unavailable is not None:
         reason = events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE
-        failure_note = (
-            f"review mutation guard unavailable: {unavailable['reason']}"
-        )
+        failure_note = f"review mutation guard unavailable: {unavailable['reason']}"
         message = (
             "review mutation guard unavailable after "
             f"{session_label}: {unavailable['reason']}"
@@ -10807,10 +10604,7 @@ def _capture_workspace_write_guard_snapshot(
     return repository_evidence.capture_registered_snapshot(
         workspace.root,
         plan_dir,
-        tuple(
-            repository.repository.path
-            for repository in workspace.repositories
-        ),
+        tuple(repository.repository.path for repository in workspace.repositories),
         default_exclude=exclude,
         include_ignored=include_ignored,
         _run_git_fn=_run_git,
@@ -10834,8 +10628,7 @@ def _workspace_review_bases(
         )
         if state_payload is None:
             raise RunError(
-                "review base unavailable for registered repository "
-                f"{repository.alias}"
+                f"review base unavailable for registered repository {repository.alias}"
             )
         dirty_paths = [
             f"{repository.alias}:{path}"
@@ -10862,14 +10655,10 @@ def _workspace_snapshot_unavailable(
     """Return deterministic fail-closed details from a workspace snapshot."""
     unavailable: dict[str, dict[str, Any]] = {}
     for repository in sorted(set(required_repository_paths) - set(snapshot)):
-        unavailable[repository] = {
-            "reason": "registered-repository-missing"
-        }
+        unavailable[repository] = {"reason": "registered-repository-missing"}
     for repository in sorted(snapshot):
         fingerprint = snapshot[repository]
-        detail = repository_evidence.repository_evidence_unavailable(
-            fingerprint
-        )
+        detail = repository_evidence.repository_evidence_unavailable(fingerprint)
         if detail is None and not fingerprint.get("git"):
             detail = {"reason": "repository-unavailable"}
         if detail is not None:
@@ -11071,7 +10860,7 @@ def _latest_workspace_scope_repair_requirement(
     for line in reversed(lines):
         try:
             record = json.loads(line)
-        except (TypeError, json.JSONDecodeError):
+        except TypeError, json.JSONDecodeError:
             continue
         if not isinstance(record, dict):
             continue
@@ -11082,9 +10871,7 @@ def _latest_workspace_scope_repair_requirement(
         if not isinstance(details, dict):
             continue
         guard = details.get("workspace_write_guard")
-        guard_session_id = (
-            guard.get("session_id") if isinstance(guard, dict) else None
-        )
+        guard_session_id = guard.get("session_id") if isinstance(guard, dict) else None
         detail_session_id = details.get("session_id")
         detail_session = details.get("session")
         if (
@@ -11142,9 +10929,7 @@ def _workspace_scope_repair_comparison(
     suppressed: list[str] = []
     for kind, suppress_registered in (("added", True), ("removed", False)):
         raw_roots = comparison.get(kind)
-        if not isinstance(raw_roots, Sequence) or isinstance(
-            raw_roots, (str, bytes)
-        ):
+        if not isinstance(raw_roots, Sequence) or isinstance(raw_roots, (str, bytes)):
             continue
         retained: list[str] = []
         for raw_repository in raw_roots:
@@ -11319,18 +11104,12 @@ def _enforce_review_verdict(
     stop must win over another turn (the caller must ``break``).
     """
     review_path = final_review_output_path(before.plan_dir)
-    verdict = _read_review_verdict(
-        before.plan_dir, require_artifact=require_artifact
-    )
+    verdict = _read_review_verdict(before.plan_dir, require_artifact=require_artifact)
     if verdict.get("ok"):
         with persistence.lock:
             turn_payload["review_verdict"] = {
                 "passed": True,
-                **{
-                    key: value
-                    for key, value in verdict.items()
-                    if key != "ok"
-                },
+                **{key: value for key, value in verdict.items() if key != "ok"},
             }
             _write_json_file(paths["result"], turn_payload)
         return ("pass", None)
@@ -11352,9 +11131,7 @@ def _enforce_review_verdict(
     fingerprint = _review_verdict_fingerprint(verdict)
     priors = _read_prior_review_verdict_retries(event_path, session_id)
     prior_fingerprints = tuple(
-        str(prior["fingerprint"])
-        for prior in priors
-        if prior.get("fingerprint")
+        str(prior["fingerprint"]) for prior in priors if prior.get("fingerprint")
     )
     attempt = len(priors) + 1
     exhausted = _is_review_verdict_repair_exhausted(
@@ -11364,14 +11141,10 @@ def _enforce_review_verdict(
         "review_verdict_fingerprint": fingerprint,
         "review_verdict_repair_attempt": attempt,
         "review_verdict_repair_exhausted": exhausted,
-        "review_verdict_repair_max_attempts": (
-            MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS
-        ),
+        "review_verdict_repair_max_attempts": (MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS),
     }
     if not exhausted and stop_after_current_pending:
-        repair_payload["review_verdict_repair_declined"] = (
-            "stop-after-current"
-        )
+        repair_payload["review_verdict_repair_declined"] = "stop-after-current"
     with persistence.lock:
         payload["final_snapshot"] = _snapshot_payload(snapshot_after)
         payload["review_verdict"] = None
@@ -11417,9 +11190,7 @@ def _enforce_review_verdict(
         event_path,
         payload,
         reason="verify-failed",
-        message=(
-            f"review verdict validation failed for {session_label}: {error}"
-        ),
+        message=(f"review verdict validation failed for {session_label}: {error}"),
         details=details,
         persistence=persistence,
     )
@@ -11456,9 +11227,7 @@ def _enforce_session_verification(
     try:
         contract = contracts.read_completion_contract(before.plan_dir, session_id)
     except plans.PlanError as error:
-        failure_note = (
-            f"verification skipped: malformed completion contract ({error})"
-        )
+        failure_note = f"verification skipped: malformed completion contract ({error})"
         reverted = _revert_session_status_to_pending(
             after, session_id, failure_note=failure_note
         )
@@ -11477,9 +11246,7 @@ def _enforce_session_verification(
             event_path,
             payload,
             reason="malformed-contract",
-            message=(
-                f"completion contract for {session_label} is malformed: {error}"
-            ),
+            message=(f"completion contract for {session_label} is malformed: {error}"),
             details={**session_details, "error": str(error)},
             persistence=persistence,
         )
@@ -11516,9 +11283,7 @@ def _enforce_session_verification(
             event_path,
             payload,
             reason="no-contract",
-            message=(
-                f"{session_label} has no Completion Contract section to verify"
-            ),
+            message=(f"{session_label} has no Completion Contract section to verify"),
             details={**session_details},
             persistence=persistence,
         )
@@ -11630,9 +11395,7 @@ def _enforce_session_verification(
             event_path,
             payload,
             reason="interrupted",
-            message=(
-                f"verification for {session_label} interrupted by user"
-            ),
+            message=(f"verification for {session_label} interrupted by user"),
             details={**session_details},
             persistence=persistence,
         )
@@ -11644,9 +11407,7 @@ def _enforce_session_verification(
             reason="verify-failed",
             error=str(error),
         )
-        failure_note = (
-            f"verification failed to execute: {error}"
-        )
+        failure_note = f"verification failed to execute: {error}"
         reverted = _revert_session_status_to_pending(
             after, session_id, failure_note=failure_note
         )
@@ -11671,9 +11432,7 @@ def _enforce_session_verification(
         )
         return True
 
-    passed_count = sum(
-        1 for check in result.checks if check.status == "pass"
-    )
+    passed_count = sum(1 for check in result.checks if check.status == "pass")
     diagnostic_count = len(result.diagnostic_names)
     live_verification.finish(
         passed=result.passed,
@@ -11758,9 +11517,7 @@ def _enforce_session_verification(
         event_path,
         payload,
         reason="verify-failed",
-        message=(
-            f"verification failed for {session_label}: {summary}"
-        ),
+        message=(f"verification failed for {session_label}: {summary}"),
         details={**session_details, **details, **repair_payload},
         persistence=persistence,
     )
@@ -11798,11 +11555,7 @@ def _append_handoff_note(
         insert_at = section_end
         while insert_at - 1 > handoff_index and lines[insert_at - 1].strip() == "":
             insert_at -= 1
-        return (
-            lines[:insert_at]
-            + ["- **Notes**:", new_bullet]
-            + lines[insert_at:]
-        )
+        return lines[:insert_at] + ["- **Notes**:", new_bullet] + lines[insert_at:]
     insert_at = notes_index + 1
     while insert_at < section_end:
         candidate = lines[insert_at]
@@ -11880,9 +11633,7 @@ def _initial_payload(
     review_harness = getattr(args, "review_harness", None)
     review_requested = review_harness is not None
     review_output_path = (
-        str(final_review_output_path(snapshot.plan_dir))
-        if review_requested
-        else None
+        str(final_review_output_path(snapshot.plan_dir)) if review_requested else None
     )
     # A dry run never becomes audit-eligible: eligibility starts with the run ID
     # and run directory of a loop that actually executes.
@@ -11978,9 +11729,7 @@ def _dry_run_payload(
     review_harness = getattr(args, "review_harness", None)
     review_requested = review_harness is not None
     review_output_path = (
-        str(final_review_output_path(snapshot.plan_dir))
-        if review_requested
-        else None
+        str(final_review_output_path(snapshot.plan_dir)) if review_requested else None
     )
     next_pending = snapshot.next_pending
     mailbox_enabled = bool(mailbox_activation.get("enabled"))
@@ -12028,9 +11777,7 @@ def _dry_run_payload(
     paths = _turn_paths(run_dir, turn_index=1, session_id=next_pending.id)
     workspace = context.workspace
     session_scope = (
-        _session_scope(next_pending, workspace)
-        if workspace is not None
-        else None
+        _session_scope(next_pending, workspace) if workspace is not None else None
     )
     use_registered_packet = (
         workspace is not None and _worker_mode() == WORKER_MODE_PACKET
@@ -12038,9 +11785,7 @@ def _dry_run_payload(
     packet_kwargs: dict[str, Any] = {}
     if use_registered_packet:
         dry_run_event_path = (
-            state.plan_state_dir(
-                snapshot.plan_dir, getattr(args, "state_dir", None)
-            )
+            state.plan_state_dir(snapshot.plan_dir, getattr(args, "state_dir", None))
             / events.EVENTS_FILE_NAME
         )
         repair_references = _verification_repair_state(
@@ -12049,21 +11794,13 @@ def _dry_run_payload(
         )["references"]
         if is_review_session:
             repair_references = repair_references + (
-                _review_verdict_repair_references(
-                    dry_run_event_path, next_pending.id
-                )
+                _review_verdict_repair_references(dry_run_event_path, next_pending.id)
             )
         packet_kwargs = {
             "session_id": next_pending.id,
-            "predecessor_id": _predecessor_session_id(
-                snapshot, next_pending.id
-            ),
-            "has_expansion": _session_has_expansion(
-                snapshot.plan_dir, next_pending.id
-            ),
-            "has_progress": (
-                snapshot.plan_dir / plans.PROGRESS_FILE_NAME
-            ).is_file(),
+            "predecessor_id": _predecessor_session_id(snapshot, next_pending.id),
+            "has_expansion": _session_has_expansion(snapshot.plan_dir, next_pending.id),
+            "has_progress": (snapshot.plan_dir / plans.PROGRESS_FILE_NAME).is_file(),
             "repair_references": repair_references,
             "mailbox_enabled": mailbox_enabled,
             "state_dir": getattr(args, "state_dir", None),
@@ -12214,9 +11951,7 @@ def _run_locked(
             if verification_context.workspace is None
             else verification_context.workspace.root
         ),
-        ledger_state_dir=(
-            None if args.state_dir is None else Path(args.state_dir)
-        ),
+        ledger_state_dir=(None if args.state_dir is None else Path(args.state_dir)),
         repositories=audited_repositories,
         registry_declared=audited_registry_declared,
     )
@@ -12225,9 +11960,7 @@ def _run_locked(
     # run writes its own state.json (which would suppress the scan). A scan
     # failure must never block the run, so any error yields no candidates.
     try:
-        orphan_candidates = state.orphaned_state_candidates(
-            snapshot, args.state_dir
-        )
+        orphan_candidates = state.orphaned_state_candidates(snapshot, args.state_dir)
     except Exception:  # pragma: no cover - defensive; scan is best-effort
         orphan_candidates = []
 
@@ -12485,7 +12218,8 @@ def _run_locked(
                 event_path,
                 payload,
                 reason="no-pending-but-incomplete",
-                message="no pending session was found, but not every session is complete",
+                message="no pending session was found, but not every session is "
+                "complete",
                 details={"snapshot": _snapshot_payload(snapshot)},
                 persistence=persistence,
             )
@@ -12595,9 +12329,7 @@ def _run_locked(
             event_path=event_path,
             payload=payload,
             persistence=persistence,
-            max_repair_group_attempts=_max_repair_group_attempts(
-                args
-            ),
+            max_repair_group_attempts=_max_repair_group_attempts(args),
             max_review_fix_cycles=max_review_fix_cycles,
             review_requested=True,
         )
@@ -12648,9 +12380,7 @@ def _run_locked(
             payload["readiness_state_initial"] = preflight_report.readiness.state
 
     initial_workspace_scope_repair = (
-        _latest_workspace_scope_repair_requirement(
-            event_path, snapshot.next_pending.id
-        )
+        _latest_workspace_scope_repair_requirement(event_path, snapshot.next_pending.id)
         if verification_context.workspace is not None
         and snapshot.next_pending is not None
         else None
@@ -12693,11 +12423,7 @@ def _run_locked(
         )
         return terminalize(1)
 
-    if (
-        not gate_passed
-        and not allow_not_loop_ready
-        and not review_only_complete_start
-    ):
+    if not gate_passed and not allow_not_loop_ready and not review_only_complete_start:
         preflight_report, repair_payload = _repair_readiness_gate(
             preflight_report,
             plan_dir=snapshot.plan_dir,
@@ -12801,11 +12527,7 @@ def _run_locked(
         if action.action == "tail-disabled":
             inline_tail.disable()
         with run_control_lock:
-            context = (
-                None
-                if run_control_context is None
-                else dict(run_control_context)
-            )
+            context = None if run_control_context is None else dict(run_control_context)
             _record_run_control_action(
                 event_path=event_path,
                 payload=payload,
@@ -12819,11 +12541,7 @@ def _run_locked(
 
     def handle_run_control_status(action: run_control.RunControlAction) -> None:
         with run_control_lock:
-            context = (
-                None
-                if run_control_context is None
-                else dict(run_control_context)
-            )
+            context = None if run_control_context is None else dict(run_control_context)
             status_control = dict(control_payload)
             status_control["stop_after_current"] = action.stop_after_current
             status_control["tail_enabled"] = action.tail_enabled
@@ -12837,8 +12555,7 @@ def _run_locked(
             turns = payload.get("turns")
             if isinstance(turns, list):
                 status_payload["turns"] = [
-                    dict(turn) if isinstance(turn, dict) else turn
-                    for turn in turns
+                    dict(turn) if isinstance(turn, dict) else turn for turn in turns
                 ]
 
         try:
@@ -12963,8 +12680,7 @@ def _run_locked(
                             payload,
                             reason="commit-failed",
                             message=(
-                                "final auto-commit failed after all sessions "
-                                "completed"
+                                "final auto-commit failed after all sessions completed"
                             ),
                             details={
                                 "commit_group": commit_group,
@@ -12994,9 +12710,7 @@ def _run_locked(
                         wakeup=wakeup,
                     )
                     with run_control_lock:
-                        stop_before_review = (
-                            run_controls.state.stop_after_current
-                        )
+                        stop_before_review = run_controls.state.stop_after_current
                     review_resume = _set_review_resume(
                         snapshot=snapshot,
                         event_path=event_path,
@@ -13013,17 +12727,13 @@ def _run_locked(
                             in review_continuation.TERMINAL_REVIEW_DISPOSITIONS
                         )
                         with persistence.lock:
-                            _set_existing_review_verdict(
-                                payload, snapshot.plan_dir
-                            )
+                            _set_existing_review_verdict(payload, snapshot.plan_dir)
                             payload["review_fix_disposition"] = (
                                 review_resume.source_disposition
                                 if terminal_disposition
                                 else None
                             )
-                            payload["final_snapshot"] = _snapshot_payload(
-                                snapshot
-                            )
+                            payload["final_snapshot"] = _snapshot_payload(snapshot)
                         if terminal_disposition:
                             with persistence.lock:
                                 payload["reason"] = "all-complete"
@@ -13032,16 +12742,12 @@ def _run_locked(
                             _pause_run(
                                 event_path,
                                 payload,
-                                reason=(
-                                    events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR
-                                ),
+                                reason=(events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR),
                                 message=(
                                     "Recorded review repair history cannot be "
                                     f"resumed safely: {blocker}."
                                 ),
-                                details={
-                                    "review_resume": review_resume.to_payload()
-                                },
+                                details={"review_resume": review_resume.to_payload()},
                                 persistence=persistence,
                             )
                         break
@@ -13049,15 +12755,11 @@ def _run_locked(
                     if review_resume.action == "materialize-repairs":
                         if not review_resume.eligible:
                             with persistence.lock:
-                                _set_existing_review_verdict(
-                                    payload, snapshot.plan_dir
-                                )
+                                _set_existing_review_verdict(payload, snapshot.plan_dir)
                                 payload["review_fix_disposition"] = (
                                     review_resume.source_disposition
                                 )
-                                payload["final_snapshot"] = _snapshot_payload(
-                                    snapshot
-                                )
+                                payload["final_snapshot"] = _snapshot_payload(snapshot)
                             if review_resume.blocker == "higher-cap-required":
                                 with persistence.lock:
                                     payload["reason"] = "all-complete"
@@ -13073,10 +12775,7 @@ def _run_locked(
                                 resume=review_resume,
                                 max_review_fix_cycles=max_review_fix_cycles,
                                 materialized=False,
-                                result=(
-                                    review_resume.blocker
-                                    or "reopen-ineligible"
-                                ),
+                                result=(review_resume.blocker or "reopen-ineligible"),
                                 error=reopen_error,
                             )
                             _record_review_reopen(
@@ -13088,9 +12787,7 @@ def _run_locked(
                             _pause_run(
                                 event_path,
                                 payload,
-                                reason=(
-                                    events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR
-                                ),
+                                reason=(events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR),
                                 message=(
                                     "review repair reopening failed for "
                                     f"session {review_resume.review_session_id}: "
@@ -13118,21 +12815,16 @@ def _run_locked(
                         repair_result = (
                             review_repair.materialize_review_repair_sessions(
                                 snapshot.plan_dir,
-                                review_session_id=(
-                                    review_resume.review_session_id
-                                ),
+                                review_session_id=(review_resume.review_session_id),
                                 cwd=cwd,
                                 state_dir=args.state_dir,
                                 hold_lock=False,
                             )
                         )
                         repair_session_ids = tuple(
-                            child.session_id.value
-                            for child in repair_result.children
+                            child.session_id.value for child in repair_result.children
                         )
-                        materialized = bool(
-                            repair_result.ok and repair_session_ids
-                        )
+                        materialized = bool(repair_result.ok and repair_session_ids)
                         reopen_record = _review_reopen_record(
                             event_path=event_path,
                             payload=payload,
@@ -13156,15 +12848,11 @@ def _run_locked(
                                 or "review repair reopening produced no children"
                             )
                             with persistence.lock:
-                                payload["final_snapshot"] = _snapshot_payload(
-                                    snapshot
-                                )
+                                payload["final_snapshot"] = _snapshot_payload(snapshot)
                             _pause_run(
                                 event_path,
                                 payload,
-                                reason=(
-                                    events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR
-                                ),
+                                reason=(events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR),
                                 message=(
                                     "review repair reopening failed for "
                                     f"session {review_resume.review_session_id}: "
@@ -13210,9 +12898,7 @@ def _run_locked(
                             payload["review_fix_disposition"] = (
                                 REVIEW_CYCLE_DISPOSITION_REPAIRS
                             )
-                            payload["final_snapshot"] = _snapshot_payload(
-                                snapshot
-                            )
+                            payload["final_snapshot"] = _snapshot_payload(snapshot)
 
                         if (
                             repair_result.reason
@@ -13231,31 +12917,25 @@ def _run_locked(
                                 details={
                                     "review_resume": review_resume.to_payload(),
                                     "blockers": list(repair_result.blockers),
-                                    "repair_session_ids": list(
-                                        repair_session_ids
-                                    ),
+                                    "repair_session_ids": list(repair_session_ids),
                                 },
                                 persistence=persistence,
                             )
                             break
 
-                        running_success, running_error = (
-                            _write_readiness_state(
-                                snapshot.plan_dir, "running"
-                            )
+                        running_success, running_error = _write_readiness_state(
+                            snapshot.plan_dir, "running"
                         )
                         with persistence.lock:
                             if running_success:
                                 payload["readiness_state_active"] = True
                                 payload["readiness_state_current"] = "running"
-                                payload["readiness_state_refreshed_at"] = (
-                                    _isoformat(_utc_now())
+                                payload["readiness_state_refreshed_at"] = _isoformat(
+                                    _utc_now()
                                 )
                                 payload["readiness_state_refresh_error"] = None
                             else:
-                                payload["readiness_state_refresh_error"] = (
-                                    running_error
-                                )
+                                payload["readiness_state_refresh_error"] = running_error
                             persistence.write_state(payload)
                         # Execute the exact children just materialized. Once
                         # they complete, the next all-complete pass evaluates
@@ -13290,9 +12970,7 @@ def _run_locked(
                                     workspace=review_workspace,
                                     plan_dir=snapshot.plan_dir,
                                     exclude=review_guard_excludes,
-                                    include_ignored=(
-                                        review_guard_include_ignored
-                                    ),
+                                    include_ignored=(review_guard_include_ignored),
                                 )
                             )
                         except repository_evidence.RepositoryEvidenceError as error:
@@ -13316,15 +12994,11 @@ def _run_locked(
                                 workspace=review_workspace,
                             )
                             with persistence.lock:
-                                payload["final_snapshot"] = _snapshot_payload(
-                                    snapshot
-                                )
+                                payload["final_snapshot"] = _snapshot_payload(snapshot)
                             _pause_run(
                                 event_path,
                                 payload,
-                                reason=(
-                                    events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE
-                                ),
+                                reason=(events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE),
                                 message=(
                                     "combined workspace review base could not "
                                     "be captured safely"
@@ -13343,15 +13017,11 @@ def _run_locked(
                             )
                         except RunError as error:
                             with persistence.lock:
-                                payload["final_snapshot"] = _snapshot_payload(
-                                    snapshot
-                                )
+                                payload["final_snapshot"] = _snapshot_payload(snapshot)
                             _pause_run(
                                 event_path,
                                 payload,
-                                reason=(
-                                    events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE
-                                ),
+                                reason=(events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE),
                                 message=str(error),
                                 details={"error": str(error)},
                                 persistence=persistence,
@@ -13399,9 +13069,7 @@ def _run_locked(
                         break
                     review_appended = True
                     with persistence.lock:
-                        payload["review_session_id"] = (
-                            review_file.session_id.value
-                        )
+                        payload["review_session_id"] = review_file.session_id.value
                     if review_created:
                         persistence.append_event(
                             event_path,
@@ -13412,11 +13080,7 @@ def _run_locked(
                                 "scope": review_scope,
                                 "base_sha": review_base_sha,
                                 **(
-                                    {
-                                        "repositories": review_delta.get(
-                                            "repositories"
-                                        )
-                                    }
+                                    {"repositories": review_delta.get("repositories")}
                                     if review_delta is not None
                                     and "repositories" in review_delta
                                     else {}
@@ -13436,9 +13100,7 @@ def _run_locked(
                                 "review_session_path": str(review_file.path),
                                 "review_output_path": (
                                     payload.get("review_output_path")
-                                    or str(final_review_output_path(
-                                        snapshot.plan_dir
-                                    ))
+                                    or str(final_review_output_path(snapshot.plan_dir))
                                 ),
                                 "review_scope": review_scope,
                                 "review_base_sha": review_base_sha,
@@ -13473,14 +13135,12 @@ def _run_locked(
                         if running_success:
                             payload["readiness_state_active"] = True
                             payload["readiness_state_current"] = "running"
-                            payload["readiness_state_refreshed_at"] = (
-                                _isoformat(_utc_now())
+                            payload["readiness_state_refreshed_at"] = _isoformat(
+                                _utc_now()
                             )
                             payload["readiness_state_refresh_error"] = None
                         else:
-                            payload["readiness_state_refresh_error"] = (
-                                running_error
-                            )
+                            payload["readiness_state_refresh_error"] = running_error
                         persistence.write_state(payload)
                     continue
 
@@ -13489,9 +13149,7 @@ def _run_locked(
                     payload["reason"] = "all-complete"
                 break
 
-            is_review_session = is_generated_review_session_file(
-                pending_session.path
-            )
+            is_review_session = is_generated_review_session_file(pending_session.path)
             prepared_review_workspace_snapshot: (
                 repository_evidence.WorkspaceSnapshot | None
             ) = None
@@ -13515,9 +13173,7 @@ def _run_locked(
                                     workspace=review_workspace,
                                     plan_dir=snapshot.plan_dir,
                                     exclude=review_guard_excludes,
-                                    include_ignored=(
-                                        review_guard_include_ignored
-                                    ),
+                                    include_ignored=(review_guard_include_ignored),
                                 )
                             )
                         except repository_evidence.RepositoryEvidenceError as error:
@@ -13541,9 +13197,7 @@ def _run_locked(
                             review_workspace,
                             prepared_review_workspace_snapshot,
                         )
-                        review_text = pending_session.path.read_text(
-                            encoding="utf-8"
-                        )
+                        review_text = pending_session.path.read_text(encoding="utf-8")
                         refreshed_text = refreshed_review_repository_base(
                             review_text, review_workspace, review_bases
                         )
@@ -13694,9 +13348,7 @@ def _run_locked(
                     event_path,
                     payload,
                     reason="harness-unavailable",
-                    message=(
-                        f"harness unavailable before {session_label}: {message}"
-                    ),
+                    message=(f"harness unavailable before {session_label}: {message}"),
                     details=details,
                     persistence=persistence,
                 )
@@ -13708,12 +13360,10 @@ def _run_locked(
             worker_mode = _worker_mode()
             predecessor_id = _predecessor_session_id(before, session_id)
             has_expansion = _session_has_expansion(before.plan_dir, session_id)
-            has_progress = (
-                before.plan_dir / plans.PROGRESS_FILE_NAME
-            ).is_file()
-            repair_references = _verification_repair_state(
-                event_path, session_id
-            )["references"]
+            has_progress = (before.plan_dir / plans.PROGRESS_FILE_NAME).is_file()
+            repair_references = _verification_repair_state(event_path, session_id)[
+                "references"
+            ]
             if is_review_session:
                 repair_references = repair_references + (
                     _review_verdict_repair_references(event_path, session_id)
@@ -13780,23 +13430,17 @@ def _run_locked(
                     "run_id": turn_reply_context.run_id,
                     "session_id": turn_reply_context.session_id,
                     "turn_index": turn_reply_context.turn_index,
-                    "last_message_path": str(
-                        turn_reply_context.last_message_path
-                    ),
+                    "last_message_path": str(turn_reply_context.last_message_path),
                     "reply_length": len(turn_reply_text),
                     "origin": turn_reply.origin,
                 }
                 if turn_reply.question_id is not None:
                     reply_source_meta["question_id"] = turn_reply.question_id
                 if turn_reply.reply_message_id is not None:
-                    reply_source_meta["reply_message_id"] = (
-                        turn_reply.reply_message_id
-                    )
+                    reply_source_meta["reply_message_id"] = turn_reply.reply_message_id
                 if turn_reply.reply_seq is not None:
                     reply_source_meta["reply_seq"] = turn_reply.reply_seq
-                persisted_prompt = _reply_argv_placeholder(
-                    len(turn_reply_text)
-                )
+                persisted_prompt = _reply_argv_placeholder(len(turn_reply_text))
                 resolution_source_meta: dict[str, Any] | None = None
             elif use_resolution_prompt:
                 assert turn_resolution is not None
@@ -13834,9 +13478,7 @@ def _run_locked(
                     ).render()
                 prompt_kind = "resolution"
                 reply_source_meta = None
-                resolution_source_meta = _resolution_source_metadata(
-                    turn_resolution
-                )
+                resolution_source_meta = _resolution_source_metadata(turn_resolution)
                 persisted_prompt = _resolution_argv_placeholder(
                     turn_resolution.action,
                     resolution_source_meta["note_length"],
@@ -13891,9 +13533,7 @@ def _run_locked(
                 _pause_run(
                     event_path,
                     payload,
-                    reason=(
-                        events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED
-                    ),
+                    reason=(events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED),
                     message=_repository_intent_message(
                         packet_intent_report,
                         subject=f"task packet for {session_label}",
@@ -13981,23 +13621,19 @@ def _run_locked(
                 wakeup=wakeup,
             )
 
-            def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
-                log_stream_callback(stream_name, text)
-                live_turn.record_activity(stream_name, text)
+            stream_callback = _live_stream_callback(log_stream_callback, live_turn)
 
             with run_control_lock:
                 run_control_context = dict(active_turn)
             # Captured before the reply is consumed and before `turn_started`:
             # an unusable guard has to stop the run without spending the turn.
-            workspace_snapshot_before: (
-                repository_evidence.WorkspaceSnapshot | None
-            ) = None
+            workspace_snapshot_before: repository_evidence.WorkspaceSnapshot | None = (
+                None
+            )
             if workspace is not None:
                 assert session_scope is not None
                 if is_review_session and prepared_review_workspace_snapshot is not None:
-                    workspace_snapshot_before = (
-                        prepared_review_workspace_snapshot
-                    )
+                    workspace_snapshot_before = prepared_review_workspace_snapshot
                     unavailable = _workspace_snapshot_unavailable(
                         workspace_snapshot_before,
                         required_repository_paths=tuple(
@@ -14052,9 +13688,7 @@ def _run_locked(
                     _pause_run(
                         event_path,
                         payload,
-                        reason=(
-                            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
-                        ),
+                        reason=(events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE),
                         message=(
                             "workspace write guard unavailable before "
                             f"{session_label}; evidence for a registered "
@@ -14070,8 +13704,7 @@ def _run_locked(
                     break
                 if (
                     pending_workspace_scope_repair is not None
-                    and pending_workspace_scope_repair.get("session_id")
-                    == session_id
+                    and pending_workspace_scope_repair.get("session_id") == session_id
                 ):
                     prior_snapshot = pending_workspace_scope_repair.get(
                         "snapshot_before"
@@ -14099,17 +13732,11 @@ def _run_locked(
                             exclude=review_guard_excludes,
                             include_ignored=review_guard_include_ignored,
                         )
-                        repair_evidence["repair_registry_delta"] = (
-                            repair_registry_delta
-                        )
+                        repair_evidence["repair_registry_delta"] = repair_registry_delta
                     else:
                         repair_evidence = {
                             "passed": False,
-                            "unavailable": {
-                                ".": {
-                                    "reason": "repair-baseline-missing"
-                                }
-                            },
+                            "unavailable": {".": {"reason": "repair-baseline-missing"}},
                             "violations": [],
                         }
                     current_expansion = _session_expansion_evidence(
@@ -14118,11 +13745,10 @@ def _run_locked(
                     prior_expansion = pending_workspace_scope_repair.get(
                         "expansion_before_repair"
                     )
-                    expansion_fresh = (
-                        isinstance(prior_expansion, Mapping)
-                        and _workspace_scope_repair_is_fresh(
-                            prior_expansion, current_expansion
-                        )
+                    expansion_fresh = isinstance(
+                        prior_expansion, Mapping
+                    ) and _workspace_scope_repair_is_fresh(
+                        prior_expansion, current_expansion
                     )
                     if not repair_evidence["passed"] or not expansion_fresh:
                         repair_record = {
@@ -14223,10 +13849,7 @@ def _run_locked(
                     )
                     break
             if use_reply_prompt:
-                assert (
-                    reply_source_meta is not None
-                    and turn_reply is not None
-                )
+                assert reply_source_meta is not None and turn_reply is not None
                 # Consumption is explicit rather than positional: a mailbox
                 # continuation can begin on any later turn index, and no reply
                 # may leak into a subsequent session prompt.
@@ -14254,8 +13877,7 @@ def _run_locked(
                 )
             elif use_resolution_prompt:
                 assert (
-                    resolution_source_meta is not None
-                    and turn_resolution is not None
+                    resolution_source_meta is not None and turn_resolution is not None
                 )
                 # Clear the pending object before recording turn start. A
                 # successful start therefore consumes this exact resolution
@@ -14338,9 +13960,7 @@ def _run_locked(
             previous_turn_finished_at = turn_finished_at
             if is_review_session:
                 normalized_after_review = (
-                    plans.normalize_generated_review_handoff_artifacts(
-                        before.plan_dir
-                    )
+                    plans.normalize_generated_review_handoff_artifacts(before.plan_dir)
                 )
                 if normalized_after_review:
                     normalized_review_handoffs.extend(normalized_after_review)
@@ -14367,9 +13987,7 @@ def _run_locked(
                 live_turn=live_turn_payload,
                 plan_error=plan_error,
                 unredacted_prompt=(
-                    prompt
-                    if use_reply_prompt or use_resolution_prompt
-                    else None
+                    prompt if use_reply_prompt or use_resolution_prompt else None
                 ),
             )
             if pending_exception_guard is not None:
@@ -14458,8 +14076,10 @@ def _run_locked(
                     with persistence.lock:
                         turn_payload["review_repository_bases"] = review_bases
                         _write_json_file(paths["result"], turn_payload)
-            if is_review_session and review_fingerprint_before is not None:
-                if _enforce_review_mutation_guard(
+            if (
+                is_review_session
+                and review_fingerprint_before is not None
+                and _enforce_review_mutation_guard(
                     event_path=event_path,
                     payload=payload,
                     persistence=persistence,
@@ -14475,8 +14095,9 @@ def _run_locked(
                     turn_payload=turn_payload,
                     paths=paths,
                     plan_cache=plan_cache,
-                ):
-                    break
+                )
+            ):
+                break
 
             if result.interrupted:
                 with persistence.lock:
@@ -14557,11 +14178,7 @@ def _run_locked(
                 break
 
             selected_after = next(
-                (
-                    item
-                    for item in after.sessions
-                    if item.id == session_id
-                ),
+                (item for item in after.sessions if item.id == session_id),
                 None,
             )
             if (
@@ -14682,9 +14299,7 @@ def _run_locked(
                                 settings=prepared_wait.settings,
                                 persistence=persistence,
                                 poll_controls=mailbox_poll,
-                                started_monotonic=(
-                                    prepared_wait.started_monotonic
-                                ),
+                                started_monotonic=(prepared_wait.started_monotonic),
                             )
                             wait_result = _finish_mailbox_reply_wait_lifecycle(
                                 plan_dir=after.plan_dir,
@@ -14803,9 +14418,7 @@ def _run_locked(
                                     note=resolution_message.note,
                                     context=prepared_wait.context,
                                     question_id=prepared_wait.question.id,
-                                    resolution_message_id=(
-                                        resolution_message.id
-                                    ),
+                                    resolution_message_id=(resolution_message.id),
                                     resolution_seq=resolution_message.seq,
                                 )
                                 # The session remains pending; schedule its
@@ -14889,7 +14502,8 @@ def _run_locked(
                     event_path,
                     payload,
                     reason="multiple-status-changes",
-                    message="more than one session status changed during one harness turn",
+                    message="more than one session status changed during one harness "
+                    "turn",
                     details={
                         **session_details,
                         "expected_status_changes": list(expected_change),
@@ -14907,7 +14521,8 @@ def _run_locked(
                     event_path,
                     payload,
                     reason="unexpected-status-change",
-                    message="the changed session status did not match the expected pending completion",
+                    message="the changed session status did not match the expected "
+                    "pending completion",
                     details={
                         **session_details,
                         "expected_status_changes": list(expected_change),
@@ -14961,9 +14576,7 @@ def _run_locked(
                     wakeup=wakeup,
                 )
                 with run_control_lock:
-                    stop_after_current_pending = (
-                        run_controls.state.stop_after_current
-                    )
+                    stop_after_current_pending = run_controls.state.stop_after_current
                 verdict_action, verdict_snapshot = _enforce_review_verdict(
                     event_path=event_path,
                     payload=payload,
@@ -14978,8 +14591,7 @@ def _run_locked(
                     plan_cache=plan_cache,
                     require_artifact=(
                         review_session_version is not None
-                        and review_session_version
-                        >= STRUCTURED_REVIEW_MIN_VERSION
+                        and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
                     ),
                     stop_after_current_pending=stop_after_current_pending,
                 )
@@ -15052,7 +14664,9 @@ def _run_locked(
                     )
                     break
                 with persistence.lock:
-                    turn_payload["ledger_updates"] = [str(path) for path in ledger_updates]
+                    turn_payload["ledger_updates"] = [
+                        str(path) for path in ledger_updates
+                    ]
                     turn_payload["after"] = _snapshot_payload(after)
                     _write_json_file(paths["result"], turn_payload)
 
@@ -15093,8 +14707,7 @@ def _run_locked(
                         payload,
                         reason="commit-failed",
                         message=(
-                            "auto-commit failed after session "
-                            f"{session_id} completed"
+                            f"auto-commit failed after session {session_id} completed"
                         ),
                         details={
                             **session_details,
@@ -15220,18 +14833,14 @@ def _run_locked(
                     **live_turn_payload,
                     "run_id": run_id,
                     "turn_index": live_turn_payload.get("turn_index"),
-                    **_session_identity_payload(
-                        str(guard_context["session_id"])
-                    ),
+                    **_session_identity_payload(str(guard_context["session_id"])),
                     "status_result": "exception",
                     "exception": {
                         "type": type(error).__name__,
                         "message": str(error),
                     },
                     "before": _snapshot_payload(guard_context["before"]),
-                    "after": (
-                        _snapshot_payload(after) if after is not None else None
-                    ),
+                    "after": (_snapshot_payload(after) if after is not None else None),
                 }
             try:
                 _enforce_workspace_write_guard(
@@ -15303,9 +14912,9 @@ def _run_locked(
             and payload.get("review_skipped_reason") is None
         ):
             if payload.get("paused"):
-                payload["review_skipped_reason"] = payload.get(
-                    "pause_reason"
-                ) or "paused"
+                payload["review_skipped_reason"] = (
+                    payload.get("pause_reason") or "paused"
+                )
             elif payload["reason"] not in ("", "all-complete"):
                 payload["review_skipped_reason"] = payload["reason"]
 
@@ -15546,15 +15155,20 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
         ]
         for group in unresolved[:3]:
             successful = group.get("successful_repositories")
-            partial = [
-                f"{row.get('alias') or row.get('key')}={row.get('commit_sha')}"
-                for row in successful
-                if isinstance(row, Mapping) and row.get("commit_sha")
-            ] if isinstance(successful, list) else []
+            partial = (
+                [
+                    f"{row.get('alias') or row.get('key')}={row.get('commit_sha')}"
+                    for row in successful
+                    if isinstance(row, Mapping) and row.get("commit_sha")
+                ]
+                if isinstance(successful, list)
+                else []
+            )
             print(
                 "Pending commit group: "
                 f"failed {group.get('failed_alias') or 'none'}; "
-                f"remaining {', '.join(group.get('remaining_aliases') or []) or 'none'}; "
+                f"remaining "
+                f"{', '.join(group.get('remaining_aliases') or []) or 'none'}; "
                 f"partial SHAs {', '.join(partial) or 'none'}"
             )
         if len(unresolved) > 3:
@@ -15575,9 +15189,17 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
                 violations = guard.get("violations")
                 unavailable = guard.get("unavailable")
                 if violations:
-                    print("Workspace scope violations retained; edit durable scope and rerun expansion/preflight.", file=sys.stderr)
+                    print(
+                        "Workspace scope violations retained; edit durable scope and "
+                        "rerun expansion/preflight.",
+                        file=sys.stderr,
+                    )
                 if unavailable:
-                    print("Repository evidence unavailable; repair Git evidence before retrying.", file=sys.stderr)
+                    print(
+                        "Repository evidence unavailable; repair Git evidence before "
+                        "retrying.",
+                        file=sys.stderr,
+                    )
         else:
             print(f"Run failed: {payload['reason']}", file=sys.stderr)
         if payload["turns"]:
@@ -15621,7 +15243,7 @@ def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None
             responses.print_json(payload)
         else:
             _print_text_outcome(payload)
-    except (BrokenPipeError, OSError):
+    except BrokenPipeError, OSError:
         # A recovered run whose original pipe reader exited (helper
         # early-exit) must not crash on its final emission; the same payload
         # is already durable in state.json / result.json.
@@ -15796,7 +15418,7 @@ def _load_resume_state(
         return None
     try:
         payload = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -15825,9 +15447,7 @@ def _apply_resume_config(
         raise _ResumeUnavailable(
             "runner state predates run_config persistence; re-run with "
             "explicit flags instead of --resume",
-            command=_reconstruct_resume_command(
-                args.plan_dir, state_dir_arg, payload
-            ),
+            command=_reconstruct_resume_command(args.plan_dir, state_dir_arg, payload),
         )
     explicit = _explicit_resume_dests(run_argv)
     args._resume_workspace_config = {
@@ -15982,8 +15602,8 @@ def run_from_args(
         )
         details: dict[str, Any] = {"repository_intent": intent_report}
         if registration is not None:
-            details["repository_registration"] = (
-                repository_registration.result_payload(registration)
+            details["repository_registration"] = repository_registration.result_payload(
+                registration
             )
             if registration.status == "applied":
                 details["auto_repairs"] = [
@@ -16064,9 +15684,7 @@ def run_from_args(
                             cwd=verification_context.root,
                             snapshot=initial_snapshot,
                         )
-                        contention_details = run_contention.conflict_details(
-                            conflicts
-                        )
+                        contention_details = run_contention.conflict_details(conflicts)
                         payload["details"] = contention_details
                         payload["pause_details"] = dict(contention_details)
                         _emit_run_payload(args, payload)
@@ -16203,9 +15821,7 @@ def doctor_from_args(args: argparse.Namespace) -> int:
             )
 
     prompt_workspace = (
-        verification_context.workspace
-        if snapshot.next_pending is not None
-        else None
+        verification_context.workspace if snapshot.next_pending is not None else None
     )
     prompt_scope = (
         _session_scope(snapshot.next_pending, prompt_workspace)
@@ -16222,15 +15838,11 @@ def doctor_from_args(args: argparse.Namespace) -> int:
             args.harness,
             snapshot.plan_dir,
             session_id=snapshot.next_pending.id,
-            predecessor_id=_predecessor_session_id(
-                snapshot, snapshot.next_pending.id
-            ),
+            predecessor_id=_predecessor_session_id(snapshot, snapshot.next_pending.id),
             has_expansion=_session_has_expansion(
                 snapshot.plan_dir, snapshot.next_pending.id
             ),
-            has_progress=(
-                snapshot.plan_dir / plans.PROGRESS_FILE_NAME
-            ).is_file(),
+            has_progress=(snapshot.plan_dir / plans.PROGRESS_FILE_NAME).is_file(),
             workspace=prompt_workspace,
             session_scope=prompt_scope,
         ).render()

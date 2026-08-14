@@ -40,15 +40,14 @@ rejected lines would hide the only evidence that the ledger is damaged.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 import math
 import sys
+from datetime import datetime
 from typing import Any
 
 from . import assurance_ledger as ledger
 from . import assurance_projection as projection
-from . import responses
-from . import state
+from . import responses, state
 from .assurance_models import (
     CLOSEOUT_OUTCOMES,
     ISSUE_STATES,
@@ -57,7 +56,6 @@ from .assurance_models import (
     issue_id_number,
     parse_issue_id,
 )
-
 
 COMMAND_ASSURANCE_LIST = "assurance-list"
 COMMAND_ASSURANCE_SHOW = "assurance-show"
@@ -284,9 +282,7 @@ def _occurrence_payload(
     }
 
 
-def _run_payload(
-    inbox: projection.AssuranceProjection, run_id: str
-) -> dict[str, Any]:
+def _run_payload(inbox: projection.AssuranceProjection, run_id: str) -> dict[str, Any]:
     audit = inbox.run(run_id)
     if audit is None:
         # An observation names the run that saw the defect, and only an audit
@@ -445,15 +441,12 @@ def assurance_list_from_args(args: argparse.Namespace) -> int:
         )
     if args.severity is not None and args.severity not in SEVERITIES:
         return refuse(
-            f"--severity must be one of {', '.join(SEVERITIES)}; "
-            f"got {args.severity!r}"
+            f"--severity must be one of {', '.join(SEVERITIES)}; got {args.severity!r}"
         )
 
     state_filter = None if show_all else (args.state or DEFAULT_LIST_STATE)
     limit = (
-        None
-        if show_all
-        else (DEFAULT_LIST_LIMIT if args.limit is None else args.limit)
+        None if show_all else (DEFAULT_LIST_LIMIT if args.limit is None else args.limit)
     )
 
     inbox = _read_inbox(
@@ -464,9 +457,7 @@ def assurance_list_from_args(args: argparse.Namespace) -> int:
     if inbox is None:
         return 1
 
-    matched = _matching_issues(
-        inbox, state=state_filter, severity=args.severity
-    )
+    matched = _matching_issues(inbox, state=state_filter, severity=args.severity)
     shown = matched if limit is None else matched[:limit]
     warning_fields = _warning_fields(inbox)
     payload = responses.success_payload(
@@ -507,8 +498,7 @@ def _show_text_lines(payload: dict[str, Any]) -> list[str]:
     ]
     if payload["merged"]:
         lines.append(
-            f"{payload['requested_issue_id']} was merged into "
-            f"{issue['issue_id']}."
+            f"{payload['requested_issue_id']} was merged into {issue['issue_id']}."
         )
     lines.extend(
         (
@@ -524,9 +514,7 @@ def _show_text_lines(payload: dict[str, Any]) -> list[str]:
     )
     absorbed_fingerprints = issue["fingerprints"][1:]
     if absorbed_fingerprints:
-        lines.append(
-            f"  also observed as {', '.join(absorbed_fingerprints)}"
-        )
+        lines.append(f"  also observed as {', '.join(absorbed_fingerprints)}")
     lines.extend(
         (
             f"History: {issue['occurrence_count']} occurrence(s)  "
@@ -727,7 +715,7 @@ def _is_tty(stream: Any) -> bool:
         return False
     try:
         return bool(isatty())
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return False
 
 
@@ -844,8 +832,7 @@ def assurance_merge_from_args(args: argparse.Namespace) -> int:
             text_label=TEXT_LABEL_MERGE,
             hints={
                 projection.MERGE_SOURCE_ALREADY_MERGED: (
-                    f"run `asl assurance show {source}` to see where its history "
-                    "went"
+                    f"run `asl assurance show {source}` to see where its history went"
                 ),
                 projection.MERGE_TARGET_ALREADY_MERGED: (
                     f"run `asl assurance show {target}` to see which issue owns "
@@ -941,9 +928,7 @@ def _resolve_run_location(
             REASON_AMBIGUOUS_RUN,
             f"{run_id} names a run under {len(located)} plans",
             "pass --plan PLAN_DIR_OR_ID to say which one",
-            candidates=[
-                str(item.plan_dir or item.state_dir) for item in located
-            ],
+            candidates=[str(item.plan_dir or item.state_dir) for item in located],
         )
     return (located[0] if located else None), None
 
@@ -1141,9 +1126,7 @@ def assurance_process_pending_from_args(args: argparse.Namespace) -> int:
             state_dir=args.state_dir,
             plan_dir=plan_dir,
             run_id=args.run_id,
-            limit=(
-                catchup.DEFAULT_PENDING_LIMIT if args.limit is None else args.limit
-            ),
+            limit=(catchup.DEFAULT_PENDING_LIMIT if args.limit is None else args.limit),
             overrides=catchup.AuditOverrides(
                 harness=args.audit_harness,
                 model=args.audit_harness_model,
@@ -1200,9 +1183,7 @@ _PLAN_HINTS: dict[str, str] = {
     "harness-unavailable": (
         "pick a harness that can run under the restricted read-only profile"
     ),
-    "malformed-output": (
-        "the reply is discarded, not saved; rerun to draft again"
-    ),
+    "malformed-output": ("the reply is discarded, not saved; rerun to draft again"),
     "mutation-detected": (
         "the reply is discarded because the drafter wrote something under a "
         "read-only root; check that root before rerunning"

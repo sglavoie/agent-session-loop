@@ -6,14 +6,13 @@ path hash after a move, and the ``migrate-state`` command that relocates them.
 
 from __future__ import annotations
 
-import argparse
-from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 
 from agent_session_loop import cli, events, plans, state
 from tests.support import read_jsonl, write_plan
@@ -63,9 +62,7 @@ class StateMigrationTestBase(unittest.TestCase):
             "ok": True,
             "command": "run",
             "plan_dir": (
-                str(self.old_plan)
-                if recorded_plan_dir is None
-                else recorded_plan_dir
+                str(self.old_plan) if recorded_plan_dir is None else recorded_plan_dir
             ),
             "state_dir": str(self.old_state_dir),
             "state_path": str(state_path),
@@ -75,9 +72,7 @@ class StateMigrationTestBase(unittest.TestCase):
             "run_finished_at": run_finished_at,
             "initial_snapshot": {
                 "content_sha256": (
-                    self.content_sha256
-                    if content_sha256 is None
-                    else content_sha256
+                    self.content_sha256 if content_sha256 is None else content_sha256
                 ),
             },
         }
@@ -106,9 +101,7 @@ class StateMigrationTestBase(unittest.TestCase):
         return lock_path
 
     def _add_result_artifact(self) -> Path:
-        result_path = (
-            self.old_state_dir / "runs" / "run-1" / "turn-1" / "result.json"
-        )
+        result_path = self.old_state_dir / "runs" / "run-1" / "turn-1" / "result.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text(
             json.dumps({"after": {"plan_dir": str(self.old_plan)}}),
@@ -225,9 +218,7 @@ class MigrateStateTests(StateMigrationTestBase):
         self.assertTrue(self.new_state_dir.is_dir())
 
         migrated = json.loads(
-            (self.new_state_dir / events.STATE_FILE_NAME).read_text(
-                encoding="utf-8"
-            )
+            (self.new_state_dir / events.STATE_FILE_NAME).read_text(encoding="utf-8")
         )
         self.assertEqual(str(self.new_plan), migrated["plan_dir"])
         self.assertEqual(str(self.new_state_dir), migrated["state_dir"])

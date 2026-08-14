@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import importlib.util
-from datetime import datetime, timedelta, timezone
 import io
 import itertools
 import json
@@ -23,6 +22,7 @@ from contextlib import (
     redirect_stderr,
     redirect_stdout,
 )
+from datetime import UTC, datetime, timedelta
 
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "asl_autopilot.py")
 SPEC = importlib.util.spec_from_file_location("asl_autopilot", MODULE_PATH)
@@ -32,7 +32,7 @@ SPEC.loader.exec_module(autopilot)
 
 # Loading the helper installs the repository root on ``sys.path`` so this test
 # remains directly executable from an arbitrary working directory.
-from agent_session_loop import runner  # noqa: E402
+from agent_session_loop import runner  # noqa: E402 - needs the sys.path insert above
 
 
 class ArgParserTest(unittest.TestCase):
@@ -57,22 +57,20 @@ class ArgParserTest(unittest.TestCase):
         # --max-review-fix-plans option is gone. It survives only inside the
         # `asl run ...` command string as a deprecated alias.
         parser = autopilot.build_arg_parser()
-        with self.assertRaises(SystemExit):
-            with redirect_stderr(io.StringIO()):
-                parser.parse_args(
-                    [
-                        "--command",
-                        "asl run /tmp/plan",
-                        "--max-review-fix-plans",
-                        "4",
-                    ]
-                )
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parser.parse_args(
+                [
+                    "--command",
+                    "asl run /tmp/plan",
+                    "--max-review-fix-plans",
+                    "4",
+                ]
+            )
 
     def test_command_is_required(self) -> None:
         parser = autopilot.build_arg_parser()
-        with self.assertRaises(SystemExit):
-            with redirect_stderr(io.StringIO()):
-                parser.parse_args([])
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parser.parse_args([])
 
     def test_json_and_reply_stdin_default_false(self) -> None:
         parser = autopilot.build_arg_parser()
@@ -84,9 +82,11 @@ class ArgParserTest(unittest.TestCase):
 
 class MainTest(unittest.TestCase):
     def test_help_exits_zero(self) -> None:
-        with self.assertRaises(SystemExit) as caught:
-            with redirect_stdout(io.StringIO()):
-                autopilot.main(["--help"])
+        with (
+            self.assertRaises(SystemExit) as caught,
+            redirect_stdout(io.StringIO()),
+        ):
+            autopilot.main(["--help"])
         self.assertEqual(caught.exception.code, 0)
 
     def test_json_output_is_valid_parse_failure_payload(self) -> None:
@@ -198,18 +198,16 @@ class ParseCommandTest(unittest.TestCase):
         self.assertEqual(
             "/tmp/workspace", bound["argv"][bound["argv"].index("--cwd") + 1]
         )
-        self.assertEqual(["SVC", "OAK"], [row["alias"] for row in bound["repositories"]])
+        self.assertEqual(
+            ["SVC", "OAK"], [row["alias"] for row in bound["repositories"]]
+        )
 
     def test_status_workspace_mismatch_requires_explicit_rebind(self) -> None:
-        parsed = autopilot.parse_command(
-            "asl run /tmp/plan --cwd /tmp/workspace/svc"
-        )
+        parsed = autopilot.parse_command("asl run /tmp/plan --cwd /tmp/workspace/svc")
         status = {
             "ok": True,
             "workspace_root": "/tmp/workspace",
-            "repositories": [
-                {"alias": "SVC", "resolved_root": "/tmp/workspace/svc"}
-            ],
+            "repositories": [{"alias": "SVC", "resolved_root": "/tmp/workspace/svc"}],
         }
 
         error = autopilot._workspace_launch_error(parsed, status)
@@ -267,9 +265,7 @@ class ParseCommandTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         args = result["run_args"]
         self.assertIn("--resume", args)
-        self.assertEqual(
-            args[args.index("--review-harness-model") + 1], "gpt-5"
-        )
+        self.assertEqual(args[args.index("--review-harness-model") + 1], "gpt-5")
 
     def test_non_resume_still_rejects_model_only_override(self) -> None:
         # The deferral is scoped to --resume: without it, a model-only override
@@ -304,23 +300,18 @@ class ParseCommandTest(unittest.TestCase):
 
     def test_zero_review_fix_cycles_is_accepted(self) -> None:
         # 0 is the review-only mode: the runner reviews but creates no repairs.
-        result = autopilot.parse_command(
-            "asl run /tmp/plan --max-review-fix-cycles 0"
-        )
+        result = autopilot.parse_command("asl run /tmp/plan --max-review-fix-cycles 0")
         self.assertTrue(result["ok"])
         self.assertEqual(result["max_review_fix_cycles"], 0)
 
     def test_rejects_negative_review_fix_cycles(self) -> None:
-        result = autopilot.parse_command(
-            "asl run /tmp/plan --max-review-fix-cycles -1"
-        )
+        result = autopilot.parse_command("asl run /tmp/plan --max-review-fix-cycles -1")
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "invalid-argument")
 
     def test_rejects_both_review_fix_flags_together(self) -> None:
         result = autopilot.parse_command(
-            "asl run /tmp/plan --max-review-fix-cycles 2 "
-            "--max-review-fix-plans 2"
+            "asl run /tmp/plan --max-review-fix-cycles 2 --max-review-fix-plans 2"
         )
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "invalid-argument")
@@ -440,7 +431,12 @@ class RunAutopilotParseIntegrationTest(unittest.TestCase):
 
         def fake_supervisor(parsed):
             captured["parsed"] = parsed
-            return {"ok": True, "stage": autopilot.RUN_STAGE, "reason": "complete", "chunks": 1}
+            return {
+                "ok": True,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "complete",
+                "chunks": 1,
+            }
 
         result = autopilot.run_autopilot(args, supervisor=fake_supervisor)
         self.assertEqual(result["stage"], autopilot.RUN_STAGE)
@@ -469,9 +465,7 @@ class RunAutopilotParseIntegrationTest(unittest.TestCase):
             supervisor=fake_supervisor,
         )
         autopilot.run_autopilot(
-            parser.parse_args(
-                ["--command", "asl run /tmp/plan", "--wait-quota-reset"]
-            ),
+            parser.parse_args(["--command", "asl run /tmp/plan", "--wait-quota-reset"]),
             supervisor=fake_supervisor,
         )
         self.assertEqual(captured, [{}, {"wait_quota_reset": True}])
@@ -493,8 +487,7 @@ class RunAutopilotParseIntegrationTest(unittest.TestCase):
         args = parser.parse_args(
             [
                 "--command",
-                "asl run /tmp/plan --review-harness codex "
-                "--max-review-fix-cycles 1",
+                "asl run /tmp/plan --review-harness codex --max-review-fix-cycles 1",
             ]
         )
         captured = {}
@@ -525,9 +518,7 @@ class RunAutopilotParseIntegrationTest(unittest.TestCase):
         self.assertEqual(captured["parsed"]["max_review_fix_cycles"], 1)
         self.assertEqual(result["command"]["max_review_fix_cycles"], 1)
         run_args = captured["parsed"]["run_args"]
-        self.assertEqual(
-            run_args[run_args.index("--max-review-fix-cycles") + 1], "1"
-        )
+        self.assertEqual(run_args[run_args.index("--max-review-fix-cycles") + 1], "1")
 
 
 class RunAutopilotPauseReplyTest(unittest.TestCase):
@@ -571,7 +562,12 @@ class RunAutopilotPauseReplyTest(unittest.TestCase):
 
     def test_paused_run_records_questions_error_when_context_missing(self) -> None:
         def paused_supervisor(parsed):
-            return {"ok": False, "stage": autopilot.RUN_STAGE, "reason": "paused", "chunks": 1}
+            return {
+                "ok": False,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "paused",
+                "chunks": 1,
+            }
 
         error = {"ok": False, "reason": "no-paused-run", "error": "not paused"}
         result = autopilot.run_autopilot(
@@ -688,7 +684,12 @@ class RunAutopilotPauseReplyTest(unittest.TestCase):
 
         def reply_supervisor(parsed, *, reply_text=None):
             captured["reply_text"] = reply_text
-            return {"ok": True, "stage": autopilot.RUN_STAGE, "reason": "complete", "chunks": 1}
+            return {
+                "ok": True,
+                "stage": autopilot.RUN_STAGE,
+                "reason": "complete",
+                "chunks": 1,
+            }
 
         result = autopilot.run_autopilot(
             self._args(reply_stdin=True),
@@ -896,7 +897,10 @@ def _control_block(last_action):
 
 
 def _leftover_state_attach_status(
-    pending, *, run_id="run-old", run_started_at=OLDER_RUN_STARTED_AT,
+    pending,
+    *,
+    run_id="run-old",
+    run_started_at=OLDER_RUN_STARTED_AT,
     lock_created_at=LOCK_CREATED_AT,
 ):
     """Startup-window attach poll with the *previous* run's state still on disk.
@@ -984,7 +988,9 @@ class ClassifyLockTest(unittest.TestCase):
         self.assertEqual(self._classify({}, _status_payload(1)), "clear")
 
     def test_present_but_inactive_is_clear(self) -> None:
-        status = _status_payload(1, lock={"present": True, "active": False, "stale": False})
+        status = _status_payload(
+            1, lock={"present": True, "active": False, "stale": False}
+        )
         self.assertEqual(self._classify({}, status), "clear")
 
     def test_active_stale_lock_is_stale(self) -> None:
@@ -1060,7 +1066,9 @@ class ClassifyLockTest(unittest.TestCase):
 class SuperviseRunInjectedTest(unittest.TestCase):
     """Drive the supervision loop with injected status/run invokers."""
 
-    def _supervise(self, status_invoker, run_invoker, *, parsed=None, clock=None, **kwargs):
+    def _supervise(
+        self, status_invoker, run_invoker, *, parsed=None, clock=None, **kwargs
+    ):
         return autopilot.supervise_run(
             parsed
             or {
@@ -1083,10 +1091,12 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(result["chunks"], 0)
 
     def test_stale_lock_starts_a_run(self) -> None:
-        status = _StatusScript([
-            _status_payload(1, lock=_active_lock(stale=True)),
-            _status_payload(0),
-        ])
+        status = _StatusScript(
+            [
+                _status_payload(1, lock=_active_lock(stale=True)),
+                _status_payload(0),
+            ]
+        )
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
         result = self._supervise(status, run)
         self.assertTrue(result["ok"])
@@ -1094,17 +1104,21 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(run.chunks, [1])
 
     def test_mismatched_lock_is_user_required(self) -> None:
-        status = _StatusScript([_status_payload(1, lock=_active_lock(plan_dir="/other"))])
+        status = _StatusScript(
+            [_status_payload(1, lock=_active_lock(plan_dir="/other"))]
+        )
         result = self._supervise(status, _never_run)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "user_required")
 
     def test_attach_waits_then_completes(self) -> None:
-        status = _StatusScript([
-            _status_payload(1, lock=_active_lock()),
-            _status_payload(1, lock=_active_lock()),
-            _status_payload(0),
-        ])
+        status = _StatusScript(
+            [
+                _status_payload(1, lock=_active_lock()),
+                _status_payload(1, lock=_active_lock()),
+                _status_payload(0),
+            ]
+        )
         result = self._supervise(status, _never_run)
         self.assertTrue(result["ok"])
         self.assertEqual(result["reason"], "complete")
@@ -1112,10 +1126,12 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(status.calls, 3)
 
     def test_active_lock_with_zero_pending_attaches_before_completing(self) -> None:
-        status = _StatusScript([
-            _status_payload(0, lock=_active_lock()),
-            _status_payload(0),
-        ])
+        status = _StatusScript(
+            [
+                _status_payload(0, lock=_active_lock()),
+                _status_payload(0),
+            ]
+        )
         result = self._supervise(status, _never_run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
@@ -1227,7 +1243,14 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
         parsed = {
             "plan_dir": "/tmp/plan",
-            "argv": ["asl", "run", "/tmp/plan", "--max-review-fix-cycles", "3", "--json"],
+            "argv": [
+                "asl",
+                "run",
+                "/tmp/plan",
+                "--max-review-fix-cycles",
+                "3",
+                "--json",
+            ],
             "review_harness": "codex",
             "max_review_fix_cycles": 3,
         }
@@ -1238,9 +1261,7 @@ class SuperviseRunInjectedTest(unittest.TestCase):
     def test_default_cap_launches_materialization_requiring_three_or_four(
         self,
     ) -> None:
-        parsed = autopilot.parse_command(
-            "asl run /tmp/plan --review-harness codex"
-        )
+        parsed = autopilot.parse_command("asl run /tmp/plan --review-harness codex")
         self.assertTrue(parsed["ok"], parsed)
         for minimum_cap in (3, 4):
             with self.subTest(minimum_cap=minimum_cap):
@@ -1252,9 +1273,7 @@ class SuperviseRunInjectedTest(unittest.TestCase):
                     minimum_required_cap=minimum_cap,
                     source_disposition="cycle-cap-exhausted",
                 )
-                self.assertTrue(
-                    autopilot._should_launch_for_status(parsed, status, 0)
-                )
+                self.assertTrue(autopilot._should_launch_for_status(parsed, status, 0))
 
     def test_unchanged_insufficient_cap_returns_guidance_without_launch(self) -> None:
         blocked = _status_payload(0)
@@ -1267,7 +1286,14 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         )
         parsed = {
             "plan_dir": "/tmp/plan",
-            "argv": ["asl", "run", "/tmp/plan", "--max-review-fix-cycles", "2", "--json"],
+            "argv": [
+                "asl",
+                "run",
+                "/tmp/plan",
+                "--max-review-fix-cycles",
+                "2",
+                "--json",
+            ],
             "review_harness": "codex",
             "max_review_fix_cycles": 2,
         }
@@ -1287,7 +1313,14 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         status_payload["review_resume"]["selected_cap"] = 5
         parsed = {
             "plan_dir": "/tmp/plan",
-            "argv": ["asl", "run", "/tmp/plan", "--max-review-fix-cycles", "2", "--json"],
+            "argv": [
+                "asl",
+                "run",
+                "/tmp/plan",
+                "--max-review-fix-cycles",
+                "2",
+                "--json",
+            ],
             "review_harness": "codex",
             "max_review_fix_cycles": 2,
         }
@@ -1346,7 +1379,14 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         )
         parsed = {
             "plan_dir": "/tmp/plan",
-            "argv": ["asl", "run", "/tmp/plan", "--max-review-fix-cycles", "2", "--json"],
+            "argv": [
+                "asl",
+                "run",
+                "/tmp/plan",
+                "--max-review-fix-cycles",
+                "2",
+                "--json",
+            ],
             "review_harness": "codex",
             "max_review_fix_cycles": 2,
         }
@@ -1392,7 +1432,14 @@ class SuperviseRunInjectedTest(unittest.TestCase):
                 status_payload["review_resume"] = review_resume
                 parsed = {
                     "plan_dir": "/tmp/plan",
-                    "argv": ["asl", "run", "/tmp/plan", "--review-harness", "codex", "--json"],
+                    "argv": [
+                        "asl",
+                        "run",
+                        "/tmp/plan",
+                        "--review-harness",
+                        "codex",
+                        "--json",
+                    ],
                     "review_harness": "codex",
                     "max_review_fix_cycles": 9,
                 }
@@ -1504,9 +1551,7 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         )
         status = _StatusScript([initial, terminal])
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
-        result = self._supervise(
-            status, run, parsed=self._resume_parsed(state_path)
-        )
+        result = self._supervise(status, run, parsed=self._resume_parsed(state_path))
         self.assertTrue(result["ok"], result)
         self.assertEqual(run.chunks, [1])
 
@@ -1539,9 +1584,7 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         )
         status = _StatusScript([resumable, terminal])
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
-        result = self._supervise(
-            status, run, parsed=self._resume_parsed(state_path)
-        )
+        result = self._supervise(status, run, parsed=self._resume_parsed(state_path))
         self.assertTrue(result["ok"], result)
         self.assertEqual(run.chunks, [1])
 
@@ -1601,14 +1644,16 @@ class SuperviseRunInjectedTest(unittest.TestCase):
 
     def test_paused_run_stops_with_paused(self) -> None:
         status = _StatusScript([_status_payload(1)])
-        run = _RunScript([
-            {
-                "ok": False,
-                "paused": True,
-                "reason": "input-error",
-                "pause_message": "needs an answer",
-            }
-        ])
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "input-error",
+                    "pause_message": "needs an answer",
+                }
+            ]
+        )
         result = self._supervise(status, run)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "paused")
@@ -1622,9 +1667,16 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(result["reason"], "blocked")
 
     def test_status_probe_failure_stops(self) -> None:
-        status = _StatusScript([
-            {"ok": False, "stage": autopilot.RUN_STAGE, "reason": "status-error", "error": "boom"}
-        ])
+        status = _StatusScript(
+            [
+                {
+                    "ok": False,
+                    "stage": autopilot.RUN_STAGE,
+                    "reason": "status-error",
+                    "error": "boom",
+                }
+            ]
+        )
         result = self._supervise(status, _never_run)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "status-error")
@@ -1645,8 +1697,11 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # attach_max_seconds bounds it in wall clock and surfaces `capped`.
         driver = _AttachClock([_status_payload(1, lock=_active_lock())], step=30.0)
         result = self._supervise(
-            driver.status, _never_run, clock=driver,
-            events_stat=lambda _path: None, attach_max_seconds=90.0,
+            driver.status,
+            _never_run,
+            clock=driver,
+            events_stat=lambda _path: None,
+            attach_max_seconds=90.0,
         )
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "capped")
@@ -1661,8 +1716,12 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         attached = _status_payload(1, lock=_active_lock())
         driver = _AttachClock([attached] * 6 + [_status_payload(0)], step=1.0)
         result = self._supervise(
-            driver.status, _never_run, clock=driver,
-            events_stat=lambda _path: None, max_chunks=1, attach_max_seconds=3600.0,
+            driver.status,
+            _never_run,
+            clock=driver,
+            events_stat=lambda _path: None,
+            max_chunks=1,
+            attach_max_seconds=3600.0,
         )
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
@@ -1673,14 +1732,23 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # bound would cap. Per-episode elapsed never exceeds 40s.
         attached = _status_payload(1, lock=_active_lock())
         driver = _AttachClock(
-            [attached, attached, _status_payload(1),
-             attached, attached, _status_payload(0)],
+            [
+                attached,
+                attached,
+                _status_payload(1),
+                attached,
+                attached,
+                _status_payload(0),
+            ],
             step=40.0,
         )
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
         result = self._supervise(
-            driver.status, run, clock=driver,
-            events_stat=lambda _path: None, attach_max_seconds=100.0,
+            driver.status,
+            run,
+            clock=driver,
+            events_stat=lambda _path: None,
+            attach_max_seconds=100.0,
         )
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
@@ -1689,7 +1757,14 @@ class SuperviseRunInjectedTest(unittest.TestCase):
     def _budget_parsed(self, max_sessions):
         return {
             "plan_dir": "/tmp/plan",
-            "argv": ["asl", "run", "/tmp/plan", "--max-sessions", str(max_sessions), "--json"],
+            "argv": [
+                "asl",
+                "run",
+                "/tmp/plan",
+                "--max-sessions",
+                str(max_sessions),
+                "--json",
+            ],
             "max_sessions": max_sessions,
         }
 
@@ -1731,11 +1806,13 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # Budget 3: chunk 1 completes 2 sessions (pending 3 -> 1) then pauses on
         # a recoverable verify-failed; the retry must be capped at the 1 session
         # still in budget so total completions never exceed 3.
-        status = _StatusScript([
-            _status_payload(3),
-            _status_payload(1),
-            _status_payload(0),
-        ])
+        status = _StatusScript(
+            [
+                _status_payload(3),
+                _status_payload(1),
+                _status_payload(0),
+            ]
+        )
         payloads = [
             {"ok": False, "paused": True, "reason": "verify-failed"},
             {"ok": True, "paused": False, "reason": "all-complete"},
@@ -1792,14 +1869,16 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # not an anomaly: same `ok: true`, no relaunch, and `stop_kind` names the
         # abort so the zero progress is not read as a stall.
         status = _StatusScript([_status_payload(3), _status_payload(3)])
-        run = _RunScript([
-            {
-                "ok": True,
-                "paused": False,
-                "reason": "stopped",
-                "control": _control_block("abort-turn-honored"),
-            }
-        ])
+        run = _RunScript(
+            [
+                {
+                    "ok": True,
+                    "paused": False,
+                    "reason": "stopped",
+                    "control": _control_block("abort-turn-honored"),
+                }
+            ]
+        )
         result = self._supervise(status, run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "stopped")
@@ -1813,14 +1892,16 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # The worker wound the turn down inside the grace window, so nothing was
         # killed — but the request that ended the run was still the abort.
         status = _StatusScript([_status_payload(3), _status_payload(3)])
-        run = _RunScript([
-            {
-                "ok": True,
-                "paused": False,
-                "reason": "stopped",
-                "control": _control_block("abort-turn-satisfied-by-worker"),
-            }
-        ])
+        run = _RunScript(
+            [
+                {
+                    "ok": True,
+                    "paused": False,
+                    "reason": "stopped",
+                    "control": _control_block("abort-turn-satisfied-by-worker"),
+                }
+            ]
+        )
         result = self._supervise(status, run)
         self.assertEqual(result["reason"], "stopped")
         self.assertEqual(result["stop_kind"], autopilot.STOP_KIND_ABORT)
@@ -1830,9 +1911,9 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # reading is the session-boundary stop, the outcome that leaves finished
         # work behind, so nothing claims a session was reverted.
         status = _StatusScript([_status_payload(3), _status_payload(2)])
-        run = _RunScript([
-            {"ok": True, "paused": False, "reason": "stopped", "control": None}
-        ])
+        run = _RunScript(
+            [{"ok": True, "paused": False, "reason": "stopped", "control": None}]
+        )
         result = self._supervise(status, run)
         self.assertEqual(result["stop_kind"], autopilot.STOP_KIND_AFTER_CURRENT)
 
@@ -1859,9 +1940,7 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         run = _RunScript([{"ok": True, "paused": False, "reason": "stopped"}])
         parsed = {
             "plan_dir": "/tmp/plan",
-            "argv": [
-                "asl", "run", "/tmp/plan", "--review-harness", "codex", "--json"
-            ],
+            "argv": ["asl", "run", "/tmp/plan", "--review-harness", "codex", "--json"],
             "review_harness": "codex",
             "max_review_fix_cycles": 2,
         }
@@ -1889,10 +1968,12 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # having persisted `ok`/`reason: "stopped"` with sessions still pending.
         # The helper must report that clean early stop rather than launching a
         # chunk that would undo the operator's request.
-        status = _StatusScript([
-            _attached_run_status(3),
-            _finished_run_status(2, reason="stopped"),
-        ])
+        status = _StatusScript(
+            [
+                _attached_run_status(3),
+                _finished_run_status(2, reason="stopped"),
+            ]
+        )
         result = self._supervise(status, _never_run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "stopped")
@@ -1906,12 +1987,14 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # Same attach path, but the foreign run was ended by `asl control abort`:
         # the persisted control block's terminal action is what distinguishes it,
         # and the reverted session keeps pending at 3.
-        status = _StatusScript([
-            _attached_run_status(3),
-            _finished_run_status(
-                3, reason="stopped", last_action="abort-turn-honored"
-            ),
-        ])
+        status = _StatusScript(
+            [
+                _attached_run_status(3),
+                _finished_run_status(
+                    3, reason="stopped", last_action="abort-turn-honored"
+                ),
+            ]
+        )
         result = self._supervise(status, _never_run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "stopped")
@@ -1927,10 +2010,12 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # `run_id`. The lock we attached to still identifies the run that wrote
         # the state (it started after the lock was created), so the stop is
         # honored rather than relaunched over.
-        status = _StatusScript([
-            _startup_attach_status(3),
-            _finished_run_status(2, reason="stopped"),
-        ])
+        status = _StatusScript(
+            [
+                _startup_attach_status(3),
+                _finished_run_status(2, reason="stopped"),
+            ]
+        )
         result = self._supervise(status, _never_run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "stopped")
@@ -1943,10 +2028,12 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # outcome. Latching that `run_id` would make the new run's own stopped
         # state look like a mismatch; it is rejected as older than the lock, so
         # the fresh stop is still honored.
-        status = _StatusScript([
-            _leftover_state_attach_status(3, run_id="run-old"),
-            _finished_run_status(2, run_id="run-new", reason="stopped"),
-        ])
+        status = _StatusScript(
+            [
+                _leftover_state_attach_status(3, run_id="run-old"),
+                _finished_run_status(2, run_id="run-new", reason="stopped"),
+            ]
+        )
         result = self._supervise(status, _never_run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "stopped")
@@ -1958,29 +2045,37 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # Startup window again, but the run we attached to died without writing
         # anything: the `stopped` state left behind started before our lock
         # existed, so it belongs to an earlier run and must not block a launch.
-        status = _StatusScript([
-            _startup_attach_status(2),
-            _finished_run_status(
-                2, run_id="run-old", reason="stopped",
-                run_started_at=OLDER_RUN_STARTED_AT,
-            ),
-            _status_payload(0),
-        ])
+        status = _StatusScript(
+            [
+                _startup_attach_status(2),
+                _finished_run_status(
+                    2,
+                    run_id="run-old",
+                    reason="stopped",
+                    run_started_at=OLDER_RUN_STARTED_AT,
+                ),
+                _status_payload(0),
+            ]
+        )
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
         result = self._supervise(status, run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
         self.assertEqual(run.chunks, [1])
 
-    def test_attached_stop_without_a_readable_lock_timestamp_still_launches(self) -> None:
+    def test_attached_stop_without_a_readable_lock_timestamp_still_launches(
+        self,
+    ) -> None:
         # No `run_id` observed and no lock `created_at` to correlate against
         # (an older `asl status` payload): there is no trustworthy identity, so
         # the conservative pre-existing launch behavior stands.
-        status = _StatusScript([
-            _startup_attach_status(2, lock_created_at=None),
-            _finished_run_status(2, reason="stopped"),
-            _status_payload(0),
-        ])
+        status = _StatusScript(
+            [
+                _startup_attach_status(2, lock_created_at=None),
+                _finished_run_status(2, reason="stopped"),
+                _status_payload(0),
+            ]
+        )
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
         result = self._supervise(status, run)
         self.assertEqual(result["reason"], "complete")
@@ -1991,14 +2086,18 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # lock while we watch. The new holder's identity is not observable yet,
         # but its lock is: run-a's id must not be held against the run that
         # actually honored the stop.
-        status = _StatusScript([
-            _attached_run_status(3, run_id="run-a"),
-            _startup_attach_status(2, lock_created_at="2026-07-24T19:05:00+00:00"),
-            _finished_run_status(
-                1, run_id="run-b", reason="stopped",
-                run_started_at="2026-07-24T19:06:00+00:00",
-            ),
-        ])
+        status = _StatusScript(
+            [
+                _attached_run_status(3, run_id="run-a"),
+                _startup_attach_status(2, lock_created_at="2026-07-24T19:05:00+00:00"),
+                _finished_run_status(
+                    1,
+                    run_id="run-b",
+                    reason="stopped",
+                    run_started_at="2026-07-24T19:06:00+00:00",
+                ),
+            ]
+        )
         result = self._supervise(status, _never_run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "stopped")
@@ -2009,12 +2108,14 @@ class SuperviseRunInjectedTest(unittest.TestCase):
     def test_attached_stop_counts_every_session_finished_while_attached(self) -> None:
         # Progress made across several attach polls is attributed to `completed`,
         # measured from the pending count at the first poll (4 -> 1).
-        status = _StatusScript([
-            _attached_run_status(4),
-            _attached_run_status(3),
-            _attached_run_status(2),
-            _finished_run_status(1, reason="stopped"),
-        ])
+        status = _StatusScript(
+            [
+                _attached_run_status(4),
+                _attached_run_status(3),
+                _attached_run_status(2),
+                _finished_run_status(1, reason="stopped"),
+            ]
+        )
         result = self._supervise(status, _never_run)
         self.assertEqual(result["reason"], "stopped")
         self.assertEqual(result["completed"], 3)
@@ -2023,10 +2124,12 @@ class SuperviseRunInjectedTest(unittest.TestCase):
     def test_attached_stop_with_nothing_pending_completes(self) -> None:
         # As with a spent budget, a stop that lands exactly as pending reaches 0
         # must not pre-empt the normal complete/review path.
-        status = _StatusScript([
-            _attached_run_status(1),
-            _finished_run_status(0, reason="stopped"),
-        ])
+        status = _StatusScript(
+            [
+                _attached_run_status(1),
+                _finished_run_status(0, reason="stopped"),
+            ]
+        )
         result = self._supervise(status, _never_run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
@@ -2034,10 +2137,12 @@ class SuperviseRunInjectedTest(unittest.TestCase):
     def test_stale_stopped_state_from_an_older_run_still_launches(self) -> None:
         # Never attached: the plan is unlocked and the `stopped` state on disk
         # belongs to some earlier run. It must not block a new run.
-        status = _StatusScript([
-            _finished_run_status(2, run_id="run-old", reason="stopped"),
-            _status_payload(0),
-        ])
+        status = _StatusScript(
+            [
+                _finished_run_status(2, run_id="run-old", reason="stopped"),
+                _status_payload(0),
+            ]
+        )
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
         result = self._supervise(status, run)
         self.assertTrue(result["ok"], result)
@@ -2048,11 +2153,13 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # We attached to run-b, but the state left behind was written by run-old
         # (run-b died before persisting its own outcome). The identity mismatch
         # means the `stopped` reason says nothing about the run we watched.
-        status = _StatusScript([
-            _attached_run_status(2, run_id="run-b"),
-            _finished_run_status(2, run_id="run-old", reason="stopped"),
-            _status_payload(0),
-        ])
+        status = _StatusScript(
+            [
+                _attached_run_status(2, run_id="run-b"),
+                _finished_run_status(2, run_id="run-old", reason="stopped"),
+                _status_payload(0),
+            ]
+        )
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
         result = self._supervise(status, run)
         self.assertTrue(result["ok"], result)
@@ -2063,11 +2170,13 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # The attached run ended on its own `--max-sessions` budget, not on a
         # control request: the supervisor owns the remaining sessions and its own
         # (absent) budget, so it launches.
-        status = _StatusScript([
-            _attached_run_status(3, run_id="run-a"),
-            _finished_run_status(2, run_id="run-a", reason="max-sessions"),
-            _status_payload(0),
-        ])
+        status = _StatusScript(
+            [
+                _attached_run_status(3, run_id="run-a"),
+                _finished_run_status(2, run_id="run-a", reason="max-sessions"),
+                _status_payload(0),
+            ]
+        )
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
         result = self._supervise(status, run)
         self.assertEqual(result["reason"], "complete")
@@ -2077,11 +2186,15 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # An orphaned state (no `run_finished_at`, flagged stale_unfinished) says
         # nothing about how the run ended, even when a `stopped` reason was
         # persisted mid-flight before the process died.
-        status = _StatusScript([
-            _attached_run_status(3, run_id="run-a"),
-            _finished_run_status(2, run_id="run-a", reason="stopped", finished=False),
-            _status_payload(0),
-        ])
+        status = _StatusScript(
+            [
+                _attached_run_status(3, run_id="run-a"),
+                _finished_run_status(
+                    2, run_id="run-a", reason="stopped", finished=False
+                ),
+                _status_payload(0),
+            ]
+        )
         run = _RunScript([{"ok": True, "paused": False, "reason": "all-complete"}])
         result = self._supervise(status, run)
         self.assertEqual(result["reason"], "complete")
@@ -2091,13 +2204,13 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # Sessions the attached run finished count against the global budget, so
         # a budget already spent while attached reports `max-sessions` (its own
         # clean early stop) rather than the control-request stop.
-        status = _StatusScript([
-            _attached_run_status(3, run_id="run-a"),
-            _finished_run_status(2, run_id="run-a", reason="stopped"),
-        ])
-        result = self._supervise(
-            status, _never_run, parsed=self._budget_parsed(1)
+        status = _StatusScript(
+            [
+                _attached_run_status(3, run_id="run-a"),
+                _finished_run_status(2, run_id="run-a", reason="stopped"),
+            ]
         )
+        result = self._supervise(status, _never_run, parsed=self._budget_parsed(1))
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "max-sessions")
         self.assertEqual(result["completed"], 1)
@@ -2105,9 +2218,16 @@ class SuperviseRunInjectedTest(unittest.TestCase):
 
     def test_run_invoke_error_stops_with_run_error(self) -> None:
         status = _StatusScript([_status_payload(1)])
-        run = _RunScript([
-            {"ok": False, "reason": "run-error", "error": "no JSON", "_invoke_error": True}
-        ])
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "reason": "run-error",
+                    "error": "no JSON",
+                    "_invoke_error": True,
+                }
+            ]
+        )
         result = self._supervise(status, run)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "run-error")
@@ -2115,15 +2235,19 @@ class SuperviseRunInjectedTest(unittest.TestCase):
     def test_recoverable_pause_retries_then_completes(self) -> None:
         # First chunk hits a recoverable verify-failed pause; the supervisor
         # relaunches the same session and the retry completes the plan.
-        status = _StatusScript([
-            _status_payload(1),
-            _status_payload(1),
-            _status_payload(0),
-        ])
-        run = _RunScript([
-            {"ok": False, "paused": True, "reason": "verify-failed"},
-            {"ok": True, "paused": False, "reason": "all-complete"},
-        ])
+        status = _StatusScript(
+            [
+                _status_payload(1),
+                _status_payload(1),
+                _status_payload(0),
+            ]
+        )
+        run = _RunScript(
+            [
+                {"ok": False, "paused": True, "reason": "verify-failed"},
+                {"ok": True, "paused": False, "reason": "all-complete"},
+            ]
+        )
         result = self._supervise(status, run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
@@ -2134,15 +2258,17 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # The pause never clears, so after max_retries relaunches the supervisor
         # surfaces the pause instead of retrying forever.
         status = _StatusScript([_status_payload(1)])
-        run = _RunScript([
-            {
-                "ok": False,
-                "paused": True,
-                "reason": "verify-failed",
-                "pause_reason": "verify-failed",
-                "pause_message": "checks failed",
-            }
-        ])
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "pause_reason": "verify-failed",
+                    "pause_message": "checks failed",
+                }
+            ]
+        )
         result = self._supervise(status, run, max_retries=2)
         self.assertFalse(result["ok"], result)
         self.assertEqual(result["reason"], "paused")
@@ -2156,15 +2282,17 @@ class SuperviseRunInjectedTest(unittest.TestCase):
     def test_non_recoverable_pause_is_not_retried(self) -> None:
         # A question/blocked pause needs a reply; it must not consume retries.
         status = _StatusScript([_status_payload(1)])
-        run = _RunScript([
-            {
-                "ok": False,
-                "paused": True,
-                "reason": "input-error",
-                "pause_reason": "input-error",
-                "pause_message": "needs an answer",
-            }
-        ])
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "input-error",
+                    "pause_reason": "input-error",
+                    "pause_message": "needs an answer",
+                }
+            ]
+        )
         result = self._supervise(status, run)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "paused")
@@ -2177,22 +2305,24 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # that carries pause_policy={recoverable: false} is the single source of
         # truth and wins: the supervisor surfaces the pause without relaunching.
         status = _StatusScript([_status_payload(1)])
-        run = _RunScript([
-            {
-                "ok": False,
-                "paused": True,
-                "reason": "verify-failed",
-                "pause_reason": "verify-failed",
-                "pause_message": "checks failed",
-                "pause_policy": {
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
                     "reason": "verify-failed",
-                    "recoverable": False,
-                    "requires_user": False,
-                    "max_retries": 0,
-                    "backoff_seconds": [],
-                },
-            }
-        ])
+                    "pause_reason": "verify-failed",
+                    "pause_message": "checks failed",
+                    "pause_policy": {
+                        "reason": "verify-failed",
+                        "recoverable": False,
+                        "requires_user": False,
+                        "max_retries": 0,
+                        "backoff_seconds": [],
+                    },
+                }
+            ]
+        )
         result = self._supervise(status, run, max_retries=2)
         self.assertFalse(result["ok"], result)
         self.assertEqual(result["reason"], "paused")
@@ -2205,22 +2335,24 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # A reason absent from the user-required constant set still surfaces as
         # user_required when the payload's pause_policy says so.
         status = _StatusScript([_status_payload(1)])
-        run = _RunScript([
-            {
-                "ok": False,
-                "paused": True,
-                "reason": "runner-pause",
-                "pause_reason": "runner-pause",
-                "pause_message": "needs a human",
-                "pause_policy": {
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
                     "reason": "runner-pause",
-                    "recoverable": False,
-                    "requires_user": True,
-                    "max_retries": 0,
-                    "backoff_seconds": [],
-                },
-            }
-        ])
+                    "pause_reason": "runner-pause",
+                    "pause_message": "needs a human",
+                    "pause_policy": {
+                        "reason": "runner-pause",
+                        "recoverable": False,
+                        "requires_user": True,
+                        "max_retries": 0,
+                        "backoff_seconds": [],
+                    },
+                }
+            ]
+        )
         result = self._supervise(status, run)
         self.assertFalse(result["ok"], result)
         self.assertEqual(result["reason"], "user_required")
@@ -2230,16 +2362,18 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # The runner marked the verification repair exhausted (an identical
         # failure fingerprint repeated), so the supervisor must not relaunch.
         status = _StatusScript([_status_payload(1)])
-        run = _RunScript([
-            {
-                "ok": False,
-                "paused": True,
-                "reason": "verify-failed",
-                "pause_reason": "verify-failed",
-                "pause_message": "identical checks failed",
-                "pause_details": {"verification_repair_exhausted": True},
-            }
-        ])
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "pause_reason": "verify-failed",
+                    "pause_message": "identical checks failed",
+                    "pause_details": {"verification_repair_exhausted": True},
+                }
+            ]
+        )
         result = self._supervise(status, run, max_retries=2)
         self.assertFalse(result["ok"], result)
         self.assertEqual(result["reason"], "paused")
@@ -2251,16 +2385,18 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         # The runner burned its in-run review-verdict retries and reused the
         # verify-failed pause, so relaunching would just replay the same turn.
         status = _StatusScript([_status_payload(1)])
-        run = _RunScript([
-            {
-                "ok": False,
-                "paused": True,
-                "reason": "verify-failed",
-                "pause_reason": "verify-failed",
-                "pause_message": "invalid review verdict",
-                "pause_details": {"review_verdict_repair_exhausted": True},
-            }
-        ])
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "pause_reason": "verify-failed",
+                    "pause_message": "invalid review verdict",
+                    "pause_details": {"review_verdict_repair_exhausted": True},
+                }
+            ]
+        )
         result = self._supervise(status, run, max_retries=2)
         self.assertFalse(result["ok"], result)
         self.assertEqual(result["reason"], "paused")
@@ -2270,27 +2406,33 @@ class SuperviseRunInjectedTest(unittest.TestCase):
     def test_verify_failed_changed_fingerprint_still_retries(self) -> None:
         # A changed verification failure (exhausted flag clear) stays eligible
         # for another bounded retry, which then completes the plan.
-        status = _StatusScript([
-            _status_payload(1),
-            _status_payload(1),
-            _status_payload(0),
-        ])
-        run = _RunScript([
-            {
-                "ok": False,
-                "paused": True,
-                "reason": "verify-failed",
-                "pause_reason": "verify-failed",
-                "pause_details": {"verification_repair_exhausted": False},
-            },
-            {"ok": True, "paused": False, "reason": "all-complete"},
-        ])
+        status = _StatusScript(
+            [
+                _status_payload(1),
+                _status_payload(1),
+                _status_payload(0),
+            ]
+        )
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "pause_reason": "verify-failed",
+                    "pause_details": {"verification_repair_exhausted": False},
+                },
+                {"ok": True, "paused": False, "reason": "all-complete"},
+            ]
+        )
         result = self._supervise(status, run)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["reason"], "complete")
         self.assertEqual(run.chunks, [1, 2])
 
-    def test_default_run_invoker_forwards_status_probe_and_stall_threshold(self) -> None:
+    def test_default_run_invoker_forwards_status_probe_and_stall_threshold(
+        self,
+    ) -> None:
         # With no injected run_invoker, the default closure must thread the
         # status probe (reusing the status_invoker seam) and stall_threshold
         # into `_invoke_run`.
@@ -2312,7 +2454,10 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         autopilot._invoke_run = fake_invoke_run
         try:
             result = autopilot.supervise_run(
-                {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]},
+                {
+                    "plan_dir": "/tmp/plan",
+                    "argv": ["asl", "run", "/tmp/plan", "--json"],
+                },
                 status_invoker=status_invoker,
                 clock=_counter_clock(),
                 sleep=lambda *_: None,
@@ -2339,9 +2484,7 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         plan_dir = os.path.join(tmp, "plan")
         state_root = os.path.join(tmp, "state")
         os.makedirs(plan_dir)
-        mailbox_path = autopilot._mailbox.mailbox_path_for_plan(
-            plan_dir, state_root
-        )
+        mailbox_path = autopilot._mailbox.mailbox_path_for_plan(plan_dir, state_root)
         lease_path = autopilot._mailbox.lease_path_for_plan(plan_dir, state_root)
 
         initial = _status_payload(1)
@@ -2365,9 +2508,7 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         def fake_invoke_run(target, **kwargs):
             observed["lease_present_at_launch"] = lease_path.exists()
             observed["watcher"] = kwargs["mailbox_watcher"]
-            observed["watcher_enabled_at_launch"] = kwargs[
-                "mailbox_watcher"
-            ].enabled
+            observed["watcher_enabled_at_launch"] = kwargs["mailbox_watcher"].enabled
             return {"ok": True, "paused": False, "reason": "all-complete"}
 
         original = autopilot._invoke_run
@@ -2405,12 +2546,10 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         plan_dir = os.path.join(tmp, "plan")
         state_root = os.path.join(tmp, "state")
         os.makedirs(plan_dir)
-        mailbox_path = autopilot._mailbox.mailbox_path_for_plan(
-            plan_dir, state_root
-        )
+        mailbox_path = autopilot._mailbox.mailbox_path_for_plan(plan_dir, state_root)
         lease_path = autopilot._mailbox.lease_path_for_plan(plan_dir, state_root)
         clock = _ManualClock()
-        wall_start = datetime(2026, 7, 24, tzinfo=timezone.utc)
+        wall_start = datetime(2026, 7, 24, tzinfo=UTC)
         lease_writes = []
         launch_times = []
         activation_at_launch = []
@@ -2461,9 +2600,7 @@ class SuperviseRunInjectedTest(unittest.TestCase):
                 ).fresh
             )
             if chunk_index == 1:
-                clock.advance(
-                    autopilot._mailbox.MAILBOX_LEASE_FRESH_SECONDS + 1.0
-                )
+                clock.advance(autopilot._mailbox.MAILBOX_LEASE_FRESH_SECONDS + 1.0)
                 return {
                     "ok": False,
                     "paused": True,
@@ -2509,9 +2646,7 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         plan_dir = os.path.join(tmp, "plan")
         state_root = os.path.join(tmp, "state")
         os.makedirs(plan_dir)
-        mailbox_path = autopilot._mailbox.mailbox_path_for_plan(
-            plan_dir, state_root
-        )
+        mailbox_path = autopilot._mailbox.mailbox_path_for_plan(plan_dir, state_root)
         lease_path = autopilot._mailbox.lease_path_for_plan(plan_dir, state_root)
         initial = _status_payload(1)
         initial.update(
@@ -2601,15 +2736,19 @@ class SuperviseRunTransportBackoffTest(unittest.TestCase):
     def test_transport_retry_clears_after_first_backoff(self) -> None:
         # First chunk hits a transport pause; after a single 5s backoff the
         # relaunch completes the plan.
-        status = _StatusScript([
-            _status_payload(1),
-            _status_payload(1),
-            _status_payload(0),
-        ])
-        run = _RunScript([
-            self._transport_pause(),
-            {"ok": True, "paused": False, "reason": "all-complete"},
-        ])
+        status = _StatusScript(
+            [
+                _status_payload(1),
+                _status_payload(1),
+                _status_payload(0),
+            ]
+        )
+        run = _RunScript(
+            [
+                self._transport_pause(),
+                {"ok": True, "paused": False, "reason": "all-complete"},
+            ]
+        )
         sleeps = []
         result = self._supervise(status, run, sleeps)
         self.assertTrue(result["ok"], result)
@@ -2640,20 +2779,24 @@ class SuperviseRunTransportBackoffTest(unittest.TestCase):
     def test_verify_failed_retry_does_not_back_off(self) -> None:
         # Verification repair retries relaunch immediately (Session 10 revisits
         # them); no backoff sleep is scheduled.
-        status = _StatusScript([
-            _status_payload(1),
-            _status_payload(1),
-            _status_payload(0),
-        ])
-        run = _RunScript([
-            {
-                "ok": False,
-                "paused": True,
-                "reason": "verify-failed",
-                "pause_reason": "verify-failed",
-            },
-            {"ok": True, "paused": False, "reason": "all-complete"},
-        ])
+        status = _StatusScript(
+            [
+                _status_payload(1),
+                _status_payload(1),
+                _status_payload(0),
+            ]
+        )
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "pause_reason": "verify-failed",
+                },
+                {"ok": True, "paused": False, "reason": "all-complete"},
+            ]
+        )
         sleeps = []
         result = self._supervise(status, run, sleeps)
         self.assertTrue(result["ok"], result)
@@ -2664,12 +2807,14 @@ class SuperviseRunTransportBackoffTest(unittest.TestCase):
         # A transport retry, an attach poll (someone else briefly holds the
         # lock), then the same pause again: the retry budget keeps counting from
         # where it left off rather than resetting after the attach.
-        status = _StatusScript([
-            _status_payload(1),                        # chunk 1 -> transport pause
-            _status_payload(1, lock=_active_lock()),   # attach wait
-            _status_payload(1),                        # chunk 2 -> transport pause
-            _status_payload(1),                        # chunk 3 -> transport pause
-        ])
+        status = _StatusScript(
+            [
+                _status_payload(1),  # chunk 1 -> transport pause
+                _status_payload(1, lock=_active_lock()),  # attach wait
+                _status_payload(1),  # chunk 2 -> transport pause
+                _status_payload(1),  # chunk 3 -> transport pause
+            ]
+        )
         run = _RunScript([self._transport_pause()])
         result = autopilot.supervise_run(
             {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]},
@@ -2757,7 +2902,7 @@ class SuperviseRunUserRequiredHarnessTest(unittest.TestCase):
         self.assertNotIn("quota_wait", result)
 
 
-QUOTA_NOW = datetime(2026, 7, 30, 12, 0, 0, tzinfo=timezone.utc)
+QUOTA_NOW = datetime(2026, 7, 30, 12, 0, 0, tzinfo=UTC)
 
 
 class _WallClock:
@@ -2795,7 +2940,7 @@ class ParseQuotaResetAtTest(unittest.TestCase):
         self.assertEqual(self._parse(" 120 "), QUOTA_NOW + timedelta(minutes=2))
 
     def test_iso_timestamp_tolerates_trailing_z(self) -> None:
-        expected = datetime(2026, 7, 31, 6, 0, tzinfo=timezone.utc)
+        expected = datetime(2026, 7, 31, 6, 0, tzinfo=UTC)
         self.assertEqual(self._parse("2026-07-31T06:00:00Z"), expected)
         self.assertEqual(self._parse("2026-07-31T06:00:00+00:00"), expected)
 
@@ -2817,10 +2962,10 @@ class ParseQuotaResetAtTest(unittest.TestCase):
     def test_time_of_day_with_zone_resolves_to_next_occurrence(self) -> None:
         # 12:00Z is 08:00 in New York, so 10:30pm is later the same day.
         parsed = self._parse("10:30pm (America/New_York)")
-        self.assertEqual(parsed, datetime(2026, 7, 31, 2, 30, tzinfo=timezone.utc))
+        self.assertEqual(parsed, datetime(2026, 7, 31, 2, 30, tzinfo=UTC))
         # A time already past today rolls to tomorrow.
         parsed = self._parse("6:00am (America/New_York)")
-        self.assertEqual(parsed, datetime(2026, 7, 31, 10, 0, tzinfo=timezone.utc))
+        self.assertEqual(parsed, datetime(2026, 7, 31, 10, 0, tzinfo=UTC))
 
     def test_time_of_day_without_zone_uses_local_wall_clock(self) -> None:
         local_now = QUOTA_NOW.astimezone()
@@ -2998,9 +3143,7 @@ class SuperviseRunQuotaWaitTest(unittest.TestCase):
         )
         self.assertEqual(result["reason"], "complete", result)
         self.assertEqual(run.chunks, [1, 2])
-        self.assertEqual(
-            sum(wall.sleeps), autopilot.DEFAULT_QUOTA_RESET_BUFFER_SECONDS
-        )
+        self.assertEqual(sum(wall.sleeps), autopilot.DEFAULT_QUOTA_RESET_BUFFER_SECONDS)
 
     def test_suspend_past_the_reset_relaunches_promptly(self) -> None:
         clock = _WallClock(suspend_after=1, suspend_seconds=86400.0)
@@ -3102,9 +3245,7 @@ class SuperviseRunQuotaWaitTest(unittest.TestCase):
                 self.assertEqual(result["reason"], "user_required")
                 self.assertEqual(run.chunks, [1])
                 self.assertEqual(wall.sleeps, [])
-                self.assertEqual(
-                    result["quota_wait"]["skipped"], "reason-not-quota"
-                )
+                self.assertEqual(result["quota_wait"]["skipped"], "reason-not-quota")
 
     def test_relaunch_after_the_wait_carries_no_operator_reply(self) -> None:
         # Reply injection is chunk-1 only, so the chunk resuming after a quota
@@ -3214,7 +3355,7 @@ class SuperviseRunAttachHeartbeatTest(unittest.TestCase):
             snapshot,
             90.0,
             events_stale=False,
-            now=datetime(2026, 7, 24, 19, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 7, 24, 19, 0, tzinfo=UTC),
         )
 
         self.assertTrue(is_stall)
@@ -3225,7 +3366,7 @@ class SuperviseRunAttachHeartbeatTest(unittest.TestCase):
             snapshot,
             90.0,
             events_stale=False,
-            now=datetime(2026, 7, 24, 19, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 7, 24, 19, 0, tzinfo=UTC),
         )
         self.assertIn("WARN possibly stalled", heartbeat)
 
@@ -3556,9 +3697,7 @@ class MailboxWatcherTest(unittest.TestCase):
         watcher.poll(now=0.0, force_read=True)
         progress = watcher.drain_progress_records()
         self.assertTrue(any(line.startswith("WAIT_ENDED ") for line in progress))
-        self.assertTrue(
-            any(line.startswith("CLOSURE_CONSUMED ") for line in progress)
-        )
+        self.assertTrue(any(line.startswith("CLOSURE_CONSUMED ") for line in progress))
         self.assertNotIn(question.text, repr(progress))
 
     def test_resolves_paths_renews_lease_and_returns_questions_once(self) -> None:
@@ -3578,12 +3717,8 @@ class MailboxWatcherTest(unittest.TestCase):
             last_seq=3,
         )
 
-        def write_lease(
-            plan_dir, supervisor_id, *, state_dir=None, **projection
-        ):
-            writes.append(
-                (plan_dir, supervisor_id, state_dir, projection)
-            )
+        def write_lease(plan_dir, supervisor_id, *, state_dir=None, **projection):
+            writes.append((plan_dir, supervisor_id, state_dir, projection))
 
         def read_mailbox(plan_dir, *, state_dir=None):
             reads.append((plan_dir, state_dir))
@@ -3632,9 +3767,7 @@ class MailboxWatcherTest(unittest.TestCase):
             clock=lambda: 0.0,
             read_mailbox=lambda *_args, **_kwargs: view,
             write_lease=(
-                lambda *_args, state_dir=None, **projection: writes.append(
-                    projection
-                )
+                lambda *_args, state_dir=None, **projection: writes.append(projection)
             ),
             supervisor_id="00000000-0000-0000-0000-000000000099",
         )
@@ -3661,9 +3794,7 @@ class MailboxWatcherTest(unittest.TestCase):
             (),
         )
 
-        notice_records = [
-            record for record in progress if record.startswith("NOTICE ")
-        ]
+        notice_records = [record for record in progress if record.startswith("NOTICE ")]
         self.assertEqual(len(notice_records), 1)
         self.assertIn(current.id, notice_records[0])
         self.assertNotIn("\n", notice_records[0])
@@ -3693,10 +3824,7 @@ class MailboxWatcherTest(unittest.TestCase):
             )
         )
         self.assertTrue(
-            all(
-                projection.get("unanswered_questions", 0) == 0
-                for projection in writes
-            )
+            all(projection.get("unanswered_questions", 0) == 0 for projection in writes)
         )
 
     def test_lease_transient_failure_recovers_and_delivers_question(self) -> None:
@@ -3715,12 +3843,8 @@ class MailboxWatcherTest(unittest.TestCase):
         )
         views = iter((empty_view, question_view))
 
-        def write_lease(
-            plan_dir, supervisor_id, *, state_dir=None, **projection
-        ):
-            writes.append(
-                (plan_dir, supervisor_id, state_dir, projection)
-            )
+        def write_lease(plan_dir, supervisor_id, *, state_dir=None, **projection):
+            writes.append((plan_dir, supervisor_id, state_dir, projection))
             if len(writes) == 2:
                 raise OSError("transient lease write failure")
 
@@ -3766,10 +3890,7 @@ class MailboxWatcherTest(unittest.TestCase):
         self.assertTrue(watcher.enabled)
         self.assertIn("MAILBOX lease renewal recovered", progress)
         self.assertTrue(
-            any(
-                record.startswith(f"QUESTION id={question.id} ")
-                for record in progress
-            )
+            any(record.startswith(f"QUESTION id={question.id} ") for record in progress)
         )
         self.assertEqual(len(writes), 3)
         self.assertEqual(len(reads), 2)
@@ -3790,12 +3911,8 @@ class MailboxWatcherTest(unittest.TestCase):
             last_seq=0,
         )
 
-        def write_lease(
-            plan_dir, supervisor_id, *, state_dir=None, **projection
-        ):
-            writes.append(
-                (plan_dir, supervisor_id, state_dir, projection)
-            )
+        def write_lease(plan_dir, supervisor_id, *, state_dir=None, **projection):
+            writes.append((plan_dir, supervisor_id, state_dir, projection))
             if len(writes) == 1:
                 raise autopilot._mailbox.MailboxError(
                     autopilot._mailbox.ERROR_LEASE_WRITE,
@@ -3885,9 +4002,7 @@ class MailboxWatcherTest(unittest.TestCase):
         self.assertTrue(watcher.enabled)
         self.assertEqual(len(writes), 4)
         self.assertEqual(
-            progress.count(
-                "MAILBOX WARN lease renewal failed; retry scheduled"
-            ),
+            progress.count("MAILBOX WARN lease renewal failed; retry scheduled"),
             1,
         )
         self.assertEqual(
@@ -3941,9 +4056,7 @@ class MailboxWatcherTest(unittest.TestCase):
             )
         )
 
-        def write_lease(
-            plan_dir, supervisor_id, *, state_dir=None, **projection
-        ):
+        def write_lease(plan_dir, supervisor_id, *, state_dir=None, **projection):
             writes.append(projection)
 
         watcher = autopilot._MailboxWatcher.from_status(
@@ -3970,18 +4083,14 @@ class MailboxWatcherTest(unittest.TestCase):
                     "unanswered_questions": 0,
                 },
                 {
-                    "latest_unanswered_question_created_at": (
-                        question.created_at
-                    ),
+                    "latest_unanswered_question_created_at": (question.created_at),
                     "latest_unanswered_question_id": question.id,
                     "projection_seq": 1,
                     "run_id": "run-current",
                     "unanswered_questions": 1,
                 },
                 {
-                    "latest_unanswered_question_created_at": (
-                        question.created_at
-                    ),
+                    "latest_unanswered_question_created_at": (question.created_at),
                     "latest_unanswered_question_id": question.id,
                     "projection_seq": 1,
                     "run_id": "run-current",
@@ -4001,9 +4110,7 @@ class MailboxWatcherTest(unittest.TestCase):
     ) -> None:
         clock = _ManualClock()
         writes: list[dict] = []
-        old_question = self._question(
-            seq=1, text="old run question", run_id="run-old"
-        )
+        old_question = self._question(seq=1, text="old run question", run_id="run-old")
         current_question = autopilot._mailbox.MailboxMessage(
             seq=2,
             id="00000000-0000-0000-0000-000000000022",
@@ -4024,9 +4131,7 @@ class MailboxWatcherTest(unittest.TestCase):
         )
         views = iter((old_view, current_view, current_view))
 
-        def write_lease(
-            _plan_dir, _supervisor_id, *, state_dir=None, **projection
-        ):
+        def write_lease(_plan_dir, _supervisor_id, *, state_dir=None, **projection):
             writes.append(projection)
 
         watcher = autopilot._MailboxWatcher(
@@ -4100,8 +4205,7 @@ class MailboxWatcherTest(unittest.TestCase):
         self.assertTrue(
             any(
                 write.get("run_id") == "run-current"
-                and write.get("latest_unanswered_question_id")
-                == current_question.id
+                and write.get("latest_unanswered_question_id") == current_question.id
                 for write in successor_writes
             )
         )
@@ -4245,9 +4349,7 @@ class MailboxWatcherTest(unittest.TestCase):
             [item["id"] for item in payload["outbox"]["notices"]],
             [notice.id],
         )
-        notice_records = [
-            record for record in progress if record.startswith("NOTICE ")
-        ]
+        notice_records = [record for record in progress if record.startswith("NOTICE ")]
         self.assertEqual(len(notice_records), 1)
         self.assertIn(notice.id, notice_records[0])
 
@@ -4330,9 +4432,7 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         self._patch(autopilot, "run_autopilot", supervision)
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            exit_code = autopilot.main(
-                ["--command", command, "--json", *extra_argv]
-            )
+            exit_code = autopilot.main(["--command", command, "--json", *extra_argv])
         return exit_code, buffer.getvalue()
 
     def test_each_terminal_reason_appends_one_mapped_record(self) -> None:
@@ -4362,7 +4462,9 @@ class SupervisionEndEmissionTest(unittest.TestCase):
                     "reason": reason,
                     "command": autopilot.parse_command(command),
                 }
-                exit_code, _ = self._run_main(command, lambda args: result)
+                exit_code, _ = self._run_main(
+                    command, lambda args, result=result: result
+                )
 
                 self.assertEqual(0 if ok else 1, exit_code)
                 records = self._supervision_ends(plan_dir, state_dir)
@@ -4470,9 +4572,7 @@ class SupervisionEndEmissionTest(unittest.TestCase):
     def test_overlapping_launches_leave_distinguishable_records(self) -> None:
         # Two helpers on one plan: sequence cannot tell their records apart,
         # the launch identity can.
-        launches = [
-            autopilot._mailbox.new_supervision_id() for _ in range(2)
-        ]
+        launches = [autopilot._mailbox.new_supervision_id() for _ in range(2)]
         for launch in launches:
             result = {
                 "ok": True,
@@ -4498,17 +4598,16 @@ class SupervisionEndEmissionTest(unittest.TestCase):
             raise RuntimeError("supervisor exploded")
 
         self._patch(autopilot, "run_autopilot", supervision)
-        with self.assertRaises(RuntimeError):
-            with redirect_stdout(io.StringIO()):
-                autopilot.main(
-                    [
-                        "--command",
-                        self.command,
-                        "--json",
-                        "--supervision-id",
-                        launch,
-                    ]
-                )
+        with self.assertRaises(RuntimeError), redirect_stdout(io.StringIO()):
+            autopilot.main(
+                [
+                    "--command",
+                    self.command,
+                    "--json",
+                    "--supervision-id",
+                    launch,
+                ]
+            )
 
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual([launch], [record.supervision_id for record in records])
@@ -4518,17 +4617,19 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         )
 
     def test_malformed_supervision_id_is_refused_before_supervision(self) -> None:
-        with self.assertRaises(SystemExit) as raised:
-            with redirect_stderr(io.StringIO()):
-                autopilot.main(
-                    [
-                        "--command",
-                        self.command,
-                        "--json",
-                        "--supervision-id",
-                        "not-a-uuid",
-                    ]
-                )
+        with (
+            self.assertRaises(SystemExit) as raised,
+            redirect_stderr(io.StringIO()),
+        ):
+            autopilot.main(
+                [
+                    "--command",
+                    self.command,
+                    "--json",
+                    "--supervision-id",
+                    "not-a-uuid",
+                ]
+            )
 
         self.assertEqual(2, raised.exception.code)
         self.assertFalse(
@@ -4584,9 +4685,7 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         # is appended even though the failing command names a real plan.
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            exit_code = autopilot.main(
-                ["--command", f"{self.command} | cat", "--json"]
-            )
+            exit_code = autopilot.main(["--command", f"{self.command} | cat", "--json"])
 
         self.assertEqual(1, exit_code)
         self.assertEqual("shell-syntax", json.loads(buffer.getvalue())["reason"])
@@ -4601,9 +4700,8 @@ class SupervisionEndEmissionTest(unittest.TestCase):
             raise RuntimeError("supervisor exploded")
 
         self._patch(autopilot, "run_autopilot", supervision)
-        with self.assertRaises(RuntimeError):
-            with redirect_stdout(io.StringIO()):
-                autopilot.main(["--command", self.command, "--json"])
+        with self.assertRaises(RuntimeError), redirect_stdout(io.StringIO()):
+            autopilot.main(["--command", self.command, "--json"])
 
         records = self._supervision_ends(self.plan_dir, self.state_dir)
         self.assertEqual(1, len(records))
@@ -4646,9 +4744,11 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)
         self._patch(autopilot, "run_autopilot", supervision)
-        with self.assertRaises(SystemExit) as caught:
-            with redirect_stdout(io.StringIO()):
-                autopilot.main(["--command", self.command, "--json"])
+        with (
+            self.assertRaises(SystemExit) as caught,
+            redirect_stdout(io.StringIO()),
+        ):
+            autopilot.main(["--command", self.command, "--json"])
 
         self.assertEqual(128 + int(signal.SIGTERM), caught.exception.code)
         self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
@@ -4712,7 +4812,9 @@ class SupervisionEndEmissionTest(unittest.TestCase):
             with self.subTest(signal=signal_number):
                 plan_dir, state_dir, command = self._plan(f"flush-{signal_number:d}")
                 result = self._complete_result(command)
-                self._patch(autopilot, "run_autopilot", lambda args: result)
+                self._patch(
+                    autopilot, "run_autopilot", lambda args, result=result: result
+                )
                 self._patch(
                     autopilot,
                     "_supervision_end_fields",
@@ -4722,9 +4824,11 @@ class SupervisionEndEmissionTest(unittest.TestCase):
                 previous_int = signal.getsignal(signal.SIGINT)
                 stdout = io.StringIO()
 
-                with self.assertRaises(SystemExit) as caught:
-                    with redirect_stdout(stdout):
-                        autopilot.main(["--command", command, "--json"])
+                with (
+                    self.assertRaises(SystemExit) as caught,
+                    redirect_stdout(stdout),
+                ):
+                    autopilot.main(["--command", command, "--json"])
 
                 self.assertEqual(128 + int(signal_number), caught.exception.code)
                 self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
@@ -4769,9 +4873,11 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)
 
-        with self.assertRaises(SystemExit) as caught:
-            with redirect_stdout(io.StringIO()):
-                autopilot.main(["--command", self.command, "--json"])
+        with (
+            self.assertRaises(SystemExit) as caught,
+            redirect_stdout(io.StringIO()),
+        ):
+            autopilot.main(["--command", self.command, "--json"])
 
         self.assertEqual(128 + int(signal.SIGTERM), caught.exception.code)
         self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
@@ -4810,9 +4916,7 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         signal.pthread_sigmask(signal.SIG_UNBLOCK, autopilot.TERMINATION_SIGNALS)
         for number in autopilot.TERMINATION_SIGNALS:
             current = signal.getsignal(number)
-            if getattr(current, "__qualname__", "").startswith(
-                "_termination_handlers"
-            ):
+            if getattr(current, "__qualname__", "").startswith("_termination_handlers"):
                 real_signal(number, signal.SIG_DFL)
 
     def test_signal_at_an_install_seam_still_emits_one_error_record(self) -> None:
@@ -4824,7 +4928,7 @@ class SupervisionEndEmissionTest(unittest.TestCase):
                 with self.subTest(call=call, signal=number.name):
                     plan_dir, state_dir, command = self._plan(f"seam-{call}-{number}")
 
-                    def fire(swap):
+                    def fire(swap, number=number):
                         previous = swap()
                         # Blocked by the install hold, so it stays pending
                         # until the mask lifts inside `main`'s guard.
@@ -4834,14 +4938,18 @@ class SupervisionEndEmissionTest(unittest.TestCase):
                     self._counting_signal(call=call, fire=fire)
                     launched: list = []
                     self._patch(
-                        autopilot, "run_autopilot", lambda args: launched.append(args)
+                        autopilot,
+                        "run_autopilot",
+                        lambda args, launched=launched: launched.append(args),
                     )
                     previous_term = signal.getsignal(signal.SIGTERM)
                     previous_int = signal.getsignal(signal.SIGINT)
 
-                    with self.assertRaises(SystemExit) as caught:
-                        with redirect_stdout(io.StringIO()):
-                            autopilot.main(["--command", command, "--json"])
+                    with (
+                        self.assertRaises(SystemExit) as caught,
+                        redirect_stdout(io.StringIO()),
+                    ):
+                        autopilot.main(["--command", command, "--json"])
 
                     self.assertEqual(128 + int(number), caught.exception.code)
                     self.assertEqual([], launched)
@@ -4868,9 +4976,8 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)
 
-        with self.assertRaises(RuntimeError):
-            with redirect_stdout(io.StringIO()):
-                autopilot.main(["--command", self.command, "--json"])
+        with self.assertRaises(RuntimeError), redirect_stdout(io.StringIO()):
+            autopilot.main(["--command", self.command, "--json"])
 
         self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
         self.assertIs(previous_int, signal.getsignal(signal.SIGINT))
@@ -4880,9 +4987,7 @@ class SupervisionEndEmissionTest(unittest.TestCase):
             autopilot._mailbox.SUPERVISION_OUTCOME_ERROR,
             records[0].supervision_outcome,
         )
-        self.assertEqual(
-            "supervision ended: error - RuntimeError", records[0].text
-        )
+        self.assertEqual("supervision ended: error - RuntimeError", records[0].text)
 
     def test_signal_at_the_restore_seam_keeps_the_committed_record(self) -> None:
         # The accepted nuance: the record is already committed, so the signal
@@ -4911,9 +5016,11 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         self._patch(autopilot, "run_autopilot", lambda args: result)
         previous_int = signal.getsignal(signal.SIGINT)
 
-        with self.assertRaises(SystemExit) as caught:
-            with redirect_stdout(io.StringIO()):
-                autopilot.main(["--command", self.command, "--json"])
+        with (
+            self.assertRaises(SystemExit) as caught,
+            redirect_stdout(io.StringIO()),
+        ):
+            autopilot.main(["--command", self.command, "--json"])
 
         self.assertEqual(128 + int(signal.SIGTERM), caught.exception.code)
         self.assertEqual([int(signal.SIGTERM)], delivered)
@@ -4939,9 +5046,11 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         self._patch(autopilot, "run_autopilot", lambda args: result)
         self._patch(autopilot._mailbox, "append_supervision_end", signalling_append)
 
-        with self.assertRaises(SystemExit) as caught:
-            with redirect_stdout(io.StringIO()):
-                autopilot.main(["--command", self.command, "--json"])
+        with (
+            self.assertRaises(SystemExit) as caught,
+            redirect_stdout(io.StringIO()),
+        ):
+            autopilot.main(["--command", self.command, "--json"])
 
         self.assertEqual(128 + int(signal.SIGINT), caught.exception.code)
         # `_supervision_ends` refuses rejected lines, so one record here means
@@ -4974,7 +5083,9 @@ class SupervisionEndEmissionTest(unittest.TestCase):
             with self.subTest(signal=signal_number):
                 plan_dir, state_dir, command = self._plan(f"write-{signal_number:d}")
                 result = self._complete_result(command)
-                self._patch(autopilot, "run_autopilot", lambda args: result)
+                self._patch(
+                    autopilot, "run_autopilot", lambda args, result=result: result
+                )
                 self._patch(
                     autopilot._mailbox.os,
                     "write",
@@ -4984,9 +5095,11 @@ class SupervisionEndEmissionTest(unittest.TestCase):
                 previous_int = signal.getsignal(signal.SIGINT)
                 stdout = io.StringIO()
 
-                with self.assertRaises(SystemExit) as caught:
-                    with redirect_stdout(stdout):
-                        autopilot.main(["--command", command, "--json"])
+                with (
+                    self.assertRaises(SystemExit) as caught,
+                    redirect_stdout(stdout),
+                ):
+                    autopilot.main(["--command", command, "--json"])
 
                 self.assertEqual(128 + int(signal_number), caught.exception.code)
                 self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
@@ -5028,7 +5141,9 @@ class SupervisionEndEmissionTest(unittest.TestCase):
             with self.subTest(signal=signal_number):
                 plan_dir, state_dir, command = self._plan(f"sync-{signal_number:d}")
                 result = self._complete_result(command)
-                self._patch(autopilot, "run_autopilot", lambda args: result)
+                self._patch(
+                    autopilot, "run_autopilot", lambda args, result=result: result
+                )
                 self._patch(
                     autopilot._mailbox.durability,
                     "fullsync",
@@ -5038,9 +5153,11 @@ class SupervisionEndEmissionTest(unittest.TestCase):
                 previous_int = signal.getsignal(signal.SIGINT)
                 stdout = io.StringIO()
 
-                with self.assertRaises(SystemExit) as caught:
-                    with redirect_stdout(stdout):
-                        autopilot.main(["--command", command, "--json"])
+                with (
+                    self.assertRaises(SystemExit) as caught,
+                    redirect_stdout(stdout),
+                ):
+                    autopilot.main(["--command", command, "--json"])
 
                 self.assertEqual(128 + int(signal_number), caught.exception.code)
                 self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
@@ -5086,9 +5203,11 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)
 
-        with self.assertRaises(SystemExit) as caught:
-            with redirect_stdout(io.StringIO()):
-                autopilot.main(["--command", self.command, "--json"])
+        with (
+            self.assertRaises(SystemExit) as caught,
+            redirect_stdout(io.StringIO()),
+        ):
+            autopilot.main(["--command", self.command, "--json"])
 
         self.assertEqual(128 + int(signal.SIGTERM), caught.exception.code)
         self.assertIs(previous_term, signal.getsignal(signal.SIGTERM))
@@ -5110,9 +5229,11 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         self._patch(autopilot, "run_autopilot", lambda args: result)
         self._patch(autopilot._mailbox, "append_supervision_end", boom)
 
-        with self.assertRaises(SystemExit) as caught:
-            with redirect_stdout(io.StringIO()):
-                autopilot.main(["--command", self.command, "--json"])
+        with (
+            self.assertRaises(SystemExit) as caught,
+            redirect_stdout(io.StringIO()),
+        ):
+            autopilot.main(["--command", self.command, "--json"])
 
         # The record is lost with the mailbox, but the signal is not: an
         # operator who sent SIGTERM still sees the process die of it.
@@ -5164,9 +5285,8 @@ class SupervisionEndEmissionTest(unittest.TestCase):
 
         self._patch(autopilot, "run_autopilot", supervision)
         stdout = io.StringIO()
-        with self.assertRaises(RuntimeError):
-            with redirect_stdout(stdout):
-                autopilot.main(["--command", self.command, "--json"])
+        with self.assertRaises(RuntimeError), redirect_stdout(stdout):
+            autopilot.main(["--command", self.command, "--json"])
 
         self.assertEqual("", stdout.getvalue())
         records = self._supervision_ends(self.plan_dir, self.state_dir)
@@ -5182,9 +5302,8 @@ class SupervisionEndEmissionTest(unittest.TestCase):
         self._patch(autopilot, "run_autopilot", lambda args: result)
         stdout = io.StringIO()
 
-        with self.assertRaises(TypeError):
-            with redirect_stdout(stdout):
-                autopilot.main(["--command", self.command, "--json"])
+        with self.assertRaises(TypeError), redirect_stdout(stdout):
+            autopilot.main(["--command", self.command, "--json"])
 
         self.assertEqual("", stdout.getvalue())
         records = self._supervision_ends(self.plan_dir, self.state_dir)
@@ -5205,9 +5324,11 @@ class SupervisionEndEmissionTest(unittest.TestCase):
                 self._patch(autopilot, "run_autopilot", terminated(signal_number))
                 stdout = io.StringIO()
 
-                with self.assertRaises(SystemExit) as caught:
-                    with redirect_stdout(stdout):
-                        autopilot.main(["--command", command, "--json"])
+                with (
+                    self.assertRaises(SystemExit) as caught,
+                    redirect_stdout(stdout),
+                ):
+                    autopilot.main(["--command", command, "--json"])
 
                 self.assertEqual(128 + int(signal_number), caught.exception.code)
                 self.assertEqual("", stdout.getvalue())
@@ -5223,12 +5344,16 @@ class SupervisionEndEmissionTest(unittest.TestCase):
             with self.subTest(signal=signal_number.name):
                 plan_dir, state_dir, command = self._plan(f"mid-{signal_number:d}")
                 result = self._complete_result(command)
-                self._patch(autopilot, "run_autopilot", lambda args: result)
+                self._patch(
+                    autopilot, "run_autopilot", lambda args, result=result: result
+                )
                 stdout = _TruncatingStdout(signal_number)
 
-                with self.assertRaises(SystemExit) as caught:
-                    with redirect_stdout(stdout):
-                        autopilot.main(["--command", command, "--json"])
+                with (
+                    self.assertRaises(SystemExit) as caught,
+                    redirect_stdout(stdout),
+                ):
+                    autopilot.main(["--command", command, "--json"])
 
                 self.assertEqual(128 + int(signal_number), caught.exception.code)
                 # Exactly what the `error` outcome exists to warn about: the
@@ -5267,23 +5392,25 @@ class DeferredTerminationSignalsTest(unittest.TestCase):
                     for number in autopilot.TERMINATION_SIGNALS
                 }
 
-                with self.assertRaises(SystemExit) as caught:
-                    with autopilot._deferred_termination_signals() as deferred:
-                        # Held, not trapped: nothing is raised here and the
-                        # process-wide handlers are exactly the ones the caller
-                        # installed.
-                        signal.raise_signal(signal_number)
-                        self.assertEqual(
-                            signal.Signals(signal_number).name,
-                            deferred.signal_name,
-                        )
-                        self.assertEqual(
-                            dispositions,
-                            {
-                                number: signal.getsignal(number)
-                                for number in autopilot.TERMINATION_SIGNALS
-                            },
-                        )
+                with (
+                    self.assertRaises(SystemExit) as caught,
+                    autopilot._deferred_termination_signals() as deferred,
+                ):
+                    # Held, not trapped: nothing is raised here and the
+                    # process-wide handlers are exactly the ones the caller
+                    # installed.
+                    signal.raise_signal(signal_number)
+                    self.assertEqual(
+                        signal.Signals(signal_number).name,
+                        deferred.signal_name,
+                    )
+                    self.assertEqual(
+                        dispositions,
+                        {
+                            number: signal.getsignal(number)
+                            for number in autopilot.TERMINATION_SIGNALS
+                        },
+                    )
 
                 self.assertEqual(128 + int(signal_number), caught.exception.code)
                 self.assertEqual(
@@ -5480,13 +5607,9 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         watcher = created[0]
         assert watcher is not None
         self.assertEqual(watcher.run_id, ATTACHED_RUN_ID)
-        self.assertEqual(
-            [], [beat for beat in beats if beat.startswith("QUESTION ")]
-        )
+        self.assertEqual([], [beat for beat in beats if beat.startswith("QUESTION ")])
         self.assertEqual([], result["outbox"]["questions"])
-        projections = [
-            write for write in lease_writes if "run_id" in write
-        ]
+        projections = [write for write in lease_writes if "run_id" in write]
         self.assertTrue(projections)
         # The reducer generation stays at the attach cursor: a question the
         # previous run abandoned is never a pending-set delta.
@@ -5542,9 +5665,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
         unbound = self._attach_status()
         unbound["runner_state"].pop("run_id")
         bound = self._attach_status()
-        status = _StatusScript(
-            [unbound] + [bound] * 6 + [_status_payload(0)]
-        )
+        status = _StatusScript([unbound] + [bound] * 6 + [_status_payload(0)])
         beats: list[str] = []
         result = autopilot.supervise_run(
             {
@@ -5663,9 +5784,7 @@ class AttachedMailboxWatcherTest(unittest.TestCase):
                 ],
                 "no_mailbox": True,
             },
-            status_invoker=_StatusScript(
-                [self._attach_status(), _status_payload(0)]
-            ),
+            status_invoker=_StatusScript([self._attach_status(), _status_payload(0)]),
             run_invoker=_never_run,
             clock=_counter_clock(),
             sleep=lambda *_: None,
@@ -5800,8 +5919,7 @@ def _batch_follower(batches):
     """A `follow_events` stand-in yielding each batch, then empty batches."""
 
     def follow(_path):
-        for batch in batches:
-            yield batch
+        yield from batches
         while True:
             yield []
 
@@ -6011,9 +6129,7 @@ class EventsTailerTest(unittest.TestCase):
         tailer = autopilot._EventsTailer(
             "events.jsonl",
             clock=_clock_from([0.0, 1.0, 2.0, 3.0]),
-            follow=_batch_follower(
-                [[wait_started], [wait_cleared], [turn_started]]
-            ),
+            follow=_batch_follower([[wait_started], [wait_cleared], [turn_started]]),
         )
 
         snapshot, _ = tailer.snapshot()
@@ -6044,7 +6160,7 @@ class EventsTailerTest(unittest.TestCase):
             snapshot,
             90.0,
             events_stale=True,
-            now=datetime(2026, 7, 24, 21, 15, tzinfo=timezone.utc),
+            now=datetime(2026, 7, 24, 21, 15, tzinfo=UTC),
         )
 
         self.assertNotIn("WARN possibly stalled", message)
@@ -6068,7 +6184,7 @@ class EventsTailerTest(unittest.TestCase):
             snapshot,
             90.0,
             events_stale=False,
-            now=datetime(2026, 7, 24, 19, 15, tzinfo=timezone.utc),
+            now=datetime(2026, 7, 24, 19, 15, tzinfo=UTC),
         )
 
         self.assertIn("WARN possibly stalled", message)
@@ -6088,7 +6204,7 @@ class EventsTailerTest(unittest.TestCase):
             snapshot,
             90.0,
             events_stale=False,
-            now=datetime(2026, 7, 24, 19, 15, tzinfo=timezone.utc),
+            now=datetime(2026, 7, 24, 19, 15, tzinfo=UTC),
         )
 
         self.assertIn("WARN possibly stalled", message)
@@ -6176,9 +6292,20 @@ class InvokeRunEventsTailerTest(unittest.TestCase):
         return payload, beats
 
     def test_tailer_snapshot_drives_the_tick_line(self) -> None:
-        tailer = _FakeTailer([({"state": "running", "session_id": "s7",
-                                "session_number": 2, "total_sessions": 5,
-                                "idle_seconds": 96}, False)])
+        tailer = _FakeTailer(
+            [
+                (
+                    {
+                        "state": "running",
+                        "session_id": "s7",
+                        "session_number": 2,
+                        "total_sessions": 5,
+                        "idle_seconds": 96,
+                    },
+                    False,
+                )
+            ]
+        )
         popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
         payload, beats = self._run(popen=popen, tailer=tailer)
         self.assertEqual(payload["reason"], "all-complete")
@@ -6190,8 +6317,9 @@ class InvokeRunEventsTailerTest(unittest.TestCase):
         self.assertNotIn("WARN", tick)
 
     def test_tailer_stall_flag_renders_warning(self) -> None:
-        tailer = _FakeTailer([({"state": "running", "session_id": "s7",
-                                "idle_seconds": 96}, True)])
+        tailer = _FakeTailer(
+            [({"state": "running", "session_id": "s7", "idle_seconds": 96}, True)]
+        )
         popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
         _payload, beats = self._run(popen=popen, tailer=tailer)
         self.assertIn("WARN possibly stalled", beats[1])
@@ -6253,7 +6381,9 @@ class InvokeRunEventsTailerTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         events_path = os.path.join(tmp, "events.jsonl")
         with open(events_path, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(_turn_heartbeat_record(42, session_id="wired")) + "\n")
+            handle.write(
+                json.dumps(_turn_heartbeat_record(42, session_id="wired")) + "\n"
+            )
         status = {"ok": True, "events_path": events_path}
         popen = FakeTimeoutPopen(timeout_count=1, stdout=self.FINAL_JSON)
         payload, beats = self._run(popen=popen, status_probe=lambda: status)
@@ -6446,9 +6576,7 @@ class HangEscalationPolicyTest(unittest.TestCase):
         policy = autopilot._HangEscalation(probes=2, idle_ceiling=900.0)
         snapshot = {
             "state": "running",
-            "hang_suspected": _hang_block(
-                autopilot.HANG_CLASS_ZERO_CPU, idle=950.0
-            ),
+            "hang_suspected": _hang_block(autopilot.HANG_CLASS_ZERO_CPU, idle=950.0),
         }
         verdict = policy.observe(snapshot)
         self.assertIsNotNone(verdict)
@@ -6946,9 +7074,9 @@ class SuperviseRunWorkerHungTest(unittest.TestCase):
         # the re-armed episode, so escalation waits for the third probe.
         first = _hung_attach_status()
         rearmed = _hung_attach_status()
-        rearmed["runner_state"]["active_turn"]["hang_suspected"][
-            "detected_at"
-        ] = "2026-07-24T19:05:30+00:00"
+        rearmed["runner_state"]["active_turn"]["hang_suspected"]["detected_at"] = (
+            "2026-07-24T19:05:30+00:00"
+        )
         status = _StatusScript([first, rearmed, rearmed])
         result = autopilot.supervise_run(
             dict(self.PARSED),
@@ -7095,13 +7223,15 @@ class HumanSummaryWorkerHungTest(unittest.TestCase):
     def test_abort_summary_names_the_reverted_session(self) -> None:
         # An aborted run reports zero completed sessions on purpose; the line has
         # to say the session went back to pending or the counts read as a stall.
-        summary = autopilot._human_summary({
-            "ok": True,
-            "reason": "stopped",
-            "stop_kind": autopilot.STOP_KIND_ABORT,
-            "completed": 2,
-            "pending": 3,
-        })
+        summary = autopilot._human_summary(
+            {
+                "ok": True,
+                "reason": "stopped",
+                "stop_kind": autopilot.STOP_KIND_ABORT,
+                "completed": 2,
+                "pending": 3,
+            }
+        )
         self.assertTrue(summary.startswith("ok: stopped - "), summary)
         self.assertIn("supervisor abort ended the in-flight turn", summary)
         self.assertIn("returned its session to pending", summary)
@@ -7120,14 +7250,12 @@ class HumanSummaryWorkerHungTest(unittest.TestCase):
                 if stop_kind is not None:
                     result["stop_kind"] = stop_kind
                 summary = autopilot._human_summary(result)
-                self.assertIn(
-                    "graceful stop after the current session", summary
-                )
+                self.assertIn("graceful stop after the current session", summary)
                 self.assertNotIn("abort", summary)
 
 
 _FAKE_ASL = textwrap.dedent(
-    '''\
+    """\
     #!/usr/bin/env python3
     import json
     import os
@@ -7145,7 +7273,9 @@ _FAKE_ASL = textwrap.dedent(
         payload = {
             "ok": True,
             "counts": {"pending": state["pending"], "complete": state["complete"]},
-            "next_pending_id": None if state["pending"] == 0 else str(state["complete"] + 1),
+            "next_pending_id": (
+                None if state["pending"] == 0 else str(state["complete"] + 1)
+            ),
             "lock": {"present": False, "active": False, "stale": False},
             "sessions": [],
             "plan_dir": "/tmp/plan",
@@ -7161,7 +7291,11 @@ _FAKE_ASL = textwrap.dedent(
         for i, tok in enumerate(argv):
             if tok == "--max-sessions" and i + 1 < len(argv):
                 max_sessions = int(argv[i + 1])
-        took = state["pending"] if max_sessions is None else min(max_sessions, state["pending"])
+        took = (
+            state["pending"]
+            if max_sessions is None
+            else min(max_sessions, state["pending"])
+        )
         # A queued `stop-after-current` request: the runner drains it after the
         # current session, so it takes exactly one session and then exits ok
         # with `reason: "stopped"`. Draining consumes the request (one-shot),
@@ -7201,7 +7335,7 @@ _FAKE_ASL = textwrap.dedent(
 
     sys.stderr.write("unknown subcommand\\n")
     sys.exit(2)
-    '''
+    """
 )
 
 
@@ -7226,7 +7360,9 @@ class SuperviseRunFakeAslTest(unittest.TestCase):
             return json.load(fh)
 
     def _parsed(self, extra: str = "") -> dict:
-        command = f"FAKE_ASL_STATE={self.state_path} {self.asl} run /tmp/plan {extra}".strip()
+        command = (
+            f"FAKE_ASL_STATE={self.state_path} {self.asl} run /tmp/plan {extra}".strip()
+        )
         parsed = autopilot.parse_command(command)
         self.assertTrue(parsed["ok"], parsed)
         return parsed
@@ -7302,9 +7438,7 @@ class SuperviseRunFakeAslTest(unittest.TestCase):
         # finish one session and exit ok with `reason: "stopped"`. The supervisor
         # must stop there — a single chunk, no relaunch — and re-running the same
         # command continues from the remaining sessions.
-        self._write_state(
-            pending=4, complete=0, chunks_run=0, stop_after_current=True
-        )
+        self._write_state(pending=4, complete=0, chunks_run=0, stop_after_current=True)
         first = self._supervise()
         self.assertTrue(first["ok"], first)
         self.assertEqual(first["reason"], "stopped")
@@ -7357,7 +7491,7 @@ class SuperviseRunFakeAslTest(unittest.TestCase):
 
 
 _FAKE_ASL_REPLY = textwrap.dedent(
-    '''\
+    """\
     #!/usr/bin/env python3
     import json
     import os
@@ -7384,12 +7518,14 @@ _FAKE_ASL_REPLY = textwrap.dedent(
         reply = sys.stdin.read() if "--reply-stdin" in argv else ""
         with open(capture, "w") as fh:
             json.dump({"argv": argv, "stdin": reply}, fh)
-        sys.stdout.write(json.dumps({"ok": True, "paused": False, "reason": "all-complete"}))
+        sys.stdout.write(
+            json.dumps({"ok": True, "paused": False, "reason": "all-complete"})
+        )
         sys.exit(0)
 
     sys.stderr.write("unknown subcommand\\n")
     sys.exit(2)
-    '''
+    """
 )
 
 
@@ -7412,11 +7548,13 @@ class ReplyResumeFakeAslTest(unittest.TestCase):
     def test_reply_reaches_stdin_and_never_leaks_into_argv(self) -> None:
         reply = "reuse the cached parser output"
         parser = autopilot.build_arg_parser()
-        args = parser.parse_args([
-            "--command",
-            f"FAKE_ASL_CAPTURE={self.capture_path} {self.asl} run /tmp/plan",
-            "--reply-stdin",
-        ])
+        args = parser.parse_args(
+            [
+                "--command",
+                f"FAKE_ASL_CAPTURE={self.capture_path} {self.asl} run /tmp/plan",
+                "--reply-stdin",
+            ]
+        )
         err = io.StringIO()
         with redirect_stderr(err):
             result = autopilot.run_autopilot(args, stdin=io.StringIO(reply))
@@ -7434,7 +7572,7 @@ class ReplyResumeFakeAslTest(unittest.TestCase):
 
 
 _FAKE_ASL_QUESTIONS = textwrap.dedent(
-    '''\
+    """\
     #!/usr/bin/env python3
     import json
     import sys
@@ -7458,7 +7596,7 @@ _FAKE_ASL_QUESTIONS = textwrap.dedent(
 
     sys.stderr.write("unknown subcommand\\n")
     sys.exit(2)
-    '''
+    """
 )
 
 
@@ -7756,7 +7894,10 @@ class RunAutopilotReviewTest(unittest.TestCase):
             "summary": "…",
         }
         result = autopilot.run_autopilot(
-            self._args(command="asl run /tmp/plan --review-harness codex --max-review-fix-cycles 2"),
+            self._args(
+                command="asl run /tmp/plan --review-harness codex "
+                "--max-review-fix-cycles 2"
+            ),
             supervisor=complete_with_guidance,
             review_reader=lambda parsed: verdict,
         )

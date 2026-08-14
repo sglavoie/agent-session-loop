@@ -16,20 +16,21 @@ helpers.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass
 import errno
 import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
 import socket
 import threading
 import time
-from typing import Iterable, Iterator, Literal, Mapping, NoReturn, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Literal, NoReturn
 
 from . import durability
 from .workspaces import (
@@ -38,7 +39,6 @@ from .workspaces import (
     WorkspaceError,
     validate_repository_alias,
 )
-
 
 StatusValue = Literal["pending", "complete", "empty", "unknown"]
 ReadinessState = Literal["draft", "reviewed", "loop-ready", "running", "complete"]
@@ -67,9 +67,7 @@ _GENERATED_REVIEW_SESSION_MARKER = "<!-- asl:generated-review-session -->"
 _GENERATED_REVIEW_SESSION_VERSION_MARKER_RE = re.compile(
     r"<!--\s*asl:generated-review-session\s+version=[0-9]+\s*-->"
 )
-_GENERATED_REVIEW_PLAN_ARTIFACTS = frozenset(
-    {"final-review.md", "final-review.json"}
-)
+_GENERATED_REVIEW_PLAN_ARTIFACTS = frozenset({"final-review.md", "final-review.json"})
 PROGRESS_FILE_NAME = "progress.md"
 PROGRESS_SCHEMA_VERSION = 1
 PLAN_METADATA_FILE_NAME = "plan-metadata.json"
@@ -101,9 +99,7 @@ READINESS_CHECKED_PREFIX = "**Readiness checked at**:"
 SESSION_ID_PATTERN = r"[1-9][0-9]*(?:\.[1-9][0-9]*)*"
 SESSION_ID_RE = re.compile(rf"^{SESSION_ID_PATTERN}$")
 SESSION_FILE_RE = re.compile(rf"^session-({SESSION_ID_PATTERN})\.md$")
-SESSION_EXPANSION_FILE_RE = re.compile(
-    rf"^session-({SESSION_ID_PATTERN})\.expand\.md$"
-)
+SESSION_EXPANSION_FILE_RE = re.compile(rf"^session-({SESSION_ID_PATTERN})\.expand\.md$")
 LOOSE_SESSION_FILE_RE = re.compile(r"^session-([0-9]+(?:\.[0-9]+)*)\.md$")
 SESSION_STATUS_TABLE_HEADERS = {
     "#",
@@ -136,9 +132,7 @@ class SessionScopeError(PlanError):
         self.source_line = source_line
         self.session_id = session_id
         self.path = path
-        super().__init__(
-            f"line {line_number}: {reason}; source line: {source_line!r}"
-        )
+        super().__init__(f"line {line_number}: {reason}; source line: {source_line!r}")
 
 
 @dataclass(frozen=True)
@@ -264,7 +258,9 @@ class SessionId:
         components = tuple(self.components)
         if not components:
             raise ValueError("session id must contain at least one component")
-        if any(type(component) is not int or component <= 0 for component in components):
+        if any(
+            type(component) is not int or component <= 0 for component in components
+        ):
             raise ValueError("session id components must be positive integers")
         object.__setattr__(self, "components", components)
 
@@ -393,7 +389,8 @@ def _parse_scope_alias_list(
     if "(none)" in parts:
         if not allow_none or parts != ("(none)",):
             raise _scope_error(
-                f"{field} uses malformed (none); it is allowed only by itself for writes",
+                f"{field} uses malformed (none); it is allowed only by itself for "
+                f"writes",
                 lines=lines,
                 index=index,
                 start_line=start_line,
@@ -424,9 +421,7 @@ def _structural_session_scope_indices(lines: Sequence[str]) -> tuple[int, ...]:
 def strip_session_scope_lines(lines: Sequence[str]) -> tuple[str, ...]:
     """Remove structural scope fields while preserving fenced examples."""
     scope_indices = frozenset(_structural_session_scope_indices(lines))
-    return tuple(
-        line for index, line in enumerate(lines) if index not in scope_indices
-    )
+    return tuple(line for index, line in enumerate(lines) if index not in scope_indices)
 
 
 def parse_session_scope_lines(
@@ -678,7 +673,9 @@ class PlanSnapshot:
 
     @property
     def next_pending(self) -> SessionStatus | None:
-        return next((session for session in self.sessions if session.status == "pending"), None)
+        return next(
+            (session for session in self.sessions if session.status == "pending"), None
+        )
 
     @property
     def session_ids(self) -> tuple[str, ...]:
@@ -801,7 +798,7 @@ def _plan_transaction_lock_holder(descriptor: int) -> str:
     try:
         os.lseek(descriptor, 0, os.SEEK_SET)
         payload = json.loads(os.read(descriptor, 4096).decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except OSError, UnicodeDecodeError, json.JSONDecodeError:
         return "unknown (metadata unavailable)"
     if not isinstance(payload, dict):
         return "unknown (metadata unavailable)"
@@ -851,9 +848,7 @@ def _recover_pending_plan_transaction_locked(
     if not isinstance(payload, dict):
         raise PlanError("pending plan transaction journal must contain a JSON object")
     if payload.get("version") != PLAN_TRANSACTION_SCHEMA_VERSION:
-        raise PlanError(
-            "pending plan transaction journal uses an unsupported version"
-        )
+        raise PlanError("pending plan transaction journal uses an unsupported version")
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, list) or not raw_entries:
         raise PlanError("pending plan transaction journal has no entries")
@@ -944,9 +939,7 @@ def recover_pending_plan_transaction(plan_dir: str | Path) -> bool:
             # commit completed; re-check in case another marker replaced it.
             continue
         except OSError as error:
-            raise PlanError(
-                f"cannot lock pending plan transaction: {error}"
-            ) from error
+            raise PlanError(f"cannot lock pending plan transaction: {error}") from error
     return False
 
 
@@ -984,9 +977,7 @@ def load_plan_metadata(plan_dir: str | Path) -> PlanMetadataValue | None:
     return _parse_legacy_plan_metadata(path, payload)
 
 
-def _parse_legacy_plan_metadata(
-    path: Path, payload: dict[str, object]
-) -> PlanMetadata:
+def _parse_legacy_plan_metadata(path: Path, payload: dict[str, object]) -> PlanMetadata:
     """Parse v1 metadata without changing its strict compatibility contract."""
     unknown = sorted(set(payload) - {"version", "cwd"})
     if unknown:
@@ -1005,8 +996,7 @@ def _parse_legacy_plan_metadata(
     canonical_cwd = str(canonicalize_path(cwd))
     if cwd != canonical_cwd:
         raise PlanError(
-            f"{path} field 'cwd' is not canonical: {cwd!r}; "
-            f"expected {canonical_cwd!r}"
+            f"{path} field 'cwd' is not canonical: {cwd!r}; expected {canonical_cwd!r}"
         )
     return PlanMetadata(cwd=cwd, version=version)
 
@@ -1032,12 +1022,11 @@ def _parse_workspace_plan_metadata(
         )
     workspace_root = payload.get("workspace_root")
     if not isinstance(workspace_root, str) or not workspace_root.strip():
-        raise PlanError(
-            f"{path} field 'workspace_root' must be a non-empty string"
-        )
-    if workspace_root != workspace_root.strip() or not Path(
-        workspace_root
-    ).is_absolute():
+        raise PlanError(f"{path} field 'workspace_root' must be a non-empty string")
+    if (
+        workspace_root != workspace_root.strip()
+        or not Path(workspace_root).is_absolute()
+    ):
         raise PlanError(
             f"{path} field 'workspace_root' must be a canonical absolute path"
         )
@@ -1195,9 +1184,7 @@ def _format_noncanonical_session_file_error(
     canonical_dir: Path,
     suggestions: tuple[tuple[str, str], ...],
 ) -> str:
-    rendered = ", ".join(
-        f"{source} -> {target}" for source, target in suggestions[:5]
-    )
+    rendered = ", ".join(f"{source} -> {target}" for source, target in suggestions[:5])
     remaining = len(suggestions) - 5
     if remaining > 0:
         rendered += f", and {remaining} more"
@@ -1314,7 +1301,9 @@ _REPOSITORY_REGISTRY_UNSET = object()
 def read_session_handoff(
     session: SessionFile,
     *,
-    repository_registry: RepositoryRegistry | None | object = _REPOSITORY_REGISTRY_UNSET,
+    repository_registry: RepositoryRegistry
+    | None
+    | object = _REPOSITORY_REGISTRY_UNSET,
 ) -> SessionHandoff:
     """Read the final `## Handoff` block in a session file as a structured record.
 
@@ -1431,7 +1420,9 @@ def read_session_handoff(
 def read_session_status(
     session: SessionFile,
     *,
-    repository_registry: RepositoryRegistry | None | object = _REPOSITORY_REGISTRY_UNSET,
+    repository_registry: RepositoryRegistry
+    | None
+    | object = _REPOSITORY_REGISTRY_UNSET,
 ) -> SessionStatus:
     """Read the status marker from the final handoff block in a session file."""
     handoff = read_session_handoff(
@@ -1510,8 +1501,10 @@ def parse_repository_registry_manifest(
     if index + 1 >= len(lines):
         raise PlanError("manifest repository registry separator row is missing")
     separator = _split_table_row(lines[index + 1])
-    if separator is None or len(separator[1]) != 3 or not _is_separator_row(
-        separator[1]
+    if (
+        separator is None
+        or len(separator[1]) != 3
+        or not _is_separator_row(separator[1])
     ):
         raise PlanError("manifest repository registry separator row is malformed")
 
@@ -1527,7 +1520,9 @@ def parse_repository_registry_manifest(
         try:
             repositories.append(Repository(*cells))
         except WorkspaceError as error:
-            raise PlanError(f"manifest repository registry is invalid: {error}") from error
+            raise PlanError(
+                f"manifest repository registry is invalid: {error}"
+            ) from error
         index += 1
     if not repositories:
         raise PlanError("manifest repository registry must contain at least one row")
@@ -1582,7 +1577,8 @@ def validate_completed_handoff_paths(
             ) from error
         if parsed.alias not in scope.writes:
             raise PlanError(
-                f"{handoff.session.filename} Files modified entry {entry!r} is outside Writes repositories"
+                f"{handoff.session.filename} Files modified entry {entry!r} is outside "
+                f"Writes repositories"
             )
         qualified.append(parsed)
     return tuple(qualified)
@@ -1615,10 +1611,7 @@ def completed_handoff_registry_blocker(
 
     inline = handoff.files_modified[0].strip() if handoff.files_modified else ""
     if not inline:
-        return (
-            f"{handoff.session.filename} completed handoff is missing "
-            "Files modified"
-        )
+        return f"{handoff.session.filename} completed handoff is missing Files modified"
     if inline == "(none)":
         return None
     if inline == "(none yet)":
@@ -1815,7 +1808,9 @@ def plan_content_sha256(
     parallel scheduling text cannot move the content hash.
     """
     canonical_dir = canonicalize_path(plan_dir)
-    selected_sessions = discover_session_files(canonical_dir) if sessions is None else sessions
+    selected_sessions = (
+        discover_session_files(canonical_dir) if sessions is None else sessions
+    )
     selected_sessions = tuple(
         sorted(selected_sessions, key=lambda session: session.session_id.sort_key)
     )
@@ -1876,7 +1871,8 @@ def _is_readiness_line(line: str) -> bool:
 
 
 def parse_readiness_metadata(manifest_text: str) -> ReadinessMetadata | None:
-    """Parse `**Readiness**`, `**Readiness SHA-256**`, `**Readiness checked at**` lines."""
+    """Parse `**Readiness**`, `**Readiness SHA-256**`, `**Readiness checked at**` "
+    "lines."""
     state: ReadinessState | None = None
     sha: str | None = None
     checked_at: str | None = None
@@ -1946,9 +1942,7 @@ def _find_readiness_insertion_index(lines: list[str]) -> int:
     return last_metadata + 1
 
 
-def replace_readiness_metadata_in_text(
-    text: str, metadata: ReadinessMetadata
-) -> str:
+def replace_readiness_metadata_in_text(text: str, metadata: ReadinessMetadata) -> str:
     """Insert or replace readiness metadata lines in manifest text."""
     new_block = _render_readiness_metadata_lines(metadata)
     lines = text.splitlines(keepends=False)
@@ -1968,9 +1962,7 @@ def replace_readiness_metadata_in_text(
     return "\n".join(result) + suffix
 
 
-def write_readiness_metadata(
-    plan_dir: str | Path, metadata: ReadinessMetadata
-) -> bool:
+def write_readiness_metadata(plan_dir: str | Path, metadata: ReadinessMetadata) -> bool:
     """Write readiness metadata to `manifest.md`. Returns True if the file changed."""
     canonical_dir = canonicalize_path(plan_dir)
     manifest_path = canonical_dir / "manifest.md"
@@ -2164,7 +2156,9 @@ def stable_readiness_sha256(
 def inspect_plan(
     plan_dir: str | Path,
     *,
-    repository_registry: RepositoryRegistry | None | object = _REPOSITORY_REGISTRY_UNSET,
+    repository_registry: RepositoryRegistry
+    | None
+    | object = _REPOSITORY_REGISTRY_UNSET,
 ) -> PlanSnapshot:
     """Inspect a split plan directory and return durable session state."""
     recover_pending_plan_transaction(plan_dir)
@@ -2237,7 +2231,7 @@ def _plan_file_stamps(canonical_dir: Path) -> dict[str, tuple[int, int, int]] | 
     try:
         recover_pending_plan_transaction(canonical_dir)
         sessions = discover_session_files(canonical_dir)
-    except (PlanError, OSError):
+    except PlanError, OSError:
         return None
 
     relative_names = ["context.md", "manifest.md"]
@@ -2333,7 +2327,8 @@ def progress_path(plan_dir: str | Path) -> Path:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    """Write `text` to `path` via temp-file + `os.replace` so the destination is never half-written."""
+    """Write `text` to `path` via temp-file + `os.replace` so the destination is never "
+    "half-written."""
     tmp_path = path.with_name(f".{path.name}.tmp")
     try:
         tmp_path.write_text(text, encoding="utf-8")
@@ -2342,10 +2337,8 @@ def _atomic_write_text(path: Path, text: str) -> None:
     try:
         os.replace(tmp_path, path)
     except OSError as error:
-        try:
+        with suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
         _raise_read_error(path, error)
 
 
@@ -2504,7 +2497,7 @@ def read_progress_entries(plan_dir: str | Path) -> tuple[ProgressEntry, ...]:
 
 
 def append_progress_entry(plan_dir: str | Path, entry: ProgressEntry) -> Path:
-    """Append `entry` to `<plan_dir>/progress.md`, creating the file with header if absent.
+    """Append `entry` to `<plan_dir>/progress.md`, adding a header if absent.
 
     Idempotent on retries: if the most recent entry already matches
     `(session_id, completed_at)`, the file is left untouched. Writes go

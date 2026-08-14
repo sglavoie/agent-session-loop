@@ -8,9 +8,7 @@ outcome records.  Delivery failures are always evidence, never run failures.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from datetime import datetime
+import contextlib
 import json
 import math
 import os
@@ -18,9 +16,11 @@ import re
 import subprocess
 import threading
 import time
-from typing import Any
 import uuid
-
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 START_EVENT = "AgentSessionLoopStarted"
 TURN_START_EVENT = "AgentSessionLoopTurnStarted"
@@ -184,9 +184,7 @@ def build_loop_payload(
             hook_payload["phase"] = phase
     if sequence is not None:
         hook_payload["source_sequence"] = str(int(sequence))
-        hook_payload["source_event_id"] = (
-            f"{payload.get('run_id')}:{int(sequence)}"
-        )
+        hook_payload["source_event_id"] = f"{payload.get('run_id')}:{int(sequence)}"
     if emitted_at is not None:
         hook_payload["emitted_time"] = str(int(emitted_at.timestamp()))
     if payload.get("kitty_window_id") is not None:
@@ -345,7 +343,7 @@ def _invoke(
             reason="attempt_timeout",
             error_classification="timeout",
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None, AttemptSummary(
             attempt=0,
             mode="acknowledged",
@@ -369,9 +367,7 @@ def _classify_acknowledged(
             attempt=0,
             mode="acknowledged",
             status=(
-                STATUS_RETRYABLE_FAILURE
-                if retryable
-                else STATUS_PERMANENT_FAILURE
+                STATUS_RETRYABLE_FAILURE if retryable else STATUS_PERMANENT_FAILURE
             ),
             retryable=retryable,
             reason="invalid_acknowledgement",
@@ -561,9 +557,7 @@ def _deliver(
                     )
                 )
                 return attempts
-            classified = _classify_acknowledged(
-                completed, request_id=request_id
-            )
+            classified = _classify_acknowledged(completed, request_id=request_id)
             summary = AttemptSummary(
                 attempt=attempt,
                 mode=classified.mode,
@@ -671,13 +665,10 @@ def notify(
                     run_command=run_command,
                     sleep=sleep,
                 )
-            outcome = _outcome_payload(
-                event_name, hook_payload, request_id, attempts
-            )
-            try:
+            outcome = _outcome_payload(event_name, hook_payload, request_id, attempts)
+            # Observability stays fail-open.
+            with contextlib.suppress(Exception):
                 record_outcome(outcome)
-            except Exception:  # noqa: BLE001 - observability stays fail-open
-                pass
             return outcome
     except Exception:  # noqa: BLE001 - AgentMux is never a run dependency
         return None

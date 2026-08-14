@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
 from agent_session_loop import state
 from agent_session_loop.assurance_ledger import LedgerError
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,7 +26,7 @@ LATER_TIMESTAMP = "2026-08-10T11:11:12+00:00"
 DIGEST = "a" * 64
 
 
-_WORKER_SOURCE = """
+_WORKER_SOURCE = f"""
 import sys
 from pathlib import Path
 
@@ -46,11 +45,11 @@ finding = models.Finding(
     evidence=("events.jsonl",),
 )
 observation = models.IssueObservation(
-    run_id="%s", finding=finding, observed_at="%s"
+    run_id="{RUN_ID}", finding=finding, observed_at="{TIMESTAMP}"
 )
 record = ledger.append_issue_observation(observation, state_dir=state_dir)
 sys.stdout.write(record.issue_id)
-""" % (RUN_ID, TIMESTAMP)
+"""
 
 
 def _finding(**overrides) -> models.Finding:
@@ -529,7 +528,9 @@ class IssueIdTests(LedgerTestCase):
                 with lock:
                     failures.append(error)
 
-        threads = [threading.Thread(target=append, args=(index,)) for index in range(workers)]
+        threads = [
+            threading.Thread(target=append, args=(index,)) for index in range(workers)
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -548,7 +549,13 @@ class IssueIdTests(LedgerTestCase):
         workers = 5
         processes = [
             subprocess.Popen(
-                [sys.executable, "-c", _WORKER_SOURCE, str(self.state_dir), f"proc.key-{index}"],
+                [
+                    sys.executable,
+                    "-c",
+                    _WORKER_SOURCE,
+                    str(self.state_dir),
+                    f"proc.key-{index}",
+                ],
                 cwd=REPO_ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -578,9 +585,7 @@ class IndexTests(LedgerTestCase):
         self.assertTrue(index.matches(self.ledger_path.read_bytes()))
         self.assertEqual(1, index.record_count)
         self.assertEqual(2, index.next_issue_number)
-        self.assertEqual(
-            {_finding().fingerprint: "ASI-1"}, dict(index.issue_ids)
-        )
+        self.assertEqual({_finding().fingerprint: "ASI-1"}, dict(index.issue_ids))
 
     def test_a_missing_cache_is_rebuilt_identically(self) -> None:
         ledger.append_issue_observation(_observation(), state_dir=self.state_dir)

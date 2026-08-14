@@ -34,14 +34,14 @@ GET  ``/api/commits?plan_dir=<path>``    - commit artifact metadata from events.
 GET  ``/api/progress?plan_dir=<path>``   - parsed progress journal entries.
 GET  ``/api/final-review?plan_dir=<path>`` - bounded final-review.md content.
 GET  ``/api/questions?plan_dir=<path>``  - paused-run resolver prompt and Q&A context.
-GET  ``/api/archive``                    - archived entries, retention, and auto-empty results.
+GET  ``/api/archive``                    - archived entries, retention, auto-empty.
 POST ``/api/registry/pin``               - upsert a registry pin.
 POST ``/api/registry/unpin``             - remove a registry pin.
 POST ``/api/plan/archive``               - archive one plan (plan + ASL state).
 POST ``/api/plans/archive``              - bulk-archive many plans (per-entry results).
-POST ``/api/plan/delete``                - backward-compatible archive alias (was permanent delete).
+POST ``/api/plan/delete``                - backward-compatible archive alias.
 POST ``/api/archive/restore``            - restore one archived entry to its origin.
-POST ``/api/archive/delete``             - permanently purge one or many archive entries.
+POST ``/api/archive/delete``             - permanently purge archive entries.
 POST ``/api/archive/settings``           - update archive retention days.
 POST ``/api/launch``                     - spawn ``asl run`` for a plan.
 POST ``/api/reply``                      - resume a paused run with reply.
@@ -53,6 +53,7 @@ POST ``/api/unlock``                     - remove a stale operational lock.
 
 from __future__ import annotations
 
+import contextlib
 import http.server
 import json
 import os
@@ -61,17 +62,16 @@ import signal
 import threading
 import urllib.parse
 import webbrowser
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import (
     artifacts,
     control_cli,
     control_queue,
     control_signal,
-    events as events_module,
     harnesses,
     plans,
     qna,
@@ -80,7 +80,9 @@ from . import (
     tail,
     workbench,
 )
-
+from . import (
+    events as events_module,
+)
 
 TOKEN_BYTES = 32
 DEFAULT_HOST = "127.0.0.1"
@@ -191,7 +193,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
     server_version = "ASLWorkbench/1"
     sys_version = ""
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
         # Silence the default per-request access log so the operator-facing
         # console only carries deliberate startup output. Run-control events
         # remain the canonical audit trail for mutating actions.
@@ -209,9 +211,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             self._dispatch(method)
         except _BadRequestError as error:
-            self._send_error(
-                400, error.reason, error.message, details=error.details
-            )
+            self._send_error(400, error.reason, error.message, details=error.details)
         except Exception as error:  # noqa: BLE001 - want one safety net
             self._send_error(500, "internal-error", str(error))
 
@@ -233,7 +233,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 )
                 return
             if path.startswith(STATIC_URL_PREFIX):
-                self._handle_static_asset(path[len(STATIC_URL_PREFIX):])
+                self._handle_static_asset(path[len(STATIC_URL_PREFIX) :])
                 return
         routes: dict[tuple[str, str], Callable[..., None]] = {
             ("GET", "/api/health"): self._handle_health,
@@ -300,10 +300,8 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
     def _authorize(self) -> bool:
         header = self.headers.get("Authorization", "")
         if header.startswith(AUTH_SCHEME):
-            provided = header[len(AUTH_SCHEME):].strip()
-            if provided and secrets.compare_digest(
-                provided, self._server().token
-            ):
+            provided = header[len(AUTH_SCHEME) :].strip()
+            if provided and secrets.compare_digest(provided, self._server().token):
                 return True
         self._send_error(
             401,
@@ -324,7 +322,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             raise _BadRequestError(
                 "invalid-request",
                 f"Content-Length is not an integer: {error}",
-            )
+            ) from error
         if length <= 0:
             return {}
         if length > MAX_REQUEST_BODY:
@@ -341,14 +339,14 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             raise _BadRequestError(
                 "invalid-request",
                 f"request body must be utf-8: {error}",
-            )
+            ) from error
         try:
             parsed = json.loads(decoded)
         except json.JSONDecodeError as error:
             raise _BadRequestError(
                 "invalid-request",
                 f"request body must be valid JSON: {error}",
-            )
+            ) from error
         if not isinstance(parsed, dict):
             raise _BadRequestError(
                 "invalid-request", "request body must be a JSON object"
@@ -367,7 +365,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except BrokenPipeError, ConnectionResetError:
             # Client disconnected before the response could be flushed; the
             # server keeps running for the next request.
             return
@@ -433,7 +431,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                     self.send_header("ETag", etag)
                     self.send_header("Cache-Control", cache_control)
                     self.end_headers()
-                except (BrokenPipeError, ConnectionResetError):
+                except BrokenPipeError, ConnectionResetError:
                     pass
                 return
         try:
@@ -464,7 +462,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except BrokenPipeError, ConnectionResetError:
             return
 
     def _handle_static_asset(self, relative: str) -> None:
@@ -549,8 +547,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         if sort_mode == "oldest":
             summaries = _sort_summaries_oldest_first(summaries)
         plan_payloads = [
-            _augment_archivable(summary.to_payload(), summary)
-            for summary in summaries
+            _augment_archivable(summary.to_payload(), summary) for summary in summaries
         ]
         self._send_success(
             reason="ok",
@@ -581,9 +578,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 details={"plan_dir": plan_dir},
             )
             return
-        pin = next(
-            (p for p in registry.pins if p.plan_dir == str(canonical)), None
-        )
+        pin = next((p for p in registry.pins if p.plan_dir == str(canonical)), None)
         discovered = workbench.DiscoveredPlan(
             plan_dir=canonical,
             sources=("registry",) if pin is not None else (),
@@ -627,9 +622,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 details={"plan_dir": str(canonical)},
             )
             return
-        discovered = workbench.DiscoveredPlan(
-            plan_dir=snapshot.plan_dir, exists=True
-        )
+        discovered = workbench.DiscoveredPlan(plan_dir=snapshot.plan_dir, exists=True)
         recovery = workbench.build_workbench_recovery(
             discovered, state_dir=config.state_dir
         )
@@ -720,10 +713,8 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             lock_info=lock_info,
         )
         try:
-            workspace = workbench._workspace_projection(
-                canonical, runtime=payload
-            )
-        except (plans.PlanError, OSError, ValueError):
+            workspace = workbench._workspace_projection(canonical, runtime=payload)
+        except plans.PlanError, OSError, ValueError:
             workspace = {}
         next_pending = snapshot.next_pending
         self._send_success(
@@ -731,9 +722,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             plan_dir=str(canonical),
             state_path=str(state_path),
             state=payload,
-            sessions=[
-                state._session_payload(session) for session in snapshot.sessions
-            ],
+            sessions=[state._session_payload(session) for session in snapshot.sessions],
             counts=state._status_counts(snapshot),
             next_pending_id=next_pending.id if next_pending is not None else None,
             workspace=workspace,
@@ -769,8 +758,8 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             state_payload = tail._read_json_file(state_path)
         except tail.TailError:
             state_payload = None
-        run_id = filter_run if filter_run else tail._latest_run_id(
-            state_payload, records
+        run_id = (
+            filter_run if filter_run else tail._latest_run_id(state_payload, records)
         )
         run_records = tail._event_records_for_run(records, run_id)
         total = len(run_records)
@@ -989,8 +978,8 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             state_payload = tail._read_json_file(state_path)
         except tail.TailError:
             state_payload = None
-        run_id = filter_run if filter_run else tail._latest_run_id(
-            state_payload, records
+        run_id = (
+            filter_run if filter_run else tail._latest_run_id(state_payload, records)
         )
         run_records = tail._event_records_for_run(records, run_id)
         commits = _build_commit_rows(run_records)
@@ -1059,7 +1048,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             structured_error = str(error)
         try:
             workspace = workbench._workspace_projection(canonical)
-        except (plans.PlanError, OSError, ValueError):
+        except plans.PlanError, OSError, ValueError:
             workspace = {}
         self._send_success(
             reason="ok",
@@ -1326,9 +1315,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         )
         self._send_success(reason="ok", **result.to_payload())
 
-    def _handle_archive_settings(
-        self, *, query: Mapping[str, list[str]]
-    ) -> None:
+    def _handle_archive_settings(self, *, query: Mapping[str, list[str]]) -> None:
         del query
         body = self._read_json_body()
         retention_days = _require_int(body, "archive_retention_days")
@@ -1424,9 +1411,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             return
         # Same best-effort wakeup the CLI producer sends, so the HTTP surface
         # is not the slower way to reach a live runner.
-        notified = control_signal.notify_runner(
-            plan_dir, state_dir=config.state_dir
-        )
+        notified = control_signal.notify_runner(plan_dir, state_dir=config.state_dir)
         self._send_json(
             202,
             responses.success_payload(
@@ -1488,9 +1473,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             note = control_cli.ABORT_WILL_APPLY_NOTE
         else:
             note = control_cli.ABORT_DEGRADES_NOTE
-        notified = control_signal.notify_runner(
-            plan_dir, state_dir=config.state_dir
-        )
+        notified = control_signal.notify_runner(plan_dir, state_dir=config.state_dir)
         self._send_json(
             202,
             responses.success_payload(
@@ -1520,11 +1503,9 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             # host where the plan sits behind a symlink.
             canonical = plans.canonicalize_path(plan_dir)
             plan_state = state.plan_state_dir(canonical, config.state_dir)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return False, False
-        lock_info = state._read_lock_path(
-            plan_state / state.LOCK_FILE_NAME, canonical
-        )
+        lock_info = state._read_lock_path(plan_state / state.LOCK_FILE_NAME, canonical)
         run_active = lock_info is not None and lock_info.active
         if not run_active:
             return False, False
@@ -1533,9 +1514,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         )
         return True, runtime.get("active_turn") is not None
 
-    def _handle_control_select_harness(
-        self, *, query: Mapping[str, list[str]]
-    ) -> None:
+    def _handle_control_select_harness(self, *, query: Mapping[str, list[str]]) -> None:
         del query
         body = self._read_json_body()
         plan_dir = _require_string(body, "plan_dir")
@@ -1561,9 +1540,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         except control_queue.ControlQueueError as error:
             self._send_error(400, "invalid-command", str(error))
             return
-        notified = control_signal.notify_runner(
-            plan_dir, state_dir=config.state_dir
-        )
+        notified = control_signal.notify_runner(plan_dir, state_dir=config.state_dir)
         self._send_json(
             202,
             responses.success_payload(
@@ -1582,9 +1559,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         force = bool(body.get("force", False))
         config = self._server().config
         try:
-            result = state.unlock_plan(
-                plan_dir, config.state_dir, force=force
-            )
+            result = state.unlock_plan(plan_dir, config.state_dir, force=force)
         except plans.PlanError as error:
             self._send_error(
                 400,
@@ -1633,9 +1608,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
     def _server(self) -> WorkbenchHTTPServer:
         return self.server  # type: ignore[return-value]
 
-    def _require_query_value(
-        self, query: Mapping[str, list[str]], key: str
-    ) -> str:
+    def _require_query_value(self, query: Mapping[str, list[str]], key: str) -> str:
         values = query.get(key)
         if not values:
             raise _BadRequestError(
@@ -1680,9 +1653,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             )
         return value
 
-    def _resolve_plan_state(
-        self, query: Mapping[str, list[str]]
-    ) -> tuple[Path, Path]:
+    def _resolve_plan_state(self, query: Mapping[str, list[str]]) -> tuple[Path, Path]:
         plan_dir = self._require_query_value(query, "plan_dir")
         try:
             canonical = plans.canonicalize_path(plan_dir)
@@ -1691,7 +1662,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 "invalid-plan",
                 f"invalid plan_dir: {error}",
                 details={"plan_dir": plan_dir},
-            )
+            ) from error
         config = self._server().config
         plan_state = state.plan_state_dir(canonical, config.state_dir)
         return canonical, plan_state
@@ -1702,9 +1673,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         discovered = workbench.DiscoveredPlan(
             plan_dir=canonical, exists=canonical.is_dir()
         )
-        return workbench.build_workbench_summary(
-            discovered, state_dir=state_dir
-        )
+        return workbench.build_workbench_summary(discovered, state_dir=state_dir)
 
     def _validate_log_path(self, candidate: str, plan_state: Path) -> Path:
         try:
@@ -1714,10 +1683,10 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 "invalid-request",
                 f"invalid path: {error}",
                 details={"path": candidate},
-            )
+            ) from error
         try:
             resolved.relative_to(plan_state)
-        except ValueError:
+        except ValueError as error:
             raise _BadRequestError(
                 "invalid-request",
                 "path must be inside the plan state directory",
@@ -1725,7 +1694,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                     "path": str(resolved),
                     "plan_state_dir": str(plan_state),
                 },
-            )
+            ) from error
         return resolved
 
 
@@ -1865,9 +1834,7 @@ def _coerce_profile_payload(raw: Any) -> workbench.LaunchProfile | None:
             raw.get("max_review_fix_cycles")
         ),
         unsafe_bypass=_coerce_optional_bool(raw.get("unsafe_bypass")),
-        allow_not_loop_ready=_coerce_optional_bool(
-            raw.get("allow_not_loop_ready")
-        ),
+        allow_not_loop_ready=_coerce_optional_bool(raw.get("allow_not_loop_ready")),
         note=_coerce_optional_str(raw.get("note")),
     )
 
@@ -1915,9 +1882,7 @@ def _coerce_optional_bool(value: Any) -> bool | None:
     return value
 
 
-def _optional_query_value(
-    query: Mapping[str, list[str]], key: str
-) -> str | None:
+def _optional_query_value(query: Mapping[str, list[str]], key: str) -> str | None:
     values = query.get(key)
     if not values:
         return None
@@ -1925,9 +1890,7 @@ def _optional_query_value(
     return text or None
 
 
-def _optional_int_query(
-    query: Mapping[str, list[str]], key: str
-) -> int | None:
+def _optional_int_query(query: Mapping[str, list[str]], key: str) -> int | None:
     raw = _optional_query_value(query, key)
     if raw is None:
         return None
@@ -1938,7 +1901,7 @@ def _optional_int_query(
             "invalid-request",
             f"query parameter {key!r} must be an integer: {error}",
             details={key: raw},
-        )
+        ) from error
 
 
 def _is_gzip_artifact(path: Path) -> bool:
@@ -2190,8 +2153,7 @@ def _build_commit_rows(records: Sequence[Mapping[str, Any]]) -> list[_JSONDict]:
             started[index] = {
                 "commit_index": index,
                 "scope": payload.get("scope"),
-                "session_id": payload.get("session_id")
-                or payload.get("session"),
+                "session_id": payload.get("session_id") or payload.get("session"),
                 "run_id": payload.get("run_id"),
                 "started_at": record.get("created_at"),
                 "started_payload": payload,
@@ -2210,8 +2172,7 @@ def _build_commit_rows(records: Sequence[Mapping[str, Any]]) -> list[_JSONDict]:
                 row = {
                     "commit_index": index,
                     "scope": payload.get("scope"),
-                    "session_id": payload.get("session_id")
-                    or payload.get("session"),
+                    "session_id": payload.get("session_id") or payload.get("session"),
                     "run_id": payload.get("run_id"),
                     "started_at": None,
                     "started_payload": None,
@@ -2224,15 +2185,9 @@ def _build_commit_rows(records: Sequence[Mapping[str, Any]]) -> list[_JSONDict]:
             row["commit_sha"] = payload.get("commit_sha")
             row["duration_seconds"] = payload.get("duration_seconds")
             row["finished_payload"] = payload
-            row["stdout_path"] = payload.get("stdout_path") or row.get(
-                "stdout_path"
-            )
-            row["stderr_path"] = payload.get("stderr_path") or row.get(
-                "stderr_path"
-            )
-            row["result_path"] = payload.get("result_path") or row.get(
-                "result_path"
-            )
+            row["stdout_path"] = payload.get("stdout_path") or row.get("stdout_path")
+            row["stderr_path"] = payload.get("stderr_path") or row.get("stderr_path")
+            row["result_path"] = payload.get("result_path") or row.get("result_path")
             rows.append(row)
     # Any started-without-finished commits still in flight surface as rows.
     rows.extend(started.values())
@@ -2270,7 +2225,7 @@ def _artifact_descriptor(path: Path | None) -> _JSONDict:
         return {"path": None, "exists": False, "kind": None, "size": None}
     try:
         stat = path.stat()
-    except (FileNotFoundError, NotADirectoryError):
+    except FileNotFoundError, NotADirectoryError:
         return {"path": str(path), "exists": False, "kind": None, "size": None}
     except OSError as error:
         return {
@@ -2316,20 +2271,17 @@ def _install_shutdown_handlers(
         del signum
 
         def runner() -> None:
-            try:
+            # Shutdown must not crash here.
+            with contextlib.suppress(Exception):
                 server.shutdown()
-            except Exception:  # noqa: BLE001 - shutdown must not crash here
-                pass
 
-        threading.Thread(
-            target=runner, name="workbench-shutdown", daemon=True
-        ).start()
+        threading.Thread(target=runner, name="workbench-shutdown", daemon=True).start()
 
     previous: dict[int, Any] = {}
     for signum in (signal.SIGINT, signal.SIGTERM):
         try:
             previous[signum] = signal.signal(signum, _trigger_shutdown)
-        except (ValueError, OSError):
+        except ValueError, OSError:
             # signal() raises ValueError when called outside the main
             # thread (notably in test threads); skip silently — tests
             # call ``server.shutdown()`` directly.
@@ -2339,7 +2291,7 @@ def _install_shutdown_handlers(
         for signum, handler in previous.items():
             try:
                 signal.signal(signum, handler)
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 continue
 
     return restore
@@ -2349,7 +2301,7 @@ def _default_open_in_browser(url: str) -> bool:
     """Attempt to open ``url`` in the operator's default browser."""
     try:
         return bool(webbrowser.open(url, new=1))
-    except (webbrowser.Error, OSError):
+    except webbrowser.Error, OSError:
         return False
 
 
@@ -2358,9 +2310,7 @@ def workbench_serve_from_args(
     *,
     open_browser: Callable[[str], bool] | None = None,
     serve_forever: Callable[[WorkbenchHTTPServer], None] | None = None,
-    install_signal_handlers: Callable[
-        [WorkbenchHTTPServer], Callable[[], None]
-    ]
+    install_signal_handlers: Callable[[WorkbenchHTTPServer], Callable[[], None]]
     | None = None,
 ) -> int:
     """Run ``asl workbench serve`` from parsed CLI arguments.

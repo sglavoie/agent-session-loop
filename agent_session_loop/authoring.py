@@ -29,16 +29,17 @@ Canonical session identities come from :mod:`agent_session_loop.plans`
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime, timezone
+import contextlib
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import sys
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from . import contracts as _contracts
@@ -65,7 +66,6 @@ from .workspaces import (
     WorkspaceError,
     canonicalize_declared_origin,
 )
-
 
 DEFAULT_AGENT_PLANS_DIR_NAME = "agent-plans"
 HASH_PREFIX_LENGTH = 12
@@ -159,9 +159,7 @@ class SourceHeadingError(PlanError):
         self.category = category
         self.source_line = source_line
         self.reason = reason
-        super().__init__(
-            f"line {line_number}: {reason}; source line: {source_line!r}"
-        )
+        super().__init__(f"line {line_number}: {reason}; source line: {source_line!r}")
 
 
 class SourceRegistryError(SourceHeadingError):
@@ -179,9 +177,7 @@ class DuplicateSplitError(PlanError):
         self.plan_id = plan_id
         self.existing_outputs = tuple(existing_outputs)
         outputs = "; ".join(self.existing_outputs)
-        super().__init__(
-            f"split output already exists for plan {plan_id}: {outputs}"
-        )
+        super().__init__(f"split output already exists for plan {plan_id}: {outputs}")
 
 
 CONTEXT_REFERENCE_LINE = (
@@ -571,7 +567,8 @@ def _canonicalize_source_session_id(
     if any(component == 0 for component in components):
         raise _source_heading_error(
             line_number,
-            f"zero-valued session id component in {raw_id!r}; components must be positive",
+            f"zero-valued session id component in {raw_id!r}; components must be "
+            f"positive",
             line,
             category=LINT_ZERO_ID_COMPONENT,
         )
@@ -624,14 +621,13 @@ def _raise_malformed_session_heading(line: str, line_number: int) -> None:
         malformed_token = re.split(r"[ \t:–—-]", payload, maxsplit=1)[0]
         raise _source_heading_error(
             line_number,
-            f"invalid session id {malformed_token!r}; expected dotted decimal components",
+            f"invalid session id {malformed_token!r}; expected dotted decimal "
+            f"components",
             line,
             category=LINT_SESSION_ID_SUFFIX,
         )
 
-    _canonicalize_source_session_id(
-        raw_id, line_number=line_number, line=line
-    )
+    _canonicalize_source_session_id(raw_id, line_number=line_number, line=line)
     suffix = suffix.lstrip(" \t")
     if not suffix:
         # A valid bare ID would have matched. This path is only reachable for
@@ -649,7 +645,8 @@ def _raise_malformed_session_heading(line: str, line_number: int) -> None:
         if not suffix[1:].strip(" \t"):
             raise _source_heading_error(
                 line_number,
-                f"dangling title separator {separator!r}; a non-empty title is required",
+                f"dangling title separator {separator!r}; a non-empty title is "
+                f"required",
                 line,
                 category=LINT_DANGLING_TITLE_SEPARATOR,
             )
@@ -767,11 +764,7 @@ def _parse_repository_registry(
     line verbatim.
     """
     first_session_line = next(
-        (
-            line_number
-            for line_number, _, candidate, _ in structural_lines
-            if candidate
-        ),
+        (line_number for line_number, _, candidate, _ in structural_lines if candidate),
         None,
     )
     headings = [
@@ -801,7 +794,8 @@ def _parse_repository_registry(
         duplicate_line, duplicate_heading = headings[1]
         raise _source_registry_error(
             duplicate_line,
-            f"duplicate repository registry; first defined on line {first_heading_line}",
+            f"duplicate repository registry; first defined on line "
+            f"{first_heading_line}",
             duplicate_heading,
             category=LINT_DUPLICATE_REPOSITORIES,
         )
@@ -819,7 +813,10 @@ def _parse_repository_registry(
         )
 
     header = plans._split_table_row(lines[table_index])
-    if header is None or tuple(cell.strip() for cell in header[1]) != _REPOSITORY_HEADERS:
+    if (
+        header is None
+        or tuple(cell.strip() for cell in header[1]) != _REPOSITORY_HEADERS
+    ):
         raise _source_registry_error(
             table_index + 1,
             "repository registry columns must be exactly Alias, Path, and Origin",
@@ -948,9 +945,7 @@ def parse_plan_document(text: str) -> ParsedPlan:
     for line_number, line, is_candidate, _ in structural_lines:
         index = line_number - 1
         heading = (
-            _parse_source_session_heading(line, line_number)
-            if is_candidate
-            else None
+            _parse_source_session_heading(line, line_number) if is_candidate else None
         )
         if heading is None:
             if current is None and index not in registry_line_indices:
@@ -1009,7 +1004,7 @@ def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
         error.category == LINT_NON_NUMERIC_SESSION_ID
         and _NON_SESSION_PLAN_HEADING_RE.fullmatch(payload) is not None
     ):
-        return f"{head[:-len('Session')]}Plan overview{closing_marker}"
+        return f"{head[: -len('Session')]}Plan overview{closing_marker}"
 
     if error.category not in LINT_SUGGESTABLE_CATEGORIES:
         return None
@@ -1034,9 +1029,7 @@ def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
     return suggestion
 
 
-def lint_plan_document(
-    text: str, *, cwd: str | Path | None = None
-) -> PlanLintResult:
+def lint_plan_document(text: str, *, cwd: str | Path | None = None) -> PlanLintResult:
     """Collect every malformed source heading instead of stopping at the first.
 
     :func:`parse_plan_document` fails fast, so repairing a plan through it costs
@@ -1176,9 +1169,7 @@ def plan_footprint_payload(
     targets_by_session: dict[str, tuple[repository_scope.PathTarget, ...]] = {}
     for session in plan.sessions:
         session_id = session.session_id.value
-        targets = list(
-            repository_scope.extract_path_targets("\n".join(session.lines))
-        )
+        targets = list(repository_scope.extract_path_targets("\n".join(session.lines)))
         targets.extend(_contract_file_targets(contracts_by_id, session_id))
         targets_by_session[session_id] = tuple(targets)
     footprint = repository_scope.resolve_footprint(
@@ -1207,7 +1198,9 @@ def _contract_file_targets(
     if not isinstance(contract, dict):
         return []
     verify = contract.get("verify")
-    checks = verify.get("checks") if isinstance(verify, dict) else contract.get("checks")
+    checks = (
+        verify.get("checks") if isinstance(verify, dict) else contract.get("checks")
+    )
     if not isinstance(checks, list):
         return []
     targets: list[repository_scope.PathTarget] = []
@@ -1510,9 +1503,7 @@ def render_session_file(
     parts.append("---")
     parts.append("")
 
-    body = normalize_heading_levels(
-        _trim_body(list(instruction_lines)), heading_level
-    )
+    body = normalize_heading_levels(_trim_body(list(instruction_lines)), heading_level)
     if contract is not None:
         body, replaced = _contracts.strip_completion_contract_sections(body)
         if replaced:
@@ -1846,7 +1837,7 @@ def _is_session_status_table(block: list[str]) -> bool:
 
 
 def _timestamp_slug(now: datetime) -> str:
-    return now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def archive_dir_name(session_id: int | str | SessionId, now: datetime) -> str:
@@ -1893,8 +1884,8 @@ def refresh_readiness_metadata(
     canonical_dir = canonicalize_path(plan_dir)
     sha = stable_readiness_sha256(canonical_dir)
     if checked_at is None:
-        stamp = now if now is not None else datetime.now(timezone.utc)
-        checked_at = stamp.astimezone(timezone.utc).isoformat()
+        stamp = now if now is not None else datetime.now(UTC)
+        checked_at = stamp.astimezone(UTC).isoformat()
     metadata = ReadinessMetadata(
         state=state, readiness_sha256=sha, checked_at=checked_at
     )
@@ -2047,10 +2038,8 @@ class PlanTransaction:
         except OSError as error:
             rolled_back = self._rollback(backups, replaced, install_temps)
             if rolled_back:
-                try:
+                with contextlib.suppress(OSError):
                     plans._retire_plan_transaction(self.plan_dir, transaction_dir)
-                except OSError:
-                    pass
             raise PlanError(f"failed to commit plan write: {error}") from error
 
         try:
@@ -2094,10 +2083,8 @@ def _read_bytes_if_exists(path: Path) -> bytes | None:
 
 
 def _silent_unlink(path: Path) -> None:
-    try:
+    with contextlib.suppress(OSError):
         path.unlink()
-    except OSError:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -2108,9 +2095,7 @@ SPLIT_REASON_OK = "ok"
 SPLIT_REASON_SINGLE_SESSION = "single-session"
 SPLIT_REASON_MALFORMED_PLAN = "malformed-plan"
 SPLIT_REASON_INPUT_ERROR = "input-error"
-SPLIT_REASON_REGISTRY_REQUIRED = (
-    repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED
-)
+SPLIT_REASON_REGISTRY_REQUIRED = repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED
 
 #: Emitted when a plan's resolved locations reach a second Git repository.
 #: Distinct from the out-of-root refusal: one root outside ``--cwd`` is a
@@ -2204,7 +2189,9 @@ def split_plan(
     try:
         text = Path(canonical_source).read_text(encoding="utf-8")
     except OSError as error:
-        raise PlanError(f"cannot read source plan {canonical_source}: {error}") from error
+        raise PlanError(
+            f"cannot read source plan {canonical_source}: {error}"
+        ) from error
 
     parsed = parse_plan_document(text)
     if len(parsed.sessions) < 2:
@@ -2239,9 +2226,7 @@ def split_plan(
             repository_registry=parsed.registry,
         )
 
-    resolver = resolve_plan_output(
-        canonical_source, base_dir, force_new=force_new
-    )
+    resolver = resolve_plan_output(canonical_source, base_dir, force_new=force_new)
     output_dir = Path(str(resolver["output_dir"]))
 
     transaction = PlanTransaction(output_dir)
@@ -2277,7 +2262,7 @@ def split_plan(
             )
         )
 
-    split_date = (now or datetime.now(timezone.utc)).date().isoformat()
+    split_date = (now or datetime.now(UTC)).date().isoformat()
     transaction.stage(
         "manifest.md",
         render_manifest(
@@ -2430,8 +2415,8 @@ def check_from_args(args: Any) -> int:
         intent = repository_intent.plan_intent(text, root=check_cwd)
         registry_required = intent.registry_required
         if registry_required:
-            footprint_fields["repository_intent"] = (
-                repository_intent.intent_report(intent)
+            footprint_fields["repository_intent"] = repository_intent.intent_report(
+                intent
             )
 
     if result.findings:
@@ -2463,9 +2448,7 @@ def check_from_args(args: Any) -> int:
             for finding in result.findings:
                 print(f"  {finding.message}", file=sys.stderr)
                 if finding.suggested_line is not None:
-                    print(
-                        f"    suggested: {finding.suggested_line}", file=sys.stderr
-                    )
+                    print(f"    suggested: {finding.suggested_line}", file=sys.stderr)
         return 1
 
     if registry_required:
@@ -2555,9 +2538,9 @@ def split_from_args(args: Any) -> int:
 
     # Load the Step 7 contracts keyed by canonical session id.
     try:
-        contracts_text = Path(
-            os.path.expanduser(str(args.contracts_file))
-        ).read_text(encoding="utf-8")
+        contracts_text = Path(os.path.expanduser(str(args.contracts_file))).read_text(
+            encoding="utf-8"
+        )
     except OSError as error:
         return _emit_error(
             SPLIT_REASON_INPUT_ERROR,
@@ -2600,8 +2583,8 @@ def split_from_args(args: Any) -> int:
             plan_text, root=split_cwd, contracts_by_id=contracts_by_id
         )
         if intent.registry_required and not registry_declared:
-            footprint_fields["repository_intent"] = (
-                repository_intent.intent_report(intent)
+            footprint_fields["repository_intent"] = repository_intent.intent_report(
+                intent
             )
             return _emit_error(
                 SPLIT_REASON_REGISTRY_REQUIRED,
@@ -2622,9 +2605,9 @@ def split_from_args(args: Any) -> int:
     analysis_note: str | None = None
     if args.analysis_file:
         try:
-            analysis_note = Path(
-                os.path.expanduser(str(args.analysis_file))
-            ).read_text(encoding="utf-8")
+            analysis_note = Path(os.path.expanduser(str(args.analysis_file))).read_text(
+                encoding="utf-8"
+            )
         except OSError as error:
             return _emit_error(
                 SPLIT_REASON_INPUT_ERROR,
@@ -2643,13 +2626,9 @@ def split_from_args(args: Any) -> int:
     except SingleSessionError as error:
         return _emit_error(SPLIT_REASON_SINGLE_SESSION, str(error))
     except MissingContractError as error:
-        return _emit_error(
-            f"missing-contract:{error.session_id}", str(error)
-        )
+        return _emit_error(f"missing-contract:{error.session_id}", str(error))
     except InvalidContractError as error:
-        return _emit_error(
-            f"invalid-contract:{error.session_id}", str(error)
-        )
+        return _emit_error(f"invalid-contract:{error.session_id}", str(error))
     except PlanError as error:
         return _emit_error(SPLIT_REASON_MALFORMED_PLAN, str(error))
 

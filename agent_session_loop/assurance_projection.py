@@ -37,8 +37,9 @@ this defect now — is answered by replaying those records in order:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace as replace_dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from dataclasses import replace as replace_dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -83,7 +84,6 @@ from .assurance_models import (
     issue_id_number,
     parse_issue_id,
 )
-
 
 #: The record kind each audit state is stored under. Kind and state are two
 #: spellings of one fact and the ledger refuses a record where they disagree.
@@ -158,7 +158,7 @@ class ProjectionError(AssuranceError):
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -735,9 +735,7 @@ def record_closeout(
                 payload=replace_dataclass(
                     draft,
                     issue_ids=tuple(linked),
-                    replaces=(
-                        closeout_reference(prior[-1].seq) if prior else None
-                    ),
+                    replaces=(closeout_reference(prior[-1].seq) if prior else None),
                 ),
             ),
         )
@@ -887,7 +885,7 @@ class _IssueNode:
         self.events: list[tuple[int, str, Any]] = []
         self.merged_from: list[str] = []
 
-    def absorb(self, other: "_IssueNode") -> None:
+    def absorb(self, other: _IssueNode) -> None:
         self.events.extend(other.events)
         self.merged_from.append(other.issue_id)
         self.merged_from.extend(other.merged_from)
@@ -1041,8 +1039,7 @@ def project(view: LedgerView) -> AssuranceProjection:
             run.summaries.append(payload)
 
     issues = tuple(
-        _build_issue(nodes[issue_id])
-        for issue_id in sorted(nodes, key=issue_id_number)
+        _build_issue(nodes[issue_id]) for issue_id in sorted(nodes, key=issue_id_number)
     )
     projected_runs = []
     for run_id in sorted(runs):

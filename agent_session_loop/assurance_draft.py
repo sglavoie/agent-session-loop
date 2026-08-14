@@ -29,15 +29,13 @@ import re
 import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from . import assurance_ledger as ledger
-from . import assurance_models
+from . import assurance_models, harnesses, state
 from . import assurance_projection as projection
-from . import harnesses
-from . import state
 from .assurance_models import (
     HARNESS_NAMES,
     MAX_LOCATOR_CHARS,
@@ -46,7 +44,6 @@ from .assurance_models import (
     canonical_json_bytes,
     parse_issue_id,
 )
-
 
 #: Seconds granted to the single drafting turn. Drafting gets no retry: a
 #: rejected reply is a refusal an operator sees, not a budget to spend twice.
@@ -201,9 +198,7 @@ def fingerprint_roots(roots: Sequence[Path]) -> dict[str, str | None]:
 def _mutated_roots(
     before: Mapping[str, str | None], after: Mapping[str, str | None]
 ) -> tuple[str, ...]:
-    return tuple(
-        root for root, digest in before.items() if after.get(root) != digest
-    )
+    return tuple(root for root, digest in before.items() if after.get(root) != digest)
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +261,7 @@ def build_issue_brief(
             for item in issue.dispositions
         ],
         "existing_plans": [item.to_dict() for item in issue.plans],
-        "runs": [
-            _run_brief(inbox, run_id, directories) for run_id in issue.run_ids
-        ],
+        "runs": [_run_brief(inbox, run_id, directories) for run_id in issue.run_ids],
     }
 
 
@@ -343,9 +336,7 @@ Issue record:
 """
 
 
-def build_draft_prompt(
-    brief: Mapping[str, Any], *, read_roots: Sequence[Path]
-) -> str:
+def build_draft_prompt(brief: Mapping[str, Any], *, read_roots: Sequence[Path]) -> str:
     """Render the prompt for the single drafting turn."""
     return DRAFT_PROMPT_TEMPLATE.format(
         read_roots="\n".join(f"- {root}" for root in read_roots),
@@ -575,7 +566,7 @@ def draft_improvement_plan(
             REASON_OUTPUT_UNWRITABLE, f"could not write {target}: {error}"
         ) from error
 
-    drafted_at = (datetime.now(timezone.utc) if now is None else now()).isoformat()
+    drafted_at = (datetime.now(UTC) if now is None else now()).isoformat()
     try:
         record = projection.record_improvement_plan_draft(
             ImprovementPlanDraft(

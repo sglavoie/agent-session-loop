@@ -32,11 +32,11 @@ Two rules keep the verdict honest:
 
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-import os
 from pathlib import Path
-import re
 from typing import Any, Literal
 
 from . import repository_scope
@@ -45,7 +45,6 @@ from .workspaces import (
     canonicalize_filesystem_path,
     is_descendant,
 )
-
 
 #: Structured refusal reason shared by every surface that enforces this gate.
 REASON_REPOSITORY_REGISTRY_REQUIRED = "repository-registry-required"
@@ -192,9 +191,7 @@ def _without_provenance_metadata(text: str) -> str:
     lines = text.splitlines()
     if not any(_PROVENANCE_LINE_RE.match(line) for line in lines):
         return text
-    return "\n".join(
-        "" if _PROVENANCE_LINE_RE.match(line) else line for line in lines
-    )
+    return "\n".join("" if _PROVENANCE_LINE_RE.match(line) else line for line in lines)
 
 
 def _backtick_candidates(text: str) -> list[IntentCandidate]:
@@ -218,9 +215,7 @@ def _backtick_candidates(text: str) -> list[IntentCandidate]:
             if not value or any(character.isspace() for character in value):
                 continue
             candidates.append(
-                IntentCandidate(
-                    value=value, surface="backtick-path", line=index
-                )
+                IntentCandidate(value=value, surface="backtick-path", line=index)
             )
     return candidates
 
@@ -235,9 +230,7 @@ def candidates_from_checks(
             "contract-cwd" if target.kind == "contract-cwd" else "contract-path"
         )
         candidates.append(
-            IntentCandidate(
-                value=target.value, surface=surface, line=target.line
-            )
+            IntentCandidate(value=target.value, surface=surface, line=target.line)
         )
     return _deduplicate(candidates)
 
@@ -274,9 +267,7 @@ def candidates_from_contract_payloads(
             ):
                 value = check.get(field)
                 if isinstance(value, str) and value:
-                    candidates.append(
-                        IntentCandidate(value=value, surface=surface)
-                    )
+                    candidates.append(IntentCandidate(value=value, surface=surface))
     return _deduplicate(candidates)
 
 
@@ -290,9 +281,7 @@ def candidates_from_plan_metadata(
     for field in ("cwd", "codebase_root", "workspace_root"):
         value = metadata.get(field)
         if isinstance(value, str) and value:
-            candidates.append(
-                IntentCandidate(value=value, surface="plan-metadata")
-            )
+            candidates.append(IntentCandidate(value=value, surface="plan-metadata"))
     repositories = metadata.get("repositories")
     if isinstance(repositories, Sequence) and not isinstance(
         repositories, (str, bytes)
@@ -302,9 +291,7 @@ def candidates_from_plan_metadata(
                 continue
             value = repository.get("root") or repository.get("path")
             if isinstance(value, str) and value:
-                candidates.append(
-                    IntentCandidate(value=value, surface="plan-metadata")
-                )
+                candidates.append(IntentCandidate(value=value, surface="plan-metadata"))
     return _deduplicate(candidates)
 
 
@@ -384,9 +371,7 @@ def resolve_intent(
             )
             continue
         canonical = canonicalize_filesystem_path(resolved)
-        if any(
-            is_descendant(canonical, entry, allow_equal=True) for entry in exempt
-        ):
+        if any(is_descendant(canonical, entry, allow_equal=True) for entry in exempt):
             resolved_candidates.append(
                 ResolvedCandidate(
                     candidate=candidate,
@@ -488,9 +473,7 @@ def intent_report(
         "root": redact_credentials(str(intent.root)),
         "registry_required": intent.registry_required,
         "reason": (
-            REASON_REPOSITORY_REGISTRY_REQUIRED
-            if intent.registry_required
-            else None
+            REASON_REPOSITORY_REGISTRY_REQUIRED if intent.registry_required else None
         ),
         "git_roots": [redact_credentials(str(root)) for root in git_roots],
         "git_root_count": len(intent.git_roots),

@@ -6,70 +6,37 @@ tests/test_asl_*.py subsystem modules.
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
 import errno
-import hashlib
 import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
 import shutil
 import signal
 import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import unittest
-import urllib.parse
+from contextlib import contextmanager, suppress
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
     authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
-    config,
-    contracts,
-    control_queue,
     control_signal,
     events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
     prepare,
     process_tree,
-    progress_cli,
-    progress_repair,
-    qna,
     review,
-    review_repair,
     run_control,
     runner,
     state,
-    tail,
-    verification,
     workbench,
-    workbench_server,
 )
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
-)
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -532,12 +499,10 @@ def kill_marked_pids(marker_dir: Path) -> None:
     for marker in sorted(marker_dir.iterdir()):
         try:
             pid = int(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
-        try:
+        with suppress(OSError):
             os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
 
 
 def _baseline_contract_text(json_block: str) -> str:
@@ -648,8 +613,7 @@ def _contract_block(
             "### Verify",
             "",
             "```json",
-            f'{{"session": "{session}"{parallel_field}, '
-            f"\"checks\": [{check_payload}]}}",
+            f'{{"session": "{session}"{parallel_field}, "checks": [{check_payload}]}}',
             "```",
         ]
     )
@@ -666,9 +630,7 @@ def _write_loop_ready_plan(
     contract_blocks: dict[str, str] = {}
     for number in range(1, len(statuses) + 1):
         key = str(number)
-        contract_blocks[key] = (
-            contracts_by_id or {}
-        ).get(
+        contract_blocks[key] = (contracts_by_id or {}).get(
             key,
             _contract_block(
                 '{"type": "file_exists", "path": "README.md", '
@@ -711,9 +673,7 @@ def _structured_review_finding(
         "id": finding_id,
         "severity": severity,
         "title": f"Finding {finding_id} title",
-        "evidence": [
-            {"path": "agent_session_loop/runner.py", "symbol": "run_loop"}
-        ],
+        "evidence": [{"path": "agent_session_loop/runner.py", "symbol": "run_loop"}],
         "explanation": f"Explanation for {finding_id}.",
         "repair_group": "group-1",
         "done_criteria": ["The issue is fixed and covered by a test."],
@@ -752,8 +712,7 @@ def write_completed_review_plan(
         med = sum(1 for finding in findings if finding["severity"] == "med")
         low = sum(1 for finding in findings if finding["severity"] == "low")
         status_line = (
-            f"Status: {len(findings)} Findings "
-            f"({high} high, {med} med, {low} low)"
+            f"Status: {len(findings)} Findings ({high} high, {med} med, {low} low)"
         )
         outcome = "findings"
     else:
@@ -775,12 +734,8 @@ def write_review_cycle_event(
     payload: dict[str, object],
 ) -> Path:
     """Append one review-cycle fixture event and return its event path."""
-    event_path = (
-        state.plan_state_dir(plan_dir, state_root) / events.EVENTS_FILE_NAME
-    )
-    events.append_event(
-        event_path, events.Event(events.REVIEW_CYCLE_EVENT, payload)
-    )
+    event_path = state.plan_state_dir(plan_dir, state_root) / events.EVENTS_FILE_NAME
+    events.append_event(event_path, events.Event(events.REVIEW_CYCLE_EVENT, payload))
     return event_path
 
 
@@ -931,9 +886,7 @@ def live_wakeup_endpoint(plan_dir: Path, state_root: Path):
         state.plan_state_dir(plan_dir, state_root), event
     ) as path:
         if path is None:
-            raise unittest.SkipTest(
-                "this filesystem cannot host a wakeup FIFO"
-            )
+            raise unittest.SkipTest("this filesystem cannot host a wakeup FIFO")
         yield path, event
 
 
@@ -1132,9 +1085,7 @@ def _write_prepare_plan(plan_dir: Path, session_ids: tuple[str, ...] = ("1",)) -
                 json.dumps(
                     {
                         "session": session_id,
-                        "checks": [
-                            {"name": "c1", "type": "command", "argv": ["true"]}
-                        ],
+                        "checks": [{"name": "c1", "type": "command", "argv": ["true"]}],
                     }
                 ),
                 "```",

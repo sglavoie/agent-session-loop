@@ -5,16 +5,17 @@ Adapters construct argv lists and run harnesses without shell interpolation.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+import contextlib
 import json
 import os
-from pathlib import Path
 import shutil
 import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import IO, Any, Literal
 
 from . import config
@@ -26,7 +27,6 @@ from .process_tree import (
     sweep_enabled,
     sweep_survivors,
 )
-
 
 HarnessName = Literal["codex", "claude", "copilot"]
 HARNESS_NAMES: tuple[HarnessName, ...] = ("codex", "claude", "copilot")
@@ -188,10 +188,8 @@ def _kill_process_group(process: subprocess.Popen) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except OSError:
         # The group is already empty, or the child left it for one of its own.
-        try:
+        with contextlib.suppress(OSError):
             process.kill()
-        except OSError:
-            pass
 
 
 def _sweep_turn_descendants(
@@ -683,10 +681,8 @@ class HarnessAdapter:
             ) from error
 
         if on_spawn is not None:
-            try:
+            with contextlib.suppress(Exception):
                 on_spawn(process.pid)
-            except Exception:
-                pass
 
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
@@ -731,10 +727,8 @@ class HarnessAdapter:
                             and output_processor.final_result_seen
                         ):
                             final_result_fired.set()
-                            try:
+                            with contextlib.suppress(Exception):
                                 on_final_result()
-                            except Exception:
-                                pass
                         if not processed_chunk:
                             continue
                         chunks.append(processed_chunk)

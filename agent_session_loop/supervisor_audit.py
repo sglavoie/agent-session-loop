@@ -41,12 +41,12 @@ import json
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import __version__
 from . import (
+    __version__,
     artifacts,
     assurance_ledger,
     assurance_models,
@@ -455,7 +455,7 @@ def _record_mutation_issue(
                 "comparison": mutation,
             },
         )
-    except (OSError, assurance_models.AssuranceError):
+    except OSError, assurance_models.AssuranceError:
         return None
     try:
         record = assurance_ledger.append_issue_observation(
@@ -484,7 +484,7 @@ def _record_mutation_issue(
             ),
             state_dir=state_dir,
         )
-    except (OSError, assurance_ledger.LedgerError, assurance_models.AssuranceError):
+    except OSError, assurance_ledger.LedgerError, assurance_models.AssuranceError:
         return None
     return record.issue_id
 
@@ -601,7 +601,7 @@ def run_restricted_audit(
         repository_evidence.compare_workspace_snapshots(before, after)
     )
     if mutation is not None:
-        clock = datetime.now(timezone.utc) if now is None else now()
+        clock = datetime.now(UTC) if now is None else now()
         return AuditAttemptResult(
             outcome="mutation-detected",
             state="unavailable",
@@ -802,9 +802,7 @@ _ANOMALY_EVENT_NAMES = frozenset(
 )
 
 _RUN_STARTED_EVENT = "run_started"
-_TERMINAL_EVENT_NAMES = frozenset(
-    {events.RUN_FINISHED_EVENT, events.RUN_PAUSED_EVENT}
-)
+_TERMINAL_EVENT_NAMES = frozenset({events.RUN_FINISHED_EVENT, events.RUN_PAUSED_EVENT})
 
 #: State keys copied verbatim (after redaction) into each projection.
 _REVIEW_STATE_KEYS = (
@@ -892,7 +890,7 @@ class EvidenceRoots:
         state_dir: Path | str,
         plan_dir: Path | str,
         workspace_root: Path | str | None = None,
-    ) -> "EvidenceRoots":
+    ) -> EvidenceRoots:
         package_root = Path(__file__).resolve().parent
         declared: list[tuple[str, Path | str]] = [
             (EVIDENCE_ROOT_RUN, run_dir),
@@ -978,7 +976,12 @@ class _Omissions:
     def record(self, section: str, reason: str, payload: Any) -> None:
         entry = self._entries.setdefault(
             (section, reason),
-            {"section": section, "reason": reason, "count": 0, "digest": hashlib.sha256()},
+            {
+                "section": section,
+                "reason": reason,
+                "count": 0,
+                "digest": hashlib.sha256(),
+            },
         )
         entry["count"] += 1
         entry["digest"].update(assurance_models.canonical_json_bytes(payload))
@@ -992,7 +995,8 @@ class _Omissions:
                 "sha256": entry["digest"].hexdigest(),
             }
             for entry in sorted(
-                self._entries.values(), key=lambda item: (item["section"], item["reason"])
+                self._entries.values(),
+                key=lambda item: (item["section"], item["reason"]),
             )
         ]
 
@@ -1040,9 +1044,7 @@ class _Collector:
         return locator
 
     def evidence(self) -> list[dict[str, Any]]:
-        return [
-            self._evidence[locator].to_dict() for locator in sorted(self._evidence)
-        ]
+        return [self._evidence[locator].to_dict() for locator in sorted(self._evidence)]
 
     # -- redaction -------------------------------------------------------
 
@@ -1081,9 +1083,7 @@ class _Collector:
             located = self._roots.locate(text)
             if located is not None:
                 return located
-            self.omissions.record(
-                "references", REASON_OUTSIDE_APPROVED_ROOTS, text
-            )
+            self.omissions.record("references", REASON_OUTSIDE_APPROVED_ROOTS, text)
             return f"[{REASON_OUTSIDE_APPROVED_ROOTS}:{_sha256_text(text)[:16]}]"
         cleaned = _redact_secrets(text)
         if len(cleaned.encode("utf-8")) <= MAX_INLINE_STRING_BYTES:
@@ -1143,9 +1143,7 @@ class _Collector:
         metadata = capture.finalize(failed=False)
         record = {
             "available": True,
-            "reference": self.reference(
-                path, kind=kind, digest=metadata.sha256
-            ),
+            "reference": self.reference(path, kind=kind, digest=metadata.sha256),
             "byte_count": metadata.byte_count,
             "sha256": metadata.sha256,
             "truncated": metadata.truncated,
@@ -1251,7 +1249,7 @@ def _read_json_file(path: Path) -> tuple[Any, str | None]:
         return None, REASON_UNREADABLE
     try:
         return json.loads(text), None
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         return None, REASON_MALFORMED
 
 
@@ -1261,7 +1259,9 @@ def _tree_digest(root: Path, *, patterns: Sequence[str]) -> dict[str, Any]:
         return {"available": False, "reason": REASON_MISSING}
     paths: list[Path] = []
     for pattern in patterns:
-        paths.extend(candidate for candidate in root.rglob(pattern) if candidate.is_file())
+        paths.extend(
+            candidate for candidate in root.rglob(pattern) if candidate.is_file()
+        )
     ordered = sorted(set(paths), key=lambda item: item.relative_to(root).as_posix())
     omitted = max(0, len(ordered) - MAX_TREE_FILES)
     digest = hashlib.sha256()
@@ -1384,7 +1384,7 @@ def _read_events(
             continue
         try:
             parsed = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             rejected += 1
             collector.omissions.record("events", REASON_MALFORMED, line[:2000])
             continue
@@ -1400,9 +1400,8 @@ def _read_events(
         if names_this_run and name == _RUN_STARTED_EVENT:
             inside = True
             terminated = False
-        if not names_this_run:
-            if not inside or terminated or named_run is not None:
-                continue
+        if not names_this_run and (not inside or terminated or named_run is not None):
+            continue
         records.append(
             {
                 "sequence": index,
@@ -1512,7 +1511,7 @@ def _scopes_section(
             continue
         try:
             scope = plans.parse_session_scope(text, tuple(aliases))
-        except (plans.PlanError, ValueError):
+        except plans.PlanError, ValueError:
             entry["available"] = False
             entry["reason"] = REASON_MALFORMED
         else:
@@ -1534,9 +1533,7 @@ def _turn_section(collector: _Collector, directory: Path) -> dict[str, Any]:
         turn["result"] = collector.redact(result)
         turn["anomalous"] = _payload_shows_failure(result)
     else:
-        collector.omissions.record(
-            "turns", reason or REASON_MALFORMED, str(directory)
-        )
+        collector.omissions.record("turns", reason or REASON_MALFORMED, str(directory))
         turn["result"] = {"available": False, "reason": reason or REASON_MALFORMED}
         turn["anomalous"] = True
     turn["logs"] = {
@@ -1618,7 +1615,8 @@ def _shed(
     turns: list[dict[str, Any]] = payload["turns"]
     protected = {
         id(turn)
-        for turn in turns[-RECENT_TURN_COUNT:] + [t for t in turns if t.get("anomalous")]
+        for turn in turns[-RECENT_TURN_COUNT:]
+        + [t for t in turns if t.get("anomalous")]
     }
 
     def size() -> int:
@@ -1643,7 +1641,9 @@ def _shed(
             if not (only_unprotected and id(turn) in protected)
         ][:batch]
         for index in reversed(doomed):
-            collector.omissions.record("turns", REASON_SIZE_CAP, turns[index].get("name"))
+            collector.omissions.record(
+                "turns", REASON_SIZE_CAP, turns[index].get("name")
+            )
             del turns[index]
         return bool(doomed)
 
@@ -1948,7 +1948,9 @@ class _CheckContext:
             if isinstance(entry, Mapping) and entry.get("locator")
         }
         self.turns = [
-            turn for turn in _sequence(payload.get("turns")) if isinstance(turn, Mapping)
+            turn
+            for turn in _sequence(payload.get("turns"))
+            if isinstance(turn, Mapping)
         ]
         self.records = [
             record
@@ -2001,9 +2003,8 @@ class _CheckContext:
             for locator in dict.fromkeys(candidates)
             if isinstance(locator, str) and locator in self.declared
         ]
-        return (
-            tuple(chosen[: assurance_models.MAX_REFERENCES_PER_ITEM])
-            or (RUN_ANCHOR,)
+        return tuple(chosen[: assurance_models.MAX_REFERENCES_PER_ITEM]) or (
+            RUN_ANCHOR,
         )
 
 
@@ -2159,13 +2160,12 @@ def _check_task_packet_paths(context: _CheckContext) -> _Verdict:
                 f"the run configuration names {configured_cwd} as its working "
                 "directory, outside the run's workspace"
             )
-    evidence = context.evidence(
-        *references, context.section("state").get("reference")
-    )
+    evidence = context.evidence(*references, context.section("state").get("reference"))
     if contradictions:
         return _Verdict(
             "fail",
-            f"a task packet names paths its own run contradicts: {_joined(contradictions)}",
+            f"a task packet names paths its own run contradicts: "
+            f"{_joined(contradictions)}",
             evidence,
         )
     if not observed:
@@ -2219,9 +2219,7 @@ def _check_scope_escape(context: _CheckContext) -> _Verdict:
         elif reason == events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE:
             observed += 1
             blind.append("the write guard reported itself unavailable")
-    evidence = context.evidence(
-        *references, context.section("state").get("reference")
-    )
+    evidence = context.evidence(*references, context.section("state").get("reference"))
     if escapes:
         return _Verdict("fail", _joined(escapes), evidence)
     if blind:
@@ -2252,7 +2250,9 @@ def _check_state_event_agreement(context: _CheckContext) -> _Verdict:
         context.event_summary.get("reference"),
     )
     terminal = [
-        record for record in context.records if record.get("name") in _TERMINAL_EVENT_NAMES
+        record
+        for record in context.records
+        if record.get("name") in _TERMINAL_EVENT_NAMES
     ]
     if "ok" not in status and "paused" not in status and not terminal:
         return _Verdict(
@@ -2287,10 +2287,13 @@ def _check_state_event_agreement(context: _CheckContext) -> _Verdict:
         contradictions.append(
             "the event log records a pause the state projection reports as success"
         )
-    if any(
-        _mapping(record.get("payload")).get("ok") is False
-        for record in finished_records
-    ) and status.get("ok") is True:
+    if (
+        any(
+            _mapping(record.get("payload")).get("ok") is False
+            for record in finished_records
+        )
+        and status.get("ok") is True
+    ):
         contradictions.append(
             "the run_finished record reports failure while the state projection "
             "reports success"
@@ -2337,9 +2340,7 @@ def _check_terminal_artifacts(context: _CheckContext) -> _Verdict:
                 f"{turn.get('name')} wrote no readable {state.RESULT_FILE_NAME} "
                 f"({result.get('reason')})"
             )
-    evidence = context.evidence(
-        context.event_summary.get("reference"), *references
-    )
+    evidence = context.evidence(context.event_summary.get("reference"), *references)
     names = [str(record.get("name") or "") for record in context.records]
     if not names:
         if problems:
@@ -2454,14 +2455,10 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
         )
     if status.get("paused") is True:
         counter.append("the state projection records the run as paused")
-    if any(
-        record.get("name") == events.RUN_PAUSED_EVENT for record in context.records
-    ):
+    if any(record.get("name") == events.RUN_PAUSED_EVENT for record in context.records):
         counter.append("the event log records the run as paused")
 
-    evidence = context.evidence(
-        context.section("state").get("reference"), *references
-    )
+    evidence = context.evidence(context.section("state").get("reference"), *references)
     if claimed and counter:
         return _Verdict(
             "fail",
@@ -2694,13 +2691,12 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
             "write-guard result"
         )
 
-    evidence = context.evidence(
-        *references, context.section("state").get("reference")
-    )
+    evidence = context.evidence(*references, context.section("state").get("reference"))
     if contradictions:
         return _Verdict(
             "fail",
-            f"the run's mutation and commit guards left a gap: {_joined(contradictions)}",
+            f"the run's mutation and commit guards left a gap: "
+            f"{_joined(contradictions)}",
             evidence,
         )
     if not attempts and not guarded:
@@ -2743,7 +2739,10 @@ def _check_resource_anomalies(context: _CheckContext) -> _Verdict:
         result = _mapping(turn.get("result"))
         stalled = [
             label
-            for key, label in (("timed_out", "timed out"), ("interrupted", "was interrupted"))
+            for key, label in (
+                ("timed_out", "timed out"),
+                ("interrupted", "was interrupted"),
+            )
             if result.get(key) is True
         ]
         for label in stalled:
@@ -2772,8 +2771,7 @@ def _check_resource_anomalies(context: _CheckContext) -> _Verdict:
     if not context.records and not context.turns:
         return _Verdict(
             "unavailable",
-            "the run recorded neither events nor turns to judge stalls and "
-            "timeouts by",
+            "the run recorded neither events nor turns to judge stalls and timeouts by",
             evidence,
         )
     return _Verdict(
@@ -3090,8 +3088,7 @@ def lane_rollup(
         ):
             worst[result.lane] = result.status
     return {
-        lane: worst.get(lane, "unavailable")
-        for lane in assurance_models.RUBRIC_LANES
+        lane: worst.get(lane, "unavailable") for lane in assurance_models.RUBRIC_LANES
     }
 
 
@@ -3355,7 +3352,9 @@ def _agent_payload(text: str) -> dict[str, Any]:
             "malformed-output", "the agent answer must be a single JSON object"
         )
     unknown = sorted(
-        str(key) for key in payload if key not in {"schema_version", "lanes", "findings"}
+        str(key)
+        for key in payload
+        if key not in {"schema_version", "lanes", "findings"}
     )
     if unknown:
         raise AgentOutputError(
@@ -3373,7 +3372,9 @@ def _agent_payload(text: str) -> dict[str, Any]:
     return dict(payload)
 
 
-def _agent_lanes(payload: Mapping[str, Any]) -> tuple[assurance_models.LaneEvidence, ...]:
+def _agent_lanes(
+    payload: Mapping[str, Any],
+) -> tuple[assurance_models.LaneEvidence, ...]:
     entries = payload.get("lanes")
     if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
         raise AgentOutputError(
@@ -3452,8 +3453,7 @@ def _validate_agent_references(
     if unknown:
         raise AgentOutputError(
             "invalid-reference",
-            f"the agent cited evidence the bundle never declared: "
-            f"{_names(unknown)}",
+            f"the agent cited evidence the bundle never declared: {_names(unknown)}",
         )
     outside = sorted(
         {
@@ -3495,9 +3495,7 @@ def _status_counts(results: Sequence[assurance_models.DeterministicResult]) -> s
     counts = {status: 0 for status in assurance_models.CHECK_STATUSES}
     for result in results:
         counts[result.status] += 1
-    return ", ".join(
-        f"{count} {status}" for status, count in counts.items() if count
-    )
+    return ", ".join(f"{count} {status}" for status, count in counts.items() if count)
 
 
 def _anchor(declared: Sequence[str]) -> tuple[str, ...]:
@@ -3527,13 +3525,13 @@ def _merged_lanes(
         status = _worst(rollup[name], claim.status if claim else "unavailable")
         evidence = list(
             dict.fromkeys(
-                [*(claim.evidence if claim else ()),
-                 *(ref for result in lane_results for ref in result.evidence)]
+                [
+                    *(claim.evidence if claim else ()),
+                    *(ref for result in lane_results for ref in result.evidence),
+                ]
             )
         )[: assurance_models.MAX_REFERENCES_PER_ITEM]
-        deterministic_note = (
-            f"Deterministic checks: {_status_counts(lane_results)}."
-        )
+        deterministic_note = f"Deterministic checks: {_status_counts(lane_results)}."
         summary = (
             f"{_inline(claim.summary)} {deterministic_note}"
             if claim
@@ -3578,7 +3576,9 @@ def render_supervisor_audit(
     evidence = bundle.evidence
     declared = [entry.locator for entry in evidence]
     lanes = _merged_lanes(results, agent, declared=declared)
-    findings = _merged_findings(findings_from_results(results), agent.findings if agent else ())
+    findings = _merged_findings(
+        findings_from_results(results), agent.findings if agent else ()
+    )
     if agent is None:
         state: assurance_models.AuditState = "unavailable"
         state_reason = reason or REASON_AGENT_UNAVAILABLE
@@ -3744,7 +3744,9 @@ def _write_attempt_artifacts(
         )
         assurance_models.write_new_bytes(
             directory / ATTEMPT_MESSAGE_FILE,
-            _truncate_utf8(attempt.last_message, MAX_AGENT_OUTPUT_BYTES).encode("utf-8"),
+            _truncate_utf8(attempt.last_message, MAX_AGENT_OUTPUT_BYTES).encode(
+                "utf-8"
+            ),
             durable=durable,
         )
         assurance_models.write_new_bytes(
@@ -3761,7 +3763,7 @@ def _write_attempt_artifacts(
             ),
             durable=durable,
         )
-    except (OSError, assurance_models.AssuranceError):
+    except OSError, assurance_models.AssuranceError:
         return None
     return assurance_models.attempt_dir_name(number)
 
@@ -3794,8 +3796,10 @@ def run_agent_audit(
     consequence of the first.
     """
     run_dir = Path(run_dir)
-    clock = datetime.now(timezone.utc) if now is None else now()
-    verdicts = tuple(results) if results is not None else run_deterministic_checks(bundle)
+    clock = datetime.now(UTC) if now is None else now()
+    verdicts = (
+        tuple(results) if results is not None else run_deterministic_checks(bundle)
+    )
     declared = [entry.locator for entry in bundle.evidence]
     attempts: list[assurance_models.AuditAttempt] = []
     mutation_issue_id: str | None = None
@@ -3901,7 +3905,9 @@ def _deterministic_only_audit(
     )
 
 
-def _artifact_reference(path: Path, run_dir: Path, digest: str) -> assurance_models.EvidenceRef:
+def _artifact_reference(
+    path: Path, run_dir: Path, digest: str
+) -> assurance_models.EvidenceRef:
     return assurance_models.EvidenceRef(
         kind="artifact",
         locator=f"{EVIDENCE_ROOT_RUN}/{path.relative_to(run_dir).as_posix()}",
@@ -3954,7 +3960,7 @@ def _publish_evidence_failure(
             ),
             state_dir=ledger_state_dir,
         )
-    except (OSError, assurance_models.AssuranceError):
+    except OSError, assurance_models.AssuranceError:
         return None
     return result.summary
 
@@ -3999,7 +4005,7 @@ def audit_terminal_run(
     ledger sits in. They are different directories and conflating them would
     scatter the inbox one file per plan.
     """
-    clock = (lambda: datetime.now(timezone.utc)) if now is None else now
+    clock = (lambda: datetime.now(UTC)) if now is None else now
     if not plan.config.enabled:
         return initial_summary(plan, run_id=run_id, eligible=True)
 
@@ -4007,7 +4013,9 @@ def audit_terminal_run(
     run_dir = Path(run_dir)
     started = clock()
 
-    def pending(artifacts: Sequence[assurance_models.EvidenceRef] = ()) -> AssuranceSummary:
+    def pending(
+        artifacts: Sequence[assurance_models.EvidenceRef] = (),
+    ) -> AssuranceSummary:
         return AssuranceSummary(
             run_id=run_id,
             state="pending",
@@ -4072,12 +4080,14 @@ def audit_terminal_run(
         markdown_bytes = markdown_path.read_bytes()
         audit_artifacts = (
             _artifact_reference(input_path, run_dir, bundle.sha256),
-            _artifact_reference(report_path, run_dir, artifacts.sha256_hex(report_bytes)),
+            _artifact_reference(
+                report_path, run_dir, artifacts.sha256_hex(report_bytes)
+            ),
             _artifact_reference(
                 markdown_path, run_dir, artifacts.sha256_hex(markdown_bytes)
             ),
         )
-    except (OSError, assurance_models.AssuranceError):
+    except OSError, assurance_models.AssuranceError:
         return pending()
 
     completed = clock()
@@ -4095,13 +4105,11 @@ def audit_terminal_run(
                 linked_issue_ids=outcome.linked_issue_ids,
                 started_at=started.isoformat(),
                 completed_at=completed.isoformat(),
-                duration_seconds=max(
-                    0.0, (completed - started).total_seconds()
-                ),
+                duration_seconds=max(0.0, (completed - started).total_seconds()),
             ),
             state_dir=ledger_state_dir,
         )
-    except (OSError, assurance_models.AssuranceError):
+    except OSError, assurance_models.AssuranceError:
         return pending(audit_artifacts)
     return result.summary
 

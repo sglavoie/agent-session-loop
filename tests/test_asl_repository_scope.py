@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 from agent_session_loop import contracts, repository_scope
 from agent_session_loop.workspaces import (
@@ -42,10 +42,7 @@ class ExtractPathTargetsTests(unittest.TestCase):
 
     def test_fenced_blocks_are_not_evidence(self) -> None:
         text = (
-            "Prose mentions nothing.\n"
-            "```bash\n"
-            "cd /Users/dev/work/repoB && make\n"
-            "```\n"
+            "Prose mentions nothing.\n```bash\ncd /Users/dev/work/repoB && make\n```\n"
         )
         self.assertEqual((), repository_scope.extract_path_targets(text))
 
@@ -161,9 +158,7 @@ class ResolveFootprintTests(unittest.TestCase):
         footprint = self._footprint(
             f"Read {self.first}/README.md first.\n", self.first / "src"
         )
-        self.assertEqual(
-            [f"{self.first}/README.md"], _values(footprint.out_of_root)
-        )
+        self.assertEqual([f"{self.first}/README.md"], _values(footprint.out_of_root))
         self.assertEqual((), footprint.external)
         self.assertTrue(footprint.registry_required)
 
@@ -224,7 +219,9 @@ class ResolveFootprintTests(unittest.TestCase):
         )
 
     def test_soft_prose_never_requires_a_registry_by_itself(self) -> None:
-        footprint = self._footprint("Revisit src/main.py in this session.\n", self.first)
+        footprint = self._footprint(
+            "Revisit src/main.py in this session.\n", self.first
+        )
         self.assertFalse(footprint.registry_required)
 
 
@@ -257,8 +254,10 @@ class SuggestionTests(unittest.TestCase):
             self.workspace, tuple(self.repositories.values())
         )
         self.assertEqual(
-            [("tundra_OAK", "github.com/tundra/OAK"),
-             ("tundra_svc", "github.com/tundra/SVC")],
+            [
+                ("tundra_OAK", "github.com/tundra/OAK"),
+                ("tundra_svc", "github.com/tundra/SVC"),
+            ],
             sorted((entry.path, entry.origin) for entry in registry),
         )
         self.assertEqual(
@@ -311,9 +310,7 @@ class SuggestionTests(unittest.TestCase):
             ["left", "right"],
             sorted(str(entry["alias"]) for entry in payload["detected"]),
         )
-        self.assertEqual(
-            ["left", "right"], payload["suggested_scopes"]["1"]["writes"]
-        )
+        self.assertEqual(["left", "right"], payload["suggested_scopes"]["1"]["writes"])
 
     def test_payload_reports_a_non_git_escape_beside_out_of_root(self) -> None:
         loose = Path(self._temp.name) / "loose.txt"
@@ -345,9 +342,7 @@ class SuggestionTests(unittest.TestCase):
         stray = Path(self._temp.name) / "stray"
         init_multi_repo_workspace(stray, (("Y", "loose", "git@host:y/z.git"),))
         with self.assertRaises(WorkspaceError):
-            repository_scope.suggest_registry(
-                self.workspace, (stray / "loose",)
-            )
+            repository_scope.suggest_registry(self.workspace, (stray / "loose",))
 
     def test_aliases_are_deduplicated_deterministically(self) -> None:
         nested = self.workspace / "vendor"
@@ -368,9 +363,7 @@ class SuggestionTests(unittest.TestCase):
         second = self.repositories["OAK"]
         (first / "src").mkdir()
         (first / "src" / "main.py").write_text("x\n", encoding="utf-8")
-        registry = repository_scope.suggest_registry(
-            self.workspace, (first, second)
-        )
+        registry = repository_scope.suggest_registry(self.workspace, (first, second))
         alias_by_root = {
             canonicalize_filesystem_path(self.workspace / entry.path): entry.alias
             for entry in registry

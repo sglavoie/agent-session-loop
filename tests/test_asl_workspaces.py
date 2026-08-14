@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from agent_session_loop import authoring, plans, runner, verification, workspaces
 from tests.support import (
@@ -44,9 +44,11 @@ class RepositoryValueTests(unittest.TestCase):
             repository.alias = "changed"  # type: ignore[misc]
 
         for invalid in ("", "2SDR", "SD R", "svc.", " svc"):
-            with self.subTest(alias=invalid):
-                with self.assertRaises(workspaces.WorkspaceError):
-                    workspaces.validate_repository_alias(invalid)
+            with (
+                self.subTest(alias=invalid),
+                self.assertRaises(workspaces.WorkspaceError),
+            ):
+                workspaces.validate_repository_alias(invalid)
 
     def test_relative_path_normalization_rejects_unsafe_forms(self) -> None:
         self.assertEqual(
@@ -63,9 +65,11 @@ class RepositoryValueTests(unittest.TestCase):
             "repo\x00nested",
             "group/repo\nother",
         ):
-            with self.subTest(path=invalid):
-                with self.assertRaises(workspaces.WorkspaceError):
-                    workspaces.normalize_repository_path(invalid)
+            with (
+                self.subTest(path=invalid),
+                self.assertRaises(workspaces.WorkspaceError),
+            ):
+                workspaces.normalize_repository_path(invalid)
 
     def test_origin_identity_ignores_transport_credentials_and_dot_git(self) -> None:
         origins = (
@@ -93,9 +97,7 @@ class RepositoryValueTests(unittest.TestCase):
         for origin, identity in expected.items():
             with self.subTest(origin=origin):
                 self.assertEqual(identity, workspaces.canonicalize_origin(origin))
-                self.assertEqual(
-                    identity, workspaces.canonicalize_origin(identity)
-                )
+                self.assertEqual(identity, workspaces.canonicalize_origin(identity))
 
     def test_origin_identity_quotes_markdown_metacharacters_idempotently(self) -> None:
         identity = workspaces.canonicalize_origin(
@@ -126,9 +128,7 @@ class RepositoryValueTests(unittest.TestCase):
         self.assertTrue(workspaces.origins_equal(user_bearing, userless))
         self.assertEqual(
             "github.com/22/tundra/SVC",
-            workspaces.canonicalize_declared_origin(
-                "github.com:22/tundra/SVC"
-            ),
+            workspaces.canonicalize_declared_origin("github.com:22/tundra/SVC"),
         )
         self.assertTrue(
             workspaces.origins_equal(
@@ -138,9 +138,7 @@ class RepositoryValueTests(unittest.TestCase):
         )
         self.assertEqual(
             "code.internal:2222/tundra/SVC",
-            workspaces.canonicalize_origin(
-                "code.internal:2222/tundra/SVC"
-            ),
+            workspaces.canonicalize_origin("code.internal:2222/tundra/SVC"),
         )
 
     def test_origin_rejects_local_traversing_and_unsupported_values(self) -> None:
@@ -152,9 +150,11 @@ class RepositoryValueTests(unittest.TestCase):
             "C:\\repo",
             "C:/repo",
         ):
-            with self.subTest(origin=invalid):
-                with self.assertRaises(workspaces.WorkspaceError):
-                    workspaces.canonicalize_origin(invalid)
+            with (
+                self.subTest(origin=invalid),
+                self.assertRaises(workspaces.WorkspaceError),
+            ):
+                workspaces.canonicalize_origin(invalid)
 
         with self.assertRaisesRegex(workspaces.WorkspaceError, "absolute Git URL"):
             workspaces.canonicalize_declared_origin("github.com/org/repo")
@@ -211,9 +211,11 @@ class RepositoryRegistryTests(unittest.TestCase):
             ),
         )
         for specs in cases:
-            with self.subTest(specs=specs):
-                with self.assertRaises(workspaces.WorkspaceError):
-                    _registry(specs)
+            with (
+                self.subTest(specs=specs),
+                self.assertRaises(workspaces.WorkspaceError),
+            ):
+                _registry(specs)
 
 
 class WorkspaceResolutionTests(unittest.TestCase):
@@ -235,9 +237,7 @@ class WorkspaceResolutionTests(unittest.TestCase):
                 workspace_root, _registry((("SVC", "svc", origin),))
             )
 
-            self.assertEqual(
-                "code.internal:2222/org/svc", resolved.get("SVC").origin
-            )
+            self.assertEqual("code.internal:2222/org/svc", resolved.get("SVC").origin)
 
     def test_resolves_sibling_repositories_and_builds_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -254,9 +254,7 @@ class WorkspaceResolutionTests(unittest.TestCase):
             resolved = workspaces.resolve_workspace(workspace_root, _registry())
 
             self.assertEqual(workspace_root.resolve(), resolved.root)
-            self.assertEqual(
-                ("SVC", "OAK", "OWL", "Kiln"), resolved.registry.aliases
-            )
+            self.assertEqual(("SVC", "OAK", "OWL", "Kiln"), resolved.registry.aliases)
             self.assertEqual(repositories["OAK"].resolve(), resolved.get("OAK").root)
             self.assertEqual(_registry().digest, resolved.binding.registry_digest)
             with self.assertRaises(dataclasses.FrozenInstanceError):
@@ -286,9 +284,7 @@ class WorkspaceResolutionTests(unittest.TestCase):
                 workspace_root, _registry((DEFAULT_MULTI_REPO_SPECS[0],))
             )
 
-            self.assertEqual(
-                "github.com/tundra/SVC", resolved.get("SVC").origin
-            )
+            self.assertEqual("github.com/tundra/SVC", resolved.get("SVC").origin)
 
     def test_resolution_rejects_nested_non_top_level_and_origin_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,9 +344,7 @@ class WorkspaceResolutionTests(unittest.TestCase):
             (workspace_root / "linked").symlink_to(
                 workspace_root / "real", target_is_directory=True
             )
-            registry = _registry(
-                (("Repo", "linked/repository", origin),)
-            )
+            registry = _registry((("Repo", "linked/repository", origin),))
 
             with self.assertRaisesRegex(
                 workspaces.WorkspaceError,
@@ -422,9 +416,7 @@ class WorkspaceMetadataTests(unittest.TestCase):
             self.assertEqual(2, metadata.version)
 
             self.assertEqual(content_before, plans.plan_content_sha256(plan_dir))
-            self.assertEqual(
-                readiness_before, plans.stable_readiness_sha256(plan_dir)
-            )
+            self.assertEqual(readiness_before, plans.stable_readiness_sha256(plan_dir))
             metadata_path.write_text(
                 json.dumps(
                     {
@@ -485,9 +477,7 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 workspace_root,
                 _registry(specs),
             )
-            context = verification.VerificationContext.resolved_workspace(
-                resolved
-            )
+            context = verification.VerificationContext.resolved_workspace(resolved)
             current_binding = runner._workspace_payload_fields(context)
             self.assertNotIn("workspace_inventory_excludes", current_binding)
 
@@ -495,9 +485,7 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 argparse.Namespace(
                     _resume_workspace_config={
                         **current_binding,
-                        "workspace_inventory_excludes": [
-                            "Library/Protected.dv"
-                        ],
+                        "workspace_inventory_excludes": ["Library/Protected.dv"],
                     }
                 ),
                 context,

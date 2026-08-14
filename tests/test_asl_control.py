@@ -6,22 +6,13 @@ from __future__ import annotations
 
 import argparse
 import ast
-from collections.abc import Callable
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
-import importlib.util
 import inspect
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
 import signal
 import socket
 import stat
@@ -31,54 +22,34 @@ import tempfile
 import threading
 import time
 import unittest
-import urllib.parse
 import uuid
+from collections.abc import Callable
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
     agent_mux_delivery,
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
     cli,
-    compact_state,
     config,
-    contracts,
     control_cli,
     control_queue,
     control_signal,
     events,
     harnesses,
-    install_verify,
     mailbox,
     mailbox_cli,
     mailbox_rendering,
     plans,
-    preflight,
-    prepare,
     process_tree,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
-    review_repair,
     run_control,
     runner,
     state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
-    FakeRunControlListener,
     REPO_ROOT,
+    FakeRunControlListener,
     TTYText,
     _write_live_lock_file,
     _write_lock_file,
@@ -91,7 +62,6 @@ from tests.support import (
     read_jsonl,
     write_plan,
 )
-
 
 # What a producer gets for a live runner that published a wakeup endpoint. No
 # platform conditional survives: the endpoint is a filesystem object rather
@@ -132,9 +102,7 @@ class ControlQueueTests(unittest.TestCase):
         )
         self.assertIsNone(cmd.harness)
 
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual(("cmd-1",), result.consumed_ids)
         self.assertEqual(1, len(result.accepted))
         self.assertEqual(
@@ -147,9 +115,7 @@ class ControlQueueTests(unittest.TestCase):
         self.assertEqual("", self.queue_path().read_text(encoding="utf-8"))
 
     def test_drain_missing_file_is_empty_result(self) -> None:
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual((), result.accepted)
         self.assertEqual((), result.rejected)
         self.assertEqual(self.queue_path(), result.queue_path)
@@ -182,9 +148,7 @@ class ControlQueueTests(unittest.TestCase):
             harness="codex",
             command_id="c",
         )
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual(
             ["a", "b", "model", "c"],
             [cmd.id for cmd in result.accepted],
@@ -208,25 +172,17 @@ class ControlQueueTests(unittest.TestCase):
             command_id="abort-1",
         )
         self.assertEqual(30, appended.grace_seconds)
-        self.assertEqual(
-            "supervisor asked for a hard stop", appended.reason
-        )
+        self.assertEqual("supervisor asked for a hard stop", appended.reason)
         self.assertIsNone(appended.harness)
 
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
 
         self.assertEqual((), result.rejected)
         self.assertEqual(("abort-1",), result.consumed_ids)
         command = result.accepted[0]
-        self.assertEqual(
-            control_queue.COMMAND_REQUEST_ABORT_TURN, command.command
-        )
+        self.assertEqual(control_queue.COMMAND_REQUEST_ABORT_TURN, command.command)
         self.assertEqual(30, command.grace_seconds)
-        self.assertEqual(
-            "supervisor asked for a hard stop", command.reason
-        )
+        self.assertEqual("supervisor asked for a hard stop", command.reason)
         self.assertEqual(30, command.to_payload()["grace_seconds"])
 
     def test_abort_without_optional_fields_gets_the_default_grace(self) -> None:
@@ -250,9 +206,7 @@ class ControlQueueTests(unittest.TestCase):
         )
         self.assertNotIn("reason", lines[0])
 
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual(
             control_queue.DEFAULT_ABORT_GRACE_SECONDS,
             result.accepted[0].grace_seconds,
@@ -281,9 +235,7 @@ class ControlQueueTests(unittest.TestCase):
             command_id="stop",
         )
 
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
 
         self.assertEqual(
             ["harness", "abort", "stop"],
@@ -299,11 +251,7 @@ class ControlQueueTests(unittest.TestCase):
             ({"grace_seconds": 0}, control_queue.REJECT_INVALID_GRACE),
             ({"grace_seconds": -1}, control_queue.REJECT_INVALID_GRACE),
             (
-                {
-                    "grace_seconds": (
-                        control_queue.MAX_ABORT_GRACE_SECONDS + 1
-                    )
-                },
+                {"grace_seconds": (control_queue.MAX_ABORT_GRACE_SECONDS + 1)},
                 control_queue.REJECT_INVALID_GRACE,
             ),
             # bool is an int subclass; `True` must not read as 1 second.
@@ -312,9 +260,7 @@ class ControlQueueTests(unittest.TestCase):
         )
         for kwargs, expected in cases:
             with self.subTest(kwargs=kwargs):
-                with self.assertRaises(
-                    control_queue.ControlQueueError
-                ) as raised:
+                with self.assertRaises(control_queue.ControlQueueError) as raised:
                     control_queue.append_command(
                         self.plan_dir,
                         control_queue.COMMAND_REQUEST_ABORT_TURN,
@@ -368,9 +314,7 @@ class ControlQueueTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
 
         self.assertEqual(("ok",), result.consumed_ids)
         self.assertEqual(
@@ -406,9 +350,7 @@ class ControlQueueTests(unittest.TestCase):
             appended.effort_operation.to_payload(),
         )
 
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
 
         self.assertEqual(("model-1",), result.consumed_ids)
         command = result.accepted[0]
@@ -466,9 +408,7 @@ class ControlQueueTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
 
         self.assertEqual((), result.accepted)
         self.assertEqual(
@@ -497,8 +437,9 @@ class ControlQueueTests(unittest.TestCase):
             {"clear_effort": "yes"},
         )
         for kwargs in invalid_kwargs:
-            with self.subTest(kwargs=kwargs), self.assertRaises(
-                control_queue.ControlQueueError
+            with (
+                self.subTest(kwargs=kwargs),
+                self.assertRaises(control_queue.ControlQueueError),
             ):
                 control_queue.append_command(
                     self.plan_dir,
@@ -526,13 +467,10 @@ class ControlQueueTests(unittest.TestCase):
         queue_path = self.queue_path()
         queue_path.parent.mkdir(parents=True, exist_ok=True)
         queue_path.write_text(
-            "not-json\n"
-            '{"id":"ok","command":"request-stop-after-current"}\n',
+            'not-json\n{"id":"ok","command":"request-stop-after-current"}\n',
             encoding="utf-8",
         )
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual(("ok",), result.consumed_ids)
         self.assertEqual(1, len(result.rejected))
         self.assertEqual(control_queue.REJECT_INVALID_JSON, result.rejected[0].reason)
@@ -545,9 +483,7 @@ class ControlQueueTests(unittest.TestCase):
             '{"id":"x","command":"reboot-the-runner"}\n',
             encoding="utf-8",
         )
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual((), result.accepted)
         self.assertEqual(1, len(result.rejected))
         self.assertEqual(
@@ -562,12 +498,13 @@ class ControlQueueTests(unittest.TestCase):
             '{"id":"b","command":"select-future-harness"}\n',
             encoding="utf-8",
         )
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual((), result.accepted)
         self.assertEqual(
-            [control_queue.REJECT_INVALID_HARNESS, control_queue.REJECT_MISSING_HARNESS],
+            [
+                control_queue.REJECT_INVALID_HARNESS,
+                control_queue.REJECT_MISSING_HARNESS,
+            ],
             [reject.reason for reject in result.rejected],
         )
 
@@ -579,9 +516,7 @@ class ControlQueueTests(unittest.TestCase):
             '{"id":"","command":"request-stop-after-current"}\n',
             encoding="utf-8",
         )
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual((), result.accepted)
         self.assertEqual(
             [control_queue.REJECT_MISSING_ID, control_queue.REJECT_MISSING_ID],
@@ -622,9 +557,7 @@ class ControlQueueTests(unittest.TestCase):
         for thread in threads:
             thread.join()
 
-        result = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual(sorted(ids), sorted(cmd.id for cmd in result.accepted))
         self.assertEqual((), result.rejected)
 
@@ -745,9 +678,7 @@ class MailboxTests(unittest.TestCase):
             waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
             created_at=self.timestamp(),
         )
-        initial = mailbox.read_mailbox(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        initial = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual((question, wait_start), initial.messages)
         self.assertEqual(mailbox.DELIVERY_MODE_WAIT, question.delivery_mode)
         self.assertEqual(wait_start, initial.active_wait_for(question.id))
@@ -772,9 +703,7 @@ class MailboxTests(unittest.TestCase):
             mailbox.WAIT_END_REASON_CLOSURE,
             completion.wait_end.wait_end_reason,
         )
-        final = mailbox.read_mailbox(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        final = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual("consumed", final.delivery_state_for(question.id))
         self.assertIsNone(final.active_wait_for(question.id))
         self.assertEqual(1, final.counts.receipts)
@@ -1240,10 +1169,7 @@ class MailboxTests(unittest.TestCase):
                 with result_lock:
                     successes.append(result)
 
-        threads = [
-            threading.Thread(target=reply, args=(index,))
-            for index in range(20)
-        ]
+        threads = [threading.Thread(target=reply, args=(index,)) for index in range(20)]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -1411,8 +1337,7 @@ class MailboxTests(unittest.TestCase):
         self.assertNotIn("run_id", reply.to_record())
         path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
         records = [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
+            json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
         ]
         self.assertEqual(["run-A"], [r["run_id"] for r in records if "run_id" in r])
         self.assertEqual(
@@ -1438,9 +1363,7 @@ class MailboxTests(unittest.TestCase):
                     state_dir=self.state_dir,
                     created_at=self.timestamp(),
                 )
-                path = mailbox.mailbox_path_for_plan(
-                    self.plan_dir, self.state_dir
-                )
+                path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
                 lines = path.read_text(encoding="utf-8").splitlines()
                 record = json.loads(lines[-1])
                 record["run_id"] = raw
@@ -1450,9 +1373,7 @@ class MailboxTests(unittest.TestCase):
                     "".join(f"{line}\n" for line in lines), encoding="utf-8"
                 )
 
-                view = mailbox.read_mailbox(
-                    self.plan_dir, state_dir=self.state_dir
-                )
+                view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
 
                 # Degrades to unattributed rather than rejecting the line.
                 self.assertEqual((), view.rejected)
@@ -1685,8 +1606,7 @@ class MailboxTests(unittest.TestCase):
         view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
 
         self.assertEqual(
-            [reason for reason, _fields in malformed]
-            + [mailbox.REJECT_UNKNOWN_KIND],
+            [reason for reason, _fields in malformed] + [mailbox.REJECT_UNKNOWN_KIND],
             [record.reason for record in view.rejected],
         )
         self.assertEqual((view.messages[0],), view.unanswered_questions)
@@ -1786,8 +1706,7 @@ class MailboxTests(unittest.TestCase):
                     successes.append(result)
 
         threads = [
-            threading.Thread(target=resolve, args=(index,))
-            for index in range(20)
+            threading.Thread(target=resolve, args=(index,)) for index in range(20)
         ]
         for thread in threads:
             thread.start()
@@ -1821,8 +1740,7 @@ class MailboxTests(unittest.TestCase):
         )
         path = self.mailbox_path()
         nonclosure_limit = (
-            mailbox.MAILBOX_MAX_BYTES
-            - mailbox.MAILBOX_CLOSURE_RESERVE_BYTES
+            mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_CLOSURE_RESERVE_BYTES
         )
         current_size = path.stat().st_size
         filler_size = nonclosure_limit - current_size
@@ -1959,8 +1877,7 @@ class MailboxTests(unittest.TestCase):
                         errors.extend(record.reason for record in view.rejected)
 
         writers = [
-            threading.Thread(target=append_many, args=(worker,))
-            for worker in range(4)
+            threading.Thread(target=append_many, args=(worker,)) for worker in range(4)
         ]
         readers = [threading.Thread(target=read_many) for _ in range(3)]
         for thread in writers + readers:
@@ -2098,8 +2015,7 @@ print(json.dumps(payload))
         wait_ends = [
             message
             for message in view.messages
-            if message.kind == mailbox.KIND_WAIT_END
-            and message.to == question.id
+            if message.kind == mailbox.KIND_WAIT_END and message.to == question.id
         ]
         self.assertEqual(1, len(wait_ends))
 
@@ -2258,7 +2174,7 @@ print(json.dumps(payload))
 
     def test_lease_round_trip_is_locked_fixed_size_and_age_bounded(self) -> None:
         supervisor_id = self.message_id()
-        updated = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        updated = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
         lease = mailbox.write_lease(
             self.plan_dir,
             supervisor_id,
@@ -2281,8 +2197,7 @@ print(json.dumps(payload))
         expired = mailbox.read_lease(
             self.plan_dir,
             state_dir=self.state_dir,
-            now=updated
-            + timedelta(seconds=mailbox.MAILBOX_LEASE_FRESH_SECONDS + 1),
+            now=updated + timedelta(seconds=mailbox.MAILBOX_LEASE_FRESH_SECONDS + 1),
         )
         self.assertFalse(expired.fresh)
         self.assertEqual(mailbox.LEASE_EXPIRED, expired.reason)
@@ -2291,7 +2206,7 @@ print(json.dumps(payload))
     def test_v2_lease_projects_question_metadata_without_text(self) -> None:
         supervisor_id = self.message_id()
         question_id = self.message_id()
-        updated = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        updated = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
         lease = mailbox.write_lease(
             self.plan_dir,
             supervisor_id,
@@ -2318,12 +2233,10 @@ print(json.dumps(payload))
         self.assertEqual("run-current", view.lease.run_id)
         self.assertEqual(7, view.lease.projection_seq)
         self.assertEqual(1, view.lease.unanswered_questions)
-        self.assertEqual(
-            question_id, view.lease.latest_unanswered_question_id
-        )
+        self.assertEqual(question_id, view.lease.latest_unanswered_question_id)
 
     def test_v1_lease_remains_readable_without_projection(self) -> None:
-        updated = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        updated = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
         payload = {
             "supervisor_id": self.message_id(),
             "updated_at": updated.isoformat(),
@@ -2346,7 +2259,7 @@ print(json.dumps(payload))
         self.assertIsNone(view.lease.unanswered_questions)
 
     def test_missing_malformed_and_future_leases_are_not_fresh(self) -> None:
-        now = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
         missing = mailbox.read_lease(
             self.plan_dir,
             state_dir=self.state_dir,
@@ -2841,9 +2754,11 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         # for every later turn, so a disabled mailbox stays absent.
         self.assertEqual(
             [],
-            list(mailbox.read_mailbox(
-                self.plan_dir, state_dir=self.state_dir
-            ).pending_guidance),
+            list(
+                mailbox.read_mailbox(
+                    self.plan_dir, state_dir=self.state_dir
+                ).pending_guidance
+            ),
         )
         self.assertTrue(abort.armed)
 
@@ -2935,9 +2850,7 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
             name: {"executable": str(install_fake_harness(self.tmp, name))}
             for name in ("codex", "claude")
         }
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(harness_config), encoding="utf-8")
 
@@ -2955,9 +2868,7 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
             if "- **Status**: pending" not in text:
                 continue
             session_file.write_text(
-                text.replace(
-                    "- **Status**: pending", "- **Status**: complete", 1
-                ),
+                text.replace("- **Status**: pending", "- **Status**: complete", 1),
                 encoding="utf-8",
             )
             return
@@ -3157,9 +3068,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
             name: {"executable": str(install_fake_harness(self.tmp, name))}
             for name in ("codex", "claude")
         }
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(harness_config), encoding="utf-8")
 
@@ -3195,17 +3104,15 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
             if "- **Status**: pending" not in text:
                 continue
             session_file.write_text(
-                text.replace(
-                    "- **Status**: pending", "- **Status**: complete", 1
-                ),
+                text.replace("- **Status**: pending", "- **Status**: complete", 1),
                 encoding="utf-8",
             )
             return
 
     def _session_text(self, session_id: str) -> str:
-        return (
-            self.plan_dir / plans.session_id_to_filename(session_id)
-        ).read_text(encoding="utf-8")
+        return (self.plan_dir / plans.session_id_to_filename(session_id)).read_text(
+            encoding="utf-8"
+        )
 
     def _session_status(self, session_id: str) -> str:
         return plans.read_session_status(
@@ -3263,9 +3170,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 self.plan_dir, review_harness=str(review_harness)
             )
         if abort_before_run:
-            self._queue_abort(
-                "before-run", grace_seconds=grace_seconds, reason=reason
-            )
+            self._queue_abort("before-run", grace_seconds=grace_seconds, reason=reason)
         harness_calls: list[str] = []
 
         def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
@@ -3301,8 +3206,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                         argv=[name, str(kwargs["prompt"])],
                         returncode=0,
                         stdout=(
-                            "RUNNER_PAUSE: blocked - supervisor abort "
-                            "acknowledged\n"
+                            "RUNNER_PAUSE: blocked - supervisor abort acknowledged\n"
                         ),
                         stderr="",
                     )
@@ -3477,9 +3381,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
             ],
             self.run_control_actions(),
         )
-        self.assertNotIn(
-            "turn aborted by supervisor request", self._session_text("1")
-        )
+        self.assertNotIn("turn aborted by supervisor request", self._session_text("1"))
         self.assertFalse(payload["control"]["abort_turn_requested"])
 
     def test_compliant_completion_lets_the_run_continue_to_the_next_session(
@@ -3525,9 +3427,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
         self.assertEqual([], payload["completed_sessions"])
         self.assertEqual(["codex"], harness_calls)
         self.assertEqual("pending", self._session_status("1"))
-        self.assertNotIn(
-            "turn aborted by supervisor request", self._session_text("1")
-        )
+        self.assertNotIn("turn aborted by supervisor request", self._session_text("1"))
         self.assertEqual(
             [
                 events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
@@ -3688,9 +3588,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
         self.assertEqual(["codex", "claude"], harness_calls)
         self.assertFalse(payload["review_completed"])
         self.assertEqual("pending", self._session_status("2"))
-        self.assertIn(
-            "turn aborted by supervisor request", self._session_text("2")
-        )
+        self.assertIn("turn aborted by supervisor request", self._session_text("2"))
         self.assertEqual(
             [
                 events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
@@ -3776,9 +3674,7 @@ class MailboxPollTests(unittest.TestCase):
         self.assertEqual(
             {
                 "action": events.MAILBOX_ACTION_GUIDANCE_OBSERVED,
-                "digest": hashlib.sha256(
-                    sensitive_text.encode("utf-8")
-                ).hexdigest(),
+                "digest": hashlib.sha256(sensitive_text.encode("utf-8")).hexdigest(),
                 "length": len(sensitive_text),
                 "message_id": pending.id,
                 "run_id": "run-1",
@@ -3822,22 +3718,22 @@ class MailboxPollTests(unittest.TestCase):
         self.assertEqual(2, read.call_count)
         self.assertEqual(
             [pending.id],
-            [
-                record["payload"]["message_id"]
-                for record in self.mailbox_events()
-            ],
+            [record["payload"]["message_id"] for record in self.mailbox_events()],
         )
 
     def test_unavailable_change_token_forces_full_reads(self) -> None:
-        with mock.patch.object(
-            mailbox,
-            "mailbox_change_token",
-            return_value=mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE,
-        ), mock.patch.object(
-            mailbox,
-            "read_mailbox",
-            wraps=mailbox.read_mailbox,
-        ) as read:
+        with (
+            mock.patch.object(
+                mailbox,
+                "mailbox_change_token",
+                return_value=mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE,
+            ),
+            mock.patch.object(
+                mailbox,
+                "read_mailbox",
+                wraps=mailbox.read_mailbox,
+            ) as read,
+        ):
             self.poll()
             self.poll()
 
@@ -3885,10 +3781,13 @@ class MailboxPollTests(unittest.TestCase):
             OSError("unreadable"),
             mailbox.MailboxError(mailbox.ERROR_MAILBOX_READ, "unreadable"),
         ):
-            with self.subTest(error=type(error).__name__), mock.patch.object(
-                mailbox,
-                "read_mailbox",
-                side_effect=error,
+            with (
+                self.subTest(error=type(error).__name__),
+                mock.patch.object(
+                    mailbox,
+                    "read_mailbox",
+                    side_effect=error,
+                ),
             ):
                 poll()
 
@@ -4054,9 +3953,7 @@ class LiveTurnSchedulerTests(unittest.TestCase):
             self.assertTrue(callback_started.wait(timeout=2))
 
             def finish() -> None:
-                live_turn.finish(
-                    datetime(2026, 7, 24, 12, 1, tzinfo=timezone.utc)
-                )
+                live_turn.finish(datetime(2026, 7, 24, 12, 1, tzinfo=UTC))
                 finish_done.set()
 
             finish_thread = threading.Thread(target=finish)
@@ -4259,15 +4156,11 @@ class ControlSignalTests(unittest.TestCase):
         return lock_path
 
     def notify(self) -> control_signal.NotifyResult:
-        return control_signal.notify_runner(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        return control_signal.notify_runner(self.plan_dir, state_dir=self.state_dir)
 
     def serve_endpoint(self) -> tuple[Path, threading.Event]:
         """Hold this plan's endpoint open for the rest of the test."""
-        return self.enterContext(
-            live_wakeup_endpoint(self.plan_dir, self.state_dir)
-        )
+        return self.enterContext(live_wakeup_endpoint(self.plan_dir, self.state_dir))
 
     def abandoned_endpoint(self) -> Path:
         """A FIFO whose creator is gone: the node survives, the reader does not.
@@ -4282,9 +4175,7 @@ class ControlSignalTests(unittest.TestCase):
     def test_no_lock_reports_no_runner(self) -> None:
         result = self.notify()
 
-        self.assertEqual(
-            control_signal.NotifyResult(False, "no-runner"), result
-        )
+        self.assertEqual(control_signal.NotifyResult(False, "no-runner"), result)
 
     def test_dead_pid_reports_stale_lock(self) -> None:
         lock_path = self.write_lock(
@@ -4296,9 +4187,7 @@ class ControlSignalTests(unittest.TestCase):
 
         result = self.notify()
 
-        self.assertEqual(
-            control_signal.NotifyResult(False, "stale-lock"), result
-        )
+        self.assertEqual(control_signal.NotifyResult(False, "stale-lock"), result)
         # A producer reads the lock through the non-reclaiming reader, so even
         # a provably dead owner leaves the file untouched.
         self.assertEqual(before, lock_path.read_bytes())
@@ -4312,9 +4201,7 @@ class ControlSignalTests(unittest.TestCase):
 
         result = self.notify()
 
-        self.assertEqual(
-            control_signal.NotifyResult(False, "remote-host"), result
-        )
+        self.assertEqual(control_signal.NotifyResult(False, "remote-host"), result)
 
     def test_lock_without_an_endpoint_reports_no_endpoint(self) -> None:
         # Two runners publish this: one from before the endpoint existed, one
@@ -4402,14 +4289,10 @@ class ControlSignalTests(unittest.TestCase):
 
     def test_endpoint_stops_answering_once_the_runner_leaves(self) -> None:
         event = threading.Event()
-        with control_signal.open_wakeup_endpoint(
-            self.state_dir, event
-        ) as endpoint:
+        with control_signal.open_wakeup_endpoint(self.state_dir, event) as endpoint:
             if endpoint is None:
                 self.skipTest("this filesystem cannot host a wakeup FIFO")
-            self.assertEqual(
-                LIVE_WAKEUP, control_signal._deliver_wakeup(endpoint)
-            )
+            self.assertEqual(LIVE_WAKEUP, control_signal._deliver_wakeup(endpoint))
             self.assertTrue(event.wait(timeout=5.0))
 
         # The node is unlinked on the way out, so a producer that resolved the
@@ -4425,24 +4308,20 @@ class ControlSignalTests(unittest.TestCase):
     ) -> None:
         # Losing the endpoint costs latency, never correctness, so the run has
         # to start anyway — with a lock that names nothing to write to.
-        with mock.patch.object(
-            control_signal.os, "mkfifo", side_effect=OSError("nope")
-        ):
-            with control_signal.open_wakeup_endpoint(
+        with (
+            mock.patch.object(control_signal.os, "mkfifo", side_effect=OSError("nope")),
+            control_signal.open_wakeup_endpoint(
                 self.state_dir, threading.Event()
-            ) as endpoint:
-                self.assertIsNone(endpoint)
-                state.acquire_lock(
-                    self.plan_dir, self.state_dir, wakeup_endpoint=endpoint
-                )
-                self.addCleanup(
-                    state.release_lock, self.plan_dir, self.state_dir
-                )
+            ) as endpoint,
+        ):
+            self.assertIsNone(endpoint)
+            state.acquire_lock(self.plan_dir, self.state_dir, wakeup_endpoint=endpoint)
+            self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
 
-                self.assertEqual(
-                    control_signal.NotifyResult(False, "no-endpoint"),
-                    self.notify(),
-                )
+            self.assertEqual(
+                control_signal.NotifyResult(False, "no-endpoint"),
+                self.notify(),
+            )
 
     def test_the_production_publisher_records_the_endpoint_it_serves(
         self,
@@ -4450,9 +4329,7 @@ class ControlSignalTests(unittest.TestCase):
         # No fixture: the lock `acquire_lock` writes is the one a producer has
         # to be able to wake, and the endpoint in it is the one being read.
         endpoint, woken = self.serve_endpoint()
-        state.acquire_lock(
-            self.plan_dir, self.state_dir, wakeup_endpoint=endpoint
-        )
+        state.acquire_lock(self.plan_dir, self.state_dir, wakeup_endpoint=endpoint)
         self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
 
         lock = state.inspect_lock_info(self.plan_dir, self.state_dir)
@@ -4603,9 +4480,7 @@ with control_signal.open_wakeup_endpoint(sys.argv[2], event) as path:
         before = {number: signal.getsignal(number) for number in watched}
         event = threading.Event()
 
-        with control_signal.open_wakeup_endpoint(
-            self.state_dir, event
-        ) as endpoint:
+        with control_signal.open_wakeup_endpoint(self.state_dir, event) as endpoint:
             if endpoint is None:
                 self.skipTest("this filesystem cannot host a wakeup FIFO")
             self.assertTrue(control_signal._deliver_wakeup(endpoint).delivered)
@@ -4681,17 +4556,11 @@ sys.exit(code)
         repo_root = self.tmp / "repo"
         config_home = self.tmp / "config"
         init_git_repo(repo_root)
-        config_path = (
-            config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps(
-                {
-                    "codex": {
-                        "executable": str(install_fake_harness(self.tmp, "codex"))
-                    }
-                }
+                {"codex": {"executable": str(install_fake_harness(self.tmp, "codex"))}}
             ),
             encoding="utf-8",
         )
@@ -4700,9 +4569,7 @@ sys.exit(code)
             {
                 "XDG_CONFIG_HOME": str(config_home),
                 "FAKE_CODEX_MODE": "success",
-                "PYTHONPATH": str(REPO_ROOT)
-                + os.pathsep
-                + env.get("PYTHONPATH", ""),
+                "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
             }
         )
         locked = self.tmp / f"locked-{uuid.uuid4().hex}"
@@ -4798,8 +4665,7 @@ sys.exit(code)
             emit_delay=self.EMIT_DELAY_SECONDS
         )
         lock_path = (
-            state.plan_state_dir(self.plan_dir, self.state_dir)
-            / state.LOCK_FILE_NAME
+            state.plan_state_dir(self.plan_dir, self.state_dir) / state.LOCK_FILE_NAME
         )
 
         lock = state.inspect_lock_info(self.plan_dir, self.state_dir)
@@ -4811,15 +4677,11 @@ sys.exit(code)
         self.assertIsNotNone(endpoint)
         assert endpoint is not None
 
-        self.awaitMarker(
-            child, emitting, "the run never reached its terminal payload"
-        )
+        self.awaitMarker(child, emitting, "the run never reached its terminal payload")
         self.assertFalse(
             lock_path.exists(), "the run was woken before releasing its lock"
         )
-        self.assertFalse(
-            Path(endpoint).exists(), "the endpoint outlived its reader"
-        )
+        self.assertFalse(Path(endpoint).exists(), "the endpoint outlived its reader")
 
         self.assertEqual(
             control_signal.NotifyResult(False, "endpoint-closed"),
@@ -4854,7 +4716,7 @@ class _AfterEvaluateSentinel(runner._HangSentinel):
 class HangSentinelTests(unittest.TestCase):
     """Unit coverage for the heartbeat-tick hang classifier."""
 
-    NOW = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+    NOW = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
 
     @staticmethod
     def tree(cpu_seconds: float) -> list[dict[str, object]]:
@@ -4891,7 +4753,7 @@ class HangSentinelTests(unittest.TestCase):
         samples: list[list[dict[str, object]] | None],
         *,
         monotonic=None,
-    ) -> tuple["runner._HangSentinel", list[int]]:
+    ) -> tuple[runner._HangSentinel, list[int]]:
         sample_calls: list[int] = []
         queue = list(samples)
 
@@ -4973,9 +4835,7 @@ class HangSentinelTests(unittest.TestCase):
         self.assertIsNone(cleared.suspected)
         assert cleared.retracted is not None
         self.assertEqual(runner.HANG_REASON_ZERO_CPU, cleared.retracted["reason"])
-        self.assertAlmostEqual(
-            15.0, cleared.retracted["cpu_delta_seconds"], places=6
-        )
+        self.assertAlmostEqual(15.0, cleared.retracted["cpu_delta_seconds"], places=6)
 
         # The streak restarts from a fresh baseline: one zero-delta sample is
         # not enough, two are.
@@ -5155,9 +5015,7 @@ class HangSentinelTests(unittest.TestCase):
 
         # Going quiet again re-arms from a fresh baseline with a new episode
         # id, so a supervisor's probe count cannot span the two.
-        self.assertIsNone(
-            sentinel.evaluate(idle_seconds=210.0, now=self.NOW).suspected
-        )
+        self.assertIsNone(sentinel.evaluate(idle_seconds=210.0, now=self.NOW).suspected)
         later = self.NOW + timedelta(minutes=5)
         rearmed = sentinel.evaluate(idle_seconds=240.0, now=later)
         self.assertEqual("suspected", rearmed.transition)
@@ -5165,9 +5023,7 @@ class HangSentinelTests(unittest.TestCase):
         self.assertNotEqual(first_episode, rearmed.suspected["detected_at"])
 
     def test_cpu_progress_published_without_suspicion(self) -> None:
-        sentinel, _calls = self.make_sentinel(
-            [self.tree(10.0), self.tree(10.1)]
-        )
+        sentinel, _calls = self.make_sentinel([self.tree(10.0), self.tree(10.1)])
         sentinel.note_harness_pid(123)
 
         baseline = sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
@@ -5249,12 +5105,8 @@ class HangSentinelTests(unittest.TestCase):
         sentinel, _calls = self.make_sentinel([list(static) for _ in range(3)])
         sentinel.note_harness_pid(123)
 
-        self.assertIsNone(
-            sentinel.evaluate(idle_seconds=120.0, now=self.NOW).suspected
-        )
-        self.assertIsNone(
-            sentinel.evaluate(idle_seconds=150.0, now=self.NOW).suspected
-        )
+        self.assertIsNone(sentinel.evaluate(idle_seconds=120.0, now=self.NOW).suspected)
+        self.assertIsNone(sentinel.evaluate(idle_seconds=150.0, now=self.NOW).suspected)
         confirmed = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
 
         self.assertEqual("suspected", confirmed.transition)
@@ -5423,12 +5275,8 @@ class HangSentinelTests(unittest.TestCase):
 
         # Counters restart: a fresh baseline plus two confirming samples are
         # required before suspicion returns.
-        self.assertIsNone(
-            sentinel.evaluate(idle_seconds=210.0, now=self.NOW).suspected
-        )
-        self.assertIsNone(
-            sentinel.evaluate(idle_seconds=240.0, now=self.NOW).suspected
-        )
+        self.assertIsNone(sentinel.evaluate(idle_seconds=210.0, now=self.NOW).suspected)
+        self.assertIsNone(sentinel.evaluate(idle_seconds=240.0, now=self.NOW).suspected)
         self.assertEqual(
             "suspected",
             sentinel.evaluate(idle_seconds=270.0, now=self.NOW).transition,
@@ -5457,24 +5305,16 @@ class HangSentinelTests(unittest.TestCase):
         holder.append(sentinel)
         sentinel.note_harness_pid(123)
 
-        self.assertIsNone(
-            sentinel.evaluate(idle_seconds=120.0, now=self.NOW).suspected
-        )
-        self.assertIsNone(
-            sentinel.evaluate(idle_seconds=150.0, now=self.NOW).suspected
-        )
+        self.assertIsNone(sentinel.evaluate(idle_seconds=120.0, now=self.NOW).suspected)
+        self.assertIsNone(sentinel.evaluate(idle_seconds=150.0, now=self.NOW).suspected)
         racing = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
         self.assertIsNone(racing.suspected)
         self.assertIsNone(racing.transition)
 
         # The retraction reset the counters: a fresh baseline plus two
         # confirming samples are required before suspicion returns.
-        self.assertIsNone(
-            sentinel.evaluate(idle_seconds=210.0, now=self.NOW).suspected
-        )
-        self.assertIsNone(
-            sentinel.evaluate(idle_seconds=240.0, now=self.NOW).suspected
-        )
+        self.assertIsNone(sentinel.evaluate(idle_seconds=210.0, now=self.NOW).suspected)
+        self.assertIsNone(sentinel.evaluate(idle_seconds=240.0, now=self.NOW).suspected)
         self.assertEqual(
             "suspected",
             sentinel.evaluate(idle_seconds=270.0, now=self.NOW).transition,
@@ -5505,13 +5345,15 @@ class HangSentinelTests(unittest.TestCase):
             live_turn.note_final_result()
             clock["now"] = 100.0  # past the 45s result grace
 
-            with mock.patch.object(
-                runner, "_notify_agent_mux_loop_turn_heartbeat"
-            ), mock.patch.object(
-                runner, "_notify_agent_mux_loop_turn_hang_suspected"
-            ) as suspected_notify, mock.patch.object(
-                runner, "_notify_agent_mux_loop_turn_hang_cleared"
-            ) as cleared_notify:
+            with (
+                mock.patch.object(runner, "_notify_agent_mux_loop_turn_heartbeat"),
+                mock.patch.object(
+                    runner, "_notify_agent_mux_loop_turn_hang_suspected"
+                ) as suspected_notify,
+                mock.patch.object(
+                    runner, "_notify_agent_mux_loop_turn_hang_cleared"
+                ) as cleared_notify,
+            ):
                 # Two warm-up ticks bring the zero-CPU streak up to the
                 # confirmation a suspicion now requires; the third would
                 # suspect if output had not resumed mid-flight.
@@ -5526,14 +5368,9 @@ class HangSentinelTests(unittest.TestCase):
             # discards it instead of resurrecting it after the output.
             self.assertNotIn("hang_suspected", heartbeat)
             self.assertEqual(0.0, heartbeat["idle_seconds"])
-            state = json.loads(
-                (tmp_dir / "state.json").read_text(encoding="utf-8")
-            )
+            state = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
             self.assertNotIn("hang_suspected", state["active_turn"])
-            names = [
-                record["name"]
-                for record in read_jsonl(tmp_dir / "events.jsonl")
-            ]
+            names = [record["name"] for record in read_jsonl(tmp_dir / "events.jsonl")]
             # No suspected event — and no orphan cleared for an episode that
             # was never announced.
             self.assertEqual([events.TURN_HEARTBEAT_EVENT] * 3, names)
@@ -5565,13 +5402,15 @@ class HangSentinelTests(unittest.TestCase):
             live_turn.note_final_result()
             clock["now"] = 100.0
 
-            with mock.patch.object(
-                runner, "_notify_agent_mux_loop_turn_heartbeat"
-            ), mock.patch.object(
-                runner, "_notify_agent_mux_loop_turn_hang_suspected"
-            ) as suspected_notify, mock.patch.object(
-                runner, "_notify_agent_mux_loop_turn_hang_cleared"
-            ) as cleared_notify:
+            with (
+                mock.patch.object(runner, "_notify_agent_mux_loop_turn_heartbeat"),
+                mock.patch.object(
+                    runner, "_notify_agent_mux_loop_turn_hang_suspected"
+                ) as suspected_notify,
+                mock.patch.object(
+                    runner, "_notify_agent_mux_loop_turn_hang_cleared"
+                ) as cleared_notify,
+            ):
                 # Ticks 1-2 confirm the flat CPU streak; tick 3 announces.
                 live_turn._record_heartbeat()
                 live_turn._record_heartbeat()
@@ -5592,18 +5431,14 @@ class HangSentinelTests(unittest.TestCase):
                 names.index(events.TURN_HANG_SUSPECTED_EVENT),
                 names.index(events.TURN_HANG_CLEARED_EVENT),
             )
-            cleared_payload = records[
-                names.index(events.TURN_HANG_CLEARED_EVENT)
-            ]["payload"]
+            cleared_payload = records[names.index(events.TURN_HANG_CLEARED_EVENT)][
+                "payload"
+            ]
             # The cleared event carries the turn's fresh idle reading; the
             # stale pre-clear value stays confined to the retracted block.
             self.assertEqual(0.0, cleared_payload["idle_seconds"])
-            self.assertGreater(
-                cleared_payload["hang_suspected"]["idle_seconds"], 0.0
-            )
-            state = json.loads(
-                (tmp_dir / "state.json").read_text(encoding="utf-8")
-            )
+            self.assertGreater(cleared_payload["hang_suspected"]["idle_seconds"], 0.0)
+            state = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
             self.assertNotIn("hang_suspected", state["active_turn"])
             last_heartbeat = [
                 record
@@ -5673,9 +5508,7 @@ class ControlCliTests(unittest.TestCase):
 
     def args(self, plan_dir: Path | str | None = None, **overrides):
         namespace = {
-            "plan_dir": str(
-                self.plan_dir if plan_dir is None else plan_dir
-            ),
+            "plan_dir": str(self.plan_dir if plan_dir is None else plan_dir),
             "state_dir": str(self.state_dir),
             "json": True,
         }
@@ -5690,9 +5523,7 @@ class ControlCliTests(unittest.TestCase):
     ) -> None:
         """Simulate a live runner: an active lock plus a mid-flight turn."""
         target = plan_dir if plan_dir is not None else self.plan_dir
-        endpoint, _ = self.enterContext(
-            live_wakeup_endpoint(target, self.state_dir)
-        )
+        endpoint, _ = self.enterContext(live_wakeup_endpoint(target, self.state_dir))
         _write_live_lock_file(target, self.state_dir, wakeup_endpoint=endpoint)
         _write_state_payload(
             target,
@@ -5765,9 +5596,7 @@ class ControlCliTests(unittest.TestCase):
             self.args(),
         )
 
-        self.assertEqual(
-            {"delivered": False, "reason": "no-runner"}, payload["signal"]
-        )
+        self.assertEqual({"delivered": False, "reason": "no-runner"}, payload["signal"])
 
     def test_stop_after_current_reports_the_wakeup_it_could_send(self) -> None:
         write_plan(self.plan_dir, ("pending", "pending"))
@@ -5921,9 +5750,7 @@ class ControlCliTests(unittest.TestCase):
         lines = read_jsonl(self.queue_path())
         self.assertEqual(1, len(lines))
         self.assertEqual(payload["command_id"], lines[0]["id"])
-        self.assertEqual(
-            control_queue.COMMAND_REQUEST_ABORT_TURN, lines[0]["command"]
-        )
+        self.assertEqual(control_queue.COMMAND_REQUEST_ABORT_TURN, lines[0]["command"])
 
         result = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual((), result.rejected)
@@ -6033,9 +5860,7 @@ class ControlCliTests(unittest.TestCase):
         self.assertTrue(payload["enqueued"])
         self.assertEqual("claude", payload["harness"])
         self.assertTrue(payload["run_active"])
-        self.assertEqual(
-            "future sessions will use the claude harness", payload["note"]
-        )
+        self.assertEqual("future sessions will use the claude harness", payload["note"])
         # Harness selection says nothing about how many sessions remain.
         self.assertNotIn("pending_after_current", payload)
 
@@ -6083,9 +5908,7 @@ class ControlCliTests(unittest.TestCase):
         self.assertEqual("claude-opus-4-1", payload["harness_model"])
         self.assertEqual("high", payload["effort"])
         self.assertTrue(payload["run_active"])
-        self.assertEqual(
-            "next-implementation-turn", payload["applies_to"]
-        )
+        self.assertEqual("next-implementation-turn", payload["applies_to"])
         self.assertIn("next implementation turn", payload["note"])
         self.assertNotIn("active turn", payload["note"])
 
@@ -6097,16 +5920,10 @@ class ControlCliTests(unittest.TestCase):
         self.assertEqual("claude", record["harness"])
         self.assertEqual("claude-opus-4-1", record["harness_model"])
         self.assertEqual("high", record["effort"])
-        drained = control_queue.drain_queue(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        drained = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual((), drained.rejected)
-        self.assertEqual(
-            "set", drained.accepted[0].model_operation.operation
-        )
-        self.assertEqual(
-            "set", drained.accepted[0].effort_operation.operation
-        )
+        self.assertEqual("set", drained.accepted[0].model_operation.operation)
+        self.assertEqual("set", drained.accepted[0].effort_operation.operation)
 
     def test_set_model_can_clear_without_an_explicit_target(self) -> None:
         write_plan(self.plan_dir, ("pending",))
@@ -6259,8 +6076,7 @@ class ControlCliTests(unittest.TestCase):
         lines = stderr.getvalue().splitlines()
         self.assertEqual(1, len(lines))
         self.assertIn(
-            "agent-session-loop control stop-after-current: "
-            "cannot write control queue",
+            "agent-session-loop control stop-after-current: cannot write control queue",
             lines[0],
         )
         self.assertIn("check that the state directory is writable", lines[0])
@@ -6317,9 +6133,9 @@ class ControlCliTests(unittest.TestCase):
             str(plans.canonicalize_path(self.state_dir)),
             payload["details"]["state_root"],
         )
-        self.assertEqual((), control_queue.drain_queue(
-            first, state_dir=self.state_dir
-        ).accepted)
+        self.assertEqual(
+            (), control_queue.drain_queue(first, state_dir=self.state_dir).accepted
+        )
 
     def test_ambiguous_plan_label_text_instructs_full_path(self) -> None:
         first = self.tmp / "a" / "dup-label"
@@ -6441,9 +6257,7 @@ class ControlCliTests(unittest.TestCase):
     def test_cli_control_group_requires_a_subcommand(self) -> None:
         parser = cli.build_parser()
 
-        with redirect_stderr(io.StringIO()), self.assertRaises(
-            SystemExit
-        ) as raised:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
             parser.parse_args(["control"])
 
         self.assertEqual(2, raised.exception.code)
@@ -6451,9 +6265,7 @@ class ControlCliTests(unittest.TestCase):
     def test_cli_select_harness_requires_known_harness_choice(self) -> None:
         parser = cli.build_parser()
 
-        with redirect_stderr(io.StringIO()), self.assertRaises(
-            SystemExit
-        ) as raised:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
             parser.parse_args(
                 ["control", "select-harness", "/tmp/plan", "--harness", "gemini"]
             )
@@ -6471,12 +6283,12 @@ class ControlCliTests(unittest.TestCase):
             ("--effort", "high", "--clear-effort"),
         )
         for operations in cases:
-            with self.subTest(operations=operations), redirect_stderr(
-                io.StringIO()
-            ), self.assertRaises(SystemExit) as raised:
-                parser.parse_args(
-                    ["control", "set-model", "/tmp/plan", *operations]
-                )
+            with (
+                self.subTest(operations=operations),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                parser.parse_args(["control", "set-model", "/tmp/plan", *operations])
             self.assertEqual(2, raised.exception.code)
 
 
@@ -6511,9 +6323,7 @@ class ControlCliWaitTests(unittest.TestCase):
         endpoint, _ = self.enterContext(
             live_wakeup_endpoint(self.plan_dir, self.state_dir)
         )
-        _write_live_lock_file(
-            self.plan_dir, self.state_dir, wakeup_endpoint=endpoint
-        )
+        _write_live_lock_file(self.plan_dir, self.state_dir, wakeup_endpoint=endpoint)
         _write_state_payload(
             self.plan_dir,
             self.state_dir,
@@ -6547,9 +6357,7 @@ class ControlCliWaitTests(unittest.TestCase):
         return exit_code, json.loads(buffer.getvalue())
 
     def queued_command_ids(self) -> list[str]:
-        queue_path = control_queue.queue_path_for_plan(
-            self.plan_dir, self.state_dir
-        )
+        queue_path = control_queue.queue_path_for_plan(self.plan_dir, self.state_dir)
         if not queue_path.exists():
             return []
         return [record["id"] for record in read_jsonl(queue_path)]
@@ -6698,9 +6506,7 @@ class ControlCliWaitTests(unittest.TestCase):
         self.assertEqual("no-runner", payload["reason"])
         self.assertTrue(payload["details"]["enqueued"])
         self.assertFalse(payload["details"]["wait"]["observed"])
-        self.assertEqual(
-            payload["details"]["command_id"], self.queued_command_ids()[0]
-        )
+        self.assertEqual(payload["details"]["command_id"], self.queued_command_ids()[0])
         # The command outlives the failed observation.
         self.assertEqual(1, len(self.queued_command_ids()))
 
@@ -6716,9 +6522,7 @@ class ControlCliWaitTests(unittest.TestCase):
 
         self.assertEqual(1, exit_code)
         self.assertEqual("receipt-timeout", payload["reason"])
-        self.assertEqual(
-            LIVE_WAKEUP.to_payload(), payload["details"]["signal"]
-        )
+        self.assertEqual(LIVE_WAKEUP.to_payload(), payload["details"]["signal"])
         self.assertFalse(payload["details"]["wait"]["observed"])
         self.assertEqual(1, len(self.queued_command_ids()))
 
@@ -6846,9 +6650,7 @@ class ControlCliWaitTests(unittest.TestCase):
             ),
         ):
             with self.subTest(handler=handler.__name__):
-                exit_code, payload = self.payload_from(
-                    handler, self.args(**extra)
-                )
+                exit_code, payload = self.payload_from(handler, self.args(**extra))
 
                 self.assertEqual(0, exit_code, payload)
                 self.assertNotIn("wait", payload)
@@ -6963,9 +6765,7 @@ class MailboxCliTests(unittest.TestCase):
             wait_id=wait_start.id,
             closure_id=str(uuid.uuid4()),
         )
-        with mock.patch.object(
-            mailbox_cli, "_wait_for_receipt", return_value=receipt
-        ):
+        with mock.patch.object(mailbox_cli, "_wait_for_receipt", return_value=receipt):
             code, payload = self.payload_from(
                 mailbox_cli.inbox_reply_from_args,
                 self.args(
@@ -7020,20 +6820,14 @@ class MailboxCliTests(unittest.TestCase):
         )
         self.assertEqual(0, code)
         self.assertEqual("inbox-guidance", guidance_payload["command"])
-        self.assertEqual(
-            "guidance", guidance_payload["message"]["kind"]
-        )
-        self.assertEqual(
-            "Keep the parser lazy.", guidance_payload["message"]["text"]
-        )
+        self.assertEqual("guidance", guidance_payload["message"]["kind"])
+        self.assertEqual("Keep the parser lazy.", guidance_payload["message"]["text"])
         first_lease = mailbox.read_lease(
             self.plan_dir,
             state_dir=self.state_dir,
         )
         self.assertTrue(first_lease.fresh)
-        self.assertEqual(
-            guidance_payload["supervisor_id"], first_lease.supervisor_id
-        )
+        self.assertEqual(guidance_payload["supervisor_id"], first_lease.supervisor_id)
 
         question = mailbox.append_question(
             self.plan_dir,
@@ -7059,9 +6853,7 @@ class MailboxCliTests(unittest.TestCase):
             self.plan_dir,
             state_dir=self.state_dir,
         )
-        self.assertEqual(
-            reply_payload["supervisor_id"], second_lease.supervisor_id
-        )
+        self.assertEqual(reply_payload["supervisor_id"], second_lease.supervisor_id)
 
     def _write_projected_lease(
         self,
@@ -7071,7 +6863,7 @@ class MailboxCliTests(unittest.TestCase):
         run_id: str = "run-live",
         age_seconds: float = 30.0,
     ) -> mailbox.MailboxLease:
-        anchored = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        anchored = datetime.now(UTC) - timedelta(seconds=age_seconds)
         return mailbox.write_lease(
             self.plan_dir,
             supervisor_id,
@@ -7458,9 +7250,7 @@ class MailboxCliTests(unittest.TestCase):
             kwargs["reason"],
         )
         self.assertEqual(question.id, kwargs["extra"]["question_id"])
-        self.assertEqual(
-            "continue", kwargs["extra"]["resolution_action"]
-        )
+        self.assertEqual("continue", kwargs["extra"]["resolution_action"])
         self.assertEqual(
             str(question.seq),
             kwargs["extra"]["mailbox_projection_sequence"],
@@ -7742,7 +7532,7 @@ class MailboxCliTests(unittest.TestCase):
             raw = json.dumps(
                 {
                     "supervisor_id": v1_id,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
                     "version": 1,
                 },
                 separators=(",", ":"),
@@ -7841,9 +7631,7 @@ class MailboxCliTests(unittest.TestCase):
         notify.assert_called_once()
         event_name, payload = notify.call_args.args
         kwargs = notify.call_args.kwargs
-        self.assertEqual(
-            agent_mux_delivery.MAILBOX_REPLY_EVENT, event_name
-        )
+        self.assertEqual(agent_mux_delivery.MAILBOX_REPLY_EVENT, event_name)
         self.assertEqual("lease-run-not-current-state", payload["run_id"])
         self.assertEqual(str(self.plan_dir.resolve()), payload["plan_dir"])
         self.assertEqual(
@@ -7854,9 +7642,7 @@ class MailboxCliTests(unittest.TestCase):
             payload["state_path"],
         )
         self.assertEqual(42, payload["kitty_window_id"])
-        self.assertEqual(
-            agent_mux_delivery.MAILBOX_REPLY_REASON, kwargs["reason"]
-        )
+        self.assertEqual(agent_mux_delivery.MAILBOX_REPLY_REASON, kwargs["reason"])
         self.assertEqual(question.id, kwargs["extra"]["question_id"])
         self.assertEqual(
             str(question.seq),
@@ -8390,14 +8176,16 @@ class MailboxCliTests(unittest.TestCase):
             path=mailbox_path,
         )
         stdout, stderr = io.StringIO(), io.StringIO()
-        with mock.patch.object(
-            mailbox,
-            "append_notice",
-            side_effect=failure,
-        ), redirect_stdout(stdout), redirect_stderr(stderr):
-            code = mailbox_cli.notify_from_args(
-                self.args(text="checkpoint")
-            )
+        with (
+            mock.patch.object(
+                mailbox,
+                "append_notice",
+                side_effect=failure,
+            ),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            code = mailbox_cli.notify_from_args(self.args(text="checkpoint"))
 
         self.assertEqual(1, code)
         payload = json.loads(stdout.getvalue())
@@ -8440,21 +8228,19 @@ class MailboxCliTests(unittest.TestCase):
             ):
                 with self.subTest(command=label, failure=failure):
                     stdout, stderr = io.StringIO(), io.StringIO()
-                    with mock.patch("sys.stdin", stdin), redirect_stdout(
-                        stdout
-                    ), redirect_stderr(stderr):
+                    with (
+                        mock.patch("sys.stdin", stdin),
+                        redirect_stdout(stdout),
+                        redirect_stderr(stderr),
+                    ):
                         code = handler(args)
                     self.assertEqual(1, code)
                     self.assertEqual("", stderr.getvalue())
                     payload = json.loads(stdout.getvalue())
                     self.assertFalse(payload["ok"])
-                    self.assertEqual(
-                        mailbox_cli.ERROR_STDIN_READ, payload["reason"]
-                    )
+                    self.assertEqual(mailbox_cli.ERROR_STDIN_READ, payload["reason"])
                     self.assertNotIn("Traceback", payload["error"])
-                    self.assertEqual(
-                        str(self.plan_dir), payload["plan_reference"]
-                    )
+                    self.assertEqual(str(self.plan_dir), payload["plan_reference"])
 
     def test_missing_and_conflicting_text_sources_have_distinct_reasons(
         self,
@@ -8529,9 +8315,7 @@ class MailboxCliTests(unittest.TestCase):
                 self.assertFalse(payload["ok"])
                 self.assertEqual(expected_reason, payload["reason"])
                 self.assertEqual({}, payload["details"])
-                self.assertEqual(
-                    str(self.plan_dir), payload["plan_reference"]
-                )
+                self.assertEqual(str(self.plan_dir), payload["plan_reference"])
 
     def test_missing_and_duplicate_ask_sources_use_json_envelope(self) -> None:
         cases = (
@@ -8552,9 +8336,7 @@ class MailboxCliTests(unittest.TestCase):
                 self.assertEqual(1, code)
                 self.assertEqual("", stderr)
                 self.assertFalse(payload["ok"])
-                self.assertEqual(
-                    "invalid-question-source", payload["reason"]
-                )
+                self.assertEqual("invalid-question-source", payload["reason"])
 
     def test_ask_wait_timeout_requires_wait_in_json_envelope(self) -> None:
         code, payload, stderr = self.cli_payload_from(
@@ -8579,30 +8361,22 @@ class MailboxCliTests(unittest.TestCase):
         self.assertEqual(str(self.plan_dir), payload["plan_reference"])
         self.assertNotIn("wait_timeout", payload)
         self.assertFalse(
-            mailbox.mailbox_path_for_plan(
-                self.plan_dir, self.state_dir
-            ).exists()
+            mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir).exists()
         )
 
     def test_blank_body_is_one_json_error_without_writes(self) -> None:
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            code = mailbox_cli.inbox_guidance_from_args(
-                self.args(text=" \n")
-            )
+            code = mailbox_cli.inbox_guidance_from_args(self.args(text=" \n"))
         self.assertEqual(1, code)
         self.assertEqual("", stderr.getvalue())
         payload = json.loads(stdout.getvalue())
         self.assertEqual("missing-text", payload["reason"])
         self.assertFalse(
-            mailbox.mailbox_path_for_plan(
-                self.plan_dir, self.state_dir
-            ).exists()
+            mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir).exists()
         )
         self.assertFalse(
-            mailbox.lease_path_for_plan(
-                self.plan_dir, self.state_dir
-            ).exists()
+            mailbox.lease_path_for_plan(self.plan_dir, self.state_dir).exists()
         )
 
     def test_reply_rejects_missing_and_already_answered_questions(self) -> None:
@@ -8778,9 +8552,7 @@ class MailboxCliTests(unittest.TestCase):
 
         inbox_stdout = io.StringIO()
         with redirect_stdout(inbox_stdout):
-            inbox_code = mailbox_cli.inbox_read_from_args(
-                self.args(json=False)
-            )
+            inbox_code = mailbox_cli.inbox_read_from_args(self.args(json=False))
         self.assertEqual(0, inbox_code)
         inbox_text = inbox_stdout.getvalue()
         inbox_lines = inbox_text.splitlines()
@@ -8788,16 +8560,10 @@ class MailboxCliTests(unittest.TestCase):
             f"Guidance {guidance.id} (seq {guidance.seq}):",
             inbox_lines[0],
         )
-        self.assertEqual(
-            1, inbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN)
-        )
-        self.assertEqual(
-            1, inbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_END)
-        )
+        self.assertEqual(1, inbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN))
+        self.assertEqual(1, inbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_END))
         inbox_record = json.loads(
-            inbox_lines[
-                inbox_lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1
-            ]
+            inbox_lines[inbox_lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1]
         )
         self.assertEqual(
             {"id": guidance.id, "seq": guidance.seq, "text": body},
@@ -8821,16 +8587,10 @@ class MailboxCliTests(unittest.TestCase):
             f"Question {question.id} (seq {question.seq}):",
             outbox_lines[0],
         )
-        self.assertEqual(
-            1, outbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN)
-        )
-        self.assertEqual(
-            1, outbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_END)
-        )
+        self.assertEqual(1, outbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN))
+        self.assertEqual(1, outbox_lines.count(mailbox_cli.MAILBOX_MESSAGE_END))
         outbox_record = json.loads(
-            outbox_lines[
-                outbox_lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1
-            ]
+            outbox_lines[outbox_lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1]
         )
         self.assertEqual(
             {"id": question.id, "seq": question.seq, "text": body},
@@ -8860,16 +8620,10 @@ class MailboxCliTests(unittest.TestCase):
             f"Reply to question {question.id}:",
             ask_lines[0],
         )
-        self.assertEqual(
-            1, ask_lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN)
-        )
-        self.assertEqual(
-            1, ask_lines.count(mailbox_cli.MAILBOX_MESSAGE_END)
-        )
+        self.assertEqual(1, ask_lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN))
+        self.assertEqual(1, ask_lines.count(mailbox_cli.MAILBOX_MESSAGE_END))
         ask_record = json.loads(
-            ask_lines[
-                ask_lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1
-            ]
+            ask_lines[ask_lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1]
         )
         self.assertEqual(
             {"id": reply.id, "seq": reply.seq, "text": body},
@@ -8890,8 +8644,7 @@ class MailboxCliTests(unittest.TestCase):
                 continue
             is_print = isinstance(node.func, ast.Name) and node.func.id == "print"
             is_write = (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr == "write"
+                isinstance(node.func, ast.Attribute) and node.func.attr == "write"
             )
             if not (is_print or is_write):
                 continue
@@ -8917,9 +8670,7 @@ class MailboxCliTests(unittest.TestCase):
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.inbox_read_from_args(
-                self.args(json=False, peek=True)
-            )
+            code = mailbox_cli.inbox_read_from_args(self.args(json=False, peek=True))
 
         self.assertEqual(0, code)
         rendered = stdout.getvalue()
@@ -8977,9 +8728,7 @@ class MailboxCliTests(unittest.TestCase):
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            text_code = mailbox_cli.inbox_read_from_args(
-                self.args(json=False)
-            )
+            text_code = mailbox_cli.inbox_read_from_args(self.args(json=False))
 
         self.assertEqual(0, text_code)
         rendered = stdout.getvalue()
@@ -9009,9 +8758,7 @@ class MailboxCliTests(unittest.TestCase):
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.inbox_read_from_args(
-                self.args(json=False, peek=True)
-            )
+            code = mailbox_cli.inbox_read_from_args(self.args(json=False, peek=True))
 
         self.assertEqual(0, code)
         rendered = stdout.getvalue()
@@ -9228,19 +8975,24 @@ class MailboxCliTests(unittest.TestCase):
             state_dir=self.state_dir,
         )
 
-        with mock.patch.object(
-            mailbox,
-            "mailbox_change_token",
-            side_effect=["before", "after"],
-        ), mock.patch.object(
-            mailbox_cli.mailbox,
-            "read_mailbox",
-            side_effect=[before, after],
-        ), mock.patch.object(
-            mailbox_cli.time,
-            "monotonic",
-            side_effect=[0.0, 0.0],
-        ), mock.patch.object(mailbox_cli.time, "sleep") as sleep:
+        with (
+            mock.patch.object(
+                mailbox,
+                "mailbox_change_token",
+                side_effect=["before", "after"],
+            ),
+            mock.patch.object(
+                mailbox_cli.mailbox,
+                "read_mailbox",
+                side_effect=[before, after],
+            ),
+            mock.patch.object(
+                mailbox_cli.time,
+                "monotonic",
+                side_effect=[0.0, 0.0],
+            ),
+            mock.patch.object(mailbox_cli.time, "sleep") as sleep,
+        ):
             closure, timed_out = mailbox_cli._wait_for_closure(
                 self.plan_dir,
                 question.id,
@@ -9279,27 +9031,30 @@ class MailboxCliTests(unittest.TestCase):
     def test_ask_wait_skips_full_reads_while_large_mailbox_is_unchanged(
         self,
     ) -> None:
-        mailbox_path = mailbox.mailbox_path_for_plan(
-            self.plan_dir, self.state_dir
-        )
+        mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
         large_view = mailbox.MailboxView(
             mailbox_path=mailbox_path,
             size_bytes=mailbox.MAILBOX_MAX_BYTES - 1,
         )
         unchanged_token = (1, 2, large_view.size_bytes, 3)
-        with mock.patch.object(
-            mailbox,
-            "mailbox_change_token",
-            return_value=unchanged_token,
-        ), mock.patch.object(
-            mailbox_cli.mailbox,
-            "read_mailbox",
-            return_value=large_view,
-        ) as read, mock.patch.object(
-            mailbox_cli.time,
-            "monotonic",
-            side_effect=[0.0, 0.0, 2.0, 4.0, 6.0],
-        ), mock.patch.object(mailbox_cli.time, "sleep") as sleep:
+        with (
+            mock.patch.object(
+                mailbox,
+                "mailbox_change_token",
+                return_value=unchanged_token,
+            ),
+            mock.patch.object(
+                mailbox_cli.mailbox,
+                "read_mailbox",
+                return_value=large_view,
+            ) as read,
+            mock.patch.object(
+                mailbox_cli.time,
+                "monotonic",
+                side_effect=[0.0, 0.0, 2.0, 4.0, 6.0],
+            ),
+            mock.patch.object(mailbox_cli.time, "sleep") as sleep,
+        ):
             reply, timed_out = mailbox_cli._wait_for_reply(
                 self.plan_dir,
                 str(uuid.uuid4()),
@@ -9532,9 +9287,7 @@ class MailboxCliTests(unittest.TestCase):
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            code = mailbox_cli.outbox_wait_from_args(
-                self.args(json=False, timeout=0)
-            )
+            code = mailbox_cli.outbox_wait_from_args(self.args(json=False, timeout=0))
 
         self.assertEqual(0, code)
         lines = stdout.getvalue().splitlines()
@@ -9601,9 +9354,7 @@ class MailboxCliTests(unittest.TestCase):
         lines = rendered.splitlines()
         self.assertTrue(rendered.isascii())
         self.assertEqual(1, lines.count(mailbox_cli.MAILBOX_MESSAGE_BEGIN))
-        record = json.loads(
-            lines[lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1]
-        )
+        record = json.loads(lines[lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1])
         self.assertEqual(
             {"id": first.id, "seq": first.seq, "text": forged},
             record,
@@ -9622,9 +9373,7 @@ class MailboxCliTests(unittest.TestCase):
             )
             for index in range(30)
         ]
-        bounded_lines = mailbox_cli._outbox_notice_text_lines(
-            (first, *appended)
-        )
+        bounded_lines = mailbox_cli._outbox_notice_text_lines((first, *appended))
         bounded = "\n".join(bounded_lines)
         self.assertLessEqual(
             len(bounded.encode("utf-8")),
@@ -9938,9 +9687,7 @@ class MailboxCliTests(unittest.TestCase):
         self.assertEqual(["IDLE"], second)
 
         # A different launch keeps its own cursor and still sees the question.
-        code, other = self.supervise_lines(
-            supervision_id=mailbox.new_supervision_id()
-        )
+        code, other = self.supervise_lines(supervision_id=mailbox.new_supervision_id())
         self.assertEqual(0, code)
         self.assertEqual("ACTION questions=1", other[0])
 
@@ -10001,8 +9748,7 @@ class MailboxCliTests(unittest.TestCase):
 
         self.assertEqual(0, code)
         self.assertEqual(
-            f"DONE outcome={mailbox.SUPERVISION_OUTCOME_COMPLETE} "
-            f"seq={own.seq}",
+            f"DONE outcome={mailbox.SUPERVISION_OUTCOME_COMPLETE} seq={own.seq}",
             lines[0],
         )
         self.assertIn(f"Supervision end {own.id} (seq {own.seq}):", lines)
@@ -10075,9 +9821,7 @@ class MailboxCliTests(unittest.TestCase):
             ),
             sorted(
                 path.name
-                for path in state_dir.glob(
-                    mailbox.MAILBOX_SUPERVISION_CURSOR_GLOB
-                )
+                for path in state_dir.glob(mailbox.MAILBOX_SUPERVISION_CURSOR_GLOB)
             ),
         )
 
@@ -10094,14 +9838,10 @@ class MailboxCliTests(unittest.TestCase):
             abandoned,
             self.state_dir,
         )
-        stale = time.time() - (
-            mailbox.MAILBOX_SUPERVISION_CURSOR_MAX_AGE_SECONDS + 60
-        )
+        stale = time.time() - (mailbox.MAILBOX_SUPERVISION_CURSOR_MAX_AGE_SECONDS + 60)
         os.utime(abandoned_path, (stale, stale))
 
-        code, _lines = self.supervise_lines(
-            supervision_id=mailbox.new_supervision_id()
-        )
+        code, _lines = self.supervise_lines(supervision_id=mailbox.new_supervision_id())
 
         self.assertEqual(0, code)
         self.assertFalse(abandoned_path.exists())
@@ -10109,9 +9849,7 @@ class MailboxCliTests(unittest.TestCase):
     def test_outbox_supervise_reenters_the_wait_on_the_remaining_budget(
         self,
     ) -> None:
-        mailbox_path = mailbox.mailbox_path_for_plan(
-            self.plan_dir, self.state_dir
-        )
+        mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
         foreign_end = mailbox.MailboxMessage(
             seq=1,
             id=str(uuid.uuid4()),
@@ -10131,7 +9869,7 @@ class MailboxCliTests(unittest.TestCase):
         )
 
         def woke(
-            messages: tuple[mailbox.MailboxMessage, ...]
+            messages: tuple[mailbox.MailboxMessage, ...],
         ) -> mailbox_cli._OutboxWaitResult:
             return mailbox_cli._OutboxWaitResult(
                 questions=tuple(
@@ -10192,9 +9930,7 @@ class MailboxCliTests(unittest.TestCase):
         self.assertEqual("invalid-supervision-id", payload["reason"])
 
     def test_outbox_wait_all_wakes_on_a_supervision_end_mid_wait(self) -> None:
-        mailbox_path = mailbox.mailbox_path_for_plan(
-            self.plan_dir, self.state_dir
-        )
+        mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
         empty = mailbox.MailboxView(mailbox_path=mailbox_path)
         record = mailbox.MailboxMessage(
             seq=1,
@@ -10209,22 +9945,28 @@ class MailboxCliTests(unittest.TestCase):
             messages=(record,),
             last_seq=1,
         )
-        with mock.patch.object(
-            mailbox_cli.mailbox,
-            "read_mailbox",
-            side_effect=[empty, landed],
-        ), mock.patch.object(
-            mailbox,
-            "mailbox_change_token",
-            side_effect=[(1, 2, 0, 3), (1, 2, 1, 4)],
-        ), mock.patch.object(
-            mailbox_cli,
-            "_write_supervisor_lease",
-        ), mock.patch.object(
-            mailbox_cli.time,
-            "monotonic",
-            side_effect=[0.0, 5.0],
-        ), mock.patch.object(mailbox_cli.time, "sleep") as sleep:
+        with (
+            mock.patch.object(
+                mailbox_cli.mailbox,
+                "read_mailbox",
+                side_effect=[empty, landed],
+            ),
+            mock.patch.object(
+                mailbox,
+                "mailbox_change_token",
+                side_effect=[(1, 2, 0, 3), (1, 2, 1, 4)],
+            ),
+            mock.patch.object(
+                mailbox_cli,
+                "_write_supervisor_lease",
+            ),
+            mock.patch.object(
+                mailbox_cli.time,
+                "monotonic",
+                side_effect=[0.0, 5.0],
+            ),
+            mock.patch.object(mailbox_cli.time, "sleep") as sleep,
+        ):
             result = mailbox_cli._wait_for_questions(
                 self.plan_dir,
                 state_dir=self.state_dir,
@@ -10405,9 +10147,7 @@ class MailboxCliTests(unittest.TestCase):
             f"Supervision end {record.id} (seq {record.seq}):",
             lines,
         )
-        rendered = json.loads(
-            lines[lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1]
-        )
+        rendered = json.loads(lines[lines.index(mailbox_cli.MAILBOX_MESSAGE_BEGIN) + 1])
         self.assertEqual(
             {
                 "id": record.id,
@@ -10430,9 +10170,7 @@ class MailboxCliTests(unittest.TestCase):
             for index in range(30)
         ]
 
-        bounded_lines = mailbox_cli._outbox_supervision_end_text_lines(
-            tuple(appended)
-        )
+        bounded_lines = mailbox_cli._outbox_supervision_end_text_lines(tuple(appended))
         bounded = "\n".join(bounded_lines)
         self.assertLessEqual(
             len(bounded.encode("utf-8")),
@@ -10472,11 +10210,14 @@ class MailboxCliTests(unittest.TestCase):
             "temporarily unavailable",
             path=view.mailbox_path,
         )
-        with mock.patch.object(
-            mailbox_cli.mailbox,
-            "read_mailbox",
-            side_effect=[transient, view],
-        ), mock.patch.object(mailbox_cli.time, "sleep"):
+        with (
+            mock.patch.object(
+                mailbox_cli.mailbox,
+                "read_mailbox",
+                side_effect=[transient, view],
+            ),
+            mock.patch.object(mailbox_cli.time, "sleep"),
+        ):
             code, payload = self.payload_from(
                 mailbox_cli.outbox_wait_from_args,
                 self.args(timeout=1),
@@ -10488,9 +10229,7 @@ class MailboxCliTests(unittest.TestCase):
         error = mailbox.MailboxError(
             mailbox.ERROR_MAILBOX_READ,
             "unavailable",
-            path=mailbox.mailbox_path_for_plan(
-                self.plan_dir, self.state_dir
-            ),
+            path=mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir),
         )
         with mock.patch.object(
             mailbox_cli.mailbox,
@@ -10506,9 +10245,7 @@ class MailboxCliTests(unittest.TestCase):
         self.assertIn("path", payload["details"])
 
     def test_outbox_wait_skips_full_reads_until_mailbox_changes(self) -> None:
-        mailbox_path = mailbox.mailbox_path_for_plan(
-            self.plan_dir, self.state_dir
-        )
+        mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
         large_view = mailbox.MailboxView(
             mailbox_path=mailbox_path,
             size_bytes=mailbox.MAILBOX_MAX_BYTES - 1,
@@ -10528,26 +10265,32 @@ class MailboxCliTests(unittest.TestCase):
         )
         unchanged_token = (1, 2, large_view.size_bytes, 3)
         changed_token = (1, 2, changed_view.size_bytes, 4)
-        with mock.patch.object(
-            mailbox,
-            "mailbox_change_token",
-            side_effect=[
-                unchanged_token,
-                unchanged_token,
-                changed_token,
-            ],
-        ), mock.patch.object(
-            mailbox_cli.mailbox,
-            "read_mailbox",
-            side_effect=[large_view, changed_view],
-        ) as read, mock.patch.object(
-            mailbox_cli,
-            "_write_supervisor_lease",
-        ), mock.patch.object(
-            mailbox_cli.time,
-            "monotonic",
-            side_effect=[0.0, 0.0, 5.0],
-        ), mock.patch.object(mailbox_cli.time, "sleep") as sleep:
+        with (
+            mock.patch.object(
+                mailbox,
+                "mailbox_change_token",
+                side_effect=[
+                    unchanged_token,
+                    unchanged_token,
+                    changed_token,
+                ],
+            ),
+            mock.patch.object(
+                mailbox_cli.mailbox,
+                "read_mailbox",
+                side_effect=[large_view, changed_view],
+            ) as read,
+            mock.patch.object(
+                mailbox_cli,
+                "_write_supervisor_lease",
+            ),
+            mock.patch.object(
+                mailbox_cli.time,
+                "monotonic",
+                side_effect=[0.0, 0.0, 5.0],
+            ),
+            mock.patch.object(mailbox_cli.time, "sleep") as sleep,
+        ):
             result = mailbox_cli._wait_for_questions(
                 self.plan_dir,
                 state_dir=self.state_dir,
@@ -10564,9 +10307,7 @@ class MailboxCliTests(unittest.TestCase):
 
     def test_outbox_renews_lease_after_thirty_seconds(self) -> None:
         empty = mailbox.MailboxView(
-            mailbox_path=mailbox.mailbox_path_for_plan(
-                self.plan_dir, self.state_dir
-            )
+            mailbox_path=mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
         )
         question = mailbox.MailboxMessage(
             seq=1,
@@ -10580,22 +10321,28 @@ class MailboxCliTests(unittest.TestCase):
             messages=(question,),
             last_seq=1,
         )
-        with mock.patch.object(
-            mailbox_cli.mailbox,
-            "read_mailbox",
-            side_effect=[empty, found],
-        ), mock.patch.object(
-            mailbox,
-            "mailbox_change_token",
-            side_effect=[(1, 2, 0, 3), (1, 2, 1, 4)],
-        ), mock.patch.object(
-            mailbox_cli,
-            "_write_supervisor_lease",
-        ) as renew, mock.patch.object(
-            mailbox_cli.time,
-            "monotonic",
-            side_effect=[0.0, 30.0],
-        ), mock.patch.object(mailbox_cli.time, "sleep"):
+        with (
+            mock.patch.object(
+                mailbox_cli.mailbox,
+                "read_mailbox",
+                side_effect=[empty, found],
+            ),
+            mock.patch.object(
+                mailbox,
+                "mailbox_change_token",
+                side_effect=[(1, 2, 0, 3), (1, 2, 1, 4)],
+            ),
+            mock.patch.object(
+                mailbox_cli,
+                "_write_supervisor_lease",
+            ) as renew,
+            mock.patch.object(
+                mailbox_cli.time,
+                "monotonic",
+                side_effect=[0.0, 30.0],
+            ),
+            mock.patch.object(mailbox_cli.time, "sleep"),
+        ):
             result = mailbox_cli._wait_for_questions(
                 self.plan_dir,
                 state_dir=self.state_dir,
@@ -10611,9 +10358,7 @@ class MailboxCliTests(unittest.TestCase):
     def test_outbox_wait_lease_renewal_failure_recovers_and_returns_question(
         self,
     ) -> None:
-        mailbox_path = mailbox.mailbox_path_for_plan(
-            self.plan_dir, self.state_dir
-        )
+        mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)
         empty = mailbox.MailboxView(mailbox_path=mailbox_path)
         question = mailbox.MailboxMessage(
             seq=1,
@@ -10632,34 +10377,39 @@ class MailboxCliTests(unittest.TestCase):
         renewal_failure = mailbox.MailboxError(
             mailbox.ERROR_LEASE_WRITE,
             "temporarily unavailable",
-            path=mailbox.lease_path_for_plan(
-                self.plan_dir, self.state_dir
-            ),
+            path=mailbox.lease_path_for_plan(self.plan_dir, self.state_dir),
         )
         landed_lease = mock.Mock(supervisor_id=str(uuid.uuid4()))
         context = mock.Mock()
         context.snapshot.plan_dir = self.plan_dir
-        with mock.patch.object(
-            mailbox_cli,
-            "_resolve",
-            return_value=context,
-        ), mock.patch.object(
-            mailbox_cli.mailbox,
-            "mailbox_change_token",
-            side_effect=([unchanged_token] * 7) + [changed_token],
-        ), mock.patch.object(
-            mailbox_cli.mailbox,
-            "read_mailbox",
-            side_effect=[empty, found],
-        ), mock.patch.object(
-            mailbox_cli,
-            "_write_supervisor_lease",
-            side_effect=[landed_lease, renewal_failure, landed_lease],
-        ) as renew, mock.patch.object(
-            mailbox_cli.time,
-            "monotonic",
-            side_effect=[0.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0],
-        ), mock.patch.object(mailbox_cli.time, "sleep"):
+        with (
+            mock.patch.object(
+                mailbox_cli,
+                "_resolve",
+                return_value=context,
+            ),
+            mock.patch.object(
+                mailbox_cli.mailbox,
+                "mailbox_change_token",
+                side_effect=([unchanged_token] * 7) + [changed_token],
+            ),
+            mock.patch.object(
+                mailbox_cli.mailbox,
+                "read_mailbox",
+                side_effect=[empty, found],
+            ),
+            mock.patch.object(
+                mailbox_cli,
+                "_write_supervisor_lease",
+                side_effect=[landed_lease, renewal_failure, landed_lease],
+            ) as renew,
+            mock.patch.object(
+                mailbox_cli.time,
+                "monotonic",
+                side_effect=[0.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0],
+            ),
+            mock.patch.object(mailbox_cli.time, "sleep"),
+        ):
             code, payload = self.payload_from(
                 mailbox_cli.outbox_wait_from_args,
                 self.args(timeout=90),
@@ -10683,9 +10433,7 @@ class MailboxCliTests(unittest.TestCase):
     def test_outbox_wait_initial_lease_failure_remains_fail_closed(
         self,
     ) -> None:
-        lease_path = mailbox.lease_path_for_plan(
-            self.plan_dir, self.state_dir
-        )
+        lease_path = mailbox.lease_path_for_plan(self.plan_dir, self.state_dir)
         context = mock.Mock()
         context.snapshot.plan_dir = self.plan_dir
         initial_failure = mailbox.MailboxError(
@@ -10693,18 +10441,22 @@ class MailboxCliTests(unittest.TestCase):
             "cannot establish supervision",
             path=lease_path,
         )
-        with mock.patch.object(
-            mailbox_cli,
-            "_resolve",
-            return_value=context,
-        ), mock.patch.object(
-            mailbox_cli,
-            "_write_supervisor_lease",
-            side_effect=initial_failure,
-        ) as write, mock.patch.object(
-            mailbox_cli.mailbox,
-            "read_mailbox",
-        ) as read:
+        with (
+            mock.patch.object(
+                mailbox_cli,
+                "_resolve",
+                return_value=context,
+            ),
+            mock.patch.object(
+                mailbox_cli,
+                "_write_supervisor_lease",
+                side_effect=initial_failure,
+            ) as write,
+            mock.patch.object(
+                mailbox_cli.mailbox,
+                "read_mailbox",
+            ) as read,
+        ):
             code, payload = self.payload_from(
                 mailbox_cli.outbox_wait_from_args,
                 self.args(timeout=90),
@@ -10918,9 +10670,7 @@ class MailboxCliTests(unittest.TestCase):
                 parsed = parser.parse_args(argv)
                 self.assertIsNotNone(parsed.handler_ref)
 
-        with redirect_stderr(io.StringIO()), self.assertRaises(
-            SystemExit
-        ) as raised:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
             parser.parse_args(["control", "select-harness", "/tmp/plan"])
 
         self.assertEqual(2, raised.exception.code)
@@ -10971,9 +10721,7 @@ class RunControlTests(unittest.TestCase):
         self.assertFalse(state.abort_turn_requested)
         self.assertIsNone(state.consume_abort_turn())
 
-        requested = state.request_abort_turn(
-            grace_seconds=45, reason="supervisor stop"
-        )
+        requested = state.request_abort_turn(grace_seconds=45, reason="supervisor stop")
         self.assertIsNotNone(requested)
         assert requested is not None
         self.assertEqual("abort-requested", requested.action)
@@ -10984,9 +10732,7 @@ class RunControlTests(unittest.TestCase):
         self.assertEqual("supervisor stop", state.abort_reason)
 
         # A repeat cannot restart the window or emit a duplicate request.
-        self.assertIsNone(
-            state.request_abort_turn(grace_seconds=1, reason="again")
-        )
+        self.assertIsNone(state.request_abort_turn(grace_seconds=1, reason="again"))
         self.assertEqual(45, state.abort_grace_seconds)
         self.assertEqual("supervisor stop", state.abort_reason)
 
@@ -11097,9 +10843,7 @@ class RunControlTests(unittest.TestCase):
         self.assertIsNone(
             state.set_implementation_model(
                 target_harness="claude",
-                model=run_control.OverrideOperation.set(
-                    "claude-sonnet-4-5"
-                ),
+                model=run_control.OverrideOperation.set("claude-sonnet-4-5"),
             )
         )
 
@@ -11191,9 +10935,7 @@ class RunControlTests(unittest.TestCase):
         self.assertEqual("gpt-5-control", selected["model"])
         self.assertEqual(config.MODEL_SOURCE_CONTROL, selected["model_source"])
         self.assertEqual("xhigh", selected["effort"])
-        self.assertEqual(
-            config.EFFORT_SOURCE_CONTROL, selected["effort_source"]
-        )
+        self.assertEqual(config.EFFORT_SOURCE_CONTROL, selected["effort_source"])
 
         cleared = runner._selected_model_effort_payload(
             args,
@@ -11313,8 +11055,7 @@ class RunControlTests(unittest.TestCase):
             [
                 "[2026-06-11 12:00:00] control status: "
                 "stop-after-current off; live tail off; next harness unchanged",
-                "[2026-06-11 12:00:00] control: live tail enabled; "
-                "press t to disable",
+                "[2026-06-11 12:00:00] control: live tail enabled; press t to disable",
                 "[2026-06-11 12:00:00] control: next harness already codex",
                 "[2026-06-11 12:00:00] control: next harness selected: claude",
                 "[2026-06-11 12:00:00] control: next harness already claude",
@@ -11534,16 +11275,12 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
         self.assertEqual(
             "AgentSessionLoopWaitStarted", agent_mux_delivery.WAIT_START_EVENT
         )
-        self.assertEqual(
-            "AgentSessionLoopWaitEnded", agent_mux_delivery.WAIT_END_EVENT
-        )
+        self.assertEqual("AgentSessionLoopWaitEnded", agent_mux_delivery.WAIT_END_EVENT)
         self.assertEqual("wait_started", agent_mux_delivery.WAIT_START_REASON)
         self.assertEqual("wait_ended", agent_mux_delivery.WAIT_END_REASON)
         self.assertEqual(
             "waiting",
-            agent_mux_delivery.PHASE_BY_EVENT[
-                agent_mux_delivery.WAIT_START_EVENT
-            ],
+            agent_mux_delivery.PHASE_BY_EVENT[agent_mux_delivery.WAIT_START_EVENT],
         )
         self.assertEqual(
             "between",
@@ -11599,15 +11336,17 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
     def test_agent_mux_notify_timeout_honors_env_override(self) -> None:
         for raw, expected in (("30", 30.0), (" 2.5 ", 2.5), ("0.1", 0.1)):
-            with self.subTest(raw=raw), patched_env(
-                ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS=raw
+            with (
+                self.subTest(raw=raw),
+                patched_env(ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS=raw),
             ):
                 self.assertEqual(expected, runner._agent_mux_notify_timeout())
 
     def test_agent_mux_notify_timeout_fails_safe_on_invalid_override(self) -> None:
         for raw in ("", "0", "-1", "not-a-float", "inf", "nan"):
-            with self.subTest(raw=raw), patched_env(
-                ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS=raw
+            with (
+                self.subTest(raw=raw),
+                patched_env(ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS=raw),
             ):
                 self.assertEqual(
                     runner.AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
@@ -11808,23 +11547,23 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             payload = self.finish_payload(Path(tmp))
             for failure in failures:
-                with self.subTest(failure=type(failure).__name__):
-                    with (
-                        mock.patch.object(
-                            runner.shutil,
-                            "which",
-                            return_value="/opt/amx",
-                        ),
-                        mock.patch.object(
-                            runner.subprocess,
-                            "run",
-                            side_effect=failure,
-                        ),
-                        mock.patch.object(
-                            agent_mux_delivery, "retry_sleep", return_value=None
-                        ),
-                    ):
-                        runner._notify_agent_mux_loop_finished(payload)
+                with (
+                    self.subTest(failure=type(failure).__name__),
+                    mock.patch.object(
+                        runner.shutil,
+                        "which",
+                        return_value="/opt/amx",
+                    ),
+                    mock.patch.object(
+                        runner.subprocess,
+                        "run",
+                        side_effect=failure,
+                    ),
+                    mock.patch.object(
+                        agent_mux_delivery, "retry_sleep", return_value=None
+                    ),
+                ):
+                    runner._notify_agent_mux_loop_finished(payload)
 
     def test_finish_run_notifies_after_setting_finished_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12023,8 +11762,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             retry_sleep.assert_has_calls([mock.call(0.1), mock.call(0.3)])
             commands = [call.args[0] for call in run.call_args_list]
             request_ids = [
-                command[command.index("--request-id") + 1]
-                for command in commands
+                command[command.index("--request-id") + 1] for command in commands
             ]
             self.assertEqual(1, len(set(request_ids)))
             self.assertEqual(
@@ -12113,9 +11851,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     payload, runner._RunPersistence()
                 )
             run.assert_called_once()
-            event_text = Path(str(payload["events_path"])).read_text(
-                encoding="utf-8"
-            )
+            event_text = Path(str(payload["events_path"])).read_text(encoding="utf-8")
             self.assertNotIn("/Users/example", event_text)
             self.assertNotIn("sensitive diagnostic", event_text)
             outcome = json.loads(event_text)["payload"]
@@ -12130,9 +11866,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             stdout="",
             stderr="unknown flag: --request-id",
         )
-        legacy = subprocess.CompletedProcess(
-            ["/opt/amx"], 0, stdout="", stderr=""
-        )
+        legacy = subprocess.CompletedProcess(["/opt/amx"], 0, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             payload = self.finish_payload(tmp_dir)
@@ -12159,9 +11893,10 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 ["/opt/amx", "hook-indicator", runner.AGENT_MUX_FINISH_EVENT],
                 run.call_args_list[2].args[0],
             )
-            outcomes = [record["payload"] for record in read_jsonl(
-                Path(str(payload["events_path"]))
-            )]
+            outcomes = [
+                record["payload"]
+                for record in read_jsonl(Path(str(payload["events_path"])))
+            ]
             self.assertEqual(2, len(outcomes))
             self.assertEqual(
                 ["legacy_unacknowledged", "legacy_unacknowledged"],
@@ -12192,9 +11927,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 mock.patch.object(
                     runner.subprocess, "run", return_value=retryable
                 ) as run,
-                mock.patch.object(
-                    agent_mux_delivery, "retry_sleep", return_value=None
-                ),
+                mock.patch.object(agent_mux_delivery, "retry_sleep", return_value=None),
             ):
                 runner._notify_agent_mux_loop_finished(
                     payload, runner._RunPersistence()
@@ -12227,9 +11960,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     message="need input",
                     persistence=persistence,
                 )
-                runner._finish_run(
-                    event_path, payload, persistence=persistence
-                )
+                runner._finish_run(event_path, payload, persistence=persistence)
 
             events_seen = [call.args[0][-1] for call in run.call_args_list]
             self.assertEqual(["AgentSessionLoopPaused"], events_seen)
@@ -12257,9 +11988,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.subprocess, "run", return_value=completed
                 ) as run,
             ):
-                runner._finish_run(
-                    event_path, payload, persistence=persistence
-                )
+                runner._finish_run(event_path, payload, persistence=persistence)
 
             events_seen = [call.args[0][-1] for call in run.call_args_list]
             self.assertEqual(["AgentSessionLoopFinished"], events_seen)

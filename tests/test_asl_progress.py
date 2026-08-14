@@ -5,64 +5,22 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
-import signal
-import stat
-import subprocess
-import sys
 import tempfile
 import threading
-import time
 import unittest
-import urllib.parse
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
     cli,
-    compact_state,
-    config,
-    contracts,
-    control_queue,
-    events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
     progress_cli,
     progress_repair,
-    qna,
-    review,
-    review_repair,
-    run_control,
     runner,
-    state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     write_plan,
@@ -104,13 +62,9 @@ class ProgressJournalTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertTrue(text.startswith(plans.PROGRESS_HEADER))
             self.assertIn(plans.PROGRESS_SCHEMA_COMMENT, text)
-            self.assertIn(
-                "## Session 1 — complete (2026-06-19T14:22:00Z)", text
-            )
+            self.assertIn("## Session 1 — complete (2026-06-19T14:22:00Z)", text)
             self.assertIn("- Files touched: cli.py, plans.py", text)
-            self.assertIn(
-                "- Decisions: chose option A over B (perf)", text
-            )
+            self.assertIn("- Decisions: chose option A over B (perf)", text)
             self.assertIn("- Discovered facts:\n  - Lockfile X uses Y format.", text)
             self.assertIn("- Open questions: none", text)
             self.assertIn("- Blockers: none", text)
@@ -328,18 +282,20 @@ class ProgressJournalTests(unittest.TestCase):
             path = plans.progress_path(plan_dir)
             original_bytes = path.read_bytes()
 
-            with mock.patch(
-                "agent_session_loop.plans.os.replace",
-                side_effect=OSError("boom"),
+            with (
+                mock.patch(
+                    "agent_session_loop.plans.os.replace",
+                    side_effect=OSError("boom"),
+                ),
+                self.assertRaises(plans.PlanError),
             ):
-                with self.assertRaises(plans.PlanError):
-                    plans.append_progress_entry(
-                        plan_dir,
-                        self._entry(
-                            session_id="2",
-                            completed_at="2026-06-19T15:00:00Z",
-                        ),
-                    )
+                plans.append_progress_entry(
+                    plan_dir,
+                    self._entry(
+                        session_id="2",
+                        completed_at="2026-06-19T15:00:00Z",
+                    ),
+                )
 
             self.assertEqual(original_bytes, path.read_bytes())
             self.assertFalse(
@@ -391,12 +347,8 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
             snapshot = self._write_complete_plan(plan_dir)
             completed_at = "2026-06-19T15:00:00Z"
 
-            self.assertTrue(
-                runner._append_progress_entry(snapshot, "1", completed_at)
-            )
-            self.assertFalse(
-                runner._append_progress_entry(snapshot, "1", completed_at)
-            )
+            self.assertTrue(runner._append_progress_entry(snapshot, "1", completed_at))
+            self.assertFalse(runner._append_progress_entry(snapshot, "1", completed_at))
 
             entries = plans.read_progress_entries(plan_dir)
             self.assertEqual(1, len(entries))
@@ -415,14 +367,10 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
             snapshot = self._write_complete_plan(plan_dir)
 
             self.assertTrue(
-                runner._append_progress_entry(
-                    snapshot, "1", "2026-06-19T15:00:00Z"
-                )
+                runner._append_progress_entry(snapshot, "1", "2026-06-19T15:00:00Z")
             )
             self.assertTrue(
-                runner._append_progress_entry(
-                    snapshot, "1", "2026-06-19T16:00:00Z"
-                )
+                runner._append_progress_entry(snapshot, "1", "2026-06-19T16:00:00Z")
             )
 
             entries = plans.read_progress_entries(plan_dir)
@@ -438,9 +386,7 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
             snapshot = self._write_complete_plan(plan_dir)
 
             with self.assertRaises(plans.PlanError):
-                runner._append_progress_entry(
-                    snapshot, "99", "2026-06-19T15:00:00Z"
-                )
+                runner._append_progress_entry(snapshot, "99", "2026-06-19T15:00:00Z")
 
     def test_utc_iso_now_returns_iso_string_with_timezone(self) -> None:
         value = runner._utc_iso_now()
@@ -819,9 +765,7 @@ class ProgressCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             self._write_completed_plan(plan_dir, ("1",))
-            args = parser.parse_args(
-                ["backfill-progress", str(plan_dir)]
-            )
+            args = parser.parse_args(["backfill-progress", str(plan_dir)])
             self.assertEqual(
                 progress_cli.backfill_progress_from_args,
                 cli.resolve_handler(args),
@@ -832,9 +776,7 @@ class ProgressCliTests(unittest.TestCase):
 
     def test_progress_cli_registered_in_parser(self) -> None:
         parser = cli.build_parser()
-        args = parser.parse_args(
-            ["progress", "/tmp/example", "--tail", "--json"]
-        )
+        args = parser.parse_args(["progress", "/tmp/example", "--tail", "--json"])
         self.assertEqual(progress_cli.progress_from_args, cli.resolve_handler(args))
         self.assertEqual("/tmp/example", args.plan_dir)
         self.assertTrue(args.tail)
@@ -997,9 +939,7 @@ class ProgressRepairHelperTests(unittest.TestCase):
     def test_repair_writes_header_only_when_no_completed_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
-            self._write_completed_plan(
-                plan_dir, ("1", "2"), complete_ids=()
-            )
+            self._write_completed_plan(plan_dir, ("1", "2"), complete_ids=())
             progress_file = plans.progress_path(plan_dir)
             self.assertFalse(progress_file.exists())
 

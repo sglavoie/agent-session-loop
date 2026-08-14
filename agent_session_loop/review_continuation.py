@@ -9,15 +9,15 @@ share one cap and continuation projection.
 
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
-import json
 from pathlib import Path
-import re
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 from . import events, plans, review, review_repair, session_overview
-
 
 REVIEW_CYCLE_DISPOSITION_ALL_CLEAR = "all-clear"
 REVIEW_CYCLE_DISPOSITION_REPAIRS = "repairs-materialized"
@@ -124,12 +124,8 @@ class ReviewResume:
             "minimum_required_cap": self.minimum_required_cap,
             "selected_cap": self.selected_cap,
             "repair_session_ids": list(self.repair_session_ids),
-            "pending_repair_session_ids": list(
-                self.pending_repair_session_ids
-            ),
-            "completed_repair_session_ids": list(
-                self.completed_repair_session_ids
-            ),
+            "pending_repair_session_ids": list(self.pending_repair_session_ids),
+            "completed_repair_session_ids": list(self.completed_repair_session_ids),
             "source_fingerprints": (
                 list(self.source_fingerprints)
                 if self.source_fingerprints is not None
@@ -141,24 +137,16 @@ class ReviewResume:
                 else None
             ),
             "source_review_output_sha256": self.source_review_output_sha256,
-            "source_review_artifact_sha256": (
-                self.source_review_artifact_sha256
-            ),
+            "source_review_artifact_sha256": (self.source_review_artifact_sha256),
             "current_review_output_sha256": self.current_review_output_sha256,
-            "current_review_artifact_sha256": (
-                self.current_review_artifact_sha256
-            ),
+            "current_review_artifact_sha256": (self.current_review_artifact_sha256),
             "artifact_valid": self.artifact_valid,
             "artifact_error": self.artifact_error,
         }
         if self.max_repair_group_attempts is not None:
-            payload["max_repair_group_attempts"] = (
-                self.max_repair_group_attempts
-            )
+            payload["max_repair_group_attempts"] = self.max_repair_group_attempts
         if self.repair_group_attempts is not None:
-            payload["repair_group_attempts"] = dict(
-                self.repair_group_attempts
-            )
+            payload["repair_group_attempts"] = dict(self.repair_group_attempts)
         if self.source_findings is not None:
             payload["source_findings"] = [dict(item) for item in self.source_findings]
         if self.current_findings is not None:
@@ -184,7 +172,9 @@ def read_review_events(event_path: str | Path) -> tuple[ReviewEventRecord, ...]:
     }
     records: list[ReviewEventRecord] = []
     try:
-        event_file = Path(event_path).open("r", encoding="utf-8")
+        event_file = Path(event_path).open(  # noqa: SIM115 - opened here so OSError returns (); closed by the with below
+            "r", encoding="utf-8"
+        )
     except OSError:
         return ()
     with event_file:
@@ -194,7 +184,7 @@ def read_review_events(event_path: str | Path) -> tuple[ReviewEventRecord, ...]:
                 continue
             try:
                 record = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError, ValueError:
                 continue
             if not isinstance(record, dict):
                 continue
@@ -477,7 +467,7 @@ def exhausted_repair_group_guidance(
     repair_group, attempts = exhausted
     return (
         f'the recurring repair group "{repair_group}" already hit {attempts} '
-        f'{"attempt" if attempts == 1 else "attempts"}; fix it manually or '
+        f"{'attempt' if attempts == 1 else 'attempts'}; fix it manually or "
         "re-split instead of raising --max-review-fix-cycles"
     )
 
@@ -532,9 +522,7 @@ def _review_id_for_cycle_position(
 
 def _materialization_key_times(
     records: tuple[ReviewEventRecord, ...],
-    generated_repairs: Mapping[
-        str, Mapping[str, plans.SessionStatus]
-    ] | None = None,
+    generated_repairs: Mapping[str, Mapping[str, plans.SessionStatus]] | None = None,
     generated_reviews: Mapping[str, plans.SessionStatus] | None = None,
 ) -> dict[str, datetime | None]:
     """Return each unique materialization with the newest event that dated it.
@@ -582,9 +570,7 @@ def _materialization_key_times(
             )
             if source_id is None:
                 continue
-            if source_id in lineage_sources or not generated_repairs.get(
-                source_id
-            ):
+            if source_id in lineage_sources or not generated_repairs.get(source_id):
                 continue
             _note_materialization_time(
                 times, f"review:{source_id}", times.pop(key, None)
@@ -597,17 +583,13 @@ def _materialization_key_times(
 
 def _reconciled_materialization_keys(
     records: tuple[ReviewEventRecord, ...],
-    generated_repairs: Mapping[
-        str, Mapping[str, plans.SessionStatus]
-    ] | None = None,
+    generated_repairs: Mapping[str, Mapping[str, plans.SessionStatus]] | None = None,
     generated_reviews: Mapping[str, plans.SessionStatus] | None = None,
 ) -> set[str]:
     """Return unique materializations across events and durable children."""
 
     return set(
-        _materialization_key_times(
-            records, generated_repairs, generated_reviews
-        )
+        _materialization_key_times(records, generated_repairs, generated_reviews)
     )
 
 
@@ -646,15 +628,11 @@ def reconciled_materialization_keys(
     generated_reviews = (
         _generated_review_statuses(snapshot) if snapshot is not None else None
     )
-    times = _materialization_key_times(
-        records, generated_repairs, generated_reviews
-    )
+    times = _materialization_key_times(records, generated_repairs, generated_reviews)
     if since is None:
         return frozenset(times)
     return frozenset(
-        key
-        for key, moment in times.items()
-        if moment is not None and moment >= since
+        key for key, moment in times.items() if moment is not None and moment >= since
     )
 
 
@@ -679,20 +657,23 @@ def _post_reopen_fingerprint_baseline(
     source_id_text = _cycle_source_id(latest_cycle)
     source_id = _parse_session_id_or_none(source_id_text)
     positional_source_id: plans.SessionId | None = None
-    unresolved_source_reopen: (
-        tuple[plans.SessionId, tuple[str, ...] | None] | None
-    ) = None
+    unresolved_source_reopen: tuple[plans.SessionId, tuple[str, ...] | None] | None = (
+        None
+    )
     if source_id_text is None and generated_reviews:
         review_ids = sorted(
             generated_reviews,
             key=lambda item: plans.parse_session_id(item).sort_key,
         )
-        cycle_ordinal = sum(
-            1
-            for record in records
-            if record.name == events.REVIEW_CYCLE_EVENT
-            and record.payload is not latest_cycle
-        ) + 1
+        cycle_ordinal = (
+            sum(
+                1
+                for record in records
+                if record.name == events.REVIEW_CYCLE_EVENT
+                and record.payload is not latest_cycle
+            )
+            + 1
+        )
         positional_source_id = _parse_session_id_or_none(
             _review_id_for_cycle_position(
                 latest_cycle,
@@ -702,10 +683,7 @@ def _post_reopen_fingerprint_baseline(
         )
     source_cycle = _nonnegative_int(latest_cycle.get("cycle"))
     for record in reversed(records):
-        if (
-            record.name == events.REVIEW_CYCLE_EVENT
-            and record.payload is latest_cycle
-        ):
+        if record.name == events.REVIEW_CYCLE_EVENT and record.payload is latest_cycle:
             break
         if record.name != events.REVIEW_REPAIR_REOPENED_EVENT:
             continue
@@ -729,20 +707,15 @@ def _post_reopen_fingerprint_baseline(
             if positional_source_id is None:
                 if (
                     unresolved_source_reopen is None
-                    or reopen_source_id.sort_key
-                    > unresolved_source_reopen[0].sort_key
+                    or reopen_source_id.sort_key > unresolved_source_reopen[0].sort_key
                 ):
                     unresolved_source_reopen = (
                         reopen_source_id,
-                        _string_tuple(
-                            record.payload.get("current_fingerprints")
-                        ),
+                        _string_tuple(record.payload.get("current_fingerprints")),
                     )
                 continue
         elif source_cycle is not None:
-            reopened_cycle = _nonnegative_int(
-                record.payload.get("source_cycle")
-            )
+            reopened_cycle = _nonnegative_int(record.payload.get("source_cycle"))
             if reopened_cycle != source_cycle:
                 continue
         else:
@@ -766,9 +739,7 @@ def _latest_materialized_reopen_fingerprint_baseline(
     Legacy records without source lineage retain their newest-record fallback.
     """
 
-    latest_source_reopen: (
-        tuple[plans.SessionId, tuple[str, ...] | None] | None
-    ) = None
+    latest_source_reopen: tuple[plans.SessionId, tuple[str, ...] | None] | None = None
     latest_legacy_reopen: tuple[str, ...] | None = None
     for record in records:
         if (
@@ -820,15 +791,11 @@ def review_cycle_state(
         _generated_review_statuses(snapshot) if snapshot is not None else None
     )
     cycles = [
-        record.payload
-        for record in records
-        if record.name == events.REVIEW_CYCLE_EVENT
+        record.payload for record in records if record.name == events.REVIEW_CYCLE_EVENT
     ]
     previous_fingerprints: tuple[str, ...] = ()
     if cycles:
-        previous_fingerprints = (
-            _string_tuple(cycles[-1].get("fingerprints")) or ()
-        )
+        previous_fingerprints = _string_tuple(cycles[-1].get("fingerprints")) or ()
         reopened_fingerprints = _post_reopen_fingerprint_baseline(
             records, cycles[-1], generated_reviews
         )
@@ -899,13 +866,9 @@ def _latest_source(
     review_statuses: Mapping[str, plans.SessionStatus],
 ) -> tuple[str | None, Mapping[str, Any] | None]:
     latest_cycle = cycles[-1] if cycles else None
-    cycle_source = (
-        _cycle_source_id(latest_cycle) if latest_cycle is not None else None
-    )
+    cycle_source = _cycle_source_id(latest_cycle) if latest_cycle is not None else None
     completed_reviews = [
-        status
-        for status in review_statuses.values()
-        if status.status == "complete"
+        status for status in review_statuses.values() if status.status == "complete"
     ]
     latest_generated = (
         max(completed_reviews, key=lambda item: item.session_id.sort_key)
@@ -936,9 +899,7 @@ def _latest_source(
         legacy_matching = next(
             (
                 cycle
-                for cycle_ordinal, cycle in reversed(
-                    tuple(enumerate(cycles, start=1))
-                )
+                for cycle_ordinal, cycle in reversed(tuple(enumerate(cycles, start=1)))
                 if _parse_session_id_or_none(_cycle_source_id(cycle)) is None
                 and _review_id_for_cycle_position(
                     cycle,
@@ -992,7 +953,7 @@ def _selected_group_attempt_cap_from_history(
     state_path = Path(event_path).with_name(events.STATE_FILE_NAME)
     try:
         raw = json.loads(state_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except FileNotFoundError, OSError, json.JSONDecodeError:
         return None
     if not isinstance(raw, dict):
         return None
@@ -1119,7 +1080,7 @@ def _repair_groups_from_children(
         try:
             text = status.path.read_text(encoding="utf-8")
             scope = plans.parse_session_scope(text, registry.aliases)
-        except (OSError, plans.PlanError):
+        except OSError, plans.PlanError:
             return None
         entry = dict(group)
         entry["read_repositories"] = list(scope.reads)
@@ -1157,11 +1118,13 @@ def _resume(
     current_repositories: tuple[Mapping[str, Any], ...] | None = None
     repair_groups: tuple[Mapping[str, Any], ...] | None = None
     if planning is not None:
-        repository_aware = bool(planning.repository_bases) or any(
-            group.read_repositories for group in planning.repair_groups
-        ) or any(
-            isinstance(finding.get("repo"), str)
-            for finding in planning.validated_findings
+        repository_aware = (
+            bool(planning.repository_bases)
+            or any(group.read_repositories for group in planning.repair_groups)
+            or any(
+                isinstance(finding.get("repo"), str)
+                for finding in planning.validated_findings
+            )
         )
         current_fingerprints = (
             planning.finding_fingerprints
@@ -1199,10 +1162,7 @@ def _resume(
                 )
                 for group in planning.repair_groups
             )
-        if (
-            action in {"run-repairs", "rereview"}
-            and planning.existing_child_ids
-        ):
+        if action in {"run-repairs", "rereview"} and planning.existing_child_ids:
             # Existing children are authoritative for these lifecycle states.
             # Planning stops at that expected conflict before it can establish
             # full materializability, so do not present the conflict as proof
@@ -1221,7 +1181,10 @@ def _resume(
         selected_cap=selected_cap,
         max_repair_group_attempts=max_repair_group_attempts,
         repair_group_attempts=(
-            {group: repair_group_attempts[group] for group in sorted(repair_group_attempts)}
+            {
+                group: repair_group_attempts[group]
+                for group in sorted(repair_group_attempts)
+            }
             if repair_group_attempts
             else None
         ),
@@ -1330,9 +1293,7 @@ def evaluate_review_continuation(
     )
     records = read_review_events(event_path)
     cycles = [
-        record.payload
-        for record in records
-        if record.name == events.REVIEW_CYCLE_EVENT
+        record.payload for record in records if record.name == events.REVIEW_CYCLE_EVENT
     ]
     review_statuses = _generated_review_statuses(snapshot)
     generated_repairs = _generated_repair_statuses(snapshot)
@@ -1400,13 +1361,9 @@ def evaluate_review_continuation(
         if source_cycle_record is not None
         else None
     )
-    source_output_digest, source_artifact_digest = _source_digests(
-        source_cycle_record
-    )
+    source_output_digest, source_artifact_digest = _source_digests(source_cycle_record)
     generated_for_source = generated_repairs.get(source_id, {})
-    repair_ids = _repair_ids_for_source(
-        source_id, records, generated_for_source
-    )
+    repair_ids = _repair_ids_for_source(source_id, records, generated_for_source)
     pending_ids = tuple(
         sorted(
             (
@@ -1473,8 +1430,10 @@ def evaluate_review_continuation(
     ):
         return result("terminal", False, disposition)
 
-    if generated_for_source and not pending_ids and len(completed_ids) != len(
+    if (
         generated_for_source
+        and not pending_ids
+        and len(completed_ids) != len(generated_for_source)
     ):
         return result("terminal", False, "repair-sessions-not-runnable")
 
@@ -1484,10 +1443,7 @@ def evaluate_review_continuation(
         # deleted one; otherwise the surviving children could incorrectly
         # advance this source to rereview.
         return result("terminal", False, "repair-sessions-missing")
-    if (
-        not generated_for_source
-        and disposition in MATERIALIZED_REVIEW_DISPOSITIONS
-    ):
+    if not generated_for_source and disposition in MATERIALIZED_REVIEW_DISPOSITIONS:
         return result("terminal", False, "repair-sessions-missing")
 
     candidate = (
@@ -1521,18 +1477,18 @@ def evaluate_review_continuation(
         selected_group_attempt_cap is not None
         and planning.ok
         and planning.reason == review_repair.REVIEW_REPAIR_REASON_OK
-    ):
-        if any(
+        and any(
             repair_attempt_counts.get(group.repair_group, 0)
             >= selected_group_attempt_cap
             for group in planning.repair_groups
-        ):
-            return result(
-                "terminal",
-                False,
-                REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
-                planning=planning,
-            )
+        )
+    ):
+        return result(
+            "terminal",
+            False,
+            REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
+            planning=planning,
+        )
 
     if (
         disposition is None
@@ -1553,9 +1509,8 @@ def evaluate_review_continuation(
         )
 
     minimum_cap = materialization_count + 1
-    if (
-        disposition in BUDGET_REVIEW_DISPOSITIONS
-        and (selected_cap is None or selected_cap < minimum_cap)
+    if disposition in BUDGET_REVIEW_DISPOSITIONS and (
+        selected_cap is None or selected_cap < minimum_cap
     ):
         return result(
             "materialize-repairs",
@@ -1581,8 +1536,7 @@ def evaluate_review_continuation(
             resume,
             artifact_valid=(
                 False
-                if planning.reason
-                == review_repair.REVIEW_REPAIR_REASON_NO_FINDINGS
+                if planning.reason == review_repair.REVIEW_REPAIR_REASON_NO_FINDINGS
                 else resume.artifact_valid
             ),
             artifact_error=error,

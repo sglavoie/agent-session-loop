@@ -24,18 +24,19 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from datetime import datetime, timedelta, timezone
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import signal
 import subprocess
 import sys
 import time
-from typing import Any, Optional, Sequence
 import uuid
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 # Review verdict parsing is shared with the runner through
@@ -46,17 +47,39 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from agent_session_loop import assurance_report as _assurance_report  # noqa: E402
-from agent_session_loop import events as _events  # noqa: E402
-from agent_session_loop import harnesses as _harnesses  # noqa: E402
-from agent_session_loop import mailbox as _mailbox  # noqa: E402
-from agent_session_loop import pause_policy as _pause_policy  # noqa: E402
-from agent_session_loop import review as _review  # noqa: E402
-from agent_session_loop import review_continuation as _review_continuation  # noqa: E402
-from agent_session_loop import run_flags as _run_flags  # noqa: E402
-from agent_session_loop import runner as _runner  # noqa: E402
-from agent_session_loop import state as _state  # noqa: E402
-from agent_session_loop import tail as _tail  # noqa: E402
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    assurance_report as _assurance_report,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    events as _events,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    harnesses as _harnesses,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    mailbox as _mailbox,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    pause_policy as _pause_policy,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    review as _review,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    review_continuation as _review_continuation,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    run_flags as _run_flags,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    runner as _runner,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    state as _state,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    tail as _tail,
+)
 
 HELPER_NAME = "asl-autopilot"
 HELPER_DESCRIPTION = (
@@ -284,7 +307,7 @@ class _ParseError(Exception):
 class _RunArgumentParser(argparse.ArgumentParser):
     """`asl run` flag mirror that raises instead of calling ``sys.exit``."""
 
-    def error(self, message: str) -> "None":  # type: ignore[override]
+    def error(self, message: str) -> None:  # type: ignore[override]
         raise _ParseError(message)
 
 
@@ -335,7 +358,9 @@ _CHILD_RUN_ARG_SKIP_DESTS = frozenset(
 )
 
 
-def _append_child_run_flag(argv: list[str], flag: _run_flags.RunFlag, value: Any) -> None:
+def _append_child_run_flag(
+    argv: list[str], flag: _run_flags.RunFlag, value: Any
+) -> None:
     """Serialize one parsed run flag back into child argv.
 
     The helper keeps the child command in shared-spec order, so adding an
@@ -366,8 +391,8 @@ def _build_child_run_args(
     namespace: argparse.Namespace,
     *,
     plan_dir: str,
-    cwd: Optional[str],
-    state_dir: Optional[str],
+    cwd: str | None,
+    state_dir: str | None,
 ) -> list[str]:
     """Reconstruct the supervised ``asl run`` argv from the declarative spec."""
     argv = ["run", plan_dir]
@@ -609,9 +634,7 @@ def _read_review_verdict(parsed: dict) -> dict:
     verdict = _review.load_review_verdict(parsed["plan_dir"])
     if verdict.get("ok"):
         try:
-            with open(
-                verdict["review_output_path"], encoding="utf-8"
-            ) as handle:
+            with open(verdict["review_output_path"], encoding="utf-8") as handle:
                 text = handle.read()
         except OSError:
             text = ""
@@ -637,7 +660,7 @@ def _child_env(parsed: dict) -> dict:
     return env
 
 
-def _canonical_path(path: Optional[str]) -> Optional[str]:
+def _canonical_path(path: str | None) -> str | None:
     """Best-effort real-path canonicalization for lock/plan-dir comparison."""
     if path is None:
         return None
@@ -778,7 +801,7 @@ class _SupervisionEndEmitter:
         *,
         outcome: str,
         text: str,
-        result: Optional[dict] = None,
+        result: dict | None = None,
     ) -> bool:
         if self._emitted:
             return False
@@ -855,7 +878,7 @@ class _MailboxWatcher:
         clock=time.monotonic,
         read_mailbox=_mailbox.read_mailbox,
         write_lease=_mailbox.write_lease,
-        supervisor_id: Optional[str] = None,
+        supervisor_id: str | None = None,
         poll_interval: float = MAILBOX_POLL_INTERVAL,
         lease_interval: float = MAILBOX_LEASE_RENEW_INTERVAL,
         include_unanswered_backlog: bool = False,
@@ -874,15 +897,15 @@ class _MailboxWatcher:
         self._poll_interval = poll_interval
         self._lease_interval = lease_interval
         self._include_unanswered_backlog = include_unanswered_backlog
-        self._next_poll_at: Optional[float] = None
-        self._next_lease_at: Optional[float] = None
+        self._next_poll_at: float | None = None
+        self._next_lease_at: float | None = None
         self._questions: list[dict[str, Any]] = []
         self._notices: list[dict[str, Any]] = []
         self._observed_question_ids: set[str] = set()
         self._observed_notice_ids: set[str] = set()
         self._pending_questions: tuple[_mailbox.MailboxMessage, ...] = ()
         self._projection_seq = since
-        self.run_id: Optional[str] = None
+        self.run_id: str | None = None
         self._requires_lock_correlation = False
         self._progress_records: list[str] = []
         self._lease_degraded = False
@@ -901,9 +924,9 @@ class _MailboxWatcher:
 
     def set_run_id(
         self,
-        run_id: Optional[str],
+        run_id: str | None,
         *,
-        now: Optional[float] = None,
+        now: float | None = None,
     ) -> bool:
         """Bind the lease projection to one authoritative runner identity."""
         if not isinstance(run_id, str) or not run_id:
@@ -926,7 +949,7 @@ class _MailboxWatcher:
         self,
         status: object,
         *,
-        now: Optional[float] = None,
+        now: float | None = None,
     ) -> bool:
         """Adopt a run id only when status attributes state to the live lock."""
         if not isinstance(status, dict):
@@ -940,10 +963,9 @@ class _MailboxWatcher:
             or not _state_written_after_lock(status, lock_created_at)
         ):
             return False
-        if (
-            _parse_timestamp(lock_created_at) is not None
-            and not _state_written_after_lock(status, lock_created_at)
-        ):
+        if _parse_timestamp(
+            lock_created_at
+        ) is not None and not _state_written_after_lock(status, lock_created_at):
             return False
         return self.set_run_id(run_id, now=now)
 
@@ -952,7 +974,7 @@ class _MailboxWatcher:
         cls,
         status: object,
         **kwargs,
-    ) -> Optional["_MailboxWatcher"]:
+    ) -> _MailboxWatcher | None:
         """Resolve a watcher from canonical paths advertised by status."""
         if not isinstance(status, dict) or not status.get("ok"):
             return None
@@ -1014,7 +1036,7 @@ class _MailboxWatcher:
             **kwargs,
         )
 
-    def establish(self, *, now: Optional[float] = None) -> bool:
+    def establish(self, *, now: float | None = None) -> bool:
         """Arm observation and attempt the initial lease before launch.
 
         A transient write failure follows the periodic-renewal path: the
@@ -1035,7 +1057,7 @@ class _MailboxWatcher:
     def prepare_for_launch(
         self,
         *,
-        now: Optional[float] = None,
+        now: float | None = None,
         renew_lease: bool = True,
     ) -> bool:
         """Unbind stale run evidence immediately before a self-launched child.
@@ -1076,9 +1098,7 @@ class _MailboxWatcher:
                 projection.update(
                     {
                         "latest_unanswered_question_id": latest.id,
-                        "latest_unanswered_question_created_at": (
-                            latest.created_at
-                        ),
+                        "latest_unanswered_question_created_at": (latest.created_at),
                     }
                 )
         try:
@@ -1088,7 +1108,7 @@ class _MailboxWatcher:
                 state_dir=self.state_root,
                 **projection,
             )
-        except (OSError, _mailbox.MailboxError):
+        except OSError, _mailbox.MailboxError:
             self._lease_renewal_failures += 1
             if not self._lease_degraded:
                 self._progress_records.append(
@@ -1105,7 +1125,7 @@ class _MailboxWatcher:
         self._next_lease_at = resolved_now + self._lease_interval
         return True
 
-    def next_deadline(self) -> Optional[float]:
+    def next_deadline(self) -> float | None:
         """Return the next mailbox/lease wake deadline, if observation is live."""
         if (
             not self.enabled
@@ -1130,7 +1150,7 @@ class _MailboxWatcher:
     def poll(
         self,
         *,
-        now: Optional[float] = None,
+        now: float | None = None,
         force_read: bool = False,
     ) -> tuple[_mailbox.MailboxMessage, ...]:
         """Renew when due and return each newly observed question once.
@@ -1159,7 +1179,7 @@ class _MailboxWatcher:
                     self.plan_dir,
                     state_dir=self.state_root,
                 )
-            except (OSError, _mailbox.MailboxError):
+            except OSError, _mailbox.MailboxError:
                 pass
             else:
                 read_succeeded = True
@@ -1185,16 +1205,13 @@ class _MailboxWatcher:
                     message
                     for message in view.messages
                     if message.seq > prior_seq
-                    and message.kind
-                    in (_mailbox.KIND_WAIT_END, _mailbox.KIND_RECEIPT)
+                    and message.kind in (_mailbox.KIND_WAIT_END, _mailbox.KIND_RECEIPT)
                 )
                 self.last_seq = max(self.last_seq, view.last_seq)
                 self._observed_question_ids.update(
                     question.id for question in questions
                 )
-                self._observed_notice_ids.update(
-                    notice.id for notice in notices
-                )
+                self._observed_notice_ids.update(notice.id for notice in notices)
                 pending_questions = tuple(
                     question
                     for question in self._open_questions(view)
@@ -1203,24 +1220,16 @@ class _MailboxWatcher:
                 previous_pending_ids = {
                     question.id for question in self._pending_questions
                 }
-                pending_ids = {
-                    question.id for question in pending_questions
-                }
+                pending_ids = {question.id for question in pending_questions}
                 if pending_ids != previous_pending_ids:
                     # The reducer generation advances only when the projected
                     # pending set changes. Guidance, acknowledgements, rejected
                     # lines, and unchanged polls must not reassert a question
                     # the user explicitly cleared.
-                    self._projection_seq = max(
-                        self._projection_seq, view.last_seq
-                    )
+                    self._projection_seq = max(self._projection_seq, view.last_seq)
                 self._pending_questions = pending_questions
-                self._questions.extend(
-                    question.to_payload() for question in questions
-                )
-                self._notices.extend(
-                    notice.to_payload() for notice in notices
-                )
+                self._questions.extend(question.to_payload() for question in questions)
+                self._notices.extend(notice.to_payload() for notice in notices)
                 self._progress_records.extend(
                     _notice_progress_record(notice) for notice in notices
                 )
@@ -1321,9 +1330,7 @@ def _invoke_status(parsed: dict, *, runner=subprocess.run) -> dict:
         return _status_error(f"could not run `asl status`: {exc}")
     if completed.returncode != 0:
         detail = (completed.stderr or "").strip()[:400]
-        return _status_error(
-            f"`asl status` exited {completed.returncode}: {detail}"
-        )
+        return _status_error(f"`asl status` exited {completed.returncode}: {detail}")
     text = (completed.stdout or "").strip()
     if not text:
         return _status_error("`asl status --json` produced no output")
@@ -1371,8 +1378,7 @@ def _status_snapshot(status: object) -> dict:
         common["workspace_root"] = workspace["workspace_root"]
         common["registry_digest"] = workspace.get("registry_digest")
         common["repository_aliases"] = [
-            repository["alias"]
-            for repository in workspace["repositories"][:20]
+            repository["alias"] for repository in workspace["repositories"][:20]
         ]
         common["repository_count"] = len(workspace["repositories"])
     if (
@@ -1389,8 +1395,8 @@ def _status_snapshot(status: object) -> dict:
             **common,
         }
 
-    waiting_for_reply = (
-        runner_state.get("waiting_for_reply") or status.get("waiting_for_reply")
+    waiting_for_reply = runner_state.get("waiting_for_reply") or status.get(
+        "waiting_for_reply"
     )
     if isinstance(waiting_for_reply, dict) and waiting_for_reply:
         waiting_status = runner_state.get("waiting_for_reply_status")
@@ -1410,9 +1416,7 @@ def _status_snapshot(status: object) -> dict:
             "unsupervised_ceiling_seconds": waiting_for_reply.get(
                 "unsupervised_ceiling_seconds"
             ),
-            "last_lease_activity_at": waiting_for_reply.get(
-                "last_lease_activity_at"
-            ),
+            "last_lease_activity_at": waiting_for_reply.get("last_lease_activity_at"),
             **common,
         }
         if isinstance(waiting_status, str) and waiting_status:
@@ -1452,7 +1456,7 @@ def _status_snapshot(status: object) -> dict:
     return {"state": "unknown", **common}
 
 
-def _events_path_from_status(status: object) -> Optional[str]:
+def _events_path_from_status(status: object) -> str | None:
     """Return the ``events_path`` an ``asl status`` payload advertises, if any.
 
     ``asl status --json`` includes the plan's ``events.jsonl`` path at the top
@@ -1629,15 +1633,11 @@ class _EventsTailer:
                     "turn_index": payload.get("turn_index"),
                     "base_deadline": payload.get("base_deadline"),
                     "hard_deadline": payload.get("hard_deadline"),
-                    "unsupervised_deadline_at": payload.get(
-                        "unsupervised_deadline_at"
-                    ),
+                    "unsupervised_deadline_at": payload.get("unsupervised_deadline_at"),
                     "unsupervised_ceiling_seconds": payload.get(
                         "unsupervised_ceiling_seconds"
                     ),
-                    "last_lease_activity_at": payload.get(
-                        "last_lease_activity_at"
-                    ),
+                    "last_lease_activity_at": payload.get("last_lease_activity_at"),
                 }
             )
         elif (
@@ -1648,16 +1648,14 @@ class _EventsTailer:
             # here prevents the old wait from surviving until that next event.
             update_snapshot({"state": "unknown"})
         elif name == _events.RUN_PAUSED_EVENT:
-            update_snapshot(
-                {"state": "paused", "reason": payload.get("reason")}
-            )
+            update_snapshot({"state": "paused", "reason": payload.get("reason")})
         elif name == "run_finished":
             update_snapshot({"state": "unknown"})
 
 
 def _build_events_tailer(
     status_probe, clock, stall_threshold: float
-) -> Optional[_EventsTailer]:
+) -> _EventsTailer | None:
     """Build an :class:`_EventsTailer` from the first ``asl status`` payload.
 
     Probes ``status_probe`` once to learn the plan's ``events_path``, then opens
@@ -1675,9 +1673,7 @@ def _build_events_tailer(
     if not events_path:
         return None
     try:
-        return _EventsTailer(
-            events_path, clock=clock, stall_threshold=stall_threshold
-        )
+        return _EventsTailer(events_path, clock=clock, stall_threshold=stall_threshold)
     except Exception:
         return None
 
@@ -1687,7 +1683,7 @@ def _heartbeat_detail(
     stall_threshold: float,
     events_stale=None,
     *,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
 ):
     """Distill a snapshot into a ``(is_stall, detail)`` pair for a heartbeat.
 
@@ -1800,18 +1796,14 @@ def _heartbeat_detail(
         )
         ceiling_deadline = _state.waiting_for_reply_ceiling(snapshot)
         if ceiling_deadline is None:
-            return True, with_outbox(
-                f"{detail}: invalid {ceiling_label} (no output)"
-            )
-        current = datetime.now(timezone.utc) if now is None else now
+            return True, with_outbox(f"{detail}: invalid {ceiling_label} (no output)")
+        current = datetime.now(UTC) if now is None else now
         if current.tzinfo is None or current.utcoffset() is None:
-            current = current.replace(tzinfo=timezone.utc)
+            current = current.replace(tzinfo=UTC)
         else:
-            current = current.astimezone(timezone.utc)
+            current = current.astimezone(UTC)
         if current >= ceiling_deadline:
-            return True, with_outbox(
-                f"{detail}: {ceiling_label} elapsed (no output)"
-            )
+            return True, with_outbox(f"{detail}: {ceiling_label} elapsed (no output)")
         # Within the runner's absolute bound, ordinary event silence does not
         # imply a stall because the reply poll intentionally emits no heartbeat.
         return False, with_outbox(detail)
@@ -1825,7 +1817,7 @@ def _format_heartbeat(
     stall_threshold: float,
     events_stale=None,
     *,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
 ) -> str:
     """Render a per-tick heartbeat line from a :func:`_status_snapshot`.
 
@@ -1860,7 +1852,7 @@ def _format_heartbeat(
     return f"chunk {chunk_index}: running {int(elapsed)}s | {detail}"
 
 
-def _snapshot_idle_seconds(snapshot: dict, block: Optional[dict]):
+def _snapshot_idle_seconds(snapshot: dict, block: dict | None):
     """Best-available idle reading: the snapshot's, else the hang block's."""
     idle = snapshot.get("idle_seconds")
     if not isinstance(idle, (int, float)) or isinstance(idle, bool):
@@ -1870,7 +1862,7 @@ def _snapshot_idle_seconds(snapshot: dict, block: Optional[dict]):
     return None
 
 
-def _snapshot_cpu_progressing(snapshot: dict) -> Optional[bool]:
+def _snapshot_cpu_progressing(snapshot: dict) -> bool | None:
     """Whether the runner's last CPU sample saw the process tree progressing.
 
     ``None`` means unknown — no fresh sample, or a malformed block. Only a real
@@ -1935,7 +1927,7 @@ class _HangEscalation:
         self._result_probes = 0
         self._result_episode: object = None
 
-    def observe(self, snapshot: object) -> Optional[dict]:
+    def observe(self, snapshot: object) -> dict | None:
         """Fold one tick's snapshot; return the escalation verdict or None."""
         if not isinstance(snapshot, dict):
             snapshot = {}
@@ -1983,8 +1975,8 @@ def _hang_payload(
     parsed: dict,
     status: object,
     *,
-    supervised_child_pid: Optional[int] = None,
-    detached: Optional[bool] = None,
+    supervised_child_pid: int | None = None,
+    detached: bool | None = None,
 ) -> dict:
     """Build the structured ``hang`` block of a ``worker_hung`` result.
 
@@ -2032,14 +2024,14 @@ def _invoke_run(
     parsed: dict,
     *,
     chunk_index: int,
-    reply_text: Optional[str] = None,
+    reply_text: str | None = None,
     clock=time.monotonic,
     heartbeat=_emit_heartbeat,
     heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
     popen=subprocess.Popen,
     status_probe=None,
     events_tailer=None,
-    mailbox_watcher: Optional[_MailboxWatcher] = None,
+    mailbox_watcher: _MailboxWatcher | None = None,
     stall_threshold: float = DEFAULT_STALL_IDLE_THRESHOLD,
     hang_escalation_probes: int = DEFAULT_HANG_ESCALATION_PROBES,
     hang_idle_ceiling: float = DEFAULT_HANG_IDLE_CEILING,
@@ -2112,6 +2104,7 @@ def _invoke_run(
 
     observed_status_probe = status_probe
     if status_probe is not None and mailbox_watcher is not None:
+
         def observed_status_probe():
             status = status_probe()
             mailbox_watcher.observe_status(status, now=clock())
@@ -2125,18 +2118,14 @@ def _invoke_run(
             or observed_status_probe is None
         ):
             return
-        try:
+        with contextlib.suppress(Exception):
             observed_status_probe()
-        except Exception:
-            pass
 
     # Prefer the event-driven tailer (opened from the first `asl status`
     # payload's events_path); keep `status_probe` as the per-tick fallback seam.
     tailer = events_tailer
     if tailer is None:
-        tailer = _build_events_tailer(
-            observed_status_probe, clock, stall_threshold
-        )
+        tailer = _build_events_tailer(observed_status_probe, clock, stall_threshold)
 
     hang_escalation = _HangEscalation(
         probes=hang_escalation_probes, idle_ceiling=hang_idle_ceiling
@@ -2181,11 +2170,11 @@ def _invoke_run(
     # `input` is delivered on the first communicate(); after a heartbeat
     # timeout it has already been written, so subsequent calls pass None to
     # avoid re-sending the reply.
-    pending_input: Optional[str] = reply_text
+    pending_input: str | None = reply_text
     while True:
         now = clock()
         deadlines = [heartbeat_deadline]
-        mailbox_deadline: Optional[float] = None
+        mailbox_deadline: float | None = None
         if mailbox_watcher is not None:
             mailbox_deadline = mailbox_watcher.next_deadline()
             if mailbox_deadline is not None:
@@ -2202,10 +2191,7 @@ def _invoke_run(
             pending_input = None
             now = clock()
             if mailbox_watcher is not None:
-                if (
-                    mailbox_deadline is not None
-                    and now >= mailbox_deadline
-                ):
+                if mailbox_deadline is not None and now >= mailbox_deadline:
                     refresh_unbound_mailbox_run()
                 _poll_mailbox_watcher(
                     mailbox_watcher,
@@ -2216,7 +2202,7 @@ def _invoke_run(
                 continue
 
             elapsed = now - start
-            message: Optional[str] = None
+            message: str | None = None
             tick_snapshot: dict = {}
             if tailer is not None:
                 try:
@@ -2301,8 +2287,7 @@ def _invoke_run(
             "paused": False,
             "reason": "run-error",
             "error": (
-                f"`asl run` did not emit JSON (exit {proc.returncode}): "
-                f"{stderr[:400]}"
+                f"`asl run` did not emit JSON (exit {proc.returncode}): {stderr[:400]}"
             ),
             "_invoke_error": True,
             "returncode": proc.returncode,
@@ -2367,7 +2352,7 @@ def _invoke_questions(parsed: dict, *, runner=subprocess.run) -> dict:
     }
 
 
-def _current_session_id(status: dict) -> Optional[str]:
+def _current_session_id(status: dict) -> str | None:
     """Session the retry budget keys off: the plan's next pending session."""
     value = status.get("next_pending_id")
     return str(value) if value is not None else None
@@ -2403,7 +2388,7 @@ def _argv_with_max_sessions(argv: Sequence[str], value: int) -> list:
     return out
 
 
-def _status_workspace(status: object) -> Optional[dict]:
+def _status_workspace(status: object) -> dict | None:
     """Return a complete ordered workspace projection from authoritative status."""
     if not isinstance(status, dict) or not status.get("ok"):
         return None
@@ -2430,7 +2415,7 @@ def _status_workspace(status: object) -> Optional[dict]:
     return None
 
 
-def _workspace_launch_error(parsed: dict, status: dict) -> Optional[str]:
+def _workspace_launch_error(parsed: dict, status: dict) -> str | None:
     workspace = _status_workspace(status)
     requested = parsed.get("cwd")
     if workspace is None or not requested:
@@ -2471,7 +2456,7 @@ def _parsed_with_status_workspace(parsed: dict, status: dict) -> dict:
     }
 
 
-def _review_resume_payload(payload: Optional[dict]) -> Optional[dict]:
+def _review_resume_payload(payload: dict | None) -> dict | None:
     """Return a payload's additive ``review_resume`` projection, if present."""
     if not isinstance(payload, dict):
         return None
@@ -2479,7 +2464,7 @@ def _review_resume_payload(payload: Optional[dict]) -> Optional[dict]:
     return review_resume if isinstance(review_resume, dict) else None
 
 
-def _assurance_payload(payload: Optional[dict]) -> Optional[dict]:
+def _assurance_payload(payload: dict | None) -> dict | None:
     """Return a bounded, display-only projection of a payload's assurance object.
 
     Built through ``agent_session_loop.assurance_report`` so the supervision
@@ -2500,7 +2485,7 @@ def _assurance_payload(payload: Optional[dict]) -> Optional[dict]:
     return bounded or None
 
 
-def _resume_run_config(parsed: dict, status: dict) -> Optional[dict]:
+def _resume_run_config(parsed: dict, status: dict) -> dict | None:
     """Load the persisted ``run_config`` for a ``--resume`` supervised command.
 
     A ``--resume`` command reruns the plan against the flags its last run
@@ -2520,7 +2505,7 @@ def _resume_run_config(parsed: dict, status: dict) -> Optional[dict]:
     try:
         with open(state_path, encoding="utf-8") as handle:
             payload = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):
         return None
@@ -2528,9 +2513,7 @@ def _resume_run_config(parsed: dict, status: dict) -> Optional[dict]:
     return run_config if isinstance(run_config, dict) else None
 
 
-def _effective_review_config(
-    parsed: dict, status: dict
-) -> tuple[Optional[str], object]:
+def _effective_review_config(parsed: dict, status: dict) -> tuple[str | None, object]:
     """Return the ``(review_harness, max_review_fix_cycles)`` governing a launch.
 
     For a normal command these come straight from the parsed command. A
@@ -2608,7 +2591,7 @@ def _should_launch_for_status(parsed: dict, status: dict, pending: int) -> bool:
     return review_resume.get("blocker") == "higher-cap-required"
 
 
-def _expected_turn_harness(parsed: dict, active_turn: dict) -> Optional[str]:
+def _expected_turn_harness(parsed: dict, active_turn: dict) -> str | None:
     """Which requested harness should be driving ``active_turn``, if knowable.
 
     A dual-harness run alternates between `--harness` (implementation) and
@@ -2675,20 +2658,20 @@ def _runner_state(status: dict) -> dict:
     return runner_state if isinstance(runner_state, dict) else {}
 
 
-def _runner_run_id(status: dict) -> Optional[str]:
+def _runner_run_id(status: dict) -> str | None:
     """Identity of the run that wrote the plan's persisted ``state.json``."""
     run_id = _runner_state(status).get("run_id")
     return run_id if isinstance(run_id, str) and run_id else None
 
 
-def _lock_created_at(status: dict) -> Optional[str]:
+def _lock_created_at(status: dict) -> str | None:
     """Creation timestamp of the plan lock reported by ``asl status``."""
     lock = status.get("lock") if isinstance(status, dict) else None
     created_at = lock.get("created_at") if isinstance(lock, dict) else None
     return created_at if isinstance(created_at, str) and created_at else None
 
 
-def _parse_timestamp(value: Any) -> Optional[datetime]:
+def _parse_timestamp(value: Any) -> datetime | None:
     """Parse an ISO-8601 stamp from a status payload, normalized to UTC."""
     if not isinstance(value, str) or not value:
         return None
@@ -2697,11 +2680,11 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
-def _state_written_after_lock(status: dict, lock_created_at: Optional[str]) -> bool:
+def _state_written_after_lock(status: dict, lock_created_at: str | None) -> bool:
     """Positive evidence the persisted state belongs to the lock's holder.
 
     A runner takes the plan lock before it persists any state, and locks are
@@ -2720,8 +2703,8 @@ def _state_written_after_lock(status: dict, lock_created_at: Optional[str]) -> b
 
 def _attached_run_wrote_state(
     status: dict,
-    attached_run_id: Optional[str],
-    attached_lock_created_at: Optional[str],
+    attached_run_id: str | None,
+    attached_lock_created_at: str | None,
 ) -> bool:
     """Was the persisted ``state.json`` written by the run we attached to?
 
@@ -2741,8 +2724,8 @@ def _attached_run_wrote_state(
 
 def _attached_stop_honored(
     status: dict,
-    attached_run_id: Optional[str],
-    attached_lock_created_at: Optional[str],
+    attached_run_id: str | None,
+    attached_lock_created_at: str | None,
 ) -> bool:
     """Did the attached run exit by honoring an out-of-band control request?
 
@@ -2778,7 +2761,7 @@ def _attached_stop_honored(
     )
 
 
-def _stop_kind(payload: Optional[dict]) -> str:
+def _stop_kind(payload: dict | None) -> str:
     """Classify a clean ``stopped`` outcome from the payload's control block.
 
     Both control requests exit the run `ok` with `reason: "stopped"`, so the
@@ -2807,17 +2790,17 @@ def _run_result(
     ok: bool,
     reason: str,
     *,
-    status: Optional[dict] = None,
-    run: Optional[dict] = None,
+    status: dict | None = None,
+    run: dict | None = None,
     chunks: int = 0,
-    error: Optional[str] = None,
-    retries: Optional[dict] = None,
-    completed: Optional[int] = None,
-    pending: Optional[int] = None,
-    outbox: Optional[dict] = None,
-    hang: Optional[dict] = None,
-    quota_wait: Optional[dict] = None,
-    stop_kind: Optional[str] = None,
+    error: str | None = None,
+    retries: dict | None = None,
+    completed: int | None = None,
+    pending: int | None = None,
+    outbox: dict | None = None,
+    hang: dict | None = None,
+    quota_wait: dict | None = None,
+    stop_kind: str | None = None,
 ) -> dict:
     """Build a stable ``stage: run`` supervision result payload."""
     result: dict = {"ok": ok, "stage": RUN_STAGE, "reason": reason, "chunks": chunks}
@@ -2867,7 +2850,7 @@ def _transport_retry_delay(attempt: int) -> float:
     return schedule[min(attempt, len(schedule)) - 1]
 
 
-def _pause_classification(run_payload: dict) -> Optional[dict]:
+def _pause_classification(run_payload: dict) -> dict | None:
     """Extract the runner's ``failure_classification`` from a paused payload.
 
     Session 5's classifier embeds a bounded, serializable
@@ -2931,9 +2914,7 @@ def _verification_repair_exhausted(run_payload: dict) -> bool:
 # relative `N hours` / `N minutes`, or a wall-clock time of day with an optional
 # `(Area/City)` zone. A bare digit string (`Retry-After`) is handled directly.
 _QUOTA_RESET_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
-_QUOTA_RESET_DURATION_RE = re.compile(
-    r"^(\d+)\s*(hours?|minutes?)$", re.IGNORECASE
-)
+_QUOTA_RESET_DURATION_RE = re.compile(r"^(\d+)\s*(hours?|minutes?)$", re.IGNORECASE)
 _QUOTA_RESET_CLOCK_RE = re.compile(
     r"^(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?"
     r"(?:\s*\(([A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+)\))?$",
@@ -2949,10 +2930,10 @@ def _utc_now() -> datetime:
     the monotonic clock does not advance while the machine is suspended, so
     only wall clock makes a suspend visible to the wait below.
     """
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-def _shift_datetime(base: datetime, seconds: float) -> Optional[datetime]:
+def _shift_datetime(base: datetime, seconds: float) -> datetime | None:
     """``base`` plus ``seconds``, or ``None`` when that lands off the calendar.
 
     A reset hint is bounded to 60 characters but not in magnitude, so a
@@ -2967,9 +2948,7 @@ def _shift_datetime(base: datetime, seconds: float) -> Optional[datetime]:
         return None
 
 
-def _parse_quota_reset_at(
-    retry_at: object, *, now: datetime
-) -> Optional[datetime]:
+def _parse_quota_reset_at(retry_at: object, *, now: datetime) -> datetime | None:
     """Resolve a runner ``retry_at`` hint to the absolute instant quota resets.
 
     ``retry_at`` is the advisory free text ``runner._parse_retry_at`` extracted
@@ -3005,13 +2984,13 @@ def _parse_quota_reset_at(
             # that can leave the calendar (the last day of year 9999 does, in
             # every zone), and the platform's `localtime` may fail with OSError.
             return parsed.astimezone() if parsed.tzinfo is None else parsed
-        except (ValueError, OverflowError, OSError):
+        except ValueError, OverflowError, OSError:
             return None
 
     return _parse_quota_reset_clock(value, now=now)
 
 
-def _parse_quota_reset_clock(value: str, *, now: datetime) -> Optional[datetime]:
+def _parse_quota_reset_clock(value: str, *, now: datetime) -> datetime | None:
     """Resolve a ``10:30pm (America/New_York)`` style hint to the next such instant."""
     match = _QUOTA_RESET_CLOCK_RE.match(value)
     if match is None:
@@ -3031,7 +3010,7 @@ def _parse_quota_reset_clock(value: str, *, now: datetime) -> Optional[datetime]
     if zone_name:
         try:
             local_now = now.astimezone(ZoneInfo(zone_name))
-        except (KeyError, ValueError, OSError):
+        except KeyError, ValueError, OSError:
             return None
     else:
         local_now = now.astimezone()
@@ -3045,13 +3024,13 @@ def _quota_wait_decision(
     *,
     enabled: bool,
     pause_reason: str,
-    classification: Optional[dict],
+    classification: dict | None,
     resumes: int,
     max_resumes: int,
     now: datetime,
     buffer_seconds: float,
     ceiling_seconds: float,
-) -> tuple[Optional[datetime], Optional[dict]]:
+) -> tuple[datetime | None, dict | None]:
     """Decide whether a ``requires_user`` pause may be slept through.
 
     Returns ``(deadline, block)``. ``deadline`` is the absolute instant to wait
@@ -3137,7 +3116,7 @@ def _wait_for_quota_reset(
         slept += duration
 
 
-def _events_size(path: Optional[str]) -> Optional[int]:
+def _events_size(path: str | None) -> int | None:
     """Current byte size of an ``events.jsonl``, or ``None`` when unreadable."""
     if not path:
         return None
@@ -3155,7 +3134,7 @@ def _attach_events_wait(
     clock,
     sleep,
     events_stat,
-    mailbox_watcher: Optional[_MailboxWatcher] = None,
+    mailbox_watcher: _MailboxWatcher | None = None,
     heartbeat=_emit_heartbeat,
 ) -> None:
     """Wait between attach-mode full ``asl status`` probes, watching events.jsonl.
@@ -3169,6 +3148,7 @@ def _attach_events_wait(
     it degrades to a single bounded sleep so callers without a live event stream
     keep the legacy full-probe-every-poll cadence.
     """
+
     def poll_mailbox(now: float) -> None:
         if mailbox_watcher is None:
             return
@@ -3208,7 +3188,7 @@ def supervise_run(
     *,
     status_invoker=_invoke_status,
     run_invoker=None,
-    reply_text: Optional[str] = None,
+    reply_text: str | None = None,
     clock=time.monotonic,
     sleep=time.sleep,
     heartbeat=_emit_heartbeat,
@@ -3318,15 +3298,15 @@ def supervise_run(
     marker and the attach path's own :class:`_HangEscalation` tracker both map
     to ``run_result(False, "worker_hung", hang=...)`` — the ``asl run`` child is
     never killed or waited on, so re-running the same command re-attaches. A
-    bounded ``waiting_for_reply`` state suppresses
-    event-silence warnings only until its unsupervised ceiling; an overdue or
-    malformed deadline is reported as possibly stalled. Between attach heartbeats the loop
-    only ``os.stat``s ``events.jsonl`` (via the ``events_stat`` seam) and services
-    watcher deadlines rather than re-running ``asl status`` every poll; a fresh
+    bounded ``waiting_for_reply`` state suppresses event-silence warnings only
+    until its unsupervised ceiling; an overdue or malformed deadline is reported
+    as possibly stalled. Between attach heartbeats the loop only ``os.stat``s
+    ``events.jsonl`` (via the ``events_stat`` seam) and services watcher
+    deadlines rather than re-running ``asl status`` every poll; a fresh
     full probe — which keeps lock/pending classification authoritative — runs
     once the heartbeat interval elapses or the events file grows.
     """
-    mailbox_watcher: Optional[_MailboxWatcher] = None
+    mailbox_watcher: _MailboxWatcher | None = None
 
     def run_result(*args, **kwargs) -> dict:
         if mailbox_watcher is not None:
@@ -3355,8 +3335,8 @@ def supervise_run(
             )
 
     chunks = 0
-    attach_start: Optional[float] = None
-    last_attach_beat: Optional[float] = None
+    attach_start: float | None = None
+    last_attach_beat: float | None = None
     retry_counts: dict = {}
     retry_delays: dict = {}
     # `--max-sessions` is a global budget: `budget` is the requested cap (or
@@ -3366,9 +3346,9 @@ def supervise_run(
     # and `launched_pending` records the pending count at the last launch so the
     # next iteration can attribute the delta. Once `completed_total` reaches the
     # budget with impl sessions still pending, the run stops cleanly.
-    budget: Optional[int] = parsed.get("max_sessions")
+    budget: int | None = parsed.get("max_sessions")
     completed_total = 0
-    launched_pending: Optional[int] = None
+    launched_pending: int | None = None
     # Set when the run that last held this plan stopped cleanly with
     # `reason: "stopped"`, i.e. an out-of-band `asl control stop-after-current`
     # or `asl control abort` was honored — either a chunk we launched (from its
@@ -3377,7 +3357,7 @@ def supervise_run(
     # below stops instead of relaunching; `stop_kind` carries which of the two
     # requests it was into the result.
     stop_requested = False
-    stop_kind: Optional[str] = None
+    stop_kind: str | None = None
     # Identity and pending baseline of the run currently being attached to (a
     # foreign `asl run` driving this plan). `attached_pending` doubles as the
     # "we are attached" flag: it is the pending count at the first attach poll,
@@ -3385,9 +3365,9 @@ def supervise_run(
     # releases the lock, while `attached_run_id` (when the holder got far enough
     # to persist it) and `attached_lock_created_at` let us read that specific
     # run's terminal reason out of the persisted `runner_state`.
-    attached_run_id: Optional[str] = None
-    attached_lock_created_at: Optional[str] = None
-    attached_pending: Optional[int] = None
+    attached_run_id: str | None = None
+    attached_lock_created_at: str | None = None
+    attached_pending: int | None = None
     # Quota resets slept through so far under `wait_quota_reset`. Bounds a
     # provider that keeps rejecting immediately after each reset: every such
     # attempt spends one resume, so the loop converges to `user_required`.
@@ -3408,8 +3388,11 @@ def supervise_run(
                 else "status probe returned no payload"
             )
             return run_result(
-                False, "status-error", status=status if isinstance(status, dict) else None,
-                chunks=chunks, error=error,
+                False,
+                "status-error",
+                status=status if isinstance(status, dict) else None,
+                chunks=chunks,
+                error=error,
             )
 
         events_path = status.get("events_path")
@@ -3510,9 +3493,7 @@ def supervise_run(
                     hang=_hang_payload(escalation, parsed, status),
                 )
             if last_attach_beat is None or now - last_attach_beat >= heartbeat_interval:
-                context = (
-                    f"(pending {pending}, elapsed {int(now - attach_start)}s)"
-                )
+                context = f"(pending {pending}, elapsed {int(now - attach_start)}s)"
                 is_stall, detail = _heartbeat_detail(
                     _status_snapshot(status), stall_threshold
                 )
@@ -3564,7 +3545,9 @@ def supervise_run(
         # never launch a chunk that would silently undo the operator's request.
         if attached_pending is not None:
             completed_total += max(0, attached_pending - pending)
-            if _attached_stop_honored(status, attached_run_id, attached_lock_created_at):
+            if _attached_stop_honored(
+                status, attached_run_id, attached_lock_created_at
+            ):
                 stop_requested = True
                 stop_kind = _stop_kind(_runner_state(status))
             attached_pending = None
@@ -3681,9 +3664,7 @@ def supervise_run(
             )
         if run_payload.get("paused"):
             pause_reason = (
-                run_payload.get("pause_reason")
-                or run_payload.get("reason")
-                or "paused"
+                run_payload.get("pause_reason") or run_payload.get("reason") or "paused"
             )
             session_id = _current_session_id(status)
             retry_key = (session_id, pause_reason)
@@ -3786,7 +3767,8 @@ def supervise_run(
                 status=status,
                 chunks=chunks,
                 run=run_payload,
-                error=run_payload.get("pause_message") or run_payload.get("pause_reason"),
+                error=run_payload.get("pause_message")
+                or run_payload.get("pause_reason"),
                 retries={
                     "session": session_id,
                     "reason": pause_reason,
@@ -3803,10 +3785,7 @@ def supervise_run(
                 status=status,
                 chunks=chunks,
                 run=run_payload,
-                error=(
-                    "run stopped without completing: "
-                    f"{run_payload.get('reason')}"
-                ),
+                error=(f"run stopped without completing: {run_payload.get('reason')}"),
             )
         # Clean stop; loop re-polls. Pending 0 -> complete/review continuation;
         # a spent `--max-sessions` budget -> clean `max-sessions` stop; a runner
@@ -3845,12 +3824,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--command",
         required=True,
-        help="Exact `asl run ...` command to supervise (env assignments and quoted args allowed).",
+        help="Exact `asl run ...` command to supervise (env assignments and quoted "
+        "args allowed).",
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit machine-readable JSON on stdout (stderr stays reserved for progress).",
+        help="Emit machine-readable JSON on stdout (stderr stays reserved for "
+        "progress).",
     )
     parser.add_argument(
         "--reply-stdin",
@@ -3879,9 +3860,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _attach_question_context(
-    result: dict, parsed: dict, questioner
-) -> dict:
+def _attach_question_context(result: dict, parsed: dict, questioner) -> dict:
     """Turn a ``paused`` supervision result into ``needs_agent_reply``.
 
     Fetches the paused-run question context via ``asl questions --json`` and,
@@ -3985,7 +3964,7 @@ def run_autopilot(
     if not parsed.get("ok"):
         return parsed
 
-    reply_text: Optional[str] = None
+    reply_text: str | None = None
     if getattr(args, "reply_stdin", False):
         source = sys.stdin if stdin is None else stdin
         reply_text = source.read() if source is not None else ""
@@ -4020,15 +3999,13 @@ def run_autopilot(
         # ``run_config``) still surfaces a findings verdict instead of returning a
         # bare ``complete``. This mirrors how ``_should_launch_for_status`` gates
         # the continuation launch decision on the same effective config.
-        review_harness, _ = _effective_review_config(
-            parsed, result.get("status") or {}
-        )
+        review_harness, _ = _effective_review_config(parsed, result.get("status") or {})
         if review_harness:
             _attach_review_context(result, parsed, review_reader)
     return result
 
 
-def _review_resume_guidance(result: dict) -> Optional[str]:
+def _review_resume_guidance(result: dict) -> str | None:
     """Return concise operator guidance from a surfaced review projection.
 
     Thin wrapper over :func:`review_continuation.review_resume_guidance`, the
@@ -4052,7 +4029,7 @@ def _review_resume_guidance(result: dict) -> Optional[str]:
     )
 
 
-def _hung_leaf_command(hang: dict) -> Optional[str]:
+def _hung_leaf_command(hang: dict) -> str | None:
     """Command string of the deepest descendant in the sampled process tree.
 
     ``process_tree`` is BFS-ordered (parents before children), so the last
@@ -4073,7 +4050,7 @@ def _hung_leaf_command(hang: dict) -> Optional[str]:
     return None
 
 
-def _assurance_guidance(result: dict) -> Optional[str]:
+def _assurance_guidance(result: dict) -> str | None:
     """Name what the supervisor audit found, or ``None`` when it found nothing.
 
     Silent on ``all-clear``, ``skipped``, and ``pending``: a one-line summary
@@ -4086,9 +4063,9 @@ def _assurance_guidance(result: dict) -> Optional[str]:
     listed = ", ".join(str(item) for item in assurance["issue_ids"])
     if assurance.get("issue_ids_truncated"):
         listed = f"{listed}, …"
-    qualifier = " (partial: the audit could not complete)" if assurance.get(
-        "partial"
-    ) else ""
+    qualifier = (
+        " (partial: the audit could not complete)" if assurance.get("partial") else ""
+    )
     return (
         f"supervisor audit found {assurance.get('issue_count', 0)} issue(s)"
         f"{qualifier}: {listed}; run `{assurance.get('list_command')}`"
@@ -4166,10 +4143,7 @@ def _run_human_summary(result: dict) -> str:
             guidance = _review_resume_guidance(result)
     detail = result.get("error") or result.get("detail")
     verdict = "ok" if result.get("ok") else "stopped"
-    if detail:
-        summary = f"{verdict}: {reason} - {detail}"
-    else:
-        summary = f"{verdict}: {reason}"
+    summary = f"{verdict}: {reason} - {detail}" if detail else f"{verdict}: {reason}"
     return f"{summary}; {guidance}" if guidance else summary
 
 
@@ -4200,10 +4174,10 @@ class _DeferredSignals:
     """
 
     def __init__(self) -> None:
-        self._observed: Optional[int] = None
+        self._observed: int | None = None
 
     @property
-    def signal_number(self) -> Optional[int]:
+    def signal_number(self) -> int | None:
         if self._observed is None:
             pending = signal.sigpending()
             self._observed = next(
@@ -4213,7 +4187,7 @@ class _DeferredSignals:
         return self._observed
 
     @property
-    def signal_name(self) -> Optional[str]:
+    def signal_name(self) -> str | None:
         signal_number = self.signal_number
         if signal_number is None:
             return None
@@ -4287,7 +4261,7 @@ def _termination_detail(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point for the autopilot helper.
 
     Every exit path appends exactly one ``supervision-end`` mailbox record, so

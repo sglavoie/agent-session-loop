@@ -26,12 +26,12 @@ The module is stdlib-only.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import Path
 import sys
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from . import contracts, plans, repository_evidence, responses
@@ -53,7 +53,6 @@ from .verification import (
     run_check,
     verification_context_from_plan,
 )
-
 
 #: Baseline outcome statuses recorded in the cache. ``pass``/``fail`` mirror the
 #: verification status; ``timeout`` and ``error`` capture command executions
@@ -141,11 +140,9 @@ def _registered_repository_fingerprint(
         fingerprint = repository_evidence.capture_repository_fingerprint(
             repository.root, plan_dir
         )
-        if (
-            repository_evidence.repository_evidence_unavailable(fingerprint)
-            is not None
-            or not fingerprint.get("git")
-        ):
+        if repository_evidence.repository_evidence_unavailable(
+            fingerprint
+        ) is not None or not fingerprint.get("git"):
             available = False
         evidence.append(
             {
@@ -178,8 +175,7 @@ def baseline_evidence_is_current(
         available
         and result.get("repository_evidence_available") is True
         and result.get("registry_digest") == context.registry_digest
-        and result.get("aggregate_repository_fingerprint")
-        == fingerprint
+        and result.get("aggregate_repository_fingerprint") == fingerprint
     )
 
 
@@ -324,7 +320,9 @@ def _per_check_budget(
     return budget
 
 
-def _clamp_command_timeout(check: VerificationCheck, budget: float) -> VerificationCheck:
+def _clamp_command_timeout(
+    check: VerificationCheck, budget: float
+) -> VerificationCheck:
     if isinstance(check, CommandCheck):
         return replace(check, timeout_seconds=budget)
     return check
@@ -405,17 +403,15 @@ def run_baseline(
             VerifyRecipe(checks=tuple(check for _, check in collected))
         )
     )
-    recorded_at = now or datetime.now(timezone.utc).isoformat()
+    recorded_at = now or datetime.now(UTC).isoformat()
     registry_digest = verification_context.registry_digest
     if verification_context.workspace is None:
         fingerprint = repository_fingerprint(canonical_cwd)
         aggregate_fingerprint = None
         repository_evidence_available: bool | None = None
     else:
-        fingerprint, repository_evidence_available = (
-            _registered_repository_fingerprint(
-                verification_context, canonical_dir
-            )
+        fingerprint, repository_evidence_available = _registered_repository_fingerprint(
+            verification_context, canonical_dir
         )
         aggregate_fingerprint = fingerprint
 
@@ -608,7 +604,10 @@ def _run_result_payload(
     }
     if result.registry_digest is not None:
         repositories = []
-        if verification_context is not None and verification_context.workspace is not None:
+        if (
+            verification_context is not None
+            and verification_context.workspace is not None
+        ):
             repositories = [
                 {
                     "alias": repository.alias,
@@ -669,9 +668,7 @@ def baseline_from_args(args: Any) -> int:
     }
 
     try:
-        verification_context = verification_context_from_plan(
-            plan_dir_arg, cwd_arg
-        )
+        verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
     except (PlanError, OSError) as error:
         _emit_baseline_error(
             want_json=want_json,
@@ -719,7 +716,9 @@ def baseline_from_args(args: Any) -> int:
     else:
         reason = BASELINE_EXIT_REASON_UNSATISFIED
 
-    exit_code = 0 if reason in (BASELINE_EXIT_REASON_OK, BASELINE_EXIT_REASON_NO_CHECKS) else 1
+    exit_code = (
+        0 if reason in (BASELINE_EXIT_REASON_OK, BASELINE_EXIT_REASON_NO_CHECKS) else 1
+    )
 
     if want_json:
         if exit_code == 0:

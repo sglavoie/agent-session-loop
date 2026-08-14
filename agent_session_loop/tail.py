@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+import contextlib
 import json
-from pathlib import Path
 import sys
 import threading
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, TextIO
 
 from . import events, plans, state, workspaces
@@ -16,7 +17,6 @@ from .formatting import (
     format_turn_finished_message,
     format_turn_started_message,
 )
-
 
 DEFAULT_LINES = 40
 POLL_INTERVAL_SECONDS = 0.1
@@ -154,10 +154,8 @@ def _run_started_message(payload: dict[str, Any]) -> str:
     if isinstance(counts, dict):
         total = 0
         for value in counts.values():
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 total += int(value)
-            except (TypeError, ValueError):
-                pass
         complete = counts.get("complete", "unknown")
         pending = counts.get("pending", "unknown")
         parts.append(f"{complete}/{total} sessions complete")
@@ -204,8 +202,8 @@ def _abort_grace_remaining(deadline: Any) -> str:
     if parsed is None:
         return "grace not started" if deadline is None else "remaining unknown"
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    remaining = (parsed - datetime.now(timezone.utc)).total_seconds()
+        parsed = parsed.replace(tzinfo=UTC)
+    remaining = (parsed - datetime.now(UTC)).total_seconds()
     if remaining <= 0:
         return "grace expired"
     return f"{int(remaining)}s remaining"
@@ -241,10 +239,7 @@ def _run_control_message(payload: dict[str, Any]) -> str:
     status = "on" if payload.get("stop_after_current") else "off"
     details = [f"stop-after-current {status}"]
     details.extend(_abort_details(payload))
-    if (
-        payload.get("action")
-        == events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED
-    ):
+    if payload.get("action") == events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED:
         target_harness = payload.get("target_harness") or "unknown"
         changed_fields = payload.get("changed_fields")
         if isinstance(changed_fields, list) and changed_fields:
@@ -307,9 +302,7 @@ def _mailbox_message(payload: dict[str, Any]) -> str:
         ]
         unsupervised_deadline = payload.get("unsupervised_deadline_at")
         if unsupervised_deadline is None:
-            details.append(
-                f"hard deadline {payload.get('hard_deadline', 'unknown')}"
-            )
+            details.append(f"hard deadline {payload.get('hard_deadline', 'unknown')}")
         else:
             details.append(f"unsupervised deadline {unsupervised_deadline}")
             details.append(
@@ -361,10 +354,7 @@ def _mailbox_message(payload: dict[str, Any]) -> str:
         run_id = payload.get("run_id")
         if run_id is not None:
             details.append(f"run {run_id}")
-        return (
-            "mailbox: reply wait preparation failed "
-            f"({', '.join(details)})"
-        )
+        return f"mailbox: reply wait preparation failed ({', '.join(details)})"
     return f"mailbox: {action}"
 
 
@@ -425,9 +415,7 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
                 shas.append(f"{str(label)}={str(row.get('commit_sha'))}")
         remaining = group.get("remaining_aliases")
         remaining_values = (
-            [str(alias) for alias in remaining]
-            if isinstance(remaining, list)
-            else []
+            [str(alias) for alias in remaining] if isinstance(remaining, list) else []
         )
         visible_remaining, omitted_remaining = workspaces.bounded_repository_rows(
             remaining_values
@@ -455,8 +443,7 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
         harness = payload.get("review_harness", "unknown")
         review_path = payload.get("review_session_path", "unknown")
         return (
-            f"review session {session} created "
-            f"(harness {harness}, file {review_path})"
+            f"review session {session} created (harness {harness}, file {review_path})"
         )
     if name == events.VERIFICATION_STARTED_EVENT:
         check_count = payload.get("check_count")
@@ -494,7 +481,8 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"verification heartbeat for session {_format_session_label(payload)} "
             f"check {position} {payload.get('name', 'unknown')} "
             f"(elapsed {format_duration_seconds(payload.get('elapsed_seconds'))}, "
-            f"check elapsed {format_duration_seconds(payload.get('check_elapsed_seconds'))})"
+            f"check elapsed "
+            f"{format_duration_seconds(payload.get('check_elapsed_seconds'))})"
         )
     if name == events.VERIFICATION_CHECK_FINISHED_EVENT:
         check_index = payload.get("check_index")
@@ -730,14 +718,14 @@ def _read_new_log_text(
 def _int_sort_key(value: Any) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 
 def _session_sort_key(value: Any) -> tuple[tuple[int, ...], str]:
     try:
         parsed = plans.parse_session_id(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return ((sys.maxsize,), str(value or ""))
     return (parsed.sort_key, parsed.value)
 
@@ -1042,8 +1030,7 @@ class TailFollower:
             poll_interval=self._poll_interval,
             stop_event=self._stop_event,
             initial_finished=(
-                _has_run_finished(records, run_id)
-                or _state_run_finished(state_payload)
+                _has_run_finished(records, run_id) or _state_run_finished(state_payload)
             ),
             include_events=self._include_events,
         )

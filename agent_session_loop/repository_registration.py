@@ -39,25 +39,27 @@ can parse.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, replace
-from datetime import datetime
 import os
-from pathlib import Path
 import re
 import shlex
 import sys
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from . import (
     authoring,
-    contracts as _contracts,
     plans,
     preflight,
     repository_intent,
     repository_scope,
     responses,
     state,
+)
+from . import (
+    contracts as _contracts,
 )
 from .contracts import (
     CommandCheck,
@@ -74,15 +76,12 @@ from .workspaces import (
     canonicalize_filesystem_path,
 )
 
-
 REPOSITORIES_HEADING = "## Repositories"
 
 _HORIZONTAL_RULE_RE = re.compile(r"^ {0,3}([-*_])(?: *\1){2,} *$")
 
 
-RegistrationStatus = Literal[
-    "applied", "already-registered", "not-required", "refused"
-]
+RegistrationStatus = Literal["applied", "already-registered", "not-required", "refused"]
 
 MissingFact = Literal[
     "workspace-root",
@@ -294,14 +293,10 @@ def _source_candidates(
     for session in sessions:
         if session.contract is not None:
             candidates.extend(
-                repository_intent.candidates_from_checks(
-                    session.contract.verify.checks
-                )
+                repository_intent.candidates_from_checks(session.contract.verify.checks)
             )
     candidates.extend(repository_intent.candidates_from_text(text))
-    candidates.extend(
-        repository_intent.candidates_from_execution_roots([bound_root])
-    )
+    candidates.extend(repository_intent.candidates_from_execution_roots([bound_root]))
     return candidates
 
 
@@ -339,9 +334,7 @@ def _derive(
         return _refused("workspace-root", detail=str(error))
 
     unobservable = tuple(
-        suggestion.root
-        for suggestion in suggestions
-        if suggestion.origin is None
+        suggestion.root for suggestion in suggestions if suggestion.origin is None
     )
     if unobservable:
         return _refused(
@@ -350,17 +343,13 @@ def _derive(
             workspace_root=workspace_root,
         )
     try:
-        registry = repository_scope.suggest_registry(
-            workspace_root, intent.git_roots
-        )
+        registry = repository_scope.suggest_registry(workspace_root, intent.git_roots)
     except WorkspaceError as error:
         return _refused(
             "workspace-root", detail=str(error), workspace_root=workspace_root
         )
 
-    alias_by_root = {
-        suggestion.root: suggestion.alias for suggestion in suggestions
-    }
+    alias_by_root = {suggestion.root: suggestion.alias for suggestion in suggestions}
     git_root_cache: dict[Path, Path | None] = {}
     contracts: dict[str, CompletionContract] = {}
     scopes: dict[str, SessionScope] = {}
@@ -482,11 +471,7 @@ def _insert_registry_table(text: str, registry: RepositoryRegistry) -> str:
     """Place ``## Repositories`` exactly where ``render_manifest`` places it."""
     lines = text.splitlines()
     index = next(
-        (
-            position
-            for position, line in enumerate(lines)
-            if line.startswith("## ")
-        ),
+        (position for position, line in enumerate(lines) if line.startswith("## ")),
         len(lines),
     )
     return _render_lines(
@@ -513,16 +498,13 @@ def _source_registry_table(registry: RepositoryRegistry) -> list[str]:
         "| Alias | Path | Origin |",
         "| --- | --- | --- |",
         *(
-            f"| {repository.alias} | {repository.path} | "
-            f"https://{repository.origin} |"
+            f"| {repository.alias} | {repository.path} | https://{repository.origin} |"
             for repository in registry
         ),
     ]
 
 
-def _registry_lines(
-    lines: list[str], table: list[str], index: int
-) -> list[str]:
+def _registry_lines(lines: list[str], table: list[str], index: int) -> list[str]:
     """Splice the registry block in above ``index``, spaced like a renderer."""
     block = [REPOSITORIES_HEADING, "", *table]
     if index > 0 and lines[index - 1].strip():
@@ -556,9 +538,7 @@ def _migrate_source_plan(
     index = bounds[0][1] if bounds else len(lines)
     return (
         _render_lines(
-            _registry_lines(
-                lines, _source_registry_table(plan.registry), index
-            ),
+            _registry_lines(lines, _source_registry_table(plan.registry), index),
             text,
         ),
         tuple(reversed(changed)),
@@ -575,9 +555,7 @@ def _source_session_bounds(
     end at the last line and the first heading sits at the only offset that
     makes that true.
     """
-    cursor = len(lines) - sum(
-        len(session.lines) + 1 for session in parsed.sessions
-    )
+    cursor = len(lines) - sum(len(session.lines) + 1 for session in parsed.sessions)
     bounds: list[tuple[str, int, int]] = []
     for session in parsed.sessions:
         end = cursor + 1 + len(session.lines)
@@ -656,9 +634,7 @@ def _splice_contract(
         return lines
     stop = _contracts._section_end(lines, start, max_level=2, end=end)
     rendered = (
-        authoring.render_completion_contract(
-            contract, repository_registry=registry
-        )
+        authoring.render_completion_contract(contract, repository_registry=registry)
         .rstrip("\n")
         .splitlines()
     )
@@ -780,9 +756,7 @@ def _rewrite_contract(
 
     return replace(
         contract,
-        verify=VerifyRecipe(
-            checks=tuple(checks), parallel=contract.verify.parallel
-        ),
+        verify=VerifyRecipe(checks=tuple(checks), parallel=contract.verify.parallel),
     )
 
 
@@ -878,9 +852,7 @@ def result_payload(result: RegistrationResult) -> dict[str, Any]:
         "workspace_root": (
             None if result.workspace_root is None else str(result.workspace_root)
         ),
-        "repositories": [
-            repository.to_dict() for repository in result.repositories
-        ],
+        "repositories": [repository.to_dict() for repository in result.repositories],
         "sessions_changed": list(result.sessions_changed),
         "files": [str(path) for path in result.files],
         "readiness": result.readiness,

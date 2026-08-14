@@ -25,20 +25,20 @@ children include a parseable `## Completion Contract` so `asl verify` /
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-from datetime import datetime, timezone
+import contextlib
 import json
-from pathlib import Path
 import re
 import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
-
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from agent_session_loop import (  # noqa: E402
+from agent_session_loop import (  # noqa: E402 - import needs the sys.path insertion above
     authoring,
     contracts,
     harnesses,
@@ -46,8 +46,9 @@ from agent_session_loop import (  # noqa: E402
     responses,
     state,
 )
-from agent_session_loop.workspaces import RepositoryRegistry  # noqa: E402
-
+from agent_session_loop.workspaces import (  # noqa: E402 - needs the sys.path insert above
+    RepositoryRegistry,
+)
 
 MIN_PARTS = 2
 MAX_PARTS = 20
@@ -215,16 +216,17 @@ def _validate_snapshot(
         if session.status == "empty":
             raise ResplitError(
                 "malformed-plan",
-                f"{session.session.filename} is missing a populated final handoff status",
+                f"{session.session.filename} is missing a populated final handoff "
+                f"status",
             )
 
     parent_status = _status_by_id(snapshot).get(parent_id.value)
     if parent_status is None:
-        raise ResplitError("ambiguous-input", f"session {parent_id.value} does not exist")
-    if parent_status.status == "complete":
         raise ResplitError(
-            "blocked", f"session {parent_id.value} is already complete"
+            "ambiguous-input", f"session {parent_id.value} does not exist"
         )
+    if parent_status.status == "complete":
+        raise ResplitError("blocked", f"session {parent_id.value} is already complete")
     if parent_status.status != "pending":
         raise ResplitError(
             "unknown-status",
@@ -243,7 +245,9 @@ def _validate_snapshot(
         child_path = snapshot.plan_dir / child.filename
         child_expansion_path = snapshot.plan_dir / child.expansion_filename
         if child_path.exists():
-            raise ResplitError("collision", f"child file already exists: {child.filename}")
+            raise ResplitError(
+                "collision", f"child file already exists: {child.filename}"
+            )
         if child_expansion_path.exists():
             raise ResplitError(
                 "collision",
@@ -269,7 +273,9 @@ def _extract_parent_title(parent_id: plans.SessionId, before_handoff: str) -> st
         match = re.match(r"^#\s+(.+?)\s*$", line)
         if match:
             title = match.group(1)
-            return re.sub(rf"^Session\s+{re.escape(parent_id.value)}\s*:?\s*", "", title)
+            return re.sub(
+                rf"^Session\s+{re.escape(parent_id.value)}\s*:?\s*", "", title
+            )
     return f"Session {parent_id.value}"
 
 
@@ -348,7 +354,8 @@ def _parse_parent_details(
     if not body:
         raise ResplitError(
             "cannot-split",
-            f"{parent_status.session.filename} has no implementation instructions above handoff",
+            f"{parent_status.session.filename} has no implementation instructions "
+            f"above handoff",
         )
 
     registry = plans.read_repository_registry(parent_status.path.parent)
@@ -361,7 +368,8 @@ def _parse_parent_details(
     except plans.PlanError as error:
         raise ResplitError(
             "malformed-plan",
-            f"{parent_status.session.filename} has a malformed completion contract: {error}",
+            f"{parent_status.session.filename} has a malformed completion contract: "
+            f"{error}",
         ) from error
 
     try:
@@ -373,7 +381,8 @@ def _parse_parent_details(
     except plans.PlanError as error:
         raise ResplitError(
             "malformed-plan",
-            f"{parent_status.session.filename} has a malformed repository scope: {error}",
+            f"{parent_status.session.filename} has a malformed repository scope: "
+            f"{error}",
         ) from error
 
     return ParentDetails(
@@ -522,7 +531,8 @@ def _phase_instruction(parent_body: str, index: int, parts: int) -> str:
             "verify behavior, and record the final handoff.",
         ),
         3: (
-            "Implement input parsing, plan inspection, validation, and refusal behavior.",
+            "Implement input parsing, plan inspection, validation, and refusal "
+            "behavior.",
             "Implement the core file mutations, including locking, archival, "
             "and child-session generation.",
             "Implement derived ledger updates, stale artifact handling, reporting, "
@@ -532,14 +542,16 @@ def _phase_instruction(parent_body: str, index: int, parts: int) -> str:
             "Implement input parsing, target inference, and plan inspection.",
             "Implement safety validation and lock handling.",
             "Implement archival and child-session generation.",
-            "Implement ledger updates, stale artifact handling, reporting, and verification.",
+            "Implement ledger updates, stale artifact handling, reporting, and "
+            "verification.",
         ),
         5: (
             "Implement input parsing and target inference.",
             "Implement plan inspection and safety validation.",
             "Implement lock handling and parent archival.",
             "Implement child-session generation.",
-            "Implement ledger updates, stale artifact handling, reporting, and verification.",
+            "Implement ledger updates, stale artifact handling, reporting, and "
+            "verification.",
         ),
     }
     focus = focus_by_parts.get(parts)
@@ -581,7 +593,9 @@ def _load_child_specs(path: Path | None) -> list[Any] | None:
     raw = json.loads(_read_text(path))
     children = raw.get("children") if isinstance(raw, dict) else raw
     if not isinstance(children, list):
-        raise ResplitError("ambiguous-input", "child spec must be a list or object with children")
+        raise ResplitError(
+            "ambiguous-input", "child spec must be a list or object with children"
+        )
     return children
 
 
@@ -611,9 +625,7 @@ def _normalize_child_specs(children: list[Any]) -> list[dict[str, Any]]:
                 "ambiguous-contract",
                 f"child spec {index} must state explicit 'done_when' criteria",
             )
-        done_when = _require_str_list(
-            item["done_when"], label="done_when", index=index
-        )
+        done_when = _require_str_list(item["done_when"], label="done_when", index=index)
 
         raw_checks = item.get("checks", [])
         if not isinstance(raw_checks, list) or not all(
@@ -973,7 +985,9 @@ def _append_resplit_notes(
     return text.rstrip() + "\n" + note
 
 
-def _manifest_replacements(children: list[ChildSpec]) -> tuple[authoring.ManifestSession, ...]:
+def _manifest_replacements(
+    children: list[ChildSpec],
+) -> tuple[authoring.ManifestSession, ...]:
     return tuple(
         authoring.ManifestSession(
             session_id=child.session_id, title=child.title, status="pending"
@@ -1026,15 +1040,11 @@ def _archive_parent_files(
 
 def _rollback_archive(moves: list[tuple[Path, Path]], archive_dir: Path) -> None:
     for original, archived in moves:
-        try:
+        with contextlib.suppress(OSError):
             archived.rename(original)
-        except OSError:
-            pass
     for directory in (archive_dir, archive_dir.parent):
-        try:
+        with contextlib.suppress(OSError):
             directory.rmdir()
-        except OSError:
-            pass
 
 
 def resplit_session(
@@ -1058,7 +1068,9 @@ def resplit_session(
     parent_id = _select_parent(snapshot, session_id)
     parent_status = _status_by_id(snapshot).get(parent_id.value)
     if parent_status is None:
-        raise ResplitError("ambiguous-input", f"session {parent_id.value} does not exist")
+        raise ResplitError(
+            "ambiguous-input", f"session {parent_id.value} does not exist"
+        )
 
     parent_expansion_path = snapshot.plan_dir / parent_id.expansion_filename
     parent_details = _parse_parent_details(parent_status, parent_expansion_path)
@@ -1076,11 +1088,12 @@ def resplit_session(
         raise ResplitError("lock-contention", str(error)) from error
 
     try:
-        timestamp = now or datetime.now(timezone.utc)
+        timestamp = now or datetime.now(UTC)
         locked_snapshot = plans.inspect_plan(snapshot.plan_dir)
         locked_parent_status = _validate_snapshot(locked_snapshot, parent_id, parts)
         parent_details = _parse_parent_details(
-            locked_parent_status, locked_snapshot.plan_dir / parent_id.expansion_filename
+            locked_parent_status,
+            locked_snapshot.plan_dir / parent_id.expansion_filename,
         )
         first_previous_session_file = (
             parent_details.prior_session_file
@@ -1097,7 +1110,9 @@ def resplit_session(
         archive_dir = authoring.create_archive_dir(
             locked_snapshot.plan_dir, parent_id, timestamp
         )
-        archive_relative_path = archive_dir.relative_to(locked_snapshot.plan_dir).as_posix()
+        archive_relative_path = archive_dir.relative_to(
+            locked_snapshot.plan_dir
+        ).as_posix()
 
         # Build every staged write before mutating anything on disk.
         transaction = authoring.PlanTransaction(locked_snapshot.plan_dir)
@@ -1193,7 +1208,9 @@ def _walk_up_for_plan_dir(start: Path) -> Path | None:
         if (
             (current / "context.md").is_file()
             and (current / "manifest.md").is_file()
-            and any(plans.session_id_from_filename(path.name) for path in current.iterdir())
+            and any(
+                plans.session_id_from_filename(path.name) for path in current.iterdir()
+            )
         ):
             return current
         if current.parent == current:
@@ -1220,11 +1237,15 @@ def _resolve_cli_target(args: argparse.Namespace) -> tuple[Path, str | None]:
                 "cannot combine a direct session file with --session",
             )
         if not target.is_file():
-            raise ResplitError("ambiguous-input", f"session file does not exist: {target}")
+            raise ResplitError(
+                "ambiguous-input", f"session file does not exist: {target}"
+            )
         return target.parent, direct_session_id.value
 
     if not target.is_dir():
-        raise ResplitError("ambiguous-input", f"plan directory does not exist: {target}")
+        raise ResplitError(
+            "ambiguous-input", f"plan directory does not exist: {target}"
+        )
     return target, args.session
 
 
@@ -1239,7 +1260,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Resplit one pending session file into nested child sessions."
     )
-    parser.add_argument("target", nargs="?", help="Plan directory or session-<id>.md file")
+    parser.add_argument(
+        "target", nargs="?", help="Plan directory or session-<id>.md file"
+    )
     parser.add_argument("count", nargs="?", type=int, help="Child count, 2 through 20")
     parser.add_argument("--session", help="Explicit session id to resplit")
     parser.add_argument("--parts", type=int, help="Child count, 2 through 20")
@@ -1251,7 +1274,9 @@ def build_parser() -> argparse.ArgumentParser:
             "plus checks and/or inherit_checks per child"
         ),
     )
-    parser.add_argument("--state-dir", help="Override agent-session-loop state directory")
+    parser.add_argument(
+        "--state-dir", help="Override agent-session-loop state directory"
+    )
     parser.add_argument(
         "--skill-prefix",
         default="$",
@@ -1263,7 +1288,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _print_result(result: dict[str, Any]) -> None:
-    print(f"Resplit session {result['parent_id']} into {', '.join(result['children'])}.")
+    print(
+        f"Resplit session {result['parent_id']} into {', '.join(result['children'])}."
+    )
     print(f"Child files: {', '.join(result['child_files'])}")
     print(f"Archive directory: {result['archive_dir']}")
     archived = result["archived_files"] or ["none"]

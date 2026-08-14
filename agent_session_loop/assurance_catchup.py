@@ -28,18 +28,14 @@ import fcntl
 import json
 import os
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from . import assurance_projection as projection
-from . import events
-from . import plans
-from . import state
-from . import supervisor_audit
+from . import events, plans, state, supervisor_audit
 from .assurance_models import AssuranceError
-
 
 #: Runs audited per invocation unless the operator raises it. Each audit is a
 #: harness turn under a timeout, so the default bounds one catch-up pass to
@@ -101,6 +97,9 @@ class AuditOverrides:
     timeout_seconds: int | None = None
 
 
+NO_AUDIT_OVERRIDES = AuditOverrides()
+
+
 @dataclass(frozen=True)
 class PendingRun:
     """One recorded audit an abandoned run still owes."""
@@ -154,9 +153,7 @@ class CatchupReport:
 
     @property
     def audited(self) -> tuple[CatchupResult, ...]:
-        return tuple(
-            item for item in self.results if item.outcome == OUTCOME_AUDITED
-        )
+        return tuple(item for item in self.results if item.outcome == OUTCOME_AUDITED)
 
 
 def record_path(run_dir: Path | str) -> Path:
@@ -169,7 +166,7 @@ def _path_or_none(value: Any) -> Path | None:
         return None
     try:
         return plans.canonicalize_path(value)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 
@@ -188,7 +185,7 @@ def read_pending_run(run_dir: Path | str) -> PendingRun | None:
         return None
     try:
         parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         return None
     if not isinstance(parsed, dict):
         return None
@@ -273,10 +270,8 @@ def _claim(run_dir: Path) -> Iterator[bool]:
     finally:
         if fd is not None:
             if held:
-                try:
+                with suppress(OSError):
                     fcntl.flock(fd, fcntl.LOCK_UN)
-                except OSError:
-                    pass
             os.close(fd)
 
 
@@ -304,7 +299,7 @@ def _state_still_describes(pending: PendingRun) -> bool:
     state_path = pending.state_dir / events.STATE_FILE_NAME
     try:
         parsed = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
+    except OSError, json.JSONDecodeError, ValueError:
         return False
     return isinstance(parsed, dict) and parsed.get("run_id") == pending.run_id
 
@@ -332,7 +327,7 @@ def process_run(
     pending: PendingRun,
     *,
     state_dir: str | Path | None = None,
-    overrides: AuditOverrides = AuditOverrides(),
+    overrides: AuditOverrides = NO_AUDIT_OVERRIDES,
     force: bool = False,
     **audit_kwargs: Any,
 ) -> CatchupResult:
@@ -367,16 +362,12 @@ def process_run(
             return result(OUTCOME_UNUSABLE, reason=REASON_EVIDENCE_SUPERSEDED)
         try:
             plan = supervisor_audit.plan_audit(
-                _audit_namespace(
-                    pending, overrides=overrides, force_enabled=force
-                )
+                _audit_namespace(pending, overrides=overrides, force_enabled=force)
             )
-        except (AssuranceError, AttributeError, TypeError, ValueError):
+        except AssuranceError, AttributeError, TypeError, ValueError:
             # The recorded configuration is arbitrary stored JSON, so a role
             # that cannot be rebuilt is bad input rather than a bug here.
-            return result(
-                OUTCOME_UNUSABLE, reason=REASON_AUDIT_CONFIG_UNAVAILABLE
-            )
+            return result(OUTCOME_UNUSABLE, reason=REASON_AUDIT_CONFIG_UNAVAILABLE)
         repositories, registry_declared = _registered_repositories(pending)
         summary = supervisor_audit.audit_terminal_run(
             plan,
@@ -404,7 +395,7 @@ def process_pending(
     plan_dir: str | Path | None = None,
     run_id: str | None = None,
     limit: int = DEFAULT_PENDING_LIMIT,
-    overrides: AuditOverrides = AuditOverrides(),
+    overrides: AuditOverrides = NO_AUDIT_OVERRIDES,
     **audit_kwargs: Any,
 ) -> CatchupReport:
     """Audit up to ``limit`` runs that owe one, serially, and report each.

@@ -16,10 +16,8 @@ failures into structured ``CheckResult`` rows.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict, replace
+import contextlib
 import os
-from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import signal
@@ -27,7 +25,11 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Callable, Literal, Mapping
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path, PureWindowsPath
+from typing import Any, Literal
 
 from . import plans, responses, workspaces
 from .artifacts import ArtifactError, StreamCapture
@@ -46,7 +48,6 @@ from .process_tree import (
     sweep_enabled,
     sweep_survivors,
 )
-
 
 CheckStatus = Literal["pass", "fail"]
 FailureReason = Literal[
@@ -97,19 +98,17 @@ class VerificationContext:
     @classmethod
     def legacy(
         cls, repo_root: str | Path, *, plan_dir: str | Path | None = None
-    ) -> "VerificationContext":
+    ) -> VerificationContext:
         return cls(root=canonicalize_path(repo_root), plan_dir=plan_dir)
 
     @classmethod
     def resolved_workspace(
         cls, workspace: workspaces.ResolvedWorkspace
-    ) -> "VerificationContext":
+    ) -> VerificationContext:
         return cls(root=workspace.root, workspace=workspace)
 
     @classmethod
-    def from_plan(
-        cls, plan_dir: str | Path, cwd: str | Path
-    ) -> "VerificationContext":
+    def from_plan(cls, plan_dir: str | Path, cwd: str | Path) -> VerificationContext:
         """Interpret ``cwd`` as a repository root or workspace root by plan mode."""
         registry = plans.read_repository_registry(plan_dir)
         if registry is None:
@@ -160,9 +159,7 @@ class VerificationContext:
                 canonical, selected_root, allow_equal=True
             ) and not (
                 self.plan_dir is not None
-                and workspaces.is_descendant(
-                    canonical, self.plan_dir, allow_equal=True
-                )
+                and workspaces.is_descendant(canonical, self.plan_dir, allow_equal=True)
             )
             if escapes:
                 target = (
@@ -458,13 +455,11 @@ def _drain_stream(stream: Any, capture: StreamCapture) -> None:
             if not chunk:
                 break
             capture.feed(chunk)
-    except (OSError, ValueError, ArtifactError):
+    except OSError, ValueError, ArtifactError:
         pass
     finally:
-        try:
+        with contextlib.suppress(OSError):
             stream.close()
-        except OSError:
-            pass
 
 
 class _VerificationCancelled(BaseException):
@@ -552,10 +547,8 @@ def _kill_process_group(process: subprocess.Popen) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except OSError:
         # The group is already empty, or the child left it for one of its own.
-        try:
+        with contextlib.suppress(OSError):
             process.kill()
-        except OSError:
-            pass
 
 
 def _kill_and_reap(process: subprocess.Popen) -> None:
@@ -614,9 +607,7 @@ class _ParallelCancellation:
         with self._lock:
             self._processes.discard(process)
 
-    def snapshot_for(
-        self, process: subprocess.Popen
-    ) -> tuple[Mapping[str, Any], ...]:
+    def snapshot_for(self, process: subprocess.Popen) -> tuple[Mapping[str, Any], ...]:
         """The descendants recorded for ``process`` just before it was killed."""
         with self._lock:
             return self._snapshots.get(process.pid, ())
@@ -773,9 +764,7 @@ def _run_command_check(
             process.wait(timeout=check.timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
-            prior_snapshot = _snapshot_descendants(
-                process.pid, _sweep_process_table()
-            )
+            prior_snapshot = _snapshot_descendants(process.pid, _sweep_process_table())
             _kill_and_reap(process)
         cancelled = cancellation is not None and cancellation.cancelled
         if cancelled and not timed_out:
@@ -874,9 +863,7 @@ def _run_command_check(
         kind=check.kind,
         status="fail",
         failure_reason="command-failed",
-        detail=(
-            f"command exited {process.returncode}: {' '.join(check.argv)}"
-        ),
+        detail=(f"command exited {process.returncode}: {' '.join(check.argv)}"),
         returncode=process.returncode,
         duration_seconds=duration,
         sweep=sweep,
@@ -893,9 +880,7 @@ CommandScopeDiagnosticReason = Literal[
 _PYTHON_BASENAME_PATTERN = re.compile(r"python(\d+(\.\d+)?)?\Z")
 _MODULE_PROBE_TIMEOUT_SECONDS = 15.0
 _OPERATOR_HEALTH_SCOPED_SUBCOMMANDS = frozenset(("check-ts", "lint", "test"))
-_OPERATOR_HEALTH_NON_SELECTOR_FLAGS = frozenset(
-    ("--failed-only", "--resume", "--help")
-)
+_OPERATOR_HEALTH_NON_SELECTOR_FLAGS = frozenset(("--failed-only", "--resume", "--help"))
 
 
 @dataclass(frozen=True)
@@ -974,9 +959,7 @@ def _is_bare_python_invocation(argv: tuple[str, ...]) -> bool:
     return basename == "python"
 
 
-def _default_module_probe(
-    interpreter: str, module: str, *, cwd: Path
-) -> bool | None:
+def _default_module_probe(interpreter: str, module: str, *, cwd: Path) -> bool | None:
     """Bounded, read-only importability probe.
 
     Returns ``True`` when the module is importable, ``False`` on an unambiguous
@@ -1006,7 +989,7 @@ def _default_module_probe(
             shell=False,
             check=False,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except subprocess.TimeoutExpired, FileNotFoundError, OSError:
         return None
     if completed.returncode == 0:
         return True
@@ -1065,9 +1048,7 @@ def diagnose_command(
         if outcome is False:
             return CommandDiagnostic(
                 reason="module-not-importable",
-                detail=(
-                    f"module not importable by {executable}: {module}"
-                ),
+                detail=(f"module not importable by {executable}: {module}"),
             )
 
     return None
@@ -1115,9 +1096,7 @@ def diagnose_command_scope(
     return None
 
 
-def _run_file_exists_check(
-    check: FileExistsCheck, *, repo_root: Path
-) -> CheckResult:
+def _run_file_exists_check(check: FileExistsCheck, *, repo_root: Path) -> CheckResult:
     target = _resolve_under_root(repo_root, check.path)
     start = time.monotonic()
     try:
@@ -1217,9 +1196,7 @@ def run_check(
         repo_root=repo_root, context=context
     )
     resolved = verification_context.resolve_check(check)
-    resolved_artifact_dir = (
-        None if artifact_dir is None else Path(artifact_dir)
-    )
+    resolved_artifact_dir = None if artifact_dir is None else Path(artifact_dir)
     if isinstance(check, CommandCheck):
         result = _run_command_check(
             replace(check, cwd=str(resolved.cwd)),
@@ -1302,9 +1279,7 @@ def run_verification(
     verification_context = _coerce_verification_context(
         repo_root=repo_root, context=context
     )
-    resolved_artifact_dir = (
-        None if artifact_dir is None else Path(artifact_dir)
-    )
+    resolved_artifact_dir = None if artifact_dir is None else Path(artifact_dir)
     on_started = observer.on_check_started if observer is not None else None
     on_finished = observer.on_check_finished if observer is not None else None
     on_skipped = observer.on_check_skipped if observer is not None else None
@@ -1379,8 +1354,7 @@ def run_verification(
         executor = ThreadPoolExecutor(max_workers=min(4, len(command_indexes)))
         try:
             futures = {
-                executor.submit(execute, index): index
-                for index in command_indexes
+                executor.submit(execute, index): index for index in command_indexes
             }
             for future in as_completed(futures):
                 results_by_index[futures[future]] = future.result()
@@ -1441,9 +1415,7 @@ def run_verification(
 
     execute_phase(eligible_diagnostics)
     results = [results_by_index[index] for index in sorted(results_by_index)]
-    skipped_checks = [
-        skipped_by_index[index] for index in sorted(skipped_by_index)
-    ]
+    skipped_checks = [skipped_by_index[index] for index in sorted(skipped_by_index)]
     return VerificationResult(
         session_id=contract.session_id,
         checks=tuple(results),
@@ -1506,7 +1478,9 @@ def _print_text_verify_success(
         print(f"Workspace root: {cwd}")
         print(
             "Repositories: "
-            + ", ".join(repository.alias for repository in context.workspace.repositories)
+            + ", ".join(
+                repository.alias for repository in context.workspace.repositories
+            )
         )
     else:
         print(f"Repo root: {cwd}")
@@ -1514,16 +1488,22 @@ def _print_text_verify_success(
     for check in result.checks:
         marker = "PASS" if check.status == "pass" else "FAIL"
         repository = f" {check.repo}:" if check.repo else ""
-        print(
-            f"  [{marker}]{repository} {check.kind} {check.name}: {check.detail}"
-        )
+        print(f"  [{marker}]{repository} {check.kind} {check.name}: {check.detail}")
         if check.status != "pass":
             if check.stdout:
-                snippet = check.stdout.strip().splitlines()[-1] if check.stdout.strip() else ""
+                snippet = (
+                    check.stdout.strip().splitlines()[-1]
+                    if check.stdout.strip()
+                    else ""
+                )
                 if snippet:
                     print(f"      stdout: {snippet}", file=sys.stderr)
             if check.stderr:
-                snippet = check.stderr.strip().splitlines()[-1] if check.stderr.strip() else ""
+                snippet = (
+                    check.stderr.strip().splitlines()[-1]
+                    if check.stderr.strip()
+                    else ""
+                )
                 if snippet:
                     print(f"      stderr: {snippet}", file=sys.stderr)
     for check in result.skipped_checks:
@@ -1665,9 +1645,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        verification_context = verification_context_from_plan(
-            plan_dir_arg, cwd_arg
-        )
+        verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
     except (plans.PlanError, OSError) as error:
         _emit_verify_error(
             want_json=want_json,
@@ -1696,9 +1674,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
         _emit_verify_error(
             want_json=want_json,
             reason=VERIFY_EXIT_REASON_NO_CONTRACT,
-            error=(
-                f"session {session_id.value} has no Completion Contract section"
-            ),
+            error=(f"session {session_id.value} has no Completion Contract section"),
             plan_dir=str(plan_dir_arg),
             session=session_id.value,
             cwd=str(verification_context.root),
@@ -1791,9 +1767,7 @@ def verify_from_args(args: argparse.Namespace) -> int:
                     passed=True,
                     recipe=_recipe_summary(contract),
                     checks=[_check_result_payload(check) for check in result.checks],
-                    skipped_checks=[
-                        asdict(check) for check in result.skipped_checks
-                    ],
+                    skipped_checks=[asdict(check) for check in result.skipped_checks],
                     diagnostic_failures=[],
                 )
             )
@@ -1810,18 +1784,13 @@ def verify_from_args(args: argparse.Namespace) -> int:
                 session=result.session_id.value,
                 cwd=str(verification_context.root),
                 failure_reason=(
-                    first_failure.failure_reason
-                    if first_failure is not None
-                    else None
+                    first_failure.failure_reason if first_failure is not None else None
                 ),
                 extra={
                     **_verification_context_payload(verification_context),
                     "passed": False,
                     "recipe": _recipe_summary(contract),
-                    "checks": [
-                        _check_result_payload(check)
-                        for check in result.checks
-                    ],
+                    "checks": [_check_result_payload(check) for check in result.checks],
                     "skipped_checks": [
                         asdict(check) for check in result.skipped_checks
                     ],
@@ -1924,7 +1893,11 @@ def _diagnose_contract_check(
                 CONTRACT_CHECK_ISSUE_COMMAND_NOT_RUNNABLE,
                 diagnostic.detail,
             )
-        return (CONTRACT_CHECK_ROW_OK, None, f"command is runnable: {' '.join(check.argv)}")
+        return (
+            CONTRACT_CHECK_ROW_OK,
+            None,
+            f"command is runnable: {' '.join(check.argv)}",
+        )
 
     if isinstance(check, FileExistsCheck):
         assert resolved.path is not None
@@ -2083,9 +2056,7 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        verification_context = verification_context_from_plan(
-            plan_dir_arg, cwd_arg
-        )
+        verification_context = verification_context_from_plan(plan_dir_arg, cwd_arg)
     except (plans.PlanError, OSError) as error:
         return _emit_error(CONTRACT_CHECK_EXIT_REASON_CWD_ERROR, str(error))
 
@@ -2099,9 +2070,7 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
         try:
             session_id = plans.parse_session_id(raw_session)
         except (ValueError, plans.PlanError) as error:
-            return _emit_error(
-                CONTRACT_CHECK_EXIT_REASON_INVALID_SESSION, str(error)
-            )
+            return _emit_error(CONTRACT_CHECK_EXIT_REASON_INVALID_SESSION, str(error))
         if session_id.value not in known_ids:
             return _emit_error(
                 CONTRACT_CHECK_EXIT_REASON_INVALID_SESSION,
@@ -2116,9 +2085,7 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
     rows: list[dict[str, Any]] = []
     for session_id in session_ids:
         rows.extend(
-            _contract_check_rows(
-                plan_dir_arg, session_id, context=verification_context
-            )
+            _contract_check_rows(plan_dir_arg, session_id, context=verification_context)
         )
 
     issues = [row for row in rows if row["status"] != CONTRACT_CHECK_ROW_OK]

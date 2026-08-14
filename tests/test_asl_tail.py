@@ -4,69 +4,25 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timedelta, timezone
-import errno
-import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
 import shutil
-import signal
-import stat
-import subprocess
-import sys
 import tempfile
-import threading
 import time
 import unittest
-import urllib.parse
-from unittest import mock
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
-    config,
-    contracts,
-    control_queue,
     events,
-    harnesses,
-    install_verify,
-    plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
-    review_repair,
-    run_control,
     runner,
     state,
     tail,
-    verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
-    write_plan,
     wait_until,
+    write_plan,
 )
 
 
@@ -115,8 +71,7 @@ class TailFollowerTests(unittest.TestCase):
     def test_commit_group_preview_bounds_and_coerces_durable_values(self) -> None:
         remaining = list(range(25))
         successful = [
-            {"alias": index, "commit_sha": index + 100}
-            for index in range(25)
+            {"alias": index, "commit_sha": index + 100} for index in range(25)
         ]
         payload = {
             "phase": "updated",
@@ -133,8 +88,7 @@ class TailFollowerTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "remaining " + ",".join(str(index) for index in range(20))
-            + " (+5 more)",
+            "remaining " + ",".join(str(index) for index in range(20)) + " (+5 more)",
             message,
         )
         self.assertIn(
@@ -153,9 +107,7 @@ class TailFollowerTests(unittest.TestCase):
         message = tail._event_message(
             events.RUN_CONTROL_EVENT,
             {
-                "action": (
-                    events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED
-                ),
+                "action": (events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED),
                 "message": "implementation model controls updated",
                 "stop_after_current": False,
                 "target_harness": "claude",
@@ -199,15 +151,14 @@ class TailFollowerTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            "run control: stop after current session requested "
-            "(stop-after-current on)",
+            "run control: stop after current session requested (stop-after-current on)",
             message,
         )
 
     def test_run_control_status_line_counts_down_pending_abort_grace(
         self,
     ) -> None:
-        deadline = datetime.now(timezone.utc) + timedelta(seconds=90)
+        deadline = datetime.now(UTC) + timedelta(seconds=90)
         message = tail._event_message(
             events.RUN_CONTROL_EVENT,
             {
@@ -563,9 +514,7 @@ class TailFollowerTests(unittest.TestCase):
 
         for action in events.MAILBOX_ACTIONS:
             with self.subTest(action=action):
-                rendered = tail._mailbox_message(
-                    {"action": action, **payload}
-                )
+                rendered = tail._mailbox_message({"action": action, **payload})
                 self.assertNotEqual(f"mailbox: {action}", rendered)
 
     def cleanup_follower(self, follower: tail.TailFollower) -> None:
@@ -689,8 +638,7 @@ class TailFollowerTests(unittest.TestCase):
             wait_until(
                 lambda: (
                     "session 1/1 started" in out.getvalue()
-                    and "stdout session=1 turn=1 | discovered stdout"
-                    in out.getvalue()
+                    and "stdout session=1 turn=1 | discovered stdout" in out.getvalue()
                 )
             )
             follower.stop()
@@ -991,9 +939,7 @@ class TailFollowerTests(unittest.TestCase):
             self.addCleanup(self.cleanup_follower, follower)
 
             follower.start()
-            wait_until(
-                lambda: "stdout session=1 turn=2 | third line" in out.getvalue()
-            )
+            wait_until(lambda: "stdout session=1 turn=2 | third line" in out.getvalue())
             self.append_log_line(stdout_log, "fourth line\n")
             wait_until(
                 lambda: "stdout session=1 turn=2 | fourth line" in out.getvalue()
@@ -1001,18 +947,10 @@ class TailFollowerTests(unittest.TestCase):
             follower.stop()
             self.assertTrue(follower.join(1.0))
             text = out.getvalue()
-            self.assertEqual(
-                text.count("stdout session=1 turn=2 | first line"), 1
-            )
-            self.assertEqual(
-                text.count("stdout session=1 turn=2 | second line"), 1
-            )
-            self.assertEqual(
-                text.count("stdout session=1 turn=2 | third line"), 1
-            )
-            self.assertEqual(
-                text.count("stdout session=1 turn=2 | fourth line"), 1
-            )
+            self.assertEqual(text.count("stdout session=1 turn=2 | first line"), 1)
+            self.assertEqual(text.count("stdout session=1 turn=2 | second line"), 1)
+            self.assertEqual(text.count("stdout session=1 turn=2 | third line"), 1)
+            self.assertEqual(text.count("stdout session=1 turn=2 | fourth line"), 1)
 
     def test_tail_follower_initial_active_replay_skips_completed_turns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1243,8 +1181,7 @@ class TailFollowerTests(unittest.TestCase):
 
             follower.start()
             wait_until(
-                lambda: "stdout session=1 turn=1 | session 1 startup"
-                in out.getvalue()
+                lambda: "stdout session=1 turn=1 | session 1 startup" in out.getvalue()
             )
 
             stdout_log_two = tmp_dir / "stdout-2.log"
@@ -1291,8 +1228,10 @@ class TailFollowerTests(unittest.TestCase):
             )
             self.append_log_line(stdout_log_two, "session 2 stdout follow-up\n")
             wait_until(
-                lambda: "stdout session=2 turn=2 | session 2 stdout follow-up"
-                in out.getvalue()
+                lambda: (
+                    "stdout session=2 turn=2 | session 2 stdout follow-up"
+                    in out.getvalue()
+                )
             )
             follower.stop()
             self.assertTrue(follower.join(1.0))
@@ -1300,15 +1239,9 @@ class TailFollowerTests(unittest.TestCase):
             self.assertNotIn("session 1/2 started", text)
             self.assertNotIn("session 1/2 finished", text)
             self.assertNotIn("session 2/2 started", text)
-            self.assertIn(
-                "stdout session=2 turn=2 | session 2 stdout body", text
-            )
-            self.assertIn(
-                "stderr session=2 turn=2 | session 2 stderr body", text
-            )
-            self.assertIn(
-                "stdout session=2 turn=2 | session 2 stdout follow-up", text
-            )
+            self.assertIn("stdout session=2 turn=2 | session 2 stdout body", text)
+            self.assertIn("stderr session=2 turn=2 | session 2 stderr body", text)
+            self.assertIn("stdout session=2 turn=2 | session 2 stdout follow-up", text)
 
     def test_tail_follower_inline_mode_discovers_commit_log_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1480,8 +1413,10 @@ class FollowEventsTests(unittest.TestCase):
         # Several records first, so the read offset is well past the length of
         # the short line the file is later truncated to.
         self._append(
-            *(self._record("turn_heartbeat", session_id="1", idle_seconds=n)
-              for n in range(5))
+            *(
+                self._record("turn_heartbeat", session_id="1", idle_seconds=n)
+                for n in range(5)
+            )
         )
         follower = tail.follow_events(self.path)
         next(follower)

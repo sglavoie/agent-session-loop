@@ -6,48 +6,25 @@ from __future__ import annotations
 
 import argparse
 import ast
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
 import importlib.util
-import io
-import json
 import os
-from pathlib import Path
-import pty
 import re
-import select
-import shlex
-import shutil
-import stat
-import subprocess
-import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
-from unittest import mock
+from datetime import UTC, datetime
+from pathlib import Path
 
 from agent_session_loop import (
-    artifacts,
     assurance_ledger,
     assurance_models,
     assurance_report,
     authoring,
-    baseline,
-    baseline_cache,
     cli,
-    compact_state,
-    config,
     contracts,
     control_cli,
     control_queue,
     control_signal,
     events,
-    harnesses,
     install_verify,
     mailbox,
     mailbox_cli,
@@ -56,26 +33,15 @@ from agent_session_loop import (
     preflight,
     prepare,
     process_tree,
-    progress_cli,
-    progress_repair,
     qna,
     repository_registration,
     retention,
     review,
     review_continuation,
-    review_repair,
-    run_control,
     runner,
     state,
-    tail,
     verification,
     workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     REPO_ROOT,
@@ -86,23 +52,19 @@ class SkillInstructionTests(unittest.TestCase):
     def test_contract_path_rules_distinguish_registered_and_legacy_plans(
         self,
     ) -> None:
-        docs = (REPO_ROOT / "docs/agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        docs = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
         split_skill = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
             encoding="utf-8"
         )
-        repair_skill = (
-            REPO_ROOT / "skills/plan-preflight-iterate/SKILL.md"
-        ).read_text(encoding="utf-8")
+        repair_skill = (REPO_ROOT / "skills/plan-preflight-iterate/SKILL.md").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("retain the legacy absolute-path behavior", docs)
         self.assertIn("upward-traversing `..` segment", docs)
         self.assertIn("relative to its selected", docs)
         self.assertIn("repository and cannot be absolute", docs)
-        self.assertIn(
-            "repo-relative or absolute `path` / `cwd` behavior", split_skill
-        )
+        self.assertIn("repo-relative or absolute `path` / `cwd` behavior", split_skill)
         self.assertIn("free of upward `..` traversal", split_skill)
         self.assertIn("For a legacy plan", repair_skill)
         # A legacy absolute path is only tolerable inside the bound root; the
@@ -114,9 +76,7 @@ class SkillInstructionTests(unittest.TestCase):
         )
         self.assertIn("For a registered plan", repair_skill)
         self.assertIn("every check needs a valid `repo`", repair_skill)
-        self.assertIn(
-            "PREFLIGHT_ITERATE_PAUSE: plan-recreate", repair_skill
-        )
+        self.assertIn("PREFLIGHT_ITERATE_PAUSE: plan-recreate", repair_skill)
 
     def test_session_expand_auto_marks_loop_ready_before_session_run(self) -> None:
         text = (REPO_ROOT / "skills/session-expand/SKILL.md").read_text(
@@ -129,7 +89,8 @@ class SkillInstructionTests(unittest.TestCase):
         )
         self.assertIn("marked_loop_ready", text)
         self.assertIn(
-            "Only when final preflight succeeds with `ok: true` and readiness is `loop-ready`",
+            "Only when final preflight succeeds with `ok: true` and readiness is "
+            "`loop-ready`",
             text,
         )
         self.assertIn("<skill-prefix>plan-preflight-iterate", text)
@@ -187,9 +148,7 @@ class SkillInstructionTests(unittest.TestCase):
 
         # Every skill drives `asl register-repositories` instead of asking a
         # human to hand-write the registry it derives from disk.
-        self.assertIn(
-            "asl register-repositories --plan-file", surfaces["split"]
-        )
+        self.assertIn("asl register-repositories --plan-file", surfaces["split"])
         self.assertIn("Migrate instead of asking", surfaces["split"])
         # `--cwd` is the root the plan is bound to; the workspace root is what
         # the migration derives, and only the rebind is invoked with it.
@@ -234,9 +193,7 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("never raises this finding", surfaces["split"])
 
     def test_docs_describe_the_automatic_registry_migration(self) -> None:
-        docs = (REPO_ROOT / "docs/agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        docs = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
         readme = (REPO_ROOT / "agent_session_loop/README.md").read_text(
             encoding="utf-8"
         )
@@ -255,8 +212,7 @@ class SkillInstructionTests(unittest.TestCase):
             docs,
         )
         self.assertIn(
-            "asl prepare <plan-dir> --resume --rebind-workspace "
-            "--cwd <workspace-root>",
+            "asl prepare <plan-dir> --resume --rebind-workspace --cwd <workspace-root>",
             docs,
         )
         self.assertIn(
@@ -275,22 +231,16 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("belongs to *no* Git worktree", docs)
         self.assertIn("`external` lists the escaping targets", docs)
         self.assertIn("belongs to no Git worktree", readme)
-        self.assertIn(
-            "an escaping target that belongs to no Git worktree", readme
-        )
+        self.assertIn("an escaping target that belongs to no Git worktree", readme)
 
     def test_session_split_names_current_contract_categories(self) -> None:
-        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(encoding="utf-8")
 
         self.assertIn("missing-contract", text)
         self.assertNotIn("session-contract", text)
 
     def test_session_split_documents_optional_parallel_verify_flag(self) -> None:
-        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(encoding="utf-8")
 
         self.assertIn("`verify.parallel` is optional and defaults to `false`", text)
         self.assertIn(
@@ -300,9 +250,7 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("reporting results in declared order", text)
 
     def test_session_split_delegates_heading_grammar_to_parser(self) -> None:
-        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(encoding="utf-8")
 
         # The full source-heading grammar restatement is gone; the parser is
         # authoritative and malformed headings surface as PlanError verbatim.
@@ -325,9 +273,7 @@ class SkillInstructionTests(unittest.TestCase):
         )
 
     def test_session_split_repairs_malformed_headings_before_stopping(self) -> None:
-        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        text = (REPO_ROOT / "skills/session-split/SKILL.md").read_text(encoding="utf-8")
 
         # A malformed heading is a repairable typo, not a dead end: the skill
         # lints first, repairs, re-checks, and only then stops.
@@ -335,9 +281,7 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("asl split --check --plan-file", text)
         # --cwd is the root the footprint check measures against, so both
         # invocations carry it.
-        self.assertIn(
-            'asl split --check --inline-stdin --cwd "$PWD" --json', text
-        )
+        self.assertIn('asl split --check --inline-stdin --cwd "$PWD" --json', text)
         self.assertIn("**Repair loop** (at most 3 rounds):", text)
         self.assertIn("non-null `suggested_line`", text)
         self.assertIn("`suggested_line: null`", text)
@@ -352,19 +296,13 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("one `line <N>: <category>` line per repair", text)
 
     def test_docs_document_split_check_lint_contract(self) -> None:
-        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
 
-        self.assertIn(
-            "`split --check` lints a source plan's session headings", text
-        )
+        self.assertIn("`split --check` lints a source plan's session headings", text)
         self.assertIn("It needs no `--contracts-file`", text)
         self.assertIn("`lint_plan_document`", text)
         self.assertIn("`findings` array", text)
-        self.assertIn(
-            "`suggested_line` is non-null exactly when the damage has", text
-        )
+        self.assertIn("`suggested_line` is non-null exactly when the damage has", text)
         self.assertIn("`reason: malformed-plan`", text)
         self.assertIn("for at most three", text)
         # The fail-fast parser's verbatim-message promise is unchanged.
@@ -374,9 +312,7 @@ class SkillInstructionTests(unittest.TestCase):
         )
 
     def test_docs_name_every_lint_category(self) -> None:
-        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(
-            encoding="utf-8"
-        )
+        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
 
         categories = [
             value
@@ -388,9 +324,7 @@ class SkillInstructionTests(unittest.TestCase):
             self.assertIn(f"`{category}`", text)
 
     def test_session_run_documents_bounded_manual_auto_repair(self) -> None:
-        text = (REPO_ROOT / "skills/session-run/SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        text = (REPO_ROOT / "skills/session-run/SKILL.md").read_text(encoding="utf-8")
 
         # The manual readiness gate delegates to the machine-readable preflight
         # payload rather than re-encoding the repair ordering in prose.
@@ -410,9 +344,7 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("When `runner_managed=true`:", text)
 
     def test_session_run_delegates_to_shared_payload_surfaces(self) -> None:
-        text = (REPO_ROOT / "skills/session-run/SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        text = (REPO_ROOT / "skills/session-run/SKILL.md").read_text(encoding="utf-8")
 
         # Single shared execution path plus one compact mode-deviation table —
         # the only place `--runner-managed` differs after input parsing.
@@ -492,8 +424,7 @@ class PlanWorkflowDocsTests(unittest.TestCase):
 
         self.assertIn("One Shared Research Pass", text)
         self.assertIn(
-            "shared by the ideal divergence analysis and the completeness"
-            " assessment",
+            "shared by the ideal divergence analysis and the completeness assessment",
             text,
         )
         self.assertIn("Do not run a second research pass", text)
@@ -549,7 +480,8 @@ class PlanWorkflowDocsTests(unittest.TestCase):
             text,
         )
         self.assertNotIn(
-            "at least two explicit `## Session <id>: Title` (or `### Session <id>`) headings",
+            "at least two explicit `## Session <id>: Title` (or `### Session <id>`) "
+            "headings",
             text,
         )
 
@@ -588,16 +520,14 @@ class PlanWorkflowDocsTests(unittest.TestCase):
 
     def test_plan_iterate_metrics_paths_exist_in_the_metrics_report(self) -> None:
         cited = set(
-            re.findall(
-                r"assurance\.issues\.([a-z_]+)", self._plan_iterate_text()
-            )
+            re.findall(r"assurance\.issues\.([a-z_]+)", self._plan_iterate_text())
         )
         self.assertIn("recurrence_after_resolution_by_category", cited)
 
         with tempfile.TemporaryDirectory() as tmp:
             report = assurance_report.collect_assurance_metrics(
                 state_dir=Path(tmp) / "state",
-                since=datetime(2026, 8, 10, tzinfo=timezone.utc),
+                since=datetime(2026, 8, 10, tzinfo=UTC),
             )
         self.assertLessEqual(cited, set(report["issues"]))
 
@@ -690,9 +620,7 @@ class InstallVerificationTests(unittest.TestCase):
             folded = home / ".claude/skills/gitsummary"
             folded.unlink()
             folded.mkdir()
-            (folded / "SKILL.md").symlink_to(
-                REPO_ROOT / "skills/gitsummary/SKILL.md"
-            )
+            (folded / "SKILL.md").symlink_to(REPO_ROOT / "skills/gitsummary/SKILL.md")
 
             payload = install_verify.verify_install(
                 repo_root=REPO_ROOT,
@@ -754,8 +682,7 @@ class HarnessDocsRegressionTests(unittest.TestCase):
             "--allow-all-paths --no-ask-user --silent -p <prompt>"
         )
         safe_copilot_argv = (
-            "copilot -C <cwd> --add-dir <plan-dir> --no-ask-user "
-            "--silent -p <prompt>"
+            "copilot -C <cwd> --add-dir <plan-dir> --no-ask-user --silent -p <prompt>"
         )
         exact_expectation = (
             "For Copilot, `--no-unsafe-bypass` does not re-enable "
@@ -765,9 +692,7 @@ class HarnessDocsRegressionTests(unittest.TestCase):
 
         self.assertIn(exact_expectation, docs)
         safety_modes = docs.split("## Safety Modes", 1)[1].split("\n## ", 1)[0]
-        text_blocks = _re.findall(
-            r"```text\n(.*?)\n```", safety_modes, _re.DOTALL
-        )
+        text_blocks = _re.findall(r"```text\n(.*?)\n```", safety_modes, _re.DOTALL)
         unsafe_block = next(
             (block for block in text_blocks if unsafe_copilot_argv in block),
             None,
@@ -787,12 +712,8 @@ class HarnessDocsRegressionTests(unittest.TestCase):
     def test_docs_describe_optional_parallel_verify_recipes(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
 
-        self.assertIn(
-            "`parallel` (optional, defaults to `false`)", docs
-        )
-        self.assertIn(
-            "a parallel run is byte-identical to the\n  sequential one", docs
-        )
+        self.assertIn("`parallel` (optional, defaults to `false`)", docs)
+        self.assertIn("a parallel run is byte-identical to the\n  sequential one", docs)
         self.assertIn(
             "non-interference is the contract\n  author's responsibility", docs
         )
@@ -815,8 +736,7 @@ class HarnessDocsRegressionTests(unittest.TestCase):
             docs,
         )
         self.assertIn(
-            "`--review-harness-model` is forwarded only to\n"
-            "generated review turns",
+            "`--review-harness-model` is forwarded only to\ngenerated review turns",
             docs,
         )
         self.assertIn("`--effort` remains shared", docs)
@@ -855,9 +775,9 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def test_docs_describe_activation_precedence_waits_and_fallback(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        mailbox_docs = docs.split(
-            "## Live Mailbox and Future-Turn Model Control", 1
-        )[1].split("\n## ", 1)[0]
+        mailbox_docs = docs.split("## Live Mailbox and Future-Turn Model Control", 1)[
+            1
+        ].split("\n## ", 1)[0]
 
         for marker in (
             "`mailbox.jsonl`",
@@ -890,9 +810,9 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def test_docs_describe_exhausted_mailbox_reply_precedence(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        mailbox_docs = docs.split(
-            "### Live reply wait and fallback", 1
-        )[1].split("\n### ", 1)[0]
+        mailbox_docs = docs.split("### Live reply wait and fallback", 1)[1].split(
+            "\n### ", 1
+        )[0]
         normalized = " ".join(mailbox_docs.split())
 
         self.assertIn(
@@ -913,8 +833,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             normalized,
         )
         self.assertIn(
-            "grants the supervisor a 90-second awake grace to re-prove "
-            "liveness",
+            "grants the supervisor a 90-second awake grace to re-prove liveness",
             normalized,
         )
         self.assertIn(
@@ -932,8 +851,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             normalized,
         )
         self.assertIn(
-            "`suspend_lease_grace_seconds`, the awake lease grace that "
-            "suspend applied",
+            "`suspend_lease_grace_seconds`, the awake lease grace that suspend applied",
             normalized,
         )
         self.assertIn("`suspend_skew_seconds`", normalized)
@@ -945,9 +863,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def test_docs_describe_shared_closure_reserve_and_availability(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        mailbox_docs = docs.split(
-            "## Live Mailbox and Future-Turn Model Control", 1
-        )[1]
+        mailbox_docs = docs.split("## Live Mailbox and Future-Turn Model Control", 1)[1]
         normalized = " ".join(mailbox_docs.split())
 
         # Pin the documented reserve and minimum-closure sizes to their constants.
@@ -1019,9 +935,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def test_docs_describe_bounded_question_body(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        mailbox_docs = docs.split(
-            "## Live Mailbox and Future-Turn Model Control", 1
-        )[1]
+        mailbox_docs = docs.split("## Live Mailbox and Future-Turn Model Control", 1)[1]
         normalized = " ".join(mailbox_docs.split())
 
         # Pin the documented character bound to the constant it describes.
@@ -1049,10 +963,8 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "Closed/history-only records never emit the marker",
             "`AgentSessionLoopMailboxResolution` with `run_id`, `state_path`, "
             "`question_id`",
-            "`<run-id>:mailbox-resolution:<resolution-sequence>` source "
-            "event ID",
-            "The marker contains no question, reply, resolution-note, or "
-            "notice body",
+            "`<run-id>:mailbox-resolution:<resolution-sequence>` source event ID",
+            "The marker contains no question, reply, resolution-note, or notice body",
             "offers three explicit outcomes: submit a factual answer with "
             "`asl inbox reply`",
             "`continue_command`, and `pause_command`",
@@ -1065,13 +977,11 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             self.assertIn(marker, normalized)
 
         self.assertIn(
-            "A question is closed logically by its first accepted reply or "
-            "resolution",
+            "A question is closed logically by its first accepted reply or resolution",
             normalized,
         )
         self.assertIn(
-            "ASL does not rotate, compact, or physically delete mailbox "
-            "records",
+            "ASL does not rotate, compact, or physically delete mailbox records",
             normalized,
         )
 
@@ -1086,8 +996,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "decide between a heartbeat and a takeover",
             "re-emits the same `supervisor_id` and question projection "
             "with only `updated_at` refreshed",
-            "takes over with a new random supervisor identity and no "
-            "projection",
+            "takes over with a new random supervisor identity and no projection",
         ):
             self.assertIn(
                 marker,
@@ -1135,8 +1044,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "Every outcome except `error` means the helper wrote and flushed "
             "its complete `--json` result before appending the record",
             "`outcome: error` means the helper died abnormally",
-            "its stdout may be missing, truncated mid-write, or complete but "
-            "unproven",
+            "its stdout may be missing, truncated mid-write, or complete but unproven",
             "Never require parseable JSON there: take the termination detail "
             "from the record's `text`, recover run state with "
             "`asl status <plan-dir> --json`",
@@ -1172,7 +1080,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "Everything else is forbidden output: acknowledging the launch, "
             "announcing a poll, restating a command you are about to run or "
             "just ran, summarizing an `IDLE` line, reporting elapsed time, "
-            "quoting the payload, describing what the run \"seems\" to be "
+            'quoting the payload, describing what the run "seems" to be '
             "doing, or reassuring the user that supervision continues",
             "When `asl outbox supervise` prints `IDLE`, print nothing and "
             "reissue the identical command immediately. Hours of silence is "
@@ -1205,16 +1113,14 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "Every helper launch carries a `supervision_id`",
             "a reader treats only the record carrying its own launch identity "
             "as terminal",
-            "`--supervision-id UUID` scopes that scalar to one supervising "
-            "launch",
+            "`--supervision-id UUID` scopes that scalar to one supervising launch",
             "A record from another launch is still returned and still "
             "advances `next_since`",
             "Only the Autopilot helper writes the record, at most once per "
             "helper process",
             "On every outcome except `error`, the record is appended only "
             "after the complete `--json` result has been written and flushed",
-            "`error` is the abnormal-exit outcome and carries no stdout "
-            "guarantee",
+            "`error` is the abnormal-exit outcome and carries no stdout guarantee",
             "the result may be absent, truncated, or complete but unproven",
             "must therefore decide from the record alone — the termination "
             "detail is in `text` — and recover run state from "
@@ -1237,8 +1143,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             )
 
         for marker in (
-            "the Autopilot helper appends one terminal `supervision-end` "
-            "message",
+            "the Autopilot helper appends one terminal `supervision-end` message",
             "Every outcome except `error` is appended after the helper "
             "flushed its complete result",
             "`error` marks an abnormal exit whose stdout may be missing, "
@@ -1299,10 +1204,8 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "The record ends this supervision, not necessarily the run. It "
             "proves the helper exited, not that the `asl run` child is "
             "quiescent",
-            "a `worker_hung` stop leaves that child alive holding the plan "
-            "lock",
-            "Check `asl status <plan-dir> --json` before treating the plan as "
-            "idle",
+            "a `worker_hung` stop leaves that child alive holding the plan lock",
+            "Check `asl status <plan-dir> --json` before treating the plan as idle",
             "Its terminal `supervision-end` record therefore marks the end of "
             "supervision only: that live child can still publish mailbox "
             "questions and notices after the record lands",
@@ -1315,9 +1218,9 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def test_docs_describe_guidance_rendering_bounds(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        mailbox_docs = docs.split(
-            "## Live Mailbox and Future-Turn Model Control", 1
-        )[1].split("\n## ", 1)[0]
+        mailbox_docs = docs.split("## Live Mailbox and Future-Turn Model Control", 1)[
+            1
+        ].split("\n## ", 1)[0]
         normalized = " ".join(mailbox_docs.split())
 
         self.assertIn(
@@ -1369,14 +1272,13 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def test_docs_describe_mailbox_and_reply_text_framing(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        mailbox_docs = docs.split(
-            "## Live Mailbox and Future-Turn Model Control", 1
-        )[1].split("\n## ", 1)[0]
+        mailbox_docs = docs.split("## Live Mailbox and Future-Turn Model Control", 1)[
+            1
+        ].split("\n## ", 1)[0]
         normalized = " ".join(mailbox_docs.split())
 
         self.assertIn(
-            "In text mode, `asl inbox read`, `asl ask`, and "
-            "`asl outbox wait`",
+            "In text mode, `asl inbox read`, `asl ask`, and `asl outbox wait`",
             normalized,
         )
         self.assertIn("`BEGIN ASL MAILBOX MESSAGE JSONL`", normalized)
@@ -1390,9 +1292,9 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def test_docs_lock_wait_timeout_and_bare_label_resolution(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        mailbox_docs = docs.split(
-            "## Live Mailbox and Future-Turn Model Control", 1
-        )[1].split("\n## ", 1)[0]
+        mailbox_docs = docs.split("## Live Mailbox and Future-Turn Model Control", 1)[
+            1
+        ].split("\n## ", 1)[0]
         status_docs = docs.split("`status` reads durable plan files", 1)[1].split(
             "\n\n`tail` prints", 1
         )[0]
@@ -1431,9 +1333,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def test_docs_enumerate_mailbox_command_error_reasons(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        mailbox_docs = docs.split(
-            "### Mailbox commands", 1
-        )[1].split("\n### ", 1)[0]
+        mailbox_docs = docs.split("### Mailbox commands", 1)[1].split("\n### ", 1)[0]
         mailbox_cli_source = self._read("agent_session_loop/mailbox_cli.py")
 
         def resolve_reason(node: ast.expr) -> str | None:
@@ -1464,15 +1364,19 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             for name, value in vars(mailbox).items()
             if name.startswith("ERROR_") and isinstance(value, str)
         }
-        expected_reasons = cli_reasons | operation_reasons | {
-            "ambiguous-plan",
-            "invalid-target",
-            "malformed-plan",
-            "os-error",
-            "question-already-answered",
-            "question-not-found",
-            "state-error",
-        }
+        expected_reasons = (
+            cli_reasons
+            | operation_reasons
+            | {
+                "ambiguous-plan",
+                "invalid-target",
+                "malformed-plan",
+                "os-error",
+                "question-already-answered",
+                "question-not-found",
+                "state-error",
+            }
+        )
 
         # Keep the most important repaired distinctions visible in this
         # regression even though their production constants are also derived.
@@ -1491,14 +1395,15 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         )
         self.assertRegex(
             mailbox_docs,
-            r"`invalid-text-source` when both `--text` and\s+`--text-stdin` are supplied",
+            r"`invalid-text-source` when both `--text` and\s+`--text-stdin` are "
+            r"supplied",
         )
 
     def test_docs_enumerate_control_command_error_reasons(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        control_docs = docs.split(
-            "`asl control` is the programmatic equivalent", 1
-        )[1].split("\n`status` reads durable plan files", 1)[0]
+        control_docs = docs.split("`asl control` is the programmatic equivalent", 1)[
+            1
+        ].split("\n`status` reads durable plan files", 1)[0]
         control_cli_source = self._read("agent_session_loop/control_cli.py")
 
         def resolve_reason(node: ast.expr) -> str | None:
@@ -1535,9 +1440,9 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def _control_docs(self) -> str:
         docs = self._read("docs/agent-session-loop.md")
-        return docs.split("`asl control` is the programmatic equivalent", 1)[
-            1
-        ].split("\n`status` reads durable plan files", 1)[0]
+        return docs.split("`asl control` is the programmatic equivalent", 1)[1].split(
+            "\n`status` reads durable plan files", 1
+        )[0]
 
     def test_docs_pin_control_abort_and_receipt_constants(self) -> None:
         normalized = " ".join(self._control_docs().split())
@@ -1557,8 +1462,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             normalized,
         )
         self.assertIn(
-            "A grace outside 1–86400 seconds fails with "
-            "`reason: invalid-grace`",
+            "A grace outside 1–86400 seconds fails with `reason: invalid-grace`",
             normalized,
         )
         self.assertIn(
@@ -1566,8 +1470,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             normalized,
         )
         self.assertIn(
-            "`--timeout` requires `--wait` and must be between 0 and 1800 "
-            "seconds",
+            "`--timeout` requires `--wait` and must be between 0 and 1800 seconds",
             normalized,
         )
         self.assertIn("The default wait is `60` seconds", normalized)
@@ -1617,9 +1520,9 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
     def test_docs_enumerate_run_control_actions(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         state_files = docs.split("## State Files", 1)[1].split("\n## ", 1)[0]
-        event_reference_docs = state_files.split("`run_control` events", 1)[
-            1
-        ].split("`tail` renders", 1)[0]
+        event_reference_docs = state_files.split("`run_control` events", 1)[1].split(
+            "`tail` renders", 1
+        )[0]
 
         for action in events.RUN_CONTROL_ACTIONS:
             self.assertIn(
@@ -1721,8 +1624,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         )
         for marker in (
             "`stop_kind` names which request produced that stop.",
-            "`abort` means `asl control abort` ended the turn that was in "
-            "flight",
+            "`abort` means `asl control abort` ended the turn that was in flight",
             "reverted to `pending` with a Handoff note saying it holds no "
             "completion, so it is *not* counted in `completed`",
             "It is still a clean early stop: same `ok: true`, still never a "
@@ -1774,8 +1676,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "**The worker completed its session**",
             "the session stays `complete` and **the run continues to the next "
             "session**",
-            "never report the run as stopped on the strength of the abort "
-            "alone",
+            "never report the run as stopped on the strength of the abort alone",
             "Only `abort-turn-honored` proves the run is stopping",
             "An abort the worker satisfied inside its grace window never "
             "reaches this verdict",
@@ -1788,9 +1689,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def test_docs_describe_the_autopilot_stop_kind(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        autopilot_docs = docs.split("## Autopilot Skill", 1)[1].split(
-            "\n## ", 1
-        )[0]
+        autopilot_docs = docs.split("## Autopilot Skill", 1)[1].split("\n## ", 1)[0]
         normalized = " ".join(autopilot_docs.split())
 
         for marker in (
@@ -1812,8 +1711,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         normalized = " ".join(docs.split())
 
         self.assertIn(
-            "`POST /api/control/abort` — enqueue a `request-abort-turn` "
-            "command.",
+            "`POST /api/control/abort` — enqueue a `request-abort-turn` command.",
             normalized,
         )
         self.assertIn(
@@ -1842,8 +1740,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
                 f"`{waiting_status}`",
                 status_docs,
                 msg=(
-                    "waiting_for_reply_status value "
-                    f"{waiting_status!r} is undocumented"
+                    f"waiting_for_reply_status value {waiting_status!r} is undocumented"
                 ),
             )
         self.assertIn(f"`{qna.EXPIRED_WAIT_PAUSE_REASON}`", pause_docs)
@@ -1903,15 +1800,13 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
                 "pause semantics",
                 pause_docs,
                 (
-                    "classify it as `expired` even before its unsupervised "
-                    "ceiling",
+                    "classify it as `expired` even before its unsupervised ceiling",
                     "That lock check is what makes an abandoned wait "
                     "recoverable promptly",
                     "the ceiling itself rolls forward with lease activity, so "
                     "a record left behind by a supervised wait can carry a "
                     "projected ceiling well in the future",
-                    "orphaned nonterminal wait whose unsupervised ceiling "
-                    "passed",
+                    "orphaned nonterminal wait whose unsupervised ceiling passed",
                 ),
             ),
         ):
@@ -1921,8 +1816,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
                     marker,
                     normalized,
                     msg=(
-                        f"{section_name} docs omit rolling-ceiling marker: "
-                        f"{marker!r}"
+                        f"{section_name} docs omit rolling-ceiling marker: {marker!r}"
                     ),
                 )
 
@@ -1957,9 +1851,9 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
 
     def test_docs_lock_net_surface_privacy_and_exclusions(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        mailbox_docs = docs.split(
-            "## Live Mailbox and Future-Turn Model Control", 1
-        )[1].split("\n## ", 1)[0]
+        mailbox_docs = docs.split("## Live Mailbox and Future-Turn Model Control", 1)[
+            1
+        ].split("\n## ", 1)[0]
         surface_docs = mailbox_docs.split(
             "### Surface and observability accounting", 1
         )[1].split("\n\nWorkbench", 1)[0]
@@ -2008,9 +1902,9 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "suspend",
             normalized_surface_docs,
         )
-        live_wait_docs = mailbox_docs.split(
-            "### Live reply wait and fallback", 1
-        )[1].split("\n### ", 1)[0]
+        live_wait_docs = mailbox_docs.split("### Live reply wait and fallback", 1)[
+            1
+        ].split("\n### ", 1)[0]
         for reason in runner.MAILBOX_REPLY_WAIT_PREPARATION_REASONS:
             self.assertIn(
                 f"`{reason}`",
@@ -2089,9 +1983,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         # Reflects the registry plan_roots discovery wiring.
         self.assertIn("registry `plan_roots`", readme)
         # Reflects the tri-state nullable default behavior.
-        self.assertIn(
-            "tri-state nullable launch profiles", readme
-        )
+        self.assertIn("tri-state nullable launch profiles", readme)
         # Reflects the dotted session API/frontend rendering.
         self.assertIn("dotted session IDs", readme)
         # Reflects the Recovery Center docs and read-only API.
@@ -2104,9 +1996,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
     def test_docs_describe_workbench_cli_pin_unpin_registry(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         self.assertIn("asl workbench [serve]", docs)
-        self.assertIn(
-            "bare `asl workbench` invocation defaults to `serve`", docs
-        )
+        self.assertIn("bare `asl workbench` invocation defaults to `serve`", docs)
         self.assertIn("asl workbench pin /path/to/plan-dir", docs)
         self.assertIn("asl workbench unpin /path/to/plan-dir", docs)
         self.assertIn("asl workbench registry --json", docs)
@@ -2146,8 +2036,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             normalized = " ".join(text.split())
             self.assertIn("final-review responses", normalized)
             self.assertTrue(
-                "retain `cwd`" in normalized
-                or "retaining `cwd`" in normalized
+                "retain `cwd`" in normalized or "retaining `cwd`" in normalized
             )
             self.assertIn("`formatRepositoryAliases`", text)
 
@@ -2178,7 +2067,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "ages complete plans off their",
             "`select candidates`",
             "`select visible`",
-            "review finished work in place without flipping \"show",
+            'review finished work in place without flipping "show',
             # Session 4: archive bulk select-all and restore-selected workflow.
             "`#wb-archive-bulk`",
             "`select all`",
@@ -2202,9 +2091,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "Registry roots are scanned alongside\nCLI-supplied roots",
             docs,
         )
-        self.assertIn(
-            "canonical `plan-root` discovery source label", docs
-        )
+        self.assertIn("canonical `plan-root` discovery source label", docs)
 
     def test_docs_describe_tri_state_nullable_launch_profile(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -2222,9 +2109,9 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
 
     def test_docs_describe_v2_role_specific_launch_profiles(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        profile_docs = docs.split(
-            "### Registry, pins, launch profiles", 1
-        )[1].split("\n### ", 1)[0]
+        profile_docs = docs.split("### Registry, pins, launch profiles", 1)[1].split(
+            "\n### ", 1
+        )[0]
 
         self.assertIn("Schema version `2`", profile_docs)
         self.assertIn("`harness_model`", profile_docs)
@@ -2247,21 +2134,15 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
     def test_docs_describe_state_endpoint_session_payload(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         self.assertIn("`sessions` (ordered list with", docs)
-        self.assertIn(
-            "`counts` (`{pending, complete, empty,\n  unknown}`)", docs
-        )
+        self.assertIn("`counts` (`{pending, complete, empty,\n  unknown}`)", docs)
         self.assertIn("`next_pending_id`", docs)
-        self.assertIn(
-            "schema\n  matches `asl status --json`", docs
-        )
-        self.assertIn("`reason: \"malformed-plan\"`", docs)
+        self.assertIn("schema\n  matches `asl status --json`", docs)
+        self.assertIn('`reason: "malformed-plan"`', docs)
 
     def test_docs_describe_dotted_session_frontend_rendering(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         self.assertIn("session table iterates `payload.sessions`", docs)
-        self.assertIn(
-            "renders the dotted `id` verbatim (e.g., `2.1`, `2.2`)", docs
-        )
+        self.assertIn("renders the dotted `id` verbatim (e.g., `2.1`, `2.2`)", docs)
         self.assertIn(
             "no integer-loop or\n  `parseInt(next_pending_session_id)` inference",
             docs,
@@ -2272,12 +2153,8 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         # so the docs example must match. The stale `{"reply": "..."}`
         # example must not appear in the /api/reply bullet.
         docs = self._read("docs/agent-session-loop.md")
-        self.assertIn(
-            '`{"plan_dir": "...", "reply_text": "..."}`', docs
-        )
-        self.assertNotIn(
-            '`{"plan_dir": "...", "reply": "..."}`', docs
-        )
+        self.assertIn('`{"plan_dir": "...", "reply_text": "..."}`', docs)
+        self.assertNotIn('`{"plan_dir": "...", "reply": "..."}`', docs)
 
     def test_docs_describe_triage_queue_payload_fields(self) -> None:
         # Session 1 added additive triage fields to /api/queue and
@@ -2297,9 +2174,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`completed_at`",
             "`searchable_text`",
         ):
-            self.assertIn(
-                field, docs, msg=f"missing triage field: {field}"
-            )
+            self.assertIn(field, docs, msg=f"missing triage field: {field}")
         for field in (
             "`recovery`",
             "`primary_action`",
@@ -2307,9 +2182,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`command_count`",
             "`warning_count`",
         ):
-            self.assertIn(
-                field, docs, msg=f"missing compact recovery field: {field}"
-            )
+            self.assertIn(field, docs, msg=f"missing compact recovery field: {field}")
         # Urgency groups vocabulary (mirrors workbench.URGENCY_GROUPS).
         for group in (
             "`needs-action`",
@@ -2317,9 +2190,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`ready`",
             "`complete`",
         ):
-            self.assertIn(
-                group, docs, msg=f"missing urgency group: {group}"
-            )
+            self.assertIn(group, docs, msg=f"missing urgency group: {group}")
         # Last-activity source vocabulary (mirrors
         # workbench.LAST_ACTIVITY_SOURCES).
         for source in (
@@ -2330,13 +2201,11 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`lock-created`",
             "`progress-journal`",
         ):
-            self.assertIn(
-                source, docs, msg=f"missing activity source: {source}"
-            )
+            self.assertIn(source, docs, msg=f"missing activity source: {source}")
         # Urgency rank constants (paused-for-reply 10 .. complete 90).
         # These are documented in a table so the literal numerals appear
         # in the same lines as the primary-state names.
-        for state, rank in (
+        for primary_state, rank in (
             ("paused-for-reply", "10"),
             ("failed", "20"),
             ("stale", "30"),
@@ -2348,11 +2217,9 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             ("complete", "90"),
         ):
             self.assertIn(
-                state, docs, msg=f"missing primary state: {state}"
+                primary_state, docs, msg=f"missing primary state: {primary_state}"
             )
-            self.assertIn(
-                rank, docs, msg=f"missing urgency rank: {rank}"
-            )
+            self.assertIn(rank, docs, msg=f"missing urgency rank: {rank}")
         # Exported Python constants are the source of truth — the docs
         # must reference them so downstream callers can grep their way
         # back to workbench.py.
@@ -2363,9 +2230,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`workbench.URGENCY_GROUP_BY_STATE`",
             "`workbench.ACTIVITY_LABEL_BY_STATE`",
         ):
-            self.assertIn(
-                constant, docs, msg=f"missing exported constant: {constant}"
-            )
+            self.assertIn(constant, docs, msg=f"missing exported constant: {constant}")
 
     def test_docs_describe_recovery_center_api_and_payload(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -2407,9 +2272,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`warning_details`",
             "`compact`",
         ):
-            self.assertIn(
-                field, docs, msg=f"missing recovery payload field: {field}"
-            )
+            self.assertIn(field, docs, msg=f"missing recovery payload field: {field}")
         for warning_field in ("`code`", "`message`", "`severity`"):
             self.assertIn(
                 warning_field,
@@ -2453,9 +2316,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
 
     def test_docs_describe_recovery_center_security_boundaries(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
-        self.assertIn(
-            "The Recovery Center is a read-only diagnosis layer", docs
-        )
+        self.assertIn("The Recovery Center is a read-only diagnosis layer", docs)
         self.assertIn("copyable repair commands", docs)
         self.assertIn("Workbench never executes those\n  commands", docs)
         for endpoint in (
@@ -2463,18 +2324,14 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`/api/launch`",
             "`/api/unlock`",
         ):
-            self.assertIn(
-                endpoint, docs, msg=f"missing existing endpoint: {endpoint}"
-            )
+            self.assertIn(endpoint, docs, msg=f"missing existing endpoint: {endpoint}")
         for command in (
             "`asl preflight <plan-dir> --mark-loop-ready`",
             "`$plan-preflight-iterate <plan-dir>/`",
             "`asl verify <plan-dir>\n  --session <id> --json`",
             "`asl preflight <plan-dir> --json`",
         ):
-            self.assertIn(
-                command, docs, msg=f"missing copy-only command: {command}"
-            )
+            self.assertIn(command, docs, msg=f"missing copy-only command: {command}")
 
     def test_docs_describe_recovery_center_frontend_behavior(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -2493,7 +2350,8 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         docs = self._read("docs/agent-session-loop.md")
         for text in (
             "Recovery Center reports `not-loop-ready`",
-            "Recovery Center reports `verify-failed`, `no-contract`, or\n  `malformed-contract`",
+            "Recovery Center reports `verify-failed`, `no-contract`, or\n  "
+            "`malformed-contract`",
             "Recovery Center reports `commit-failed` or `commit-preflight`",
             "Recovery Center reports `stale-lock` or `stale-state`",
         ):
@@ -2517,9 +2375,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`path`",
             "`oldest`",
         ):
-            self.assertIn(
-                sort_mode, docs, msg=f"missing sort mode: {sort_mode}"
-            )
+            self.assertIn(sort_mode, docs, msg=f"missing sort mode: {sort_mode}")
         self.assertIn("debounces at 150 ms", docs)
         # Empty-state kinds (data-state values).
         for kind in (
@@ -2530,9 +2386,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`completed-hidden`",
             "`no-actionable`",
         ):
-            self.assertIn(
-                kind, docs, msg=f"missing empty-state kind: {kind}"
-            )
+            self.assertIn(kind, docs, msg=f"missing empty-state kind: {kind}")
 
     def test_docs_describe_two_pane_shell_and_preview(self) -> None:
         # Sessions 3 + 4 introduced the two-pane shell at the 960 px
@@ -2548,9 +2402,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             '`data-viewport="mobile|desktop"`',
             '`data-preview="empty|active"`',
         ):
-            self.assertIn(
-                attribute, docs, msg=f"missing shell attribute: {attribute}"
-            )
+            self.assertIn(attribute, docs, msg=f"missing shell attribute: {attribute}")
 
     def test_docs_describe_row_action_focus_contract(self) -> None:
         # Session 6 introduced #plan?dir=…&focus=<key>; document the
@@ -2560,12 +2412,8 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         self.assertIn("`#plan?dir=<encoded>[&focus=<key>]`", docs)
         self.assertIn("`DETAIL_FOCUS_TARGETS`", docs)
         for key in ("`reply`", "`events`", "`active`", "`launch`", "`unlock`"):
-            self.assertIn(
-                key, docs, msg=f"missing focus key: {key}"
-            )
-        self.assertIn(
-            "`data-action-kind=\"<RecommendedAction>\"`", docs
-        )
+            self.assertIn(key, docs, msg=f"missing focus key: {key}")
+        self.assertIn('`data-action-kind="<RecommendedAction>"`', docs)
         for action in (
             "`watch`",
             "`reply`",
@@ -2575,9 +2423,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`run`",
             "`repair-plan`",
         ):
-            self.assertIn(
-                action, docs, msg=f"missing recommended action: {action}"
-            )
+            self.assertIn(action, docs, msg=f"missing recommended action: {action}")
         # Row buttons must remain navigation-only — no inline mutations.
         self.assertIn("navigation-only", docs)
         # Focus is one-shot so polling does not re-snap the viewport.
@@ -2596,9 +2442,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
             "`wb.completed`",
             "`wb.selected`",
         ):
-            self.assertIn(
-                key, docs, msg=f"missing sessionStorage key: {key}"
-            )
+            self.assertIn(key, docs, msg=f"missing sessionStorage key: {key}")
         # Reply textarea privacy regression.
         self.assertIn("reply textarea is intentionally **not** persisted", docs)
         self.assertIn("`wb.reply`", docs)
@@ -2617,7 +2461,7 @@ class WorkbenchDocsRegressionTests(unittest.TestCase):
         # layout, focus-hint navigation, and the reply draft survival
         # invariant.
         docs = self._read("docs/agent-session-loop.md")
-        self.assertIn('`urgency_rank`', docs)
+        self.assertIn("`urgency_rank`", docs)
         self.assertIn('"show completed" toggle', docs)
         self.assertIn('`data-state="no-search-results"`', docs)
         self.assertIn("150 ms search debounce", docs)
@@ -2723,13 +2567,12 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         )
 
     def test_registry_migration_follow_up_order_is_documented(self) -> None:
-        agent_readme = (
-            REPO_ROOT / "agent_session_loop" / "README.md"
-        ).read_text(encoding="utf-8")
+        agent_readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
+            encoding="utf-8"
+        )
         for text in (self.docs, agent_readme):
             rebind = text.index(
-                "asl prepare PLAN_DIR --resume --rebind-workspace "
-                "--cwd WORKSPACE_ROOT"
+                "asl prepare PLAN_DIR --resume --rebind-workspace --cwd WORKSPACE_ROOT"
             )
             rerun = text.index("asl run PLAN_DIR --cwd WORKSPACE_ROOT")
             self.assertLess(rebind, rerun)
@@ -2755,9 +2598,9 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
     def test_multi_repository_docs_include_executable_four_repo_example(
         self,
     ) -> None:
-        agent_readme = (
-            REPO_ROOT / "agent_session_loop" / "README.md"
-        ).read_text(encoding="utf-8")
+        agent_readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
+            encoding="utf-8"
+        )
         for text in (self.readme, agent_readme, self.docs):
             self.assertIn("workspace root", text.lower())
             self.assertIn("Alias:path", text)
@@ -2826,24 +2669,17 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             self.docs,
         )
         self.assertIn(
-            "reports reclaimable bytes per plan directory as well as in\n"
-            "aggregate",
+            "reports reclaimable bytes per plan directory as well as in\naggregate",
             self.docs,
         )
-        self.assertIn(
-            "A stale lock is\nrefused exactly like an active one", self.docs
-        )
-        self.assertIn(
-            "The\ndefault is a dry-run that deletes nothing", self.docs
-        )
+        self.assertIn("A stale lock is\nrefused exactly like an active one", self.docs)
+        self.assertIn("The\ndefault is a dry-run that deletes nothing", self.docs)
         self.assertIn(
             "`asl gc --dry-run` is a pure projection: it deletes nothing and "
             "writes nothing,\nlocks included.",
             self.docs,
         )
-        self.assertIn(
-            "`asl gc` is the one command exempt from all\nof this", self.docs
-        )
+        self.assertIn("`asl gc` is the one command exempt from all\nof this", self.docs)
         for reason in (
             retention.RETAIN_PLAN_LOCKED,
             retention.RETAIN_LIVE_RUN,
@@ -2869,9 +2705,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             "materializations unless the supervised",
             self.docs,
         )
-        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn(
             f"`asl run --max-review-fix-cycles` (default {default_cycles})",
             skill,
@@ -2894,7 +2728,8 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            "By default `asl split` refuses a duplicate plan id before creating any directory",
+            "By default `asl split` refuses a duplicate plan id before creating any "
+            "directory",
             split_skill,
         )
         self.assertIn("intentional duplicate split", split_skill)
@@ -2957,9 +2792,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             )
 
     def test_review_cycle_default_matches_runner_constant(self) -> None:
-        self.assertIn(
-            f"(default {runner.DEFAULT_MAX_REVIEW_FIX_CYCLES};", self.docs
-        )
+        self.assertIn(f"(default {runner.DEFAULT_MAX_REVIEW_FIX_CYCLES};", self.docs)
 
     def test_recoverable_pause_docs_match_autopilot(self) -> None:
         module_path = REPO_ROOT / "skills" / "asl" / "scripts" / "asl_autopilot.py"
@@ -2972,9 +2805,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         assert spec.loader is not None
         spec.loader.exec_module(autopilot)
 
-        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
         surfaces = (self.docs, skill)
         recoverable_copy = "The helper auto-retries recoverable same-session pauses"
         for surface in surfaces:
@@ -3016,9 +2847,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         )
         self.assertEqual(runner.HANG_REASON_ZERO_CPU, autopilot.HANG_CLASS_ZERO_CPU)
 
-        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
         surfaces = {
             "skills/asl/SKILL.md": skill,
             "skills/asl/scripts/asl_autopilot.py": module_path.read_text(
@@ -3026,9 +2855,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             ),
         }
         for name, text in surfaces.items():
-            self.assertIn(
-                "worker_hung", text, f"{name} never mentions worker_hung"
-            )
+            self.assertIn("worker_hung", text, f"{name} never mentions worker_hung")
             for token in (
                 autopilot.HANG_CLASS_RESULT_RECEIVED,
                 autopilot.HANG_CLASS_ZERO_CPU,
@@ -3108,11 +2935,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
                 REPO_ROOT / "skills" / "asl" / "SKILL.md"
             ).read_text(encoding="utf-8"),
             "skills/asl/scripts/asl_autopilot.py": (
-                REPO_ROOT
-                / "skills"
-                / "asl"
-                / "scripts"
-                / "asl_autopilot.py"
+                REPO_ROOT / "skills" / "asl" / "scripts" / "asl_autopilot.py"
             ).read_text(encoding="utf-8"),
             "agent_session_loop/workbench.py": (
                 REPO_ROOT / "agent_session_loop" / "workbench.py"
@@ -3137,20 +2960,14 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         self.assertEqual(2, runner.RESULT_SCHEMA_VERSION)
         self.assertEqual(2, events.EVENT_SCHEMA_VERSION)
         state_files = self.docs.split("## State Files", 1)[1].split("\n## ", 1)[0]
-        self.assertIn(
-            f"schema version {runner.STATE_SCHEMA_VERSION}", state_files
-        )
+        self.assertIn(f"schema version {runner.STATE_SCHEMA_VERSION}", state_files)
         self.assertIn(f"`version: {runner.STATE_SCHEMA_VERSION}`", state_files)
 
     def test_json_output_pins_windowed_metrics_contract(self) -> None:
         section = self.docs.split("## JSON Output", 1)[1].split("\n## ", 1)[0]
         self.assertIn("`metrics --json`", section)
-        self.assertIn(
-            "narrowing `--since-days` never\nraises a count", section
-        )
-        self.assertIn(
-            "skipped before its event log is read", section
-        )
+        self.assertIn("narrowing `--since-days` never\nraises a count", section)
+        self.assertIn("skipped before its event log is read", section)
         for field in (
             "state_dirs_scanned",
             "state_dirs_active",
@@ -3161,9 +2978,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
 
     def test_metrics_docs_match_default_window(self) -> None:
         self.assertEqual(7, metrics.DEFAULT_SINCE_DAYS)
-        self.assertIn(
-            f"last {metrics.DEFAULT_SINCE_DAYS} days", self.docs
-        )
+        self.assertIn(f"last {metrics.DEFAULT_SINCE_DAYS} days", self.docs)
 
     def test_packet_mode_and_rollback_are_documented(self) -> None:
         self.assertEqual("packet", runner.WORKER_MODE_PACKET)
@@ -3213,14 +3028,10 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         section = self.sweep_section()
         # No group to enumerate and nothing snapshotted, so this reads the
         # process table and signals nothing.
-        report = process_tree.sweep_survivors(
-            root_pid=os.getpid(), expected_pgid=None
-        )
+        report = process_tree.sweep_survivors(root_pid=os.getpid(), expected_pgid=None)
         self.assertEqual([], report["killed"])
         for key in report:
-            self.assertIn(
-                f"`{key}`", section, f"docs never mention report key {key!r}"
-            )
+            self.assertIn(f"`{key}`", section, f"docs never mention report key {key!r}")
         for key in report["enumeration"]:
             self.assertIn(
                 f"`{key}`",
@@ -3260,9 +3071,9 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
             encoding="utf-8"
         )
         cls.readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        cls.package_readme = (
-            REPO_ROOT / "agent_session_loop" / "README.md"
-        ).read_text(encoding="utf-8")
+        cls.package_readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
+            encoding="utf-8"
+        )
         cls.asl_skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(
             encoding="utf-8"
         )
@@ -3374,9 +3185,7 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
 
     def test_the_improvement_workflow_is_documented_as_human_gated(self) -> None:
         for text in (self.readme, self.docs):
-            self.assertIn(
-                "asl assurance plan ISSUE --harness NAME --output PATH", text
-            )
+            self.assertIn("asl assurance plan ISSUE --harness NAME --output PATH", text)
         self.assertIn("no commit, and no repository change", self.readme)
 
     def test_the_autopilot_skill_reports_assurance_without_driving_it(

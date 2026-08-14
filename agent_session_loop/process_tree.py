@@ -17,21 +17,17 @@ that exits between two samples no longer takes the CPU it burned with it.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
 import os
 import re
 import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
-PS_COMMAND: tuple[str, ...] = (
-    "ps", "-axo", "pid=,ppid=,state=,time=,lstart=,command="
-)
-PS_TABLE_COMMAND: tuple[str, ...] = (
-    "ps", "-axo", "pid=,ppid=,pgid=,lstart=,command="
-)
+PS_COMMAND: tuple[str, ...] = ("ps", "-axo", "pid=,ppid=,state=,time=,lstart=,command=")
+PS_TABLE_COMMAND: tuple[str, ...] = ("ps", "-axo", "pid=,ppid=,pgid=,lstart=,command=")
 PS_BIRTH_COMMAND: tuple[str, ...] = ("ps", "-o", "lstart=", "-p")
 COMMAND_MAX_CHARS = 160
 SAMPLE_TIMEOUT_SECONDS = 5.0
@@ -59,9 +55,7 @@ _CPU_TIME_RE = re.compile(
 # missing or shaped differently yields an entry with no birth identity instead
 # of an unparsable row.
 _BIRTH_PATTERN = r"\S+\s+\S+\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4}"
-_BIRTH_RE = re.compile(
-    rf"^(?P<birth>{_BIRTH_PATTERN})\s+(?P<command>\S.*)$"
-)
+_BIRTH_RE = re.compile(rf"^(?P<birth>{_BIRTH_PATTERN})\s+(?P<command>\S.*)$")
 _LSTART_RE = re.compile(rf"^{_BIRTH_PATTERN}$")
 
 
@@ -84,9 +78,7 @@ def _parse_cpu_time(raw: str) -> float | None:
     return float(days * 86400 + hours * 3600 + minutes * 60) + seconds
 
 
-def descendant_pids(
-    root_pid: int, table: Mapping[int, Mapping[str, Any]]
-) -> list[int]:
+def descendant_pids(root_pid: int, table: Mapping[int, Mapping[str, Any]]) -> list[int]:
     """Return ``root_pid``'s descendants in BFS order, root itself excluded.
 
     ``table`` is any pid-keyed mapping whose entries carry ``ppid`` — both
@@ -97,7 +89,7 @@ def descendant_pids(
     for pid, entry in table.items():
         try:
             ppid = int(entry["ppid"])
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             continue
         children.setdefault(ppid, []).append(pid)
 
@@ -239,7 +231,7 @@ def accumulate_cpu_seconds(
     for entry in tree:
         try:
             pid = int(entry["pid"])
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             continue
         identity: CpuIdentity = (pid, entry.get("birth"))
         cpu_seconds = float(entry.get("cpu_seconds") or 0.0)
@@ -345,15 +337,13 @@ def sample_process_table(
     return table or None
 
 
-def group_member_pids(
-    pgid: int, table: Mapping[int, Mapping[str, Any]]
-) -> list[int]:
+def group_member_pids(pgid: int, table: Mapping[int, Mapping[str, Any]]) -> list[int]:
     """Return the pids whose process group is ``pgid``, ascending."""
     members: list[int] = []
     for pid, entry in table.items():
         try:
             member_pgid = int(entry["pgid"])
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             continue
         if member_pgid == pgid:
             members.append(pid)
@@ -445,7 +435,7 @@ def sweep_survivors(
             snapshot_size += 1
             try:
                 pid = int(entry["pid"])
-            except (KeyError, TypeError, ValueError):
+            except KeyError, TypeError, ValueError:
                 continue
             current = table.get(pid)
             recorded_command = entry.get("command")
@@ -497,8 +487,7 @@ def sweep_survivors(
                 survivors_after = [
                     pid
                     for pid in killed
-                    if pid in after
-                    and after[pid]["command"] == table[pid]["command"]
+                    if pid in after and after[pid]["command"] == table[pid]["command"]
                 ]
 
         return {

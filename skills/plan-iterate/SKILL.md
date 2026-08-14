@@ -85,6 +85,7 @@ Are failure modes, boundary conditions, empty states, and error paths addressed?
 **Dimension 6 — Sequencing & Dependencies**
 For multi-session plans: Is the session order justified? Are inter-session dependencies stated?
 For single-session plans: Are implementation steps in a logical order?
+**Convergence rules** (multi-session plans): every session must state its own verification command and its own done-condition — never a shared criterion deferred to a later session. Prefer **six sessions or fewer**; when the work looks like more, narrow the plan's scope rather than splitting more finely, because the long repair tails appeared in the larger splits. Mark this dimension thin when a session carries no verification command or no done-condition, and mark it thin when the plan needs a seventh session; the Step 4 question for it proposes what to cut, not a finer split.
 
 **Dimension 7 — Verification**
 Is there a concrete verification strategy? Test commands, expected outputs, manual test steps, or acceptance criteria. A bare `## Verification` with a single shell command is adequate. No verification section at all is missing.
@@ -210,6 +211,10 @@ _Sequencing_:
 
 - "Sessions N and M seem to have a dependency on [shared resource]. Should Session N create it, or should it already exist?"
 - Options: reorder, add prerequisite step, or document assumption
+- "The plan needs N sessions, above the six-sessions-or-fewer preference. Which scope should be cut so it converges in six or fewer?"
+- Options: 2-3 concrete scope cuts drawn from the plan — never a finer split of the same work
+- "Session N states no verification command (or no done-condition). What proves it is finished?"
+- Options: candidate commands evidenced by the repo's own test/lint recipes
 
 _Verification_:
 
@@ -402,12 +407,14 @@ The final plan must pass the `asl prepare` structure gate, which otherwise exits
   - a `### Verify` fenced ```json block parseable by `contracts.parse_completion_contract` giving the session's verification recipe.
 - Contract session IDs must use the canonical unpadded ID returned by the source-heading parser.
 - Contract checks carry `baseline_expectation` (`pass` or `fail`) where a meaningful pre-implementation baseline expectation exists; checks without it carry no baseline obligations.
+- Every session states its own verification command in `### Verify` and its own done-condition in `### Done when`. Neither may be blank, generic, or deferred to a later session's contract — a session whose completion is only provable by a successor cannot converge on its own.
+- The plan converges in **six sessions or fewer**. When the work looks like it needs a seventh, narrow the plan's scope rather than splitting more finely: the long repair tails appeared in the larger splits, so a finer split buys nothing. Record the cut scope under `## Consciously Deferred` per the Step I7 durable-section rule.
 
 Derive done criteria and verification recipes from the plan content and the Step I2 research; ask the user (one AskUserQuestion round at most) only when a verification command is genuinely unknowable from the plan and codebase.
 
 **Bind the premortem output to enforcement.** A premortem that ends in prose changes nothing; every Step I4.5 failure mode must land in one of exactly two places:
 
-- **Expressible as a check → it becomes one.** Add a `command`, `file_exists`, or `regex_in_file` entry to the `### Verify` recipe of the session whose work would produce that failure. Author it to the contract rules in `session-split/SKILL.md:157-166` rather than restating them: no bare `python` (always `python3`), no ambiguity sentinels, `timeout_seconds <= 3600`, and in a registered plan a `repo` alias in that session's read scope with every `path` and `cwd` repository-relative and free of `..`. Prefer the narrowest check that would actually have caught the failure — a premortem check exists to fail loudly in one specific way, not to re-run the suite.
+- **Expressible as a check → it becomes one.** Add a `command`, `file_exists`, or `regex_in_file` entry to the `### Verify` recipe of the session whose work would produce that failure. Author it to the contract rules in `session-split/SKILL.md:158-168` rather than restating them: no bare `python` (always `python3`), no ambiguity sentinels, `timeout_seconds <= 3600`, and in a registered plan a `repo` alias in that session's read scope with every `path` and `cwd` repository-relative and free of `..`. Prefer the narrowest check that would actually have caught the failure — a premortem check exists to fail loudly in one specific way, not to re-run the suite.
 - **Not expressible → it becomes a `## Risks` bullet.** One bullet per failure mode in the plan-level `## Risks` section, placed by the Step I7 durable-section rule, each naming the mechanism and what a reader should watch for. "Not expressible" means no check can distinguish the failure from success — not that writing the check is inconvenient.
 
 Give premortem-derived checks `baseline_expectation: "fail"` unless the check genuinely passes before any implementation. A premortem check is failing at baseline by construction: it asserts the property whose absence is the predicted failure.

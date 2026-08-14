@@ -20,12 +20,12 @@ the surface behaves exactly as it always has.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
-from dataclasses import dataclass
 import json
 import math
-from pathlib import Path
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import (
@@ -37,7 +37,6 @@ from . import (
     responses,
     state,
 )
-
 
 # Command names used in both success and error payloads, so a supervisor can
 # branch on `command` without inspecting argv.
@@ -57,9 +56,7 @@ STOP_BEFORE_REVIEW_NOTE = (
 )
 STOP_NOOP_NOTE = "current session is the last; stop is a no-op"
 ABORT_WILL_APPLY_NOTE = "a turn is active; abort will end it"
-ABORT_DEGRADES_NOTE = (
-    "no turn active; abort degrades to stop-after-current"
-)
+ABORT_DEGRADES_NOTE = "no turn active; abort degrades to stop-after-current"
 MODEL_APPLIES_TO = "next-implementation-turn"
 
 # A wakeup usually makes the runner drain within milliseconds, so the receipt
@@ -124,10 +121,7 @@ def _read_run_control_records(events_path: Path) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             # A line being appended right now is read whole on the next poll.
             continue
-        if (
-            isinstance(record, dict)
-            and record.get("name") == events.RUN_CONTROL_EVENT
-        ):
+        if isinstance(record, dict) and record.get("name") == events.RUN_CONTROL_EVENT:
             records.append(record)
     return records
 
@@ -176,9 +170,7 @@ def _wait_for_receipt(
     """
     started = time.monotonic()
     deadline = started + timeout
-    events_path = (
-        state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
-    )
+    events_path = state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
     last_read_token: object = _EVENTS_TOKEN_UNSEEN
     observed = False
     terminal_action: str | None = None
@@ -245,7 +237,7 @@ def _validated_wait_timeout(
             if requested is None
             else float(requested)
         )
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         timeout = math.nan
     if (
         not math.isfinite(timeout)
@@ -469,9 +461,7 @@ def _enqueue_and_report(
     # Best-effort wakeup after the durable append: the runner would drain
     # within its poll interval anyway, so the reported outcome is latency
     # information, never a delivery guarantee for the command itself.
-    notified = control_signal.notify_runner(
-        snapshot.plan_dir, state_dir=args.state_dir
-    )
+    notified = control_signal.notify_runner(snapshot.plan_dir, state_dir=args.state_dir)
 
     wait: _ReceiptWait | None = None
     if getattr(args, "wait", False):
@@ -527,8 +517,8 @@ def control_stop_after_current_from_args(args: argparse.Namespace) -> int:
     ) -> tuple[dict[str, Any], str]:
         run_active = _run_active(status)
         pending_after_current = _pending_after_current(status)
-        review_continuation_pending = (
-            run_active and _review_continuation_pending(status)
+        review_continuation_pending = run_active and _review_continuation_pending(
+            status
         )
         if not run_active:
             note = NO_ACTIVE_RUN_NOTE
@@ -620,10 +610,7 @@ def control_abort_from_args(args: argparse.Namespace) -> int:
             "reason": queued.reason,
             "note": note,
         }
-        summary = (
-            f"Queued abort for {status['plan_dir']} "
-            f"(command {queued.id}); {note}"
-        )
+        summary = f"Queued abort for {status['plan_dir']} (command {queued.id}); {note}"
         return fields, summary
 
     return _enqueue_and_report(
@@ -692,9 +679,7 @@ def control_set_model_from_args(args: argparse.Namespace) -> int:
     """Override or clear model/effort for a future implementation turn."""
     harness = getattr(args, "harness", None)
     harness_model = getattr(args, "harness_model", None)
-    clear_harness_model = bool(
-        getattr(args, "clear_harness_model", False)
-    )
+    clear_harness_model = bool(getattr(args, "clear_harness_model", False))
     effort = getattr(args, "effort", None)
     clear_effort = bool(getattr(args, "clear_effort", False))
 
@@ -720,8 +705,7 @@ def control_set_model_from_args(args: argparse.Namespace) -> int:
             text_label="control set-model",
             reason=control_queue.REJECT_MISSING_MODEL_CONTROL_OPERATION,
             error=(
-                "set-model requires at least one model or effort "
-                "set/clear operation"
+                "set-model requires at least one model or effort set/clear operation"
             ),
         )
         return 1
@@ -747,8 +731,7 @@ def control_set_model_from_args(args: argparse.Namespace) -> int:
             "note": note,
         }
         summary = (
-            f"Queued set-model for {status['plan_dir']} "
-            f"(command {queued.id}); {note}"
+            f"Queued set-model for {status['plan_dir']} (command {queued.id}); {note}"
         )
         return fields, summary
 

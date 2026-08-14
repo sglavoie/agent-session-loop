@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 
 def _append_log(mode: str) -> None:
@@ -34,8 +34,7 @@ def _git_commit() -> subprocess.CompletedProcess[str]:
     staged = subprocess.run(
         ["git", "add", "-A"],
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if staged.returncode != 0:
@@ -43,8 +42,7 @@ def _git_commit() -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "commit", "--allow-empty", "-m", "Fake spec commit"],
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
 

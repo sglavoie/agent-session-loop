@@ -10,7 +10,7 @@ def format_duration_seconds(value: Any) -> str:
     """Format a duration value for text progress output."""
     try:
         seconds = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "unknown"
 
     if not math.isfinite(seconds):

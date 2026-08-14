@@ -37,20 +37,20 @@ quotable rather than merely rejected.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+import contextlib
 import json
 import math
 import os
-from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
 from . import durability
 from .artifacts import sha256_hex
 from .harnesses import HARNESS_NAMES, HarnessName
-
 
 #: Bumped whenever the meaning of any model below changes. The version is part
 #: of every finding fingerprint, so a schema change deliberately retires the
@@ -388,7 +388,8 @@ def _require_bool(value: object, *, label: str) -> bool:
 def _require_digest(value: object, *, label: str) -> str:
     if not isinstance(value, str) or not _HEX64_RE.match(value):
         raise AssuranceError(
-            f"{label} must be a lowercase 64-character SHA-256 hex digest; got {value!r}"
+            f"{label} must be a lowercase 64-character SHA-256 hex digest; got "
+            f"{value!r}"
         )
     return value
 
@@ -402,9 +403,7 @@ def _require_timestamp(value: object, *, label: str) -> str:
             f"{label} must be an ISO-8601 timestamp; got {text!r} ({error})"
         ) from error
     if parsed.tzinfo is None:
-        raise AssuranceError(
-            f"{label} must carry an explicit UTC offset; got {text!r}"
-        )
+        raise AssuranceError(f"{label} must carry an explicit UTC offset; got {text!r}")
     return text
 
 
@@ -442,7 +441,9 @@ def _require_schema_version(value: object, *, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise AssuranceError(f"{label} must be an integer schema version")
     if value not in SUPPORTED_ASSURANCE_SCHEMA_VERSIONS:
-        supported = ", ".join(str(item) for item in sorted(SUPPORTED_ASSURANCE_SCHEMA_VERSIONS))
+        supported = ", ".join(
+            str(item) for item in sorted(SUPPORTED_ASSURANCE_SCHEMA_VERSIONS)
+        )
         raise AssuranceError(
             f"{label} {value} is unsupported; this build reads version(s) {supported}"
         )
@@ -458,7 +459,9 @@ def parse_issue_id(value: object) -> str:
     canonical ID it abbreviates.
     """
     if isinstance(value, bool):
-        raise AssuranceError(f"issue id must be {ISSUE_ID_PREFIX}N or a positive integer; got {value!r}")
+        raise AssuranceError(
+            f"issue id must be {ISSUE_ID_PREFIX}N or a positive integer; got {value!r}"
+        )
     if isinstance(value, int):
         if value < 1:
             raise AssuranceError(f"issue id must be a positive integer; got {value}")
@@ -496,9 +499,7 @@ def _require_issue_ids(value: object, *, label: str) -> tuple[str, ...]:
     issue_ids = tuple(parse_issue_id(item) for item in items)
     duplicates = _duplicates(issue_ids)
     if duplicates:
-        raise AssuranceError(
-            f"{label} repeats issue id(s) {', '.join(duplicates)}"
-        )
+        raise AssuranceError(f"{label} repeats issue id(s) {', '.join(duplicates)}")
     return issue_ids
 
 
@@ -519,7 +520,9 @@ def canonical_json_bytes(payload: Any) -> bytes:
     the same model always produces the same artifact, so an artifact digest
     identifies content rather than a serialization run.
     """
-    text = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    text = json.dumps(
+        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
     return text.encode("utf-8") + b"\n"
 
 
@@ -609,7 +612,9 @@ def finding_fingerprint(
     same defect seen in two runs must produce one issue with two occurrences,
     and any volatile input would instead produce two issues.
     """
-    version = _require_schema_version(schema_version, label="fingerprint schema version")
+    version = _require_schema_version(
+        schema_version, label="fingerprint schema version"
+    )
     material = "\x1f".join(
         (
             "assurance-finding",
@@ -714,7 +719,9 @@ def parse_finding(payload: object, *, label: str = "finding") -> Finding:
         invariant_key=_require_token(
             data.get("invariant_key"), label=f"{label} 'invariant_key'"
         ),
-        lane=_require_choice(data.get("lane"), label=f"{label} 'lane'", choices=RUBRIC_LANES),
+        lane=_require_choice(
+            data.get("lane"), label=f"{label} 'lane'", choices=RUBRIC_LANES
+        ),
         severity=_require_choice(
             data.get("severity"), label=f"{label} 'severity'", choices=SEVERITIES
         ),
@@ -758,7 +765,9 @@ class DeterministicResult:
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence", tuple(self.evidence))
         _require_token(self.check, label="deterministic result 'check'")
-        _require_choice(self.lane, label="deterministic result 'lane'", choices=RUBRIC_LANES)
+        _require_choice(
+            self.lane, label="deterministic result 'lane'", choices=RUBRIC_LANES
+        )
         _require_choice(
             self.status, label="deterministic result 'status'", choices=CHECK_STATUSES
         )
@@ -789,7 +798,9 @@ def parse_deterministic_result(
     )
     return DeterministicResult(
         check=_require_token(data.get("check"), label=f"{label} 'check'"),
-        lane=_require_choice(data.get("lane"), label=f"{label} 'lane'", choices=RUBRIC_LANES),
+        lane=_require_choice(
+            data.get("lane"), label=f"{label} 'lane'", choices=RUBRIC_LANES
+        ),
         status=_require_choice(
             data.get("status"), label=f"{label} 'status'", choices=CHECK_STATUSES
         ),
@@ -837,7 +848,9 @@ def parse_lane_evidence(payload: object, *, label: str = "lane") -> LaneEvidence
         payload, label=label, allowed_keys=("lane", "status", "summary", "evidence")
     )
     return LaneEvidence(
-        lane=_require_choice(data.get("lane"), label=f"{label} 'lane'", choices=RUBRIC_LANES),
+        lane=_require_choice(
+            data.get("lane"), label=f"{label} 'lane'", choices=RUBRIC_LANES
+        ),
         status=_require_choice(
             data.get("status"), label=f"{label} 'status'", choices=CHECK_STATUSES
         ),
@@ -1055,7 +1068,9 @@ def parse_supervisor_audit(payload: object) -> SupervisorAudit:
         )
     )
     deterministic = tuple(
-        parse_deterministic_result(item, label=f"{label} deterministic result #{index + 1}")
+        parse_deterministic_result(
+            item, label=f"{label} deterministic result #{index + 1}"
+        )
         for index, item in enumerate(
             _require_sequence(
                 data.get("deterministic", []),
@@ -1069,7 +1084,9 @@ def parse_supervisor_audit(payload: object) -> SupervisorAudit:
             data.get("schema_version"), label=f"{label} 'schema_version'"
         ),
         run_id=_require_identifier(data.get("run_id"), label=f"{label} 'run_id'"),
-        state=_require_choice(data.get("state"), label=f"{label} 'state'", choices=AUDIT_STATES),
+        state=_require_choice(
+            data.get("state"), label=f"{label} 'state'", choices=AUDIT_STATES
+        ),
         input_digest=_require_digest(
             data.get("input_digest"), label=f"{label} 'input_digest'"
         ),
@@ -1178,7 +1195,9 @@ class Disposition:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "issue_id", parse_issue_id(self.issue_id))
-        _require_choice(self.kind, label="disposition 'kind'", choices=DISPOSITION_KINDS)
+        _require_choice(
+            self.kind, label="disposition 'kind'", choices=DISPOSITION_KINDS
+        )
         _require_timestamp(self.recorded_at, label="disposition 'recorded_at'")
         if self.note is not None:
             _require_text(self.note, label="disposition 'note'")
@@ -1224,8 +1243,12 @@ class IssueMerge:
     note: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "source_issue_id", parse_issue_id(self.source_issue_id))
-        object.__setattr__(self, "target_issue_id", parse_issue_id(self.target_issue_id))
+        object.__setattr__(
+            self, "source_issue_id", parse_issue_id(self.source_issue_id)
+        )
+        object.__setattr__(
+            self, "target_issue_id", parse_issue_id(self.target_issue_id)
+        )
         if self.source_issue_id == self.target_issue_id:
             raise AssuranceError(
                 f"merge source and target are both {self.source_issue_id}; an "
@@ -1289,7 +1312,9 @@ class Closeout:
                 f"entries; got {len(self.issue_ids)}"
             )
         _require_identifier(self.run_id, label="closeout 'run_id'")
-        _require_choice(self.outcome, label="closeout 'outcome'", choices=CLOSEOUT_OUTCOMES)
+        _require_choice(
+            self.outcome, label="closeout 'outcome'", choices=CLOSEOUT_OUTCOMES
+        )
         _require_timestamp(self.recorded_at, label="closeout 'recorded_at'")
         if self.rework_minutes is not None:
             object.__setattr__(
@@ -1731,9 +1756,7 @@ class AssuranceSummary:
     def _validate_state(self) -> None:
         if self.state in {"skipped", "unavailable"}:
             if self.reason is None:
-                raise AssuranceError(
-                    f"assurance state {self.state!r} must record why"
-                )
+                raise AssuranceError(f"assurance state {self.state!r} must record why")
             _require_token(self.reason, label="assurance 'reason'")
         elif self.reason is not None:
             raise AssuranceError(
@@ -1745,13 +1768,11 @@ class AssuranceSummary:
             )
         if self.state == "all-clear" and self.issue_ids:
             raise AssuranceError(
-                "an all-clear run creates no issues; "
-                f"got {', '.join(self.issue_ids)}"
+                f"an all-clear run creates no issues; got {', '.join(self.issue_ids)}"
             )
         if self.state == "skipped" and self.issue_ids:
             raise AssuranceError(
-                "skipping an audit creates no issue; "
-                f"got {', '.join(self.issue_ids)}"
+                f"skipping an audit creates no issue; got {', '.join(self.issue_ids)}"
             )
         if self.state == "pending" and (self.attempts or self.issue_ids):
             raise AssuranceError(
@@ -1912,15 +1933,11 @@ def audit_artifact_name(name: str) -> str:
 
 def attempt_dir_name(number: int) -> str:
     """Return the canonical directory name for audit attempt ``number``."""
-    _require_int(
-        number, label="attempt number", minimum=1, maximum=MAX_AUDIT_ATTEMPTS
-    )
+    _require_int(number, label="attempt number", minimum=1, maximum=MAX_AUDIT_ATTEMPTS)
     return f"{_ATTEMPT_DIR_PREFIX}{number}"
 
 
-def write_new_bytes(
-    path: Path | str, data: bytes, *, durable: bool = True
-) -> Path:
+def write_new_bytes(path: Path | str, data: bytes, *, durable: bool = True) -> Path:
     """Create ``path`` exclusively and write ``data`` to it.
 
     An existing destination is an error, never an overwrite: a second write to a
@@ -1938,9 +1955,7 @@ def write_new_bytes(
         )
     target = Path(path)
     try:
-        descriptor = os.open(
-            target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644
-        )
+        descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError as error:
         raise AssuranceError(
             f"audit artifact {target} already exists; canonical audit artifacts "
@@ -1957,10 +1972,8 @@ def write_new_bytes(
             if durable:
                 durability.fullsync(handle.fileno())
     except OSError as error:
-        try:
+        with contextlib.suppress(OSError):
             target.unlink()
-        except OSError:
-            pass
         raise AssuranceError(
             f"could not write audit artifact {target}: {error}"
         ) from error

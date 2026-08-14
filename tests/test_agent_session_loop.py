@@ -14,137 +14,137 @@ from __future__ import annotations
 import importlib
 import unittest
 
-from tests.support import *  # noqa: F401,F403
-from tests.test_asl_core import (
-    EventPersistenceTests,
-    ParserAndStateTests,
+from tests.support import *  # noqa: F401,F403 - deliberate re-export shim
+from tests.test_asl_authoring import (
+    PlanAuthoringResplitTests,
+    PlanAuthoringTests,
 )
 from tests.test_asl_baseline import (
-    BaselineContractTests,
     BaselineCacheTests,
     BaselineCliTests,
-)
-from tests.test_asl_progress import (
-    ProgressJournalTests,
-    RunnerProgressEntryHelperTests,
-    ProgressCliTests,
-    ProgressRepairHelperTests,
-)
-from tests.test_asl_verification import (
-    VerificationExecutorTests,
-    VerifyCliTests,
-    ArtifactStorageTests,
-)
-from tests.test_asl_qna import (
-    QnAContextLoaderTests,
-    QnAQuestionsCliTests,
-)
-from tests.test_asl_prompts import (
-    TaskPacketBuilderTests,
-    ReplyPromptBuilderTests,
-    HarnessInvocationPromptOverrideTests,
-    SessionRunSkillReplyCompatibilityTests,
-)
-from tests.test_asl_reply_flows import (
-    RunReplyResumeFlowTests,
-    RunReplyStdinFlowTests,
-    EndToEndReplyResumeFlowTests,
-)
-from tests.test_asl_pause_ux import (
-    ArtifactSafetyAndPauseUxTests,
-)
-from tests.test_asl_tail import (
-    TailFollowerTests,
+    BaselineContractTests,
 )
 from tests.test_asl_cli import (
     CommandAndConfigTests,
     JsonCliTests,
 )
+from tests.test_asl_compaction import (
+    HarnessFailureClassificationTests,
+    StateCompactionTests,
+)
 from tests.test_asl_control import (
-    ControlQueueTests,
-    ControlQueueDrainInRunnerTests,
-    RunControlTests,
     AgentMuxNotificationIntegrationTests,
     AgentMuxSuiteIsolationTests,
+    ControlQueueDrainInRunnerTests,
+    ControlQueueTests,
+    RunControlTests,
 )
-from tests.test_asl_harness_integration import (
-    FakeHarnessIntegrationTests,
-)
-from tests.test_asl_preflight import (
-    PreflightCoreTests,
-    PreflightCommandRunnabilityTests,
-    PreflightRepairHintTests,
-    PreflightEnvironmentTests,
-    PreflightCliTests,
+from tests.test_asl_core import (
+    EventPersistenceTests,
+    ParserAndStateTests,
 )
 from tests.test_asl_docs import (
-    SkillInstructionTests,
-    PlanWorkflowDocsTests,
-    InstallVerificationTests,
     HarnessDocsRegressionTests,
+    InstallVerificationTests,
+    PlanWorkflowDocsTests,
+    SkillInstructionTests,
     WorkbenchDocsRegressionTests,
-)
-from tests.test_asl_run_gates import (
-    RunReadinessGateTests,
-    RunVerificationEnforcementTests,
-    RunVerificationInterruptTests,
-    LongVerificationHeartbeatIntegrationTests,
-    RunProgressJournalIntegrationTests,
-)
-from tests.test_asl_review import (
-    StructuredReviewArtifactTests,
-    ReviewRepairMaterializationTests,
-    ReviewRepairCycleTests,
-)
-from tests.test_asl_review_lifecycle import (
-    RunReviewHarnessLifecycleTests,
 )
 from tests.test_asl_e2e import (
     EndToEndQATests,
     VerificationRepairLoopTests,
 )
+from tests.test_asl_harness_integration import (
+    FakeHarnessIntegrationTests,
+)
+from tests.test_asl_pause_ux import (
+    ArtifactSafetyAndPauseUxTests,
+)
+from tests.test_asl_preflight import (
+    PreflightCliTests,
+    PreflightCommandRunnabilityTests,
+    PreflightCoreTests,
+    PreflightEnvironmentTests,
+    PreflightRepairHintTests,
+)
+from tests.test_asl_prepare import (
+    ExpansionRendererTests,
+    PrepareCliTests,
+    PrepareEndToEndTests,
+    PrepareValidatorSchemaTests,
+)
+from tests.test_asl_progress import (
+    ProgressCliTests,
+    ProgressJournalTests,
+    ProgressRepairHelperTests,
+    RunnerProgressEntryHelperTests,
+)
+from tests.test_asl_prompts import (
+    HarnessInvocationPromptOverrideTests,
+    ReplyPromptBuilderTests,
+    SessionRunSkillReplyCompatibilityTests,
+    TaskPacketBuilderTests,
+)
+from tests.test_asl_qna import (
+    QnAContextLoaderTests,
+    QnAQuestionsCliTests,
+)
+from tests.test_asl_reply_flows import (
+    EndToEndReplyResumeFlowTests,
+    RunReplyResumeFlowTests,
+    RunReplyStdinFlowTests,
+)
+from tests.test_asl_review import (
+    ReviewRepairCycleTests,
+    ReviewRepairMaterializationTests,
+    StructuredReviewArtifactTests,
+)
+from tests.test_asl_review_lifecycle import (
+    RunReviewHarnessLifecycleTests,
+)
+from tests.test_asl_run_gates import (
+    LongVerificationHeartbeatIntegrationTests,
+    RunProgressJournalIntegrationTests,
+    RunReadinessGateTests,
+    RunVerificationEnforcementTests,
+    RunVerificationInterruptTests,
+)
+from tests.test_asl_tail import (
+    TailFollowerTests,
+)
+from tests.test_asl_verification import (
+    ArtifactStorageTests,
+    VerificationExecutorTests,
+    VerifyCliTests,
+)
 from tests.test_asl_workbench_archive import (
-    WorkbenchRegistryTests,
+    WorkbenchArchivePlanTests,
     WorkbenchArchiveRetentionTests,
     WorkbenchArchiveStorageTests,
-    WorkbenchArchivePlanTests,
-    WorkbenchRestoreArchiveTests,
-    WorkbenchPurgeArchiveTests,
     WorkbenchDiscoveryTests,
-)
-from tests.test_asl_workbench_summary import (
-    WorkbenchSummaryTests,
-)
-from tests.test_asl_workbench_recovery import (
-    WorkbenchRecoveryTests,
+    WorkbenchPurgeArchiveTests,
+    WorkbenchRegistryTests,
+    WorkbenchRestoreArchiveTests,
 )
 from tests.test_asl_workbench_launch import (
     WorkbenchLaunchTests,
 )
+from tests.test_asl_workbench_recovery import (
+    WorkbenchRecoveryTests,
+)
 from tests.test_asl_workbench_server import (
-    WorkbenchServerTests,
-    WorkbenchQuestionsAPITests,
     WorkbenchArtifactReadAPITests,
+    WorkbenchQuestionsAPITests,
+    WorkbenchServerTests,
 )
 from tests.test_asl_workbench_static import (
-    WorkbenchStaticAssetTests,
+    WorkbenchCliHandlerTests,
     WorkbenchHardeningTests,
     WorkbenchServeCliTests,
-    WorkbenchCliHandlerTests,
+    WorkbenchStaticAssetTests,
 )
-from tests.test_asl_compaction import (
-    StateCompactionTests,
-    HarnessFailureClassificationTests,
-)
-from tests.test_asl_authoring import (
-    PlanAuthoringTests,
-    PlanAuthoringResplitTests,
-)
-from tests.test_asl_prepare import (
-    PrepareValidatorSchemaTests,
-    ExpansionRendererTests,
-    PrepareCliTests,
-    PrepareEndToEndTests,
+from tests.test_asl_workbench_summary import (
+    WorkbenchSummaryTests,
 )
 
 _SPLIT_MODULES = (
@@ -186,9 +186,7 @@ def load_tests(loader, tests, pattern):
         # Only a pattern naming this module asks for its own tests; the broad
         # pattern must stay empty so the split modules are not run twice.
         if pattern == _SELF_DISCOVERY_PATTERN:
-            return loader.loadTestsFromTestCase(
-                AgentMuxNotificationIntegrationTests
-            )
+            return loader.loadTestsFromTestCase(AgentMuxNotificationIntegrationTests)
         return unittest.TestSuite()
     suite = unittest.TestSuite()
     for module_name in _SPLIT_MODULES:

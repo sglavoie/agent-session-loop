@@ -7,18 +7,17 @@ symlink-safe worktree discovery and vector comparison over that schema.
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
 import contextvars
-from dataclasses import dataclass
 import hashlib
 import os
-from pathlib import Path
 import re
 import stat
 import subprocess
+from collections import OrderedDict
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
-
 
 __all__ = [
     "GitWorktreeInventory",
@@ -69,8 +68,7 @@ def _run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", "-C", str(cwd), *args],
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     except FileNotFoundError as error:
@@ -81,17 +79,14 @@ def _run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
         ) from error
 
 
-def _run_git_bytes(
-    cwd: Path, args: list[str]
-) -> subprocess.CompletedProcess[bytes]:
+def _run_git_bytes(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[bytes]:
     override = _GIT_BYTES_RUNNER.get()
     if override is not None:
         return override(cwd, args)
     try:
         return subprocess.run(
             ["git", "-C", str(cwd), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     except FileNotFoundError as error:
@@ -220,16 +215,12 @@ class _ReviewGuardUnavailable(Exception):
         self.fingerprint: dict[str, Any] = {"git": True, "unavailable": detail}
 
 
-def _review_guard_git(
-    cwd: Path, argv: list[str]
-) -> subprocess.CompletedProcess[str]:
+def _review_guard_git(cwd: Path, argv: list[str]) -> subprocess.CompletedProcess[str]:
     """Run a git probe the guard's evidence depends on, failing closed."""
     try:
         result = _run_git(cwd, argv)
     except Exception as error:
-        raise _ReviewGuardUnavailable(
-            "git-unrunnable", argv, error=error
-        ) from error
+        raise _ReviewGuardUnavailable("git-unrunnable", argv, error=error) from error
     if result.returncode != 0:
         raise _ReviewGuardUnavailable("git-command-failed", argv, result=result)
     return result
@@ -559,9 +550,7 @@ def _default_excludes_file() -> Path | None:
     return None
 
 
-def _effective_excludes_file(
-    cwd: Path, repo_root: Path
-) -> tuple[str, Path | None]:
+def _effective_excludes_file(cwd: Path, repo_root: Path) -> tuple[str, Path | None]:
     """Resolve ``core.excludesFile`` into a marker and the file git reads.
 
     The marker carries the configured value itself, so repointing the setting
@@ -583,18 +572,14 @@ def _effective_excludes_file(
     try:
         result = _run_git_bytes(cwd, argv)
     except Exception as error:
-        raise _ReviewGuardUnavailable(
-            "git-unrunnable", argv, error=error
-        ) from error
+        raise _ReviewGuardUnavailable("git-unrunnable", argv, error=error) from error
     if result.returncode == 1:
         return "unset", _default_excludes_file()
     if result.returncode != 0:
         raise _ReviewGuardUnavailable("git-command-failed", argv, result=result)
     terminator = result.stdout.find(b"\0")
     if terminator < 0:
-        raise _ReviewGuardUnavailable(
-            "excludes-file-unterminated", argv, result=result
-        )
+        raise _ReviewGuardUnavailable("excludes-file-unterminated", argv, result=result)
     value = os.fsdecode(result.stdout[:terminator])
     if not value:
         return "set:", None
@@ -686,21 +671,17 @@ def _pair_diff_names_with_patches(
             raise _ReviewGuardUnavailable(reason, argv)
         changed.append(rel)
         section_counts.append(
-            _TYPE_CHANGED_PATCH_SECTIONS
-            if status == _TYPE_CHANGED_STATUS
-            else 1
+            _TYPE_CHANGED_PATCH_SECTIONS if status == _TYPE_CHANGED_STATUS else 1
         )
     patches = _DIFF_FILE_HEADER_RE.split(diff_text)[1:]
     if len(patches) != sum(section_counts):
         raise _ReviewGuardUnavailable(reason, argv)
     paired: list[list[str]] = []
     cursor = 0
-    for rel, count in zip(changed, section_counts):
+    for rel, count in zip(changed, section_counts, strict=False):
         section = "".join(patches[cursor : cursor + count])
         cursor += count
-        paired.append(
-            [rel, hashlib.sha256(section.encode("utf-8")).hexdigest()]
-        )
+        paired.append([rel, hashlib.sha256(section.encode("utf-8")).hexdigest()])
     return changed, paired
 
 
@@ -890,9 +871,7 @@ def _capture_review_repo_fingerprint(
         # (see :data:`_WORKTREE_IGNORE_ARGV`); the strict scan merely lists the
         # same files a second time.
         worktree_ignore_argv = list(_WORKTREE_IGNORE_ARGV)
-        worktree_ignore_text = _review_guard_git(
-            cwd_path, worktree_ignore_argv
-        ).stdout
+        worktree_ignore_text = _review_guard_git(cwd_path, worktree_ignore_argv).stdout
         worktree_ignore_payload = _fingerprint_untracked_nodes(
             worktree_ignore_text,
             repo_root=repo_root,
@@ -1039,9 +1018,7 @@ def _review_guard_changed_paths(
             paths[str(rel)] = str(sha)
         return paths
 
-    def moved(
-        before_map: Mapping[str, str], after_map: Mapping[str, str]
-    ) -> set[str]:
+    def moved(before_map: Mapping[str, str], after_map: Mapping[str, str]) -> set[str]:
         return {
             path
             for path in set(before_map) | set(after_map)
@@ -1052,8 +1029,7 @@ def _review_guard_changed_paths(
         # Node kind is part of the identity: a symlink replaced by a regular
         # file holding the target's bytes must not compare equal.
         return {
-            str(rel): f"{kind}:{sha}"
-            for rel, kind, sha in (fingerprint.get(key) or ())
+            str(rel): f"{kind}:{sha}" for rel, kind, sha in (fingerprint.get(key) or ())
         }
 
     def ignore_map(
@@ -1105,8 +1081,7 @@ def _review_guard_changed_paths(
             {
                 rel
                 for role, rel in set(ignore_before) | set(ignore_after)
-                if ignore_before.get((role, rel))
-                != ignore_after.get((role, rel))
+                if ignore_before.get((role, rel)) != ignore_after.get((role, rel))
             }
         ),
         "head_changed": before.get("head") != after.get("head"),
@@ -1134,7 +1109,6 @@ def _review_guard_changed_summary(changed_paths: Mapping[str, Any]) -> str:
     if len(named) > 3:
         suffix += f" (+{len(named) - 3} more)"
     return suffix
-
 
 
 RepositoryFingerprint = dict[str, Any]
@@ -1235,9 +1209,7 @@ def _qualified_paths(repository: str, changes: Mapping[str, Any]) -> list[str]:
         "worktree_ignore",
         "ignore_config",
     ):
-        paths.extend(
-            f"{repository}:{path}" for path in changes.get(key) or ()
-        )
+        paths.extend(f"{repository}:{path}" for path in changes.get(key) or ())
     return list(dict.fromkeys(paths))
 
 
@@ -1263,9 +1235,7 @@ def _inventory_candidates(
             except OSError as error:
                 errors.append(error)
             else:
-                marker_present = stat.S_ISDIR(marker_mode) or stat.S_ISREG(
-                    marker_mode
-                )
+                marker_present = stat.S_ISDIR(marker_mode) or stat.S_ISREG(marker_mode)
         descendable: list[str] = []
         for name in directory_names:
             if name == ".git":
@@ -1308,9 +1278,7 @@ def discover_git_worktree_inventory(
         raise ValueError("max_repositories must be positive")
     candidates, errors, skipped_hidden_subtrees = _inventory_candidates(root)
     if errors:
-        raise RepositoryEvidenceError(
-            f"workspace inventory unreadable: {errors[0]}"
-        )
+        raise RepositoryEvidenceError(f"workspace inventory unreadable: {errors[0]}")
     if len(candidates) > max_repositories:
         raise RepositoryEvidenceError(
             "workspace repository inventory exceeds "
@@ -1335,9 +1303,7 @@ def discover_git_worktree_inventory(
                 f"repository {_workspace_relative(root, candidate)} "
                 f"could not be inspected: {detail or 'Git probe failed'}"
             )
-        reported = Path(
-            os.path.realpath(os.path.abspath(result.stdout.strip()))
-        )
+        reported = Path(os.path.realpath(os.path.abspath(result.stdout.strip())))
         if reported != candidate:
             raise RepositoryEvidenceError(
                 f"repository marker at {_workspace_relative(root, candidate)} "
@@ -1396,9 +1362,7 @@ def capture_workspace_snapshot(
             fingerprint = _capture_review_repo_fingerprint(
                 repository,
                 plan_dir,
-                exclude=tuple(
-                    per_repository_excludes.get(relative, default_exclude)
-                ),
+                exclude=tuple(per_repository_excludes.get(relative, default_exclude)),
                 include_ignored=include_ignored,
             )
             if not fingerprint.get("git"):

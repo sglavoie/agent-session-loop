@@ -11,7 +11,6 @@ import sys
 import time
 from pathlib import Path
 
-
 STATUS_PENDING = "- **Status**: pending"
 STATUS_COMPLETE = "- **Status**: complete"
 HANDOFF_HEADING = "## Handoff"
@@ -59,17 +58,11 @@ def _pending_sessions(plan_dir: Path) -> list[Path]:
 
 
 def _prompt_contains_reply_context() -> bool:
-    for value in sys.argv[1:]:
-        if "## ASL reply context" in value:
-            return True
-    return False
+    return any("## ASL reply context" in value for value in sys.argv[1:])
 
 
 def _prompt_contains_resolution_context() -> bool:
-    for value in sys.argv[1:]:
-        if "## ASL resolution context" in value:
-            return True
-    return False
+    return any("## ASL resolution context" in value for value in sys.argv[1:])
 
 
 def _session_label(path: Path) -> str:
@@ -200,9 +193,7 @@ def _apply_workspace_mutation_record(mutation: dict[str, object]) -> None:
         return
     if action == "git-init":
         target.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["git", "init", str(target)], capture_output=True, check=True
-        )
+        subprocess.run(["git", "init", str(target)], capture_output=True, check=True)
         return
     if action == "commit-head":
         subprocess.run(
@@ -369,17 +360,13 @@ def _invalid_review_artifacts(variant: str) -> tuple[str, str]:
     }
     if variant == "invalid-artifact-2":
         # A command check with no argv.
-        finding["verification_checks"] = [
-            {"type": "command", "name": "no-argv"}
-        ]
+        finding["verification_checks"] = [{"type": "command", "name": "no-argv"}]
     elif variant == "invalid-artifact-3":
         # A structurally present but blank done_criteria entry.
         finding["done_criteria"] = ["   "]
     else:
         # An unsupported check type.
-        finding["verification_checks"] = [
-            {"type": "bogus", "name": "not-a-check"}
-        ]
+        finding["verification_checks"] = [{"type": "bogus", "name": "not-a-check"}]
 
     review_body = (
         "## Findings\n"
@@ -442,9 +429,7 @@ def _write_review_outcome(
         review_json = json.dumps(artifact) + "\n"
     (plan_dir / "final-review.md").write_text(review_body, encoding="utf-8")
     if write_artifact and review_json:
-        (plan_dir / "final-review.json").write_text(
-            review_json, encoding="utf-8"
-        )
+        (plan_dir / "final-review.json").write_text(review_json, encoding="utf-8")
 
 
 def _blocked_last_message() -> str:
@@ -517,7 +502,9 @@ def _run_prepare_validator(plan_dir: Path, prompt: str) -> int:
         codebase_root=Path.cwd(),
     )
     sessions: list[dict[str, object]] = []
-    for session_id, session_path in zip(packet.session_ids, packet.session_paths):
+    for session_id, session_path in zip(
+        packet.session_ids, packet.session_paths, strict=False
+    ):
         title = f"Session {session_id}"
         for line in Path(session_path).read_text(encoding="utf-8").splitlines():
             match = re.match(r"^#+\s+Session\s+[^:]+:\s*(.+)$", line)
@@ -705,7 +692,9 @@ def main() -> int:
     if mode == "success":
         if pending:
             _mark_complete(pending[0])
-        _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
+        _write_last_message(
+            "Runner status: complete\nNext command: $session-run plan/\n"
+        )
         print("completed one session")
         return 0
 
@@ -723,9 +712,7 @@ def main() -> int:
             # ``final-review.json`` artifact.
             body = target.read_text(encoding="utf-8")
             if REVIEW_SESSION_MARKER in body:
-                review_mutation = os.environ.get(
-                    "FAKE_CODEX_REVIEW_MUTATION_PATH"
-                )
+                review_mutation = os.environ.get("FAKE_CODEX_REVIEW_MUTATION_PATH")
                 if review_mutation:
                     _apply_workspace_mutation_record(
                         {
@@ -751,12 +738,8 @@ def main() -> int:
                         for token in outcomes_env.split(",")
                         if token.strip()
                     ]
-                    attempt_index = review_index + _rejected_verdict_count(
-                        body
-                    )
-                    outcome = outcomes[
-                        min(attempt_index, len(outcomes) - 1)
-                    ]
+                    attempt_index = review_index + _rejected_verdict_count(body)
+                    outcome = outcomes[min(attempt_index, len(outcomes) - 1)]
                     _write_review_outcome(
                         plan_dir,
                         outcome,
@@ -798,7 +781,9 @@ def main() -> int:
                         (plan_dir / "final-review.json").write_text(
                             review_json, encoding="utf-8"
                         )
-        _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
+        _write_last_message(
+            "Runner status: complete\nNext command: $session-run plan/\n"
+        )
         print("completed one session (review-aware)")
         return 0
 
@@ -817,7 +802,9 @@ def main() -> int:
                     remaining[0],
                     source_session_id=source_session_id,
                 )
-        _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
+        _write_last_message(
+            "Runner status: complete\nNext command: $session-run plan/\n"
+        )
         print("completed one session and added a future note")
         return 0
 
@@ -840,7 +827,9 @@ def main() -> int:
             return 3
         _step_sleep()
         _mark_complete(pending[0])
-        _write_last_message("Runner status: complete\nNext command: $session-run plan/\n")
+        _write_last_message(
+            "Runner status: complete\nNext command: $session-run plan/\n"
+        )
         print(f"session {session_label} stdout after completion", flush=True)
         print(
             f"session {session_label} stderr after completion",

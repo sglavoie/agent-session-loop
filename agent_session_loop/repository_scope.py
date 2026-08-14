@@ -31,13 +31,13 @@ row can only describe a Git repository, so demanding one is unsatisfiable.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
 import os
-from pathlib import Path
 import re
 import stat
 import subprocess
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from .contracts import (
@@ -57,7 +57,6 @@ from .workspaces import (
     normalize_repository_path,
     validate_repository_alias,
 )
-
 
 TargetKind = Literal["contract-path", "contract-cwd", "handoff", "prose"]
 TargetConfidence = Literal["hard", "soft"]
@@ -92,9 +91,7 @@ _ABSOLUTE_PATH_RE = re.compile(
 _HANDOFF_RE = re.compile(
     rf"(?<![\w./:-])([A-Za-z][A-Za-z0-9_-]*):(?!/)((?:{_PATH_SEGMENT}/)*{_PATH_SEGMENT})"
 )
-_RELATIVE_PATH_RE = re.compile(
-    rf"(?<![\w./~:-])(?:{_PATH_SEGMENT}/)+{_PATH_SEGMENT}/?"
-)
+_RELATIVE_PATH_RE = re.compile(rf"(?<![\w./~:-])(?:{_PATH_SEGMENT}/)+{_PATH_SEGMENT}/?")
 #: Sentence punctuation the segment grammar swallows when a path ends a clause.
 _TRAILING_PUNCTUATION = ".,;:!?)]}'\"`"
 
@@ -206,9 +203,7 @@ def _extract_line_targets(line: str, line_number: int) -> list[PathTarget]:
             continue
         consumed.append(match.span())
         found.append(
-            PathTarget(
-                value=value, kind="prose", line=line_number, confidence="hard"
-            )
+            PathTarget(value=value, kind="prose", line=line_number, confidence="hard")
         )
 
     for match in _HANDOFF_RE.finditer(line):
@@ -244,7 +239,9 @@ def _extract_line_targets(line: str, line_number: int) -> list[PathTarget]:
 
 def _overlaps(span: tuple[int, int], consumed: Sequence[tuple[int, int]]) -> bool:
     start, end = span
-    return any(start < other_end and other_start < end for other_start, other_end in consumed)
+    return any(
+        start < other_end and other_start < end for other_start, other_end in consumed
+    )
 
 
 def _is_path_shaped(value: str) -> bool:
@@ -309,9 +306,7 @@ def resolve_footprint(
     describes the plan, not a second repository.
     """
     bound_root = canonicalize_filesystem_path(root)
-    plan_root = (
-        canonicalize_filesystem_path(plan_dir) if plan_dir is not None else None
-    )
+    plan_root = canonicalize_filesystem_path(plan_dir) if plan_dir is not None else None
     git_root_cache: dict[Path, Path | None] = {}
     repo_roots: dict[Path, None] = {}
     out_of_root: list[PathTarget] = []
@@ -367,9 +362,7 @@ def _ambiguous_targets(
         if not relative:
             continue
         candidates = tuple(
-            repo_root
-            for repo_root in repo_roots
-            if (repo_root / relative).exists()
+            repo_root for repo_root in repo_roots if (repo_root / relative).exists()
         )
         if len(candidates) > 1:
             ambiguous.append(AmbiguousTarget(target=target, candidates=candidates))
@@ -481,9 +474,7 @@ def suggest_repositories(
         suggestions.append(
             RepositorySuggestion(
                 alias=_unique_alias(canonical, used),
-                path=normalize_repository_path(
-                    canonical.relative_to(root).as_posix()
-                ),
+                path=normalize_repository_path(canonical.relative_to(root).as_posix()),
                 origin=_origin_of(canonical),
                 root=canonical,
             )
@@ -629,9 +620,7 @@ def footprint_payload(
         )
     except WorkspaceError:
         suggestions = ()
-    alias_by_root = {
-        suggestion.root: suggestion.alias for suggestion in suggestions
-    }
+    alias_by_root = {suggestion.root: suggestion.alias for suggestion in suggestions}
     evidence = _evidence_by_root(targets_by_session, footprint.root)
     detected = [
         {
@@ -697,6 +686,4 @@ def _evidence_by_root(
             if git_root is None:
                 continue
             evidence.setdefault(git_root, []).append(target)
-    return {
-        git_root: tuple(targets) for git_root, targets in evidence.items()
-    }
+    return {git_root: tuple(targets) for git_root, targets in evidence.items()}

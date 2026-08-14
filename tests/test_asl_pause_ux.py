@@ -5,71 +5,32 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timedelta, timezone
-import errno
-import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
 import shlex
-import shutil
-import signal
-import stat
-import subprocess
-import sys
 import tempfile
-import threading
 import time
 import unittest
-import urllib.parse
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
-    config,
-    contracts,
     control_queue,
     events,
     harnesses,
-    install_verify,
     mailbox,
     pause_policy,
-    plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
     qna,
-    review,
-    review_repair,
-    run_control,
     runner,
     state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
-    write_plan,
     read_jsonl,
+    write_plan,
 )
 
 
@@ -137,9 +98,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
 
     def test_set_pause_attaches_pause_policy_block(self) -> None:
         payload: dict[str, object] = {}
-        runner._set_pause(
-            payload, reason="verify-failed", message="checks failed"
-        )
+        runner._set_pause(payload, reason="verify-failed", message="checks failed")
         policy = payload["pause_policy"]
         self.assertEqual(pause_policy.classify_pause("verify-failed"), policy)
         self.assertTrue(policy["recoverable"])
@@ -151,9 +110,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         self,
     ) -> None:
         payload: dict[str, object] = {}
-        runner._set_pause(
-            payload, reason="quota-exhausted", message="out of quota"
-        )
+        runner._set_pause(payload, reason="quota-exhausted", message="out of quota")
         policy = payload["pause_policy"]
         self.assertFalse(policy["recoverable"])
         self.assertTrue(policy["requires_user"])
@@ -162,7 +119,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
     def test_new_waits_emit_the_rolling_ceiling_and_not_a_hard_deadline(
         self,
     ) -> None:
-        started_at = datetime(2026, 7, 24, 12, tzinfo=timezone.utc)
+        started_at = datetime(2026, 7, 24, 12, tzinfo=UTC)
         waiting = runner._waiting_for_reply_payload(
             question_id="question-1",
             session_id="9",
@@ -182,9 +139,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         self.assertEqual(1800.0, waiting["unsupervised_ceiling_seconds"])
 
         for bad_ceiling in (0, -1.0, float("nan"), float("inf"), "1800", True):
-            with self.assertRaisesRegex(
-                ValueError, "unsupervised_ceiling_seconds"
-            ):
+            with self.assertRaisesRegex(ValueError, "unsupervised_ceiling_seconds"):
                 runner._waiting_for_reply_payload(
                     question_id="question-1",
                     session_id="9",
@@ -208,7 +163,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 "reason": "",
                 "state_path": str(state_path),
             }
-            started_at = datetime(2026, 7, 24, 12, tzinfo=timezone.utc)
+            started_at = datetime(2026, 7, 24, 12, tzinfo=UTC)
             waiting = runner._waiting_for_reply_payload(
                 question_id="question-1",
                 session_id="9",
@@ -316,9 +271,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             io_grace_seconds=1.0,
         )
 
-        with mock.patch.object(
-            runner.mailbox, "read_mailbox", return_value=view
-        ):
+        with mock.patch.object(runner.mailbox, "read_mailbox", return_value=view):
             result = runner._wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
@@ -381,7 +334,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 "reason": "",
                 "state_path": str(state_path),
             }
-            started_at = datetime(2026, 7, 24, 12, tzinfo=timezone.utc)
+            started_at = datetime(2026, 7, 24, 12, tzinfo=UTC)
             waiting = runner._waiting_for_reply_payload(
                 question_id="question-1",
                 session_id="9",
@@ -584,12 +537,8 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             append_events=False,
         )
         with (
-            mock.patch.object(
-                runner.mailbox, "read_mailbox", return_value=view
-            ),
-            mock.patch.object(
-                runner.mailbox, "read_lease", side_effect=read_lease
-            ),
+            mock.patch.object(runner.mailbox, "read_mailbox", return_value=view),
+            mock.patch.object(runner.mailbox, "read_lease", side_effect=read_lease),
         ):
             result = runner._wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
@@ -708,9 +657,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
     def test_questions_payload_carries_pause_policy_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir, state_dir, _ = self._seed_paused_plan(Path(tmp))
-            context = qna.load_qna_context(
-                str(plan_dir), state_dir=str(state_dir)
-            )
+            context = qna.load_qna_context(str(plan_dir), state_dir=str(state_dir))
             payload = qna.questions_payload(context)
             self.assertIn("pause_policy", payload)
             self.assertEqual(
@@ -844,9 +791,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
 
     def test_attach_interactive_help_populates_payload_when_qna_loads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            plan_dir, state_dir, last_message_path = self._seed_paused_plan(
-                Path(tmp)
-            )
+            plan_dir, state_dir, last_message_path = self._seed_paused_plan(Path(tmp))
             args = self._paused_args(plan_dir, state_dir)
             payload: dict[str, object] = {
                 "paused": True,
@@ -928,9 +873,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 }
             ],
             "interactive_help": {
-                "questions_command": (
-                    "asl questions /tmp/plan --state-dir /tmp/state"
-                ),
+                "questions_command": ("asl questions /tmp/plan --state-dir /tmp/state"),
             },
         }
         err = io.StringIO()
@@ -938,9 +881,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             runner._print_text_outcome(payload)
 
         err_text = err.getvalue()
-        self.assertIn(
-            "Last message: /tmp/plan/.state/last-message.txt", err_text
-        )
+        self.assertIn("Last message: /tmp/plan/.state/last-message.txt", err_text)
         self.assertIn(
             "Questions: asl questions /tmp/plan --state-dir /tmp/state",
             err_text,
@@ -1055,9 +996,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             events_path = plan_state / events.EVENTS_FILE_NAME
             records = read_jsonl(events_path)
             turn_started = [
-                record
-                for record in records
-                if record.get("name") == "turn_started"
+                record for record in records if record.get("name") == "turn_started"
             ]
             self.assertTrue(turn_started)
             first_turn_started = turn_started[0]["payload"]
@@ -1065,9 +1004,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             self.assertNotIn(reply_text, first_turn_started["prompt"])
 
             turn_finished = [
-                record
-                for record in records
-                if record.get("name") == "turn_finished"
+                record for record in records if record.get("name") == "turn_finished"
             ]
             self.assertTrue(turn_finished)
             first_turn_finished = turn_finished[0]["payload"]
@@ -1167,12 +1104,8 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             write_plan(plan_dir, ("pending", "pending"))
             # Creating the mailbox file is what activates the protocol, so seed
             # it with an already-answered record rather than pending guidance.
-            seeded = mailbox.append_guidance(
-                plan_dir, "seeded", state_dir=state_dir
-            )
-            mailbox.append_acknowledgement(
-                plan_dir, seeded.seq, state_dir=state_dir
-            )
+            seeded = mailbox.append_guidance(plan_dir, "seeded", state_dir=state_dir)
+            mailbox.append_acknowledgement(plan_dir, seeded.seq, state_dir=state_dir)
             observed_guidance: list[str] = []
 
             def fake_run_harness(name, **kwargs):
@@ -1203,9 +1136,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 last_message = "RUNNER_PAUSE: supervisor requested abort\n"
                 last_message_path = kwargs.get("last_message_path")
                 if last_message_path is not None:
-                    Path(last_message_path).write_text(
-                        last_message, encoding="utf-8"
-                    )
+                    Path(last_message_path).write_text(last_message, encoding="utf-8")
                 return harnesses.HarnessResult(
                     name=name,
                     argv=[name, "--prompt", str(kwargs.get("prompt", ""))],
@@ -1235,9 +1166,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
 
             with (
-                mock.patch.object(
-                    runner, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02
-                ),
+                mock.patch.object(runner, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02),
                 mock.patch.object(
                     runner.harnesses, "run_harness", side_effect=fake_run_harness
                 ),
@@ -1274,9 +1203,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 actions,
             )
             self.assertFalse(payload["control"]["abort_turn_requested"])
-            self.assertIn(
-                "operator needs the machine", observed_guidance[0]
-            )
+            self.assertIn("operator needs the machine", observed_guidance[0])
 
 
 if __name__ == "__main__":

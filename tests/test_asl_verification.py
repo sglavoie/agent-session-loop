@@ -4,23 +4,12 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
 import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
 import shlex
-import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
@@ -28,57 +17,31 @@ import threading
 import time
 import tracemalloc
 import unittest
-import urllib.parse
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
     artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
     cli,
-    compact_state,
-    config,
     contracts,
-    control_queue,
-    events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
     process_tree,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
-    review_repair,
-    run_control,
     runner,
-    state,
-    tail,
     verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
+    _contract_block,
     assert_marked_pids_alive,
     assert_marked_pids_exited,
-    kill_marked_pids,
     init_multi_repo_workspace,
-    write_plan,
+    kill_marked_pids,
     write_multi_repo_plan,
+    write_plan,
     write_process_tree_scripts,
-    _contract_block,
 )
-
 
 #: A descendant that leaves the check's process group and keeps the inherited
 #: stdout/stderr open, so the reader threads draining them never see EOF while
@@ -303,9 +266,7 @@ class VerificationExecutorTests(unittest.TestCase):
             result = verification.run_check(check, repo_root=root)
 
             self.assertEqual("pass", result.status)
-            sleeper = int(
-                (root / "sleepers" / "leftover").read_text(encoding="utf-8")
-            )
+            sleeper = int((root / "sleepers" / "leftover").read_text(encoding="utf-8"))
             # It never left the group, so the pgid enumeration alone finds it.
             self.assertEqual([sleeper], result.sweep["enumeration"]["pgid_members"])
             self.assertEqual([sleeper], result.sweep["killed"])
@@ -475,9 +436,7 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertIn("sweep", payload)
             self.assertEqual(result.sweep, payload["sweep"])
             # The compaction that strips raw output keeps the report.
-            self.assertEqual(
-                result.sweep, runner._strip_check_output(payload)["sweep"]
-            )
+            self.assertEqual(result.sweep, runner._strip_check_output(payload)["sweep"])
 
     def test_command_check_reports_command_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -716,7 +675,9 @@ class VerificationExecutorTests(unittest.TestCase):
 
             self.assertTrue(result.passed)
             self.assertEqual(["suite"], [check.name for check in result.checks])
-            self.assertEqual(["focused"], [check.name for check in result.skipped_checks])
+            self.assertEqual(
+                ["focused"], [check.name for check in result.skipped_checks]
+            )
             self.assertFalse(marker.exists())
             self.assertEqual(1, len(skipped_events))
             self.assertEqual(("suite",), skipped_events[0].on_failure_of)
@@ -747,7 +708,9 @@ class VerificationExecutorTests(unittest.TestCase):
 
             self.assertFalse(result.passed)
             self.assertTrue(marker.exists())
-            self.assertEqual(["suite", "focused"], [check.name for check in result.checks])
+            self.assertEqual(
+                ["suite", "focused"], [check.name for check in result.checks]
+            )
             self.assertEqual(["suite"], [check.name for check in result.failures])
             self.assertEqual((), result.diagnostic_failures)
             self.assertEqual((), result.skipped_checks)
@@ -815,9 +778,7 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertEqual("command", started.kind)
             self.assertEqual(check.argv, started.argv)
             self.assertEqual("SVC", started.repo)
-            self.assertEqual(
-                str(plans.canonicalize_path(repo_root)), started.cwd
-            )
+            self.assertEqual(str(plans.canonicalize_path(repo_root)), started.cwd)
             self.assertEqual(started.session_id, contract.session_id)
             self.assertEqual(0, finished.check_index)
             self.assertEqual(1, finished.check_count)
@@ -930,17 +891,13 @@ class VerificationExecutorTests(unittest.TestCase):
             (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
             contract = self._contract(
                 checks=(
-                    contracts.FileExistsCheck(
-                        name="present", path="present.txt"
-                    ),
+                    contracts.FileExistsCheck(name="present", path="present.txt"),
                     contracts.CommandCheck(
                         name="middle",
                         argv=("python3", "-c", "import sys; sys.exit(0)"),
                         timeout_seconds=10.0,
                     ),
-                    contracts.FileExistsCheck(
-                        name="absent", path="nope.txt"
-                    ),
+                    contracts.FileExistsCheck(name="absent", path="nope.txt"),
                 )
             )
             observer, events = self._record_observer()
@@ -959,10 +916,7 @@ class VerificationExecutorTests(unittest.TestCase):
                     ("started", 2, "absent"),
                     ("finished", 2, "absent"),
                 ],
-                [
-                    (tag, event.check_index, event.name)
-                    for tag, event in events
-                ],
+                [(tag, event.check_index, event.name) for tag, event in events],
             )
             for tag, event in events:
                 self.assertEqual(3, event.check_count)
@@ -1002,9 +956,7 @@ class VerificationExecutorTests(unittest.TestCase):
             repo_root = Path(tmp)
             (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
             contract = self._contract(
-                checks=(
-                    contracts.FileExistsCheck(name="present", path="present.txt"),
-                )
+                checks=(contracts.FileExistsCheck(name="present", path="present.txt"),)
             )
             finished_events: list[verification.CheckFinishedEvent] = []
             observer = verification.VerificationObserver(
@@ -1024,9 +976,7 @@ class VerificationExecutorTests(unittest.TestCase):
             repo_root = Path(tmp)
             (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
             contract = self._contract(
-                checks=(
-                    contracts.FileExistsCheck(name="present", path="present.txt"),
-                )
+                checks=(contracts.FileExistsCheck(name="present", path="present.txt"),)
             )
 
             result = verification.run_verification(contract, repo_root=repo_root)
@@ -1041,9 +991,7 @@ class VerificationExecutorTests(unittest.TestCase):
             repo_root = Path(tmp)
             (repo_root / "present.txt").write_text("hi\n", encoding="utf-8")
             contract = self._contract(
-                checks=(
-                    contracts.FileExistsCheck(name="present", path="present.txt"),
-                )
+                checks=(contracts.FileExistsCheck(name="present", path="present.txt"),)
             )
 
             class _Boom(RuntimeError):
@@ -1052,9 +1000,7 @@ class VerificationExecutorTests(unittest.TestCase):
             def _explode(_event: verification.CheckStartedEvent) -> None:
                 raise _Boom("observer error")
 
-            observer = verification.VerificationObserver(
-                on_check_started=_explode
-            )
+            observer = verification.VerificationObserver(on_check_started=_explode)
 
             with self.assertRaises(_Boom):
                 verification.run_verification(
@@ -1156,9 +1102,7 @@ class VerificationExecutorTests(unittest.TestCase):
     def test_diagnose_command_none_for_runnable_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             check = self._command(("python3", "-c", "import sys; sys.exit(0)"))
-            diagnostic = verification.diagnose_command(
-                check, repo_root=Path(tmp)
-            )
+            diagnostic = verification.diagnose_command(check, repo_root=Path(tmp))
 
             self.assertIsNone(diagnostic)
 
@@ -1255,9 +1199,7 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertEqual("hello world", result.stdout)
             self.assertFalse(result.stdout_truncated)
             self.assertEqual(len(b"hello world"), result.stdout_byte_count)
-            self.assertEqual(
-                artifacts.sha256_hex(b"hello world"), result.stdout_sha256
-            )
+            self.assertEqual(artifacts.sha256_hex(b"hello world"), result.stdout_sha256)
             # Passing output never writes a full raw artifact.
             self.assertIsNone(result.stdout_artifact_path)
             self.assertIsNone(result.stderr_artifact_path)
@@ -1304,9 +1246,7 @@ class VerificationExecutorTests(unittest.TestCase):
                 (
                     "python3",
                     "-c",
-                    "import sys\n"
-                    f"sys.stdout.write('x' * {size})\n"
-                    "sys.exit(5)",
+                    f"import sys\nsys.stdout.write('x' * {size})\nsys.exit(5)",
                 ),
                 name="boom",
             )
@@ -1321,9 +1261,7 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertIsNotNone(result.stdout_artifact_path)
             recovered = artifacts.read_gzip(Path(result.stdout_artifact_path))
             self.assertEqual(b"x" * size, recovered)
-            self.assertEqual(
-                artifacts.sha256_hex(recovered), result.stdout_sha256
-            )
+            self.assertEqual(artifacts.sha256_hex(recovered), result.stdout_sha256)
 
     def test_colliding_check_names_write_distinct_recoverable_artifacts(
         self,
@@ -1338,48 +1276,49 @@ class VerificationExecutorTests(unittest.TestCase):
             ("a$%#:??/b", "a%%#%$:/b"),
         )
         for first_name, second_name in pairs:
-            with self.subTest(pair=(first_name, second_name)):
-                with tempfile.TemporaryDirectory() as tmp:
-                    repo_root = Path(tmp) / "repo"
-                    repo_root.mkdir()
-                    artifact_dir = Path(tmp) / "artifacts"
-                    results = {}
-                    for name, payload in (
-                        (first_name, "first-output"),
-                        (second_name, "second-output"),
-                    ):
-                        check = self._command(
-                            (
-                                "python3",
-                                "-c",
-                                "import sys; "
-                                f"sys.stdout.write({payload!r}); sys.exit(1)",
-                            ),
-                            name=name,
-                        )
-                        result = verification.run_check(
-                            check, repo_root=repo_root, artifact_dir=artifact_dir
-                        )
-                        self.assertEqual("fail", result.status)
-                        self.assertIsNotNone(result.stdout_artifact_path)
-                        results[name] = (result, payload)
+            with (
+                self.subTest(pair=(first_name, second_name)),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                repo_root = Path(tmp) / "repo"
+                repo_root.mkdir()
+                artifact_dir = Path(tmp) / "artifacts"
+                results = {}
+                for name, payload in (
+                    (first_name, "first-output"),
+                    (second_name, "second-output"),
+                ):
+                    check = self._command(
+                        (
+                            "python3",
+                            "-c",
+                            f"import sys; sys.stdout.write({payload!r}); sys.exit(1)",
+                        ),
+                        name=name,
+                    )
+                    result = verification.run_check(
+                        check, repo_root=repo_root, artifact_dir=artifact_dir
+                    )
+                    self.assertEqual("fail", result.status)
+                    self.assertIsNotNone(result.stdout_artifact_path)
+                    results[name] = (result, payload)
 
-                    first, first_payload = results[first_name]
-                    second, second_payload = results[second_name]
-                    self.assertNotEqual(
-                        first.stdout_artifact_path, second.stdout_artifact_path
-                    )
-                    self.assertNotEqual(
-                        first.stderr_artifact_path, second.stderr_artifact_path
-                    )
-                    self.assertEqual(
-                        first_payload.encode("utf-8"),
-                        artifacts.read_gzip(Path(first.stdout_artifact_path)),
-                    )
-                    self.assertEqual(
-                        second_payload.encode("utf-8"),
-                        artifacts.read_gzip(Path(second.stdout_artifact_path)),
-                    )
+                first, first_payload = results[first_name]
+                second, second_payload = results[second_name]
+                self.assertNotEqual(
+                    first.stdout_artifact_path, second.stdout_artifact_path
+                )
+                self.assertNotEqual(
+                    first.stderr_artifact_path, second.stderr_artifact_path
+                )
+                self.assertEqual(
+                    first_payload.encode("utf-8"),
+                    artifacts.read_gzip(Path(first.stdout_artifact_path)),
+                )
+                self.assertEqual(
+                    second_payload.encode("utf-8"),
+                    artifacts.read_gzip(Path(second.stdout_artifact_path)),
+                )
 
     def test_failed_command_without_artifact_dir_keeps_previews_only(
         self,
@@ -1458,9 +1397,7 @@ class VerificationExecutorTests(unittest.TestCase):
 
             self.assertEqual("fail", result.status)
             self.assertEqual("data", result.stdout)
-            self.assertEqual(
-                artifacts.sha256_hex(b"data"), result.stdout_sha256
-            )
+            self.assertEqual(artifacts.sha256_hex(b"data"), result.stdout_sha256)
             self.assertIsNone(result.stdout_artifact_path)
 
     def test_run_verification_forwards_artifact_dir_to_command_checks(
@@ -1479,8 +1416,7 @@ class VerificationExecutorTests(unittest.TestCase):
                             (
                                 "python3",
                                 "-c",
-                                "import sys; sys.stdout.write('boom'); "
-                                "sys.exit(1)",
+                                "import sys; sys.stdout.write('boom'); sys.exit(1)",
                             ),
                             name="fail-check",
                         ),
@@ -1495,9 +1431,7 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertFalse(result.passed)
             check_result = result.checks[0]
             self.assertIsNotNone(check_result.stdout_artifact_path)
-            self.assertTrue(
-                Path(check_result.stdout_artifact_path).exists()
-            )
+            self.assertTrue(Path(check_result.stdout_artifact_path).exists())
 
     # --- Incremental streaming regression coverage (M1) ---
     # Verification must bound command output as it arrives instead of
@@ -1549,8 +1483,7 @@ class VerificationExecutorTests(unittest.TestCase):
                 (
                     "python3",
                     "-c",
-                    "import sys\n"
-                    "sys.stdout.buffer.write(bytes(range(256)) * 256)\n",
+                    "import sys\nsys.stdout.buffer.write(bytes(range(256)) * 256)\n",
                 )
             )
 
@@ -1573,9 +1506,7 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
             repositories = init_multi_repo_workspace(workspace_root, specs)
             plan_dir = root / "plan"
             write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
-            (repositories["SVC"] / "target.txt").write_text(
-                "svc\n", encoding="utf-8"
-            )
+            (repositories["SVC"] / "target.txt").write_text("svc\n", encoding="utf-8")
             nested = repositories["OAK"] / "nested"
             nested.mkdir()
             contract = contracts.CompletionContract(
@@ -1591,7 +1522,8 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
                             argv=(
                                 sys.executable,
                                 "-c",
-                                "import pathlib; assert pathlib.Path.cwd().name == 'nested'",
+                                "import pathlib; assert pathlib.Path.cwd().name == "
+                                "'nested'",
                             ),
                             cwd="nested",
                             timeout_seconds=10.0,
@@ -1614,9 +1546,13 @@ class MultiRepositoryVerificationTests(unittest.TestCase):
             )
 
             self.assertTrue(result.passed)
-            self.assertEqual(["svc-file", "oak-command"], [r.name for r in result.checks])
+            self.assertEqual(
+                ["svc-file", "oak-command"], [r.name for r in result.checks]
+            )
             self.assertEqual("SVC:target.txt", result.checks[0].qualified_path)
-            self.assertEqual(str(repositories["SVC"].resolve()), result.checks[0].resolved_root)
+            self.assertEqual(
+                str(repositories["SVC"].resolve()), result.checks[0].resolved_root
+            )
             self.assertEqual("OAK:nested", result.checks[1].qualified_cwd)
             self.assertEqual(str(nested.resolve()), result.checks[1].cwd)
             self.assertEqual("OAK:nested", started[1].qualified_cwd)
@@ -2036,16 +1972,16 @@ class ParallelVerificationTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         start = time.monotonic()
-        with mock.patch.object(
-            verification, "as_completed", interrupt_once_running
+        with (
+            mock.patch.object(verification, "as_completed", interrupt_once_running),
+            self.assertRaises(KeyboardInterrupt),
         ):
-            with self.assertRaises(KeyboardInterrupt):
-                verification.run_verification(
-                    self._contract(checks, parallel=True),
-                    repo_root=self.repo_root,
-                    observer=observer,
-                    artifact_dir=artifact_dir,
-                )
+            verification.run_verification(
+                self._contract(checks, parallel=True),
+                repo_root=self.repo_root,
+                observer=observer,
+                artifact_dir=artifact_dir,
+            )
         elapsed = time.monotonic() - start
 
         started = sorted((root / "started").iterdir())
@@ -2102,16 +2038,18 @@ class ParallelVerificationTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         start = time.monotonic()
-        with mock.patch.object(
-            verification, "as_completed", interrupt_once_trees_are_live
+        with (
+            mock.patch.object(
+                verification, "as_completed", interrupt_once_trees_are_live
+            ),
+            self.assertRaises(KeyboardInterrupt),
         ):
-            with self.assertRaises(KeyboardInterrupt):
-                verification.run_verification(
-                    self._contract(checks, parallel=True),
-                    repo_root=self.repo_root,
-                    observer=observer,
-                    artifact_dir=artifact_dir,
-                )
+            verification.run_verification(
+                self._contract(checks, parallel=True),
+                repo_root=self.repo_root,
+                observer=observer,
+                artifact_dir=artifact_dir,
+            )
         elapsed = time.monotonic() - start
 
         # Control returned without waiting for the 60s sleeps, and without a
@@ -2171,16 +2109,18 @@ class ParallelVerificationTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         start = time.monotonic()
-        with mock.patch.object(
-            verification, "as_completed", interrupt_once_trees_are_live
+        with (
+            mock.patch.object(
+                verification, "as_completed", interrupt_once_trees_are_live
+            ),
+            self.assertRaises(KeyboardInterrupt),
         ):
-            with self.assertRaises(KeyboardInterrupt):
-                verification.run_verification(
-                    self._contract(checks, parallel=True),
-                    repo_root=self.repo_root,
-                    observer=observer,
-                    artifact_dir=artifact_dir,
-                )
+            verification.run_verification(
+                self._contract(checks, parallel=True),
+                repo_root=self.repo_root,
+                observer=observer,
+                artifact_dir=artifact_dir,
+            )
         elapsed = time.monotonic() - start
 
         self.assertEqual(total, len(list((root / "started").iterdir())))
@@ -2236,12 +2176,9 @@ class VerifyCliTests(unittest.TestCase):
             repo_root.mkdir()
             (repo_root / "target.txt").write_text("ok\n", encoding="utf-8")
             contract = _contract_block(
-                '{"type": "file_exists", "path": "target.txt", '
-                '"name": "target"}'
+                '{"type": "file_exists", "path": "target.txt", "name": "target"}'
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
 
             completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
 
@@ -2253,9 +2190,7 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual("verify", payload["command"])
             self.assertEqual("ok", payload["reason"])
             self.assertEqual("1", payload["session"])
-            self.assertEqual(
-                str(plans.canonicalize_path(repo_root)), payload["cwd"]
-            )
+            self.assertEqual(str(plans.canonicalize_path(repo_root)), payload["cwd"])
             self.assertEqual(str(plan_dir), payload["plan_dir"])
             self.assertEqual(1, payload["recipe"]["check_count"])
             self.assertEqual(1, payload["recipe"]["gate_count"])
@@ -2298,9 +2233,7 @@ class VerifyCliTests(unittest.TestCase):
                 specs=specs,
             )
 
-            completed = self._run_verify(
-                plan_dir, session="1", cwd=workspace_root
-            )
+            completed = self._run_verify(plan_dir, session="1", cwd=workspace_root)
 
             self.assertEqual(1, completed.returncode)
             self.assertEqual("", completed.stderr)
@@ -2319,9 +2252,7 @@ class VerifyCliTests(unittest.TestCase):
             workspace_root = root / "workspace"
             specs = DEFAULT_MULTI_REPO_SPECS[:2]
             repositories = init_multi_repo_workspace(workspace_root, specs)
-            (repositories["OAK"] / "target.txt").write_text(
-                "ok\n", encoding="utf-8"
-            )
+            (repositories["OAK"] / "target.txt").write_text("ok\n", encoding="utf-8")
             plan_dir = root / "plan"
             contract = _contract_block(
                 '{"type": "file_exists", "path": "target.txt", '
@@ -2334,9 +2265,7 @@ class VerifyCliTests(unittest.TestCase):
                 specs=specs,
             )
 
-            completed = self._run_verify(
-                plan_dir, session="1", cwd=workspace_root
-            )
+            completed = self._run_verify(plan_dir, session="1", cwd=workspace_root)
 
             self.assertEqual(0, completed.returncode, completed.stderr)
             payload = json.loads(completed.stdout)
@@ -2348,9 +2277,7 @@ class VerifyCliTests(unittest.TestCase):
             check = payload["checks"][0]
             self.assertEqual("OAK", check["repo"])
             self.assertEqual("OAK:target.txt", check["qualified_path"])
-            self.assertEqual(
-                str(repositories["OAK"].resolve()), check["resolved_root"]
-            )
+            self.assertEqual(str(repositories["OAK"].resolve()), check["resolved_root"])
 
     def test_verify_json_failure_reports_check_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2361,9 +2288,7 @@ class VerifyCliTests(unittest.TestCase):
             contract = _contract_block(
                 '{"type": "file_exists", "path": "absent.txt", "name": "absent"}'
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
 
             completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
 
@@ -2391,7 +2316,7 @@ class VerifyCliTests(unittest.TestCase):
             repo_root.mkdir()
             (repo_root / "target.txt").write_text("ok\n", encoding="utf-8")
             contract = _contract_block(
-                ', '.join(
+                ", ".join(
                     (
                         '{"type": "file_exists", "path": "target.txt", '
                         '"name": "suite"}',
@@ -2413,9 +2338,7 @@ class VerifyCliTests(unittest.TestCase):
             self.assertEqual(
                 ["focused"], [row["name"] for row in payload["skipped_checks"]]
             )
-            self.assertEqual(
-                ["suite"], payload["skipped_checks"][0]["on_failure_of"]
-            )
+            self.assertEqual(["suite"], payload["skipped_checks"][0]["on_failure_of"])
             self.assertEqual([], payload["diagnostic_failures"])
 
     def test_verify_json_no_contract_returns_no_contract_reason(self) -> None:
@@ -2455,19 +2378,13 @@ class VerifyCliTests(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertEqual("no-contract", payload["reason"])
             # The runtime repair hint resolves for no-contract.
-            self.assertEqual(
-                "runtime.no-contract", payload["repair_hint"]["check_id"]
-            )
+            self.assertEqual("runtime.no-contract", payload["repair_hint"]["check_id"])
             remediation = payload["skill_remediation"]
             # Names both escape hatches with the plan directory substituted.
             self.assertIn("--allow-not-loop-ready", remediation["message"])
             self.assertIn("--mark-loop-ready", remediation["message"])
-            commands = [
-                step["command"] for step in remediation["next_steps"]
-            ]
-            self.assertIn(
-                f"asl run {plan_dir} --allow-not-loop-ready", commands
-            )
+            commands = [step["command"] for step in remediation["next_steps"]]
+            self.assertIn(f"asl run {plan_dir} --allow-not-loop-ready", commands)
             self.assertIn(
                 f"asl preflight {plan_dir} --json --mark-loop-ready", commands
             )
@@ -2503,9 +2420,7 @@ class VerifyCliTests(unittest.TestCase):
                 '{"type": "command", "name": "cmd", '
                 f'"argv": {json.dumps(argv)}, "timeout_seconds": 30}}'
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
 
             completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
 
@@ -2531,9 +2446,7 @@ class VerifyCliTests(unittest.TestCase):
             contract = _contract_block(
                 '{"type": "file_exists", "path": "absent.txt", "name": "absent"}'
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
 
             completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
 
@@ -2566,9 +2479,7 @@ class VerifyCliTests(unittest.TestCase):
                     "```",
                 ]
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
 
             completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
 
@@ -2624,9 +2535,7 @@ class VerifyCliTests(unittest.TestCase):
             contract = _contract_block(
                 '{"type": "file_exists", "path": "present.txt", "name": "present"}'
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
 
             completed = self._run_verify(
                 plan_dir, session="1", cwd=repo_root, json_output=False
@@ -2646,9 +2555,7 @@ class VerifyCliTests(unittest.TestCase):
             contract = _contract_block(
                 '{"type": "file_exists", "path": "absent.txt", "name": "absent"}'
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
 
             completed = self._run_verify(
                 plan_dir, session="1", cwd=repo_root, json_output=False
@@ -2675,9 +2582,7 @@ class VerifyCliTests(unittest.TestCase):
                 '{"type": "command", "name": "cmd", '
                 f'"argv": {json.dumps(argv)}, "timeout_seconds": 30}}'
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
 
             completed = self._run_verify(plan_dir, session="1", cwd=repo_root)
 
@@ -2706,9 +2611,7 @@ class VerifyCliTests(unittest.TestCase):
                 '{"type": "command", "name": "cmd", '
                 f'"argv": {json.dumps(argv)}, "timeout_seconds": 30}}'
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
 
             completed = subprocess.run(
                 [
@@ -2750,9 +2653,7 @@ class ArtifactStorageTests(unittest.TestCase):
         self.assertEqual(artifacts.OUTPUT_METADATA_VERSION, meta.version)
         self.assertEqual(len(data), meta.byte_count)
         self.assertEqual(len("hello world"), meta.char_count)
-        self.assertEqual(
-            hashlib.sha256(data).hexdigest(), meta.sha256
-        )
+        self.assertEqual(hashlib.sha256(data).hexdigest(), meta.sha256)
         self.assertFalse(meta.truncated)
         self.assertEqual("hello world", meta.preview)
         self.assertIsNone(meta.artifact_path)
@@ -2803,9 +2704,7 @@ class ArtifactStorageTests(unittest.TestCase):
         )
 
     def test_preview_not_truncated_at_exact_boundary(self) -> None:
-        data = b"X" * (
-            artifacts.PREVIEW_HEAD_BYTES + artifacts.PREVIEW_TAIL_BYTES
-        )
+        data = b"X" * (artifacts.PREVIEW_HEAD_BYTES + artifacts.PREVIEW_TAIL_BYTES)
         preview, truncated = artifacts.bounded_preview(data)
 
         self.assertFalse(truncated)
@@ -2818,9 +2717,7 @@ class ArtifactStorageTests(unittest.TestCase):
         self.assertEqual(len(data), meta.byte_count)
         # Invalid bytes decode to U+FFFD replacement characters, so the
         # character count reflects the replaced string, not the raw bytes.
-        self.assertEqual(
-            len(data.decode("utf-8", errors="replace")), meta.char_count
-        )
+        self.assertEqual(len(data.decode("utf-8", errors="replace")), meta.char_count)
         self.assertIn("�", meta.preview)
         self.assertEqual(hashlib.sha256(data).hexdigest(), meta.sha256)
 
@@ -2914,9 +2811,7 @@ class ArtifactStorageTests(unittest.TestCase):
     def test_derive_artifact_stem_is_idempotent_and_deterministic(self) -> None:
         derived = artifacts.derive_artifact_stem("../../etc/passwd")
         self.assertEqual(derived, artifacts.derive_artifact_stem(derived))
-        self.assertEqual(
-            derived, artifacts.derive_artifact_stem("../../etc/passwd")
-        )
+        self.assertEqual(derived, artifacts.derive_artifact_stem("../../etc/passwd"))
 
     def test_derive_artifact_stem_byte_caps_overlong_names(self) -> None:
         # A ~192-char sanitized name plus the full 64-hex digest used to
@@ -2963,9 +2858,7 @@ class ArtifactStorageTests(unittest.TestCase):
         for max_bytes in (0, 1, 2, 3, 199, 200, 201):
             with self.subTest(max_bytes=max_bytes):
                 truncated = artifacts._truncate_utf8(text, max_bytes)
-                self.assertLessEqual(
-                    len(truncated.encode("utf-8")), max_bytes
-                )
+                self.assertLessEqual(len(truncated.encode("utf-8")), max_bytes)
                 self.assertTrue(text.startswith(truncated))
 
     def test_overlong_check_name_yields_recoverable_live_artifact(self) -> None:
@@ -2985,12 +2878,8 @@ class ArtifactStorageTests(unittest.TestCase):
                 with self.subTest(name=name):
                     self.assertIsNotNone(meta.artifact_path)
                     artifact = Path(meta.artifact_path)
-                    self.assertLessEqual(
-                        len(artifact.name.encode("utf-8")), 255
-                    )
-                    self.assertLessEqual(
-                        len(f".{artifact.name}.tmp".encode("utf-8")), 255
-                    )
+                    self.assertLessEqual(len(artifact.name.encode("utf-8")), 255)
+                    self.assertLessEqual(len(f".{artifact.name}.tmp".encode()), 255)
                     self.assertEqual(data, artifacts.read_gzip(artifact))
                 paths.append(meta.artifact_path)
             self.assertNotEqual(paths[0], paths[1])
@@ -3006,9 +2895,7 @@ class ArtifactStorageTests(unittest.TestCase):
 
             self.assertNotEqual(first.artifact_path, second.artifact_path)
             self.assertEqual(b"first", artifacts.read_gzip(first.artifact_path))
-            self.assertEqual(
-                b"second", artifacts.read_gzip(second.artifact_path)
-            )
+            self.assertEqual(b"second", artifacts.read_gzip(second.artifact_path))
 
     def test_sanitized_name_has_no_path_separators(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3030,12 +2917,14 @@ class ArtifactStorageTests(unittest.TestCase):
             target = Path(tmp) / "output.gz"
             target.write_bytes(b"original")
 
-            with mock.patch(
-                "agent_session_loop.artifacts.os.replace",
-                side_effect=OSError("boom"),
+            with (
+                mock.patch(
+                    "agent_session_loop.artifacts.os.replace",
+                    side_effect=OSError("boom"),
+                ),
+                self.assertRaises(artifacts.ArtifactError),
             ):
-                with self.assertRaises(artifacts.ArtifactError):
-                    artifacts.atomic_write_bytes(target, b"new-data")
+                artifacts.atomic_write_bytes(target, b"new-data")
 
             # Destination is unchanged and no stray temp file remains.
             self.assertEqual(b"original", target.read_bytes())
@@ -3152,9 +3041,7 @@ class ArtifactStorageTests(unittest.TestCase):
 
             self.assertIsNone(meta.artifact_path)
             self.assertEqual("failure output", meta.preview)
-            self.assertEqual(
-                artifacts.sha256_hex(b"failure output"), meta.sha256
-            )
+            self.assertEqual(artifacts.sha256_hex(b"failure output"), meta.sha256)
             self.assertFalse(spool_path.exists())
 
     def test_stream_capture_discard_removes_spool(self) -> None:
@@ -3217,9 +3104,7 @@ class ContractCheckCliTests(unittest.TestCase):
             self.assertEqual(0, code)
             row = payload["checks"][0]
             self.assertEqual("SVC:only-svc.txt", row["qualified_path"])
-            self.assertEqual(
-                str(repositories["SVC"].resolve()), row["resolved_root"]
-            )
+            self.assertEqual(str(repositories["SVC"].resolve()), row["resolved_root"])
 
     def test_registered_symlink_escape_is_a_structured_check_issue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3276,9 +3161,7 @@ class ContractCheckCliTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual("ok", payload["reason"])
             self.assertEqual(0, payload["issue_count"])
-            self.assertEqual(
-                {"ok"}, {row["status"] for row in payload["checks"]}
-            )
+            self.assertEqual({"ok"}, {row["status"] for row in payload["checks"]})
             self.assertEqual([None, None], [row["repo"] for row in payload["checks"]])
 
     def test_static_contract_row_reports_repository_alias(self) -> None:
@@ -3394,23 +3277,23 @@ class ContractCheckCliTests(unittest.TestCase):
             '["python3", "check_evidence.py"]',
             '["python3.11", "-c", "raise SystemExit(0)"]',
         ):
-            with self.subTest(argv=argv):
-                with tempfile.TemporaryDirectory() as tmp:
-                    tmp_dir = Path(tmp)
-                    plan_dir = tmp_dir / "plan"
-                    repo_root = tmp_dir / "repo"
-                    repo_root.mkdir()
-                    contract = _contract_block(
-                        f'{{"type": "command", "name": "c", "argv": {argv}}}'
-                    )
-                    write_plan(
-                        plan_dir, ("pending",), contracts_by_id={"1": contract}
-                    )
+            with (
+                self.subTest(argv=argv),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                tmp_dir = Path(tmp)
+                plan_dir = tmp_dir / "plan"
+                repo_root = tmp_dir / "repo"
+                repo_root.mkdir()
+                contract = _contract_block(
+                    f'{{"type": "command", "name": "c", "argv": {argv}}}'
+                )
+                write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
 
-                    code, payload = self._run(plan_dir, repo_root)
+                code, payload = self._run(plan_dir, repo_root)
 
-                    row = payload["checks"][0]
-                    self.assertNotEqual("bare-python", row["reason"])
+                row = payload["checks"][0]
+                self.assertNotEqual("bare-python", row["reason"])
 
     def test_missing_contract_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3495,9 +3378,7 @@ class ContractCheckCliTests(unittest.TestCase):
             # Session 1 alone is clean even though session 2 has an issue.
             code, payload = self._run(plan_dir, repo_root, "--session", "1")
             self.assertEqual(0, code)
-            self.assertEqual(
-                {"1"}, {row["session"] for row in payload["checks"]}
-            )
+            self.assertEqual({"1"}, {row["session"] for row in payload["checks"]})
             self.assertEqual("1", payload["session"])
 
     def test_unknown_session_is_invalid_session(self) -> None:

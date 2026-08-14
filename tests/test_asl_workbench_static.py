@@ -5,71 +5,33 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
 import errno
-import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
 import signal
-import stat
-import subprocess
-import sys
 import tempfile
 import threading
-import time
 import unittest
 import urllib.parse
+from contextlib import redirect_stderr, redirect_stdout, suppress
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
     cli,
-    compact_state,
-    config,
-    contracts,
     control_queue,
-    events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
-    review_repair,
-    run_control,
-    runner,
     state,
-    tail,
-    verification,
     workbench,
     workbench_server,
 )
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
-)
 from tests.support import (
-    patched_env,
-    write_plan,
-    _write_plan_dir,
     _http_request,
     _http_request_raw,
+    _write_plan_dir,
+    patched_env,
+    write_plan,
 )
 
 
@@ -231,9 +193,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             status, body, _ = _http_request(
                 self._base_url(server) + f"/static/{encoded}"
             )
-            self.assertIn(
-                status, (400, 404), msg=f"path={relative} status={status}"
-            )
+            self.assertIn(status, (400, 404), msg=f"path={relative} status={status}")
             self.assertFalse(body["ok"], msg=f"path={relative}")
 
     def test_static_post_falls_through_to_404(self) -> None:
@@ -446,9 +406,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             "legacyRecoveryActionTarget",
         ):
             self.assertIn(helper, decoded, msg=f"missing helper: {helper}")
-        self.assertIn(
-            "loadAndRenderRecovery(planDir, state.detailPlan)", decoded
-        )
+        self.assertIn("loadAndRenderRecovery(planDir, state.detailPlan)", decoded)
         self.assertIn('"/api/recovery?plan_dir="', decoded)
         self.assertIn("renderRecoveryPanel(compact)", decoded)
         self.assertIn("renderRecoveryPanel(body.recovery)", decoded)
@@ -477,7 +435,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("await handleLaunchClick()", decoded)
         self.assertIn("focusDetailKey(target)", decoded)
         self.assertIn('button.textContent = "copy"', decoded)
-        self.assertIn("copyRecoveryCommand(button, command.command || \"\")", decoded)
+        self.assertIn('copyRecoveryCommand(button, command.command || "")', decoded)
         for text in (
             "Recovery unavailable",
             "recovery diagnosis unavailable",
@@ -562,9 +520,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("readTriStateValue", decoded)
         self.assertIn("setTriStateValue", decoded)
         self.assertIn('readTriStateValue(form, "unsafe_bypass")', decoded)
-        self.assertIn(
-            'readTriStateValue(form, "allow_not_loop_ready")', decoded
-        )
+        self.assertIn('readTriStateValue(form, "allow_not_loop_ready")', decoded)
         # The render side must also write the tri-state value back from
         # null/true/false instead of toggling a checkbox.
         self.assertIn('setTriStateValue(form, "unsafe_bypass"', decoded)
@@ -731,16 +687,14 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # Both the preview and row renderers must populate the completed slot.
         self.assertIn('setField(facts, "completed", formatCompletedAt(plan));', decoded)
         self.assertIn(
-            'row.querySelector(\'[data-field="completed"]\').textContent = '
+            "row.querySelector('[data-field=\"completed\"]').textContent = "
             "formatCompletedAt(plan);",
             decoded,
         )
         # Oldest comparator selects completed_at for complete plans through a
         # shared timestamp helper; other states stay on last_activity_at.
         self.assertIn("oldestSortTimestampFor", decoded)
-        self.assertIn(
-            'if (plan && plan.primary_state === "complete") {', decoded
-        )
+        self.assertIn('if (plan && plan.primary_state === "complete") {', decoded)
         self.assertIn("parseActivityTimestamp(plan.completed_at)", decoded)
         self.assertIn("compareByOldestActivity", decoded)
         # Existing sort modes and other comparators remain untouched.
@@ -831,9 +785,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # desktop viewports while staying single-column on mobile so the
         # existing route toggle still owns mobile visibility.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/styles.css"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/styles.css")
         decoded = body.decode("utf-8")
         self.assertIn(".wb-shell", decoded)
         self.assertIn("min-width: 960px", decoded)
@@ -846,9 +798,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn('.wb-row[data-selected="true"]', decoded)
         # Placeholder styling must follow [data-route="queue"] so the right
         # pane shows a "select a plan" hint when no plan is selected.
-        self.assertIn(
-            '.wb-shell[data-viewport="desktop"][data-route="queue"]', decoded
-        )
+        self.assertIn('.wb-shell[data-viewport="desktop"][data-route="queue"]', decoded)
 
     def test_static_css_recovery_center_wraps_long_content_on_mobile(
         self,
@@ -858,9 +808,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # pane or overlapping action buttons. Mobile layout collapses the
         # same rows into one column.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/styles.css"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/styles.css")
         decoded = body.decode("utf-8")
         for selector in (
             ".wb-recovery__evidence-row",
@@ -885,9 +833,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # breakpoint must match the CSS so the JS and CSS agree on what
         # "desktop" means.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
         decoded = body.decode("utf-8")
         import re as _re
 
@@ -942,7 +888,8 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # applyRoute should no longer unconditionally hide the queue/filters.
         self.assertIsNone(
             _re.search(
-                r"if \(queueEl\) queueEl\.hidden = true;\s*\n\s*if \(filtersEl\) filtersEl\.hidden = true;",
+                r"if \(queueEl\) queueEl\.hidden = true;\s*\n\s*if \(filtersEl\) "
+                r"filtersEl\.hidden = true;",
                 decoded,
             ),
             msg="applyRoute still unconditionally hides queue+filters on detail",
@@ -998,9 +945,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # preview panel, and the preview is only visible on the queue
         # route on desktop viewports.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/styles.css"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/styles.css")
         decoded = body.decode("utf-8")
         self.assertIn(".wb-shell__preview", decoded)
         self.assertIn('[data-preview="empty"]', decoded)
@@ -1041,9 +986,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # shell's data-preview attribute through applyShellLayout. Clicks
         # on the row body select the plan without leaving the queue route.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
         decoded = body.decode("utf-8")
         # State + helpers.
         self.assertIn("previewPlan:", decoded)
@@ -1066,9 +1009,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # The preview is driven off the cached queue payload, not a
         # separate detail fetch.
         self.assertIn("state.lastVisiblePlans = visible", decoded)
-        self.assertIn(
-            "updatePreview(state.lastVisiblePlans || [])", decoded
-        )
+        self.assertIn("updatePreview(state.lastVisiblePlans || [])", decoded)
         # applyShellLayout writes data-preview so CSS can swap the
         # placeholder for the active preview.
         self.assertIn('shell.setAttribute("data-preview"', decoded)
@@ -1090,8 +1031,8 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("plan.last_message_preview", decoded)
         # Row click handlers must support a select-without-navigate
         # gesture so the preview can update from the queue.
-        self.assertIn('target.closest(\'[data-field="label"]\')', decoded)
-        self.assertIn('target.closest(\'[data-field="action"]\')', decoded)
+        self.assertIn("target.closest('[data-field=\"label\"]')", decoded)
+        self.assertIn("target.closest('[data-field=\"action\"]')", decoded)
         self.assertIn("selectPlanFromRow(planDir)", decoded)
         # The "open detail" link in the preview must use the normal
         # navigateToDetail flow so selection persists across the route.
@@ -1117,9 +1058,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # detail route without calling navigateToDetail(), so applyRoute must
         # derive the selected plan from the parsed route before rendering.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
         decoded = body.decode("utf-8")
         import re as _re
 
@@ -1212,9 +1151,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # an unstyled block. The empty state must layout vertically with
         # primary/secondary text and an actions row.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/styles.css"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/styles.css")
         decoded = body.decode("utf-8")
         self.assertIn(".wb-controls-bar", decoded)
         self.assertIn(".wb-controls-bar__search", decoded)
@@ -1238,9 +1175,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # and "no actionable plans" with stable kinds the action buttons
         # branch on.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
         decoded = body.decode("utf-8")
         # New control wiring functions.
         for helper in (
@@ -1284,9 +1219,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             '"completed-hidden"',
             '"no-actionable"',
         ):
-            self.assertIn(
-                kind, decoded, msg=f"missing empty-state kind: {kind}"
-            )
+            self.assertIn(kind, decoded, msg=f"missing empty-state kind: {kind}")
         # Empty-state actions wiring: clear search, show completed, and
         # reset filter must each reach the corresponding setter so the
         # operator can recover from a dead-end queue view.
@@ -1319,7 +1252,6 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
                 msg=f"reply text persisted via {pattern!r}",
             )
 
-
     def test_app_js_row_actions_dispatch_through_handleRowAction(self) -> None:
         # Session 6 contract: the queue row "action" button must route the
         # operator to the detail view via the existing navigation path with
@@ -1328,9 +1260,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # DETAIL_FOCUS_TARGETS resolves each focus key to elements that
         # exist in the rendered shell.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
         decoded = body.decode("utf-8")
         # Dispatcher + maps are defined.
         self.assertIn("function handleRowAction(plan, event)", decoded)
@@ -1343,7 +1273,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             "action.onclick = (event) => handleRowAction(plan, event)",
             decoded,
         )
-        self.assertIn('data-action-kind', decoded)
+        self.assertIn("data-action-kind", decoded)
         # ROW_ACTION_FOCUS must cover every RecommendedAction enum.
         for action_kind in (
             '"reply"',
@@ -1416,9 +1346,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # before triggering a fetch so fast typing does not pile up
         # /api/queue requests.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
         decoded = body.decode("utf-8")
         for helper in (
             "captureQueueScroll",
@@ -1428,9 +1356,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             "applyDetailFocus",
             "scheduleSearchRefresh",
         ):
-            self.assertIn(
-                helper, decoded, msg=f"missing preservation helper: {helper}"
-            )
+            self.assertIn(helper, decoded, msg=f"missing preservation helper: {helper}")
         # Debounce constant must be defined and the search listener must
         # route through scheduleSearchRefresh rather than the bare
         # refresh() call so typing storms collapse to one fetch.
@@ -1485,9 +1411,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # ``#wb-reply-text.value`` are the explicit clear button and the
         # successful submit path.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
         decoded = body.decode("utf-8")
         import re as _re
 
@@ -1547,14 +1471,10 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # bounds drift from control_queue the UI either rejects a window the
         # runner would honor or posts one the server rejects.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
         decoded = body.decode("utf-8")
         expected = {
-            "ABORT_DEFAULT_GRACE_SECONDS": (
-                control_queue.DEFAULT_ABORT_GRACE_SECONDS
-            ),
+            "ABORT_DEFAULT_GRACE_SECONDS": (control_queue.DEFAULT_ABORT_GRACE_SECONDS),
             "ABORT_MIN_GRACE_SECONDS": control_queue.MIN_ABORT_GRACE_SECONDS,
             "ABORT_MAX_GRACE_SECONDS": control_queue.MAX_ABORT_GRACE_SECONDS,
         }
@@ -1563,15 +1483,9 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
 
         _, html, _ = _http_request_raw(self._base_url(server) + "/")
         markup = html.decode("utf-8")
-        self.assertIn(
-            f'min="{control_queue.MIN_ABORT_GRACE_SECONDS}"', markup
-        )
-        self.assertIn(
-            f'max="{control_queue.MAX_ABORT_GRACE_SECONDS}"', markup
-        )
-        self.assertIn(
-            f'value="{control_queue.DEFAULT_ABORT_GRACE_SECONDS}"', markup
-        )
+        self.assertIn(f'min="{control_queue.MIN_ABORT_GRACE_SECONDS}"', markup)
+        self.assertIn(f'max="{control_queue.MAX_ABORT_GRACE_SECONDS}"', markup)
+        self.assertIn(f'value="{control_queue.DEFAULT_ABORT_GRACE_SECONDS}"', markup)
 
     def test_app_js_vocabulary_mirrors_python_constants(self) -> None:
         # Session 8 regression: the JS frontend hard-codes string
@@ -1583,9 +1497,7 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         # entry on either side fails this regression instead of
         # shipping a mismatched UI.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
         decoded = body.decode("utf-8")
         # ACTIVITY_SOURCE_LABELS keys must cover every Python
         # LAST_ACTIVITY_SOURCES value so the preview badge falls back
@@ -1620,13 +1532,11 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn('"complete"', decoded)
 
     def test_app_js_recovery_action_targets_mirror_python_constants(self) -> None:
-        from typing import get_args
         import re as _re
+        from typing import get_args
 
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/app.js"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
         decoded = body.decode("utf-8")
         targets_match = _re.search(
             r"const RECOVERY_ACTION_TARGETS = \[(.*?)\];",
@@ -1814,7 +1724,9 @@ class WorkbenchHardeningTests(unittest.TestCase):
         # Session 2: archive select-all plumbing derives loaded IDs, wires the
         # select-all control, reports "N of M entries selected", and disables
         # select-all once every loaded entry is already selected.
-        self.assertIn('selectAll.addEventListener("click", selectAllArchiveEntries)', decoded)
+        self.assertIn(
+            'selectAll.addEventListener("click", selectAllArchiveEntries)', decoded
+        )
         self.assertIn('count + " of " + loaded + " entries selected"', decoded)
         self.assertIn("loaded === 0 || count >= loaded", decoded)
         # Session 3: the restore-selected control wires the bulk restore handler,
@@ -1857,9 +1769,7 @@ class WorkbenchHardeningTests(unittest.TestCase):
         self.assertIn("archive_retention_days: days", decoded)
         # Cleanup mode + threshold are session-scoped UI preferences.
         self.assertIn('CLEANUP_MODE_STORAGE_KEY = "wb.cleanup"', decoded)
-        self.assertIn(
-            'CLEANUP_THRESHOLD_STORAGE_KEY = "wb.cleanupDays"', decoded
-        )
+        self.assertIn('CLEANUP_THRESHOLD_STORAGE_KEY = "wb.cleanupDays"', decoded)
         # Cleanup mode reveals completed plans for review without mutating the
         # persisted wb.completed preference: the visibility gate short-circuits
         # on state.cleanupMode and the reveal path never writes the completed
@@ -1893,9 +1803,7 @@ class WorkbenchHardeningTests(unittest.TestCase):
         # archive view ship layout primitives so they do not regress into an
         # unstyled block.
         server = self._start_server()
-        _, body, _ = _http_request_raw(
-            self._base_url(server) + "/static/styles.css"
-        )
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/styles.css")
         decoded = body.decode("utf-8")
         for selector in (
             ".wb-cleanup-bar",
@@ -1938,9 +1846,7 @@ class WorkbenchHardeningTests(unittest.TestCase):
     def test_static_asset_returns_304_when_etag_matches(self) -> None:
         server = self._start_server()
         # First request: capture the ETag.
-        _, _, headers = _http_request_raw(
-            self._base_url(server) + "/static/styles.css"
-        )
+        _, _, headers = _http_request_raw(self._base_url(server) + "/static/styles.css")
         etag = headers.get("ETag") or headers.get("etag")
         self.assertIsNotNone(etag)
         # Second request with If-None-Match should short-circuit to 304.
@@ -2028,9 +1934,7 @@ class WorkbenchHardeningTests(unittest.TestCase):
                 )
             return original_open(self_path, *args, **kwargs)
 
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         with mock.patch.object(Path, "open", race_open):
             status, body, _ = _http_request(
                 f"{self._base_url(server)}/api/last-message?{query}"
@@ -2055,9 +1959,7 @@ class WorkbenchHardeningTests(unittest.TestCase):
                 )
             return original_open(self_path, *args, **kwargs)
 
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         with mock.patch.object(Path, "open", race_open):
             status, body, _ = _http_request(
                 f"{self._base_url(server)}/api/state?{query}"
@@ -2091,13 +1993,10 @@ class WorkbenchHardeningTests(unittest.TestCase):
                 )
                 if status != 200 or not body.get("ok"):
                     errors.append(f"{target.name}: {status} {body!r}")
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:  # noqa: BLE001 - reported below
                 errors.append(f"{target.name}: {error!r}")
 
-        threads = [
-            threading.Thread(target=pin, args=(target,))
-            for target in plan_dirs
-        ]
+        threads = [threading.Thread(target=pin, args=(target,)) for target in plan_dirs]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -2115,9 +2014,7 @@ class WorkbenchHardeningTests(unittest.TestCase):
     def test_unlock_endpoint_removes_stale_lock(self) -> None:
         # Seed a stale lock owned by a non-existent pid so unlock can
         # remove it without --force.
-        lock_path = state.lock_path_for_plan(
-            self.canonical_plan_dir, self.state_dir
-        )
+        lock_path = state.lock_path_for_plan(self.canonical_plan_dir, self.state_dir)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(
             json.dumps(
@@ -2164,7 +2061,10 @@ class WorkbenchHardeningTests(unittest.TestCase):
             return previous
 
         try:
-            with mock.patch("agent_session_loop.workbench_server.signal.signal", side_effect=recording_signal):
+            with mock.patch(
+                "agent_session_loop.workbench_server.signal.signal",
+                side_effect=recording_signal,
+            ):
                 restore = workbench_server._install_shutdown_handlers(server)
             self.assertIn(signal.SIGINT, captured)
             self.assertIn(signal.SIGTERM, captured)
@@ -2184,16 +2084,17 @@ class WorkbenchHardeningTests(unittest.TestCase):
             finally:
                 server.shutdown = original_shutdown  # type: ignore[assignment]
             # restore() should return the original handlers without raising.
-            with mock.patch("agent_session_loop.workbench_server.signal.signal", side_effect=original_signal):
+            with mock.patch(
+                "agent_session_loop.workbench_server.signal.signal",
+                side_effect=original_signal,
+            ):
                 restore()
         finally:
             # Defensive: ensure default handlers come back even if the
             # test failed mid-way.
             for signum, previous in previous_handlers.items():
-                try:
+                with suppress(ValueError, OSError):
                     original_signal(signum, previous)
-                except (ValueError, OSError):
-                    pass
 
     def test_serve_from_args_invokes_open_browser_with_token_url(self) -> None:
         captured: dict[str, object] = {}
@@ -2259,7 +2160,7 @@ class WorkbenchHardeningTests(unittest.TestCase):
                 args,
                 open_browser=fake_open,
                 serve_forever=lambda srv: None,
-                install_signal_handlers=lambda srv: (lambda: None),
+                install_signal_handlers=lambda srv: lambda: None,
             )
         self.assertEqual(0, result)
         self.assertNotIn("url", captured)
@@ -2286,7 +2187,7 @@ class WorkbenchHardeningTests(unittest.TestCase):
                 args,
                 open_browser=lambda url: True,
                 serve_forever=fake_serve,
-                install_signal_handlers=lambda srv: (lambda: None),
+                install_signal_handlers=lambda srv: lambda: None,
             )
         self.assertEqual(0, result)
         # The socket should be releasable now; rebinding to the same
@@ -2525,14 +2426,16 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
             self.assertEqual(str(tmp_path / "newrepo"), pin.profile.cwd)
 
     def test_pin_handler_reports_error_on_invalid_plan_dir(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
-                args = argparse.Namespace(plan_dir="   ", cwd=None, label=None)
-                stderr = io.StringIO()
-                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
-                    rc = workbench.workbench_pin_from_args(args)
-                self.assertEqual(1, rc)
-                self.assertIn("workbench pin", stderr.getvalue())
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))),
+        ):
+            args = argparse.Namespace(plan_dir="   ", cwd=None, label=None)
+            stderr = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                rc = workbench.workbench_pin_from_args(args)
+            self.assertEqual(1, rc)
+            self.assertIn("workbench pin", stderr.getvalue())
 
     def test_unpin_handler_removes_pin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2553,12 +2456,14 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
             self.assertEqual((), reloaded.pins)
 
     def test_unpin_handler_is_idempotent_for_missing_pin(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))):
-                args = argparse.Namespace(plan_dir=str(Path(tmp) / "nothing"))
-                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    rc = workbench.workbench_unpin_from_args(args)
-                self.assertEqual(0, rc)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patched_env(XDG_CONFIG_HOME=str(self._xdg(tmp))),
+        ):
+            args = argparse.Namespace(plan_dir=str(Path(tmp) / "nothing"))
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                rc = workbench.workbench_unpin_from_args(args)
+            self.assertEqual(0, rc)
 
     def test_registry_handler_text_output_lists_pins_and_roots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2602,9 +2507,7 @@ class WorkbenchCliHandlerTests(unittest.TestCase):
             self.assertEqual("workbench", payload["command"])
             self.assertEqual("ok", payload["reason"])
             self.assertEqual(1, len(payload["registry"]["pins"]))
-            self.assertEqual(
-                str(plan_dir), payload["registry"]["pins"][0]["plan_dir"]
-            )
+            self.assertEqual(str(plan_dir), payload["registry"]["pins"][0]["plan_dir"])
             self.assertEqual(
                 str(tmp_path),
                 payload["registry"]["pins"][0]["profile"]["cwd"],

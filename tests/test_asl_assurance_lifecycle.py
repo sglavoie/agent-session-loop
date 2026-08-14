@@ -8,25 +8,26 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import assurance_catchup
-from agent_session_loop import assurance_ledger
-from agent_session_loop import assurance_models
-from agent_session_loop import assurance_projection
-from agent_session_loop import cli
-from agent_session_loop import config
-from agent_session_loop import control_queue
-from agent_session_loop import events
-from agent_session_loop import harnesses
-from agent_session_loop import plans
-from agent_session_loop import runner
-from agent_session_loop import state
-from agent_session_loop import supervisor_audit
+from agent_session_loop import (
+    assurance_catchup,
+    assurance_ledger,
+    assurance_models,
+    assurance_projection,
+    cli,
+    config,
+    control_queue,
+    events,
+    harnesses,
+    plans,
+    runner,
+    state,
+    supervisor_audit,
+)
 from agent_session_loop.assurance_models import RUBRIC_LANES, AuditRole
-
 from tests.support import (
     init_git_repo,
     install_fake_codex,
@@ -35,18 +36,21 @@ from tests.support import (
     write_plan,
 )
 
-
 RUN_ID = "20260810T101112123456Z-4242"
 
 #: Injected so an audit's timestamps are inputs rather than wall-clock reads.
-FIXED_CLOCK = datetime(2026, 8, 10, 10, 11, 12, tzinfo=timezone.utc)
+FIXED_CLOCK = datetime(2026, 8, 10, 10, 11, 12, tzinfo=UTC)
 
 #: Identity of the issue the audit's own read-only guard opens.
 MUTATION_INVARIANT_KEY = "audit-read-only-mutation"
 
 
 def _summary(state_name: str = "all-clear", **overrides: object):
-    values: dict[str, object] = {"run_id": RUN_ID, "state": state_name, "eligible": True}
+    values: dict[str, object] = {
+        "run_id": RUN_ID,
+        "state": state_name,
+        "eligible": True,
+    }
     values.update(overrides)
     return assurance_models.AssuranceSummary(**values)  # type: ignore[arg-type]
 
@@ -226,9 +230,7 @@ class TerminalPendingEvidenceTests(_RunHistory, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bundle = self._bundle(self._history(Path(tmp)), terminal_pending=False)
 
-            self.assertEqual(
-                "fail", self._verdict(bundle, "terminal-artifacts").status
-            )
+            self.assertEqual("fail", self._verdict(bundle, "terminal-artifacts").status)
             self.assertEqual(
                 "fail", self._verdict(bundle, "state-event-agreement").status
             )
@@ -468,9 +470,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             self.assertEqual("skipped", summary.state)
             self.assertEqual(supervisor_audit.REASON_OPTED_OUT, summary.reason)
             self.assertEqual([], auditor.prompts)
-            self.assertFalse(
-                assurance_ledger.ledger_path(history[2].parent).exists()
-            )
+            self.assertFalse(assurance_ledger.ledger_path(history[2].parent).exists())
 
     def test_a_run_without_an_independent_role_publishes_what_it_proved(self) -> None:
         """A missing auditor costs the semantic half, not the whole audit."""
@@ -627,9 +627,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             summary = self._audit(history, self._mutating_auditor(history))
 
             self.assertEqual("unavailable", summary.state)
-            self.assertEqual(
-                supervisor_audit.REASON_WORKSPACE_MUTATED, summary.reason
-            )
+            self.assertEqual(supervisor_audit.REASON_WORKSPACE_MUTATED, summary.reason)
             self.assertIn(
                 assurance_ledger.KIND_ISSUE_OBSERVED,
                 [
@@ -715,9 +713,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 {f"run/{name}" for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS},
                 {reference.locator for reference in summary.artifacts},
             )
-            self.assertTrue(
-                (run_dir / assurance_models.AUDIT_REPORT_FILENAME).exists()
-            )
+            self.assertTrue((run_dir / assurance_models.AUDIT_REPORT_FILENAME).exists())
 
     def test_an_unwritable_run_directory_degrades_to_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -811,9 +807,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             calls.append(dict(kwargs))
             return _summary() if summary is None else summary
 
-        with mock.patch.object(
-            runner.supervisor_audit, "audit_terminal_run", record
-        ):
+        with mock.patch.object(runner.supervisor_audit, "audit_terminal_run", record):
             code = runner._terminalize_run(
                 outcome=outcome,
                 exit_code=exit_code,
@@ -845,7 +839,10 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
 
     def test_the_exit_code_survives_the_coordinator_unchanged(self) -> None:
         for exit_code in (0, 1, runner.INTERRUPTED_EXIT):
-            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as tmp:
+            with (
+                self.subTest(exit_code=exit_code),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
                 payload = self._payload(Path(tmp), ["--audit-harness", "claude"])
 
                 code, calls = self._terminalize(
@@ -972,9 +969,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
                 payload = self._payload(Path(tmp), ["--audit-harness", "claude"])
 
-                code, calls = self._terminalize(
-                    payload, outcome=outcome, exit_code=0
-                )
+                code, calls = self._terminalize(payload, outcome=outcome, exit_code=0)
 
                 self.assertEqual(0, code)
                 self.assertEqual([], calls)
@@ -1138,18 +1133,19 @@ class TerminalBranchRoutingTests(unittest.TestCase):
             return _summary(audit_state, run_id=str(kwargs["run_id"]), **reason)
 
         out, err = io.StringIO(), io.StringIO()
-        with patched_env(
-            XDG_CONFIG_HOME=str(self.config_home),
-            FAKE_CODEX_MODE=mode,
-            FAKE_CODEX_SLEEP="5",
+        with (
+            patched_env(
+                XDG_CONFIG_HOME=str(self.config_home),
+                FAKE_CODEX_MODE=mode,
+                FAKE_CODEX_SLEEP="5",
+            ),
+            mock.patch.object(runner.supervisor_audit, "audit_terminal_run", record),
+            redirect_stdout(out),
+            redirect_stderr(err),
         ):
-            with mock.patch.object(
-                runner.supervisor_audit, "audit_terminal_run", record
-            ):
-                with redirect_stdout(out), redirect_stderr(err):
-                    code = runner.run_from_args(
-                        cli.build_parser().parse_args(argv), run_argv=argv
-                    )
+            code = runner.run_from_args(
+                cli.build_parser().parse_args(argv), run_argv=argv
+            )
         return code, calls, json.loads(out.getvalue())
 
     def _assurance(self) -> dict[str, object]:
@@ -1179,9 +1175,7 @@ class TerminalBranchRoutingTests(unittest.TestCase):
         self.assertEqual("all-clear", self._assurance()["state"])
 
     def test_a_session_capped_run_is_audited_once(self) -> None:
-        code, calls, payload = self._run(
-            ("pending", "pending"), "--max-sessions", "1"
-        )
+        code, calls, payload = self._run(("pending", "pending"), "--max-sessions", "1")
 
         self.assertEqual(0, code, payload)
         self.assertEqual("max-sessions", payload["reason"])

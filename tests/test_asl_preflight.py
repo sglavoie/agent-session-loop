@@ -4,82 +4,42 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
-import io
 import json
 import os
-from pathlib import Path
-import pty
 import re
-import select
 import shlex
 import shutil
-import signal
-import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
-from typing import Any
 import unittest
-import urllib.parse
+from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
     baseline,
     baseline_cache,
-    cli,
-    compact_state,
-    config,
     contracts,
-    control_queue,
-    events,
-    harnesses,
-    install_verify,
     plans,
     preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
     repository_registration,
-    review,
-    review_repair,
-    run_control,
-    runner,
     state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
     workspaces,
 )
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
-)
 from tests.support import (
+    _FIX_CATEGORIES,
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
+    _command_contract,
+    _contract_block,
+    _write_loop_ready_plan,
+    init_git_repo,
     init_multi_repo_workspace,
     patched_env,
     write_multi_repo_plan,
     write_plan,
-    init_git_repo,
-    _command_contract,
-    _contract_block,
-    _write_loop_ready_plan,
-    _FIX_CATEGORIES,
 )
 
 
@@ -279,9 +239,7 @@ class PreflightCoreTests(unittest.TestCase):
                     "```",
                 ]
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": broken_contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": broken_contract})
             plans.write_readiness_metadata(
                 plan_dir,
                 plans.ReadinessMetadata(
@@ -492,33 +450,35 @@ class PreflightCoreTests(unittest.TestCase):
             "Instructions. Stale AIDEV-TODOs and the `ssoEmail` FIXME are converted.",
         )
         for reference in reference_lines:
-            with self.subTest(reference=reference):
-                with tempfile.TemporaryDirectory() as tmp:
-                    plan_dir = Path(tmp) / "plan"
-                    _write_loop_ready_plan(plan_dir, ("pending",))
-                    session_path = plan_dir / "session-1.md"
-                    text = session_path.read_text(encoding="utf-8")
-                    session_path.write_text(
-                        text.replace("Instructions.", reference),
-                        encoding="utf-8",
-                    )
-                    plans.write_readiness_metadata(
-                        plan_dir,
-                        plans.ReadinessMetadata(
-                            state="loop-ready",
-                            readiness_sha256=plans.stable_readiness_sha256(plan_dir),
-                            checked_at="2026-06-19T00:00:00Z",
-                        ),
-                    )
+            with (
+                self.subTest(reference=reference),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                plan_dir = Path(tmp) / "plan"
+                _write_loop_ready_plan(plan_dir, ("pending",))
+                session_path = plan_dir / "session-1.md"
+                text = session_path.read_text(encoding="utf-8")
+                session_path.write_text(
+                    text.replace("Instructions.", reference),
+                    encoding="utf-8",
+                )
+                plans.write_readiness_metadata(
+                    plan_dir,
+                    plans.ReadinessMetadata(
+                        state="loop-ready",
+                        readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                        checked_at="2026-06-19T00:00:00Z",
+                    ),
+                )
 
-                    report = preflight.run_core_preflight(plan_dir)
+                report = preflight.run_core_preflight(plan_dir)
 
-                    sentinels = [
-                        finding
-                        for finding in report.findings
-                        if finding.category == "ambiguity-sentinel"
-                    ]
-                    self.assertEqual([], sentinels)
+                sentinels = [
+                    finding
+                    for finding in report.findings
+                    if finding.category == "ambiguity-sentinel"
+                ]
+                self.assertEqual([], sentinels)
 
     def test_ambiguity_sentinel_still_flags_leading_markers(self) -> None:
         # A sentinel that leads a clause (after a terminator or a list/heading
@@ -529,33 +489,35 @@ class PreflightCoreTests(unittest.TestCase):
             "Instructions.\n\n## TBD finalize the schema.",
         )
         for marker in marker_lines:
-            with self.subTest(marker=marker):
-                with tempfile.TemporaryDirectory() as tmp:
-                    plan_dir = Path(tmp) / "plan"
-                    _write_loop_ready_plan(plan_dir, ("pending",))
-                    session_path = plan_dir / "session-1.md"
-                    text = session_path.read_text(encoding="utf-8")
-                    session_path.write_text(
-                        text.replace("Instructions.", marker),
-                        encoding="utf-8",
-                    )
-                    plans.write_readiness_metadata(
-                        plan_dir,
-                        plans.ReadinessMetadata(
-                            state="loop-ready",
-                            readiness_sha256=plans.stable_readiness_sha256(plan_dir),
-                            checked_at="2026-06-19T00:00:00Z",
-                        ),
-                    )
+            with (
+                self.subTest(marker=marker),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                plan_dir = Path(tmp) / "plan"
+                _write_loop_ready_plan(plan_dir, ("pending",))
+                session_path = plan_dir / "session-1.md"
+                text = session_path.read_text(encoding="utf-8")
+                session_path.write_text(
+                    text.replace("Instructions.", marker),
+                    encoding="utf-8",
+                )
+                plans.write_readiness_metadata(
+                    plan_dir,
+                    plans.ReadinessMetadata(
+                        state="loop-ready",
+                        readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                        checked_at="2026-06-19T00:00:00Z",
+                    ),
+                )
 
-                    report = preflight.run_core_preflight(plan_dir)
+                report = preflight.run_core_preflight(plan_dir)
 
-                    sentinels = [
-                        finding
-                        for finding in report.findings
-                        if finding.category == "ambiguity-sentinel"
-                    ]
-                    self.assertTrue(sentinels)
+                sentinels = [
+                    finding
+                    for finding in report.findings
+                    if finding.category == "ambiguity-sentinel"
+                ]
+                self.assertTrue(sentinels)
 
     def test_path_reference_accepts_absolute_file_and_regex_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -584,9 +546,7 @@ class PreflightCoreTests(unittest.TestCase):
                 ),
                 session="1",
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
             plans.write_readiness_metadata(
                 plan_dir,
                 plans.ReadinessMetadata(
@@ -613,9 +573,7 @@ class PreflightCoreTests(unittest.TestCase):
                 '"pattern": "x", "name": "escape"}',
                 session="1",
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
             plans.write_readiness_metadata(
                 plan_dir,
                 plans.ReadinessMetadata(
@@ -644,9 +602,7 @@ class PreflightCoreTests(unittest.TestCase):
                 '"timeout_seconds": 30, "name": "check-ts"}',
                 session="1",
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
             plans.write_readiness_metadata(
                 plan_dir,
                 plans.ReadinessMetadata(
@@ -676,9 +632,7 @@ class PreflightCoreTests(unittest.TestCase):
                 '"--core-oidc"], "timeout_seconds": 30, "name": "lint"}',
                 session="1",
             )
-            write_plan(
-                plan_dir, ("pending",), contracts_by_id={"1": contract}
-            )
+            write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
             plans.write_readiness_metadata(
                 plan_dir,
                 plans.ReadinessMetadata(
@@ -744,9 +698,7 @@ class PreflightCoreTests(unittest.TestCase):
             finding = journal_findings[0]
             self.assertEqual("yellow", finding.severity)
             self.assertIn("backfill-progress", finding.message)
-            self.assertEqual(
-                str(plans.progress_path(plan_dir)), finding.path
-            )
+            self.assertEqual(str(plans.progress_path(plan_dir)), finding.path)
             self.assertFalse(report.ok)
 
     def test_progress_journal_missing_yellow_when_header_only_with_completed_sessions(
@@ -852,8 +804,7 @@ class PreflightCoreTests(unittest.TestCase):
                 plan_dir = Path(tmp) / "plan"
                 _write_loop_ready_plan(plan_dir, ("complete", "complete"))
                 entries = tuple(
-                    self._progress_entry(session_id)
-                    for session_id in observed_ids
+                    self._progress_entry(session_id) for session_id in observed_ids
                 )
                 plans.write_progress_journal(plan_dir, entries)
 
@@ -941,9 +892,7 @@ class PreflightCoreTests(unittest.TestCase):
             key,
             baseline_cache.BaselineRecord(
                 key=key,
-                recipe=baseline.normalize_recipe(
-                    baseline._single_check_recipe(check)
-                ),
+                recipe=baseline.normalize_recipe(baseline._single_check_recipe(check)),
                 result=result,
             ),
         )
@@ -1018,9 +967,7 @@ class PreflightCoreTests(unittest.TestCase):
             self._record_baseline(
                 plan_dir,
                 repo_root,
-                self._fresh_result(
-                    repo_root, status="fail", satisfied=False
-                ),
+                self._fresh_result(repo_root, status="fail", satisfied=False),
             )
 
             report = preflight.run_preflight(plan_dir, cwd=repo_root)
@@ -1070,9 +1017,7 @@ class PreflightCoreTests(unittest.TestCase):
             self._record_baseline(
                 plan_dir,
                 repo_root,
-                self._fresh_result(
-                    repo_root, status="timeout", satisfied=False
-                ),
+                self._fresh_result(repo_root, status="timeout", satisfied=False),
             )
 
             report = preflight.run_preflight(plan_dir, cwd=repo_root)
@@ -1259,9 +1204,7 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
 
     def test_default_and_dot_cwd_are_duplicate(self) -> None:
         command = ("python3", "-m", "unittest")
-        first = contracts.CommandCheck(
-            name="first", argv=command, timeout_seconds=300
-        )
+        first = contracts.CommandCheck(name="first", argv=command, timeout_seconds=300)
         second = contracts.CommandCheck(
             name="second", argv=command, timeout_seconds=300, cwd="."
         )
@@ -1276,9 +1219,7 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
 
     def test_missing_bare_executable_emits_single_red(self) -> None:
         contracts_by_session = {
-            "1": self._contract(
-                "1", self._command("run-1", ("pytest", "-q"))
-            )
+            "1": self._contract("1", self._command("run-1", ("pytest", "-q")))
         }
         findings = preflight._check_command_runnability(
             contracts_by_session,
@@ -1297,9 +1238,7 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
         contracts_by_session = {
             "1": self._contract(
                 "1",
-                self._command(
-                    "run-1", ("python3", "-m", "pytest", "tests")
-                ),
+                self._command("run-1", ("python3", "-m", "pytest", "tests")),
             )
         }
         findings = preflight._check_command_runnability(
@@ -1319,9 +1258,7 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
         contracts_by_session = {
             "1": self._contract(
                 "1",
-                self._command(
-                    "run-1", ("python3", "-m", "unittest", "tests")
-                ),
+                self._command("run-1", ("python3", "-m", "unittest", "tests")),
             )
         }
         findings = preflight._check_command_runnability(
@@ -1334,9 +1271,7 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
 
     def test_cwd_none_skips_check(self) -> None:
         contracts_by_session = {
-            "1": self._contract(
-                "1", self._command("run-1", ("pytest", "-q"))
-            )
+            "1": self._contract("1", self._command("run-1", ("pytest", "-q")))
         }
         findings = preflight._check_command_runnability(
             contracts_by_session,
@@ -1350,9 +1285,7 @@ class PreflightCommandRunnabilityTests(unittest.TestCase):
             "1": self._contract(
                 "1",
                 contracts.FileExistsCheck(name="f-1", path="README.md"),
-                contracts.RegexInFileCheck(
-                    name="r-1", path="README.md", pattern="x"
-                ),
+                contracts.RegexInFileCheck(name="r-1", path="README.md", pattern="x"),
             )
         }
         findings = preflight._check_command_runnability(
@@ -1625,9 +1558,7 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
             ),
             session="1",
         )
-        _write_loop_ready_plan(
-            self.plan_dir, statuses, contracts_by_id={"1": contract}
-        )
+        _write_loop_ready_plan(self.plan_dir, statuses, contracts_by_id={"1": contract})
 
     def _set_handoff(
         self, session_id: str, *, status: str, files_modified: str
@@ -1691,16 +1622,12 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
             preflight.REPAIR_HINTS["repository-footprint"],
             preflight.REPAIR_HINTS["repository-registry-required"],
             preflight._CATEGORY_HINT_OVERRIDES["repository-footprint.multi-repo"],
-            preflight._CATEGORY_HINT_OVERRIDES[
-                "repository-footprint.out-of-root"
-            ],
+            preflight._CATEGORY_HINT_OVERRIDES["repository-footprint.out-of-root"],
         )
         for hint in hints:
             with self.subTest(check_id=hint.check_id):
                 self.assertIn("asl register-repositories", hint.message)
-                self.assertIn(
-                    "asl register-repositories", hint.question_template
-                )
+                self.assertIn("asl register-repositories", hint.question_template)
                 # The hand-edit recipe is gone: no numbered step list survives.
                 self.assertNotIn("(1) add", hint.message)
 
@@ -1720,8 +1647,7 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
         manifest = self.plan_dir / "manifest.md"
         source = self.second / "plans" / "source.md"
         manifest.write_text(
-            manifest.read_text(encoding="utf-8")
-            + f"\n**Split from**: `{source}`\n",
+            manifest.read_text(encoding="utf-8") + f"\n**Split from**: `{source}`\n",
             encoding="utf-8",
         )
         plans.write_readiness_metadata(
@@ -2006,11 +1932,7 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
         locked = dataclasses.replace(
             report,
             findings=report.findings
-            + (
-                _finding(
-                    "red", "env-lock", "active lock held by pid 9 at /p/lock"
-                ),
-            ),
+            + (_finding("red", "env-lock", "active lock held by pid 9 at /p/lock"),),
         )
 
         plan = preflight.build_auto_repair_plan(
@@ -2120,9 +2042,7 @@ class PreflightRepairHintTests(unittest.TestCase):
             path="manifest.md",
         )
         hint = preflight.repair_hint_for_finding(finding)
-        self.assertEqual(
-            "manifest-readiness.state-not-loop-ready", hint.check_id
-        )
+        self.assertEqual("manifest-readiness.state-not-loop-ready", hint.check_id)
         self.assertEqual("yellow", hint.severity_hint)
 
     def test_env_git_outside_worktree_resolves_to_override(self) -> None:
@@ -2234,7 +2154,9 @@ class PreflightRepairHintTests(unittest.TestCase):
             report = preflight.run_core_preflight(plan_dir)
 
             self.assertEqual(len(report.findings), len(report.repair_hints))
-            for finding, hint in zip(report.findings, report.repair_hints):
+            for finding, hint in zip(
+                report.findings, report.repair_hints, strict=False
+            ):
                 self.assertEqual(finding.category, hint.category)
 
     def test_runtime_no_contract_resolves(self) -> None:
@@ -2261,9 +2183,7 @@ class PreflightRepairHintTests(unittest.TestCase):
         )
         self.assertIsNotNone(hint)
         assert hint is not None
-        self.assertEqual(
-            "runtime.verify-failed.command-not-found", hint.check_id
-        )
+        self.assertEqual("runtime.verify-failed.command-not-found", hint.check_id)
         self.assertEqual("env-install", hint.fix_category)
 
     def test_runtime_verify_failed_every_failure_reason_resolves(self) -> None:
@@ -2343,9 +2263,7 @@ class RepairHintSubstitutionTests(unittest.TestCase):
 
     def test_repo_root_left_as_placeholder_when_cwd_none(self) -> None:
         hint = preflight.REPAIR_HINTS["baseline-missing"]
-        payload = preflight.repair_hint_payload(
-            hint, plan_dir="/plans/demo", cwd=None
-        )
+        payload = preflight.repair_hint_payload(hint, plan_dir="/plans/demo", cwd=None)
         self.assertIn("asl baseline /plans/demo --cwd <repo-root>", payload["message"])
 
     def test_every_hint_command_carries_plan_dir_placeholder(self) -> None:
@@ -2364,7 +2282,10 @@ class RepairHintSubstitutionTests(unittest.TestCase):
                     for command in plan_dir_commands:
                         if command in hint.message:
                             self.assertIn("<plan-dir>", hint.message)
-                    if "asl preflight" in hint.message and "--mark-loop-ready" in hint.message:
+                    if (
+                        "asl preflight" in hint.message
+                        and "--mark-loop-ready" in hint.message
+                    ):
                         self.assertIn(
                             "asl preflight <plan-dir> --json --mark-loop-ready",
                             hint.message,
@@ -2406,9 +2327,9 @@ class RepairHintSubstitutionTests(unittest.TestCase):
                     text = payload[field]
                     with self.subTest(check_id=hint.check_id, field=field):
                         # Strip the quoted forms; the raw path must not survive.
-                        residue = text.replace(
-                            shlex.quote(weird_plan), ""
-                        ).replace(shlex.quote(weird_repo), "")
+                        residue = text.replace(shlex.quote(weird_plan), "").replace(
+                            shlex.quote(weird_repo), ""
+                        )
                         self.assertNotIn(weird_plan, residue)
                         self.assertNotIn(weird_repo, residue)
                     for command in _backtick_commands(text):
@@ -2424,19 +2345,19 @@ class AutoRepairPlanTests(unittest.TestCase):
             (),
             preflight.build_auto_repair_plan(report, plan_dir="/plan", cwd=None),
         )
-        self.assertIsNone(
-            preflight.build_suggested_pause(report, plan_dir="/plan")
-        )
+        self.assertIsNone(preflight.build_suggested_pause(report, plan_dir="/plan"))
 
     def test_stale_lock_then_progress_then_readiness_order(self) -> None:
         report = _report(
-            _finding("red", "manifest-readiness", "manifest is missing readiness metadata"),
-            _finding("yellow", "progress-journal-missing", "progress journal not initialized"),
+            _finding(
+                "red", "manifest-readiness", "manifest is missing readiness metadata"
+            ),
+            _finding(
+                "yellow", "progress-journal-missing", "progress journal not initialized"
+            ),
             _finding("yellow", "env-lock", "stale lock present at /p/lock"),
         )
-        plan = preflight.build_auto_repair_plan(
-            report, plan_dir="/plans/x", cwd=None
-        )
+        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x", cwd=None)
         commands = [step["command"] for step in plan]
         self.assertEqual(
             [
@@ -2449,18 +2370,14 @@ class AutoRepairPlanTests(unittest.TestCase):
         for step in plan:
             self.assertEqual(1, step["max_attempts"])
         # readiness-only residue is fully repairable -> no fallback pause.
-        self.assertIsNone(
-            preflight.build_suggested_pause(report, plan_dir="/plans/x")
-        )
+        self.assertIsNone(preflight.build_suggested_pause(report, plan_dir="/plans/x"))
 
     def test_active_lock_blocks_and_never_unlocks(self) -> None:
         report = _report(
             _finding("red", "env-lock", "active lock held by pid 9 at /p/lock"),
             _finding("yellow", "progress-journal-missing", "journal missing"),
         )
-        plan = preflight.build_auto_repair_plan(
-            report, plan_dir="/plans/x", cwd=None
-        )
+        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x", cwd=None)
         self.assertEqual(1, len(plan))
         step = plan[0]
         self.assertTrue(step["blocked"])
@@ -2476,12 +2393,16 @@ class AutoRepairPlanTests(unittest.TestCase):
         self,
     ) -> None:
         report = _report(
-            _finding("red", "manifest-readiness", "manifest is missing readiness metadata"),
-            _finding("red", "missing-contract", "session 1 is missing a ## Completion Contract section"),
+            _finding(
+                "red", "manifest-readiness", "manifest is missing readiness metadata"
+            ),
+            _finding(
+                "red",
+                "missing-contract",
+                "session 1 is missing a ## Completion Contract section",
+            ),
         )
-        plan = preflight.build_auto_repair_plan(
-            report, plan_dir="/plans/x", cwd=None
-        )
+        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x", cwd=None)
         # A non-readiness blocker (missing-contract) means mark-loop-ready would
         # be refused, so no readiness repair step is offered.
         self.assertEqual([], [s for s in plan if "command" in s])
@@ -2494,16 +2415,12 @@ class AutoRepairPlanTests(unittest.TestCase):
         report = _report(
             _finding("yellow", "progress-journal-missing", "journal missing"),
         )
-        plan = preflight.build_auto_repair_plan(
-            report, plan_dir="/plans/x", cwd=None
-        )
+        plan = preflight.build_auto_repair_plan(report, plan_dir="/plans/x", cwd=None)
         self.assertEqual(
             ["asl backfill-progress --force /plans/x"],
             [s["command"] for s in plan],
         )
-        self.assertIsNone(
-            preflight.build_suggested_pause(report, plan_dir="/plans/x")
-        )
+        self.assertIsNone(preflight.build_suggested_pause(report, plan_dir="/plans/x"))
 
     def test_repair_commands_survive_whitespace_and_metacharacters(self) -> None:
         # A plan path carrying whitespace and shell metacharacters must stay a
@@ -2640,9 +2557,7 @@ class PreflightEnvironmentTests(unittest.TestCase):
         empty_path = self.tmp_path / "empty-path"
         empty_path.mkdir()
         with patched_env(PATH=str(empty_path)):
-            report = preflight.run_environment_preflight(
-                self.plan_dir, harness="codex"
-            )
+            report = preflight.run_environment_preflight(self.plan_dir, harness="codex")
         harness_findings = [f for f in report.findings if f.category == "env-harness"]
         self.assertEqual(1, len(harness_findings))
         self.assertEqual("red", harness_findings[0].severity)
@@ -2651,9 +2566,7 @@ class PreflightEnvironmentTests(unittest.TestCase):
     def test_env_harness_present_executable_is_silent(self) -> None:
         path_str = self._path_with("codex")
         with patched_env(PATH=path_str):
-            report = preflight.run_environment_preflight(
-                self.plan_dir, harness="codex"
-            )
+            report = preflight.run_environment_preflight(self.plan_dir, harness="codex")
         harness_findings = [f for f in report.findings if f.category == "env-harness"]
         self.assertEqual([], harness_findings)
 
@@ -3278,9 +3191,7 @@ class PreflightResumeTests(unittest.TestCase):
         kwargs.setdefault("state_dir", self.xdg_state)
         return preflight.run_resume_preflight(self.plan_dir, **kwargs)
 
-    def _unhashed(
-        self, **kwargs: Any
-    ) -> tuple[preflight.PreflightFinding, ...]:
+    def _unhashed(self, **kwargs: Any) -> tuple[preflight.PreflightFinding, ...]:
         kwargs.setdefault("snapshot", plans.inspect_plan(self.plan_dir))
         kwargs.setdefault("cwd", self.repo_dir)
         return preflight.run_unhashed_state_checks(self.plan_dir, **kwargs)
@@ -3289,9 +3200,9 @@ class PreflightResumeTests(unittest.TestCase):
         self.assertIsNone(self._resume(snapshot=None))
 
     def test_returns_none_for_non_resumable_readiness_states(self) -> None:
-        for state in ("draft", "reviewed", "complete"):
-            with self.subTest(state=state):
-                self._rewrite_readiness(state=state)
+        for readiness_state in ("draft", "reviewed", "complete"):
+            with self.subTest(state=readiness_state):
+                self._rewrite_readiness(state=readiness_state)
                 self.assertIsNone(self._resume())
 
     def test_returns_none_when_recorded_sha_does_not_match(self) -> None:
@@ -3353,9 +3264,7 @@ class PreflightResumeTests(unittest.TestCase):
             report.ok,
             msg=[(f.category, f.severity, f.message) for f in report.findings],
         )
-        journal = [
-            f for f in findings if f.category == "progress-journal-missing"
-        ]
+        journal = [f for f in findings if f.category == "progress-journal-missing"]
         self.assertEqual(1, len(journal))
         self.assertEqual("yellow", journal[0].severity)
 
@@ -3366,9 +3275,7 @@ class PreflightResumeTests(unittest.TestCase):
             self.plan_dir,
             ("pending",),
             contracts_by_id={
-                "1": _command_contract(
-                    '["true"]', session="1", expectation="pass"
-                )
+                "1": _command_contract('["true"]', session="1", expectation="pass")
             },
         )
 
@@ -3441,8 +3348,7 @@ class PreflightCliTests(unittest.TestCase):
             ("pending",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}',
                     session="1",
                 ),
             },
@@ -3599,9 +3505,7 @@ class PreflightCliTests(unittest.TestCase):
         # A readiness-only break is auto-repairable via --mark-loop-ready and
         # the emitted repair_hint embeds the plan-dir-substituted command.
         commands = [
-            step["command"]
-            for step in payload["auto_repair_plan"]
-            if "command" in step
+            step["command"] for step in payload["auto_repair_plan"] if "command" in step
         ]
         self.assertIn(
             f"asl preflight {self.plan_dir} --json --mark-loop-ready",
@@ -3722,8 +3626,7 @@ class PreflightCliTests(unittest.TestCase):
             ("pending",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}',
                     session="1",
                 )
             },
@@ -3842,8 +3745,7 @@ class PreflightCliTests(unittest.TestCase):
             ("complete",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}',
                     session="1",
                 )
             },
@@ -3883,8 +3785,7 @@ class PreflightCliTests(unittest.TestCase):
             ("complete",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}',
                     session="1",
                 )
             },
@@ -3941,8 +3842,7 @@ class PreflightCliTests(unittest.TestCase):
             ("complete",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}',
                     session="1",
                 )
             },
@@ -3953,9 +3853,7 @@ class PreflightCliTests(unittest.TestCase):
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertIn(
-            "Auto-repair: rebuilt progress journal", completed.stdout
-        )
+        self.assertIn("Auto-repair: rebuilt progress journal", completed.stdout)
         self.assertIn("1 entry written", completed.stdout)
         self.assertIn("Preflight: ok", completed.stdout)
         self.assertIn("Loop-ready: marked", completed.stdout)
@@ -4013,9 +3911,7 @@ class PreflightCliTests(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertIn("repair_hints", payload)
         self.assertIsInstance(payload["repair_hints"], list)
-        self.assertEqual(
-            len(payload["findings"]), len(payload["repair_hints"])
-        )
+        self.assertEqual(len(payload["findings"]), len(payload["repair_hints"]))
         # Each hint exposes the documented stable keys.
         for hint in payload["repair_hints"]:
             for key in (
@@ -4030,7 +3926,9 @@ class PreflightCliTests(unittest.TestCase):
         # The manifest-readiness finding resolves to the sha-mismatch override.
         manifest_hints = [
             hint
-            for hint, finding in zip(payload["repair_hints"], payload["findings"])
+            for hint, finding in zip(
+                payload["repair_hints"], payload["findings"], strict=False
+            )
             if finding["category"] == "manifest-readiness"
         ]
         self.assertTrue(manifest_hints)

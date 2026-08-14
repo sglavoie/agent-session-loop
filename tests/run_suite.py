@@ -15,12 +15,12 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
 import time
 import unittest
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -94,7 +94,9 @@ _RAN_PATTERN = re.compile(r"^Ran (\d+) tests?", re.MULTILINE)
 
 def _shard_commands(fast_only: bool) -> list[tuple[str, list[str]]]:
     modules = FAST_MODULES if fast_only else FAST_MODULES + INTEGRATION_MODULES
-    shards = [(module, [sys.executable, "-m", "unittest", module]) for module in modules]
+    shards = [
+        (module, [sys.executable, "-m", "unittest", module]) for module in modules
+    ]
     if not fast_only:
         shards.extend(
             (path, [sys.executable, str(REPO_ROOT / path)]) for path in SCRIPT_SUITES

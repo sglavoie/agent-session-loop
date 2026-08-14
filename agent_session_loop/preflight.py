@@ -39,15 +39,15 @@ the discipline ``asl verify`` already uses for its JSON ``ok`` field.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from . import (
@@ -97,7 +97,6 @@ from .verification import (
     diagnose_command,
     diagnose_command_scope,
 )
-
 
 PreflightSeverity = Literal["red", "yellow", "green"]
 PreflightCategory = Literal[
@@ -281,8 +280,7 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
             "form shown in the finding detail."
         ),
         question_template=(
-            "Session filename at {path} is non-canonical ({detail}). "
-            "Apply the rename?"
+            "Session filename at {path} is non-canonical ({detail}). Apply the rename?"
         ),
         fix_category="filename-rename",
     ),
@@ -661,9 +659,7 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
             "Run from inside a git working tree, or resolve the git status "
             "problem shown in the finding detail."
         ),
-        question_template=(
-            "Git environment problem: {message}. Should I try a fix?"
-        ),
+        question_template=("Git environment problem: {message}. Should I try a fix?"),
         fix_category="env-state",
     ),
     "env-harness": RepairHint(
@@ -675,8 +671,7 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
             "`agent_session_loop/harnesses.json` to point at the right executable."
         ),
         question_template=(
-            "Harness CLI problem: {message}. "
-            "Should I help configure harnesses.json?"
+            "Harness CLI problem: {message}. Should I help configure harnesses.json?"
         ),
         fix_category="env-install",
     ),
@@ -726,9 +721,7 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         category="env-turn-budget",
         check_id="env-turn-budget.healthy",
         severity_hint="green",
-        message=(
-            "Turn budget is within the expected range. No fix required."
-        ),
+        message=("Turn budget is within the expected range. No fix required."),
         question_template=(
             "Turn budget is healthy ({message}). No action is required."
         ),
@@ -837,8 +830,7 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         check_id="env-git.outside-worktree",
         severity_hint="red",
         message=(
-            "Run from inside a git working tree, or pass `--cwd` pointing "
-            "at one."
+            "Run from inside a git working tree, or pass `--cwd` pointing at one."
         ),
         question_template=(
             "Repo root {path} is not inside a git working tree. "
@@ -864,9 +856,7 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         category="env-lock",
         check_id="env-lock.stale",
         severity_hint="yellow",
-        message=(
-            "Run `asl unlock <plan-dir> --json` to clear the stale lock."
-        ),
+        message=("Run `asl unlock <plan-dir> --json` to clear the stale lock."),
         question_template=(
             "A stale lock is present at {path} ({detail}). "
             "Clear it with `asl unlock <plan-dir> --json`?"
@@ -1068,8 +1058,7 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
             "(permissions, encoding, etc.) and re-run."
         ),
         question_template=(
-            "Verification could not read the artifact. "
-            "Should I diagnose the OS error?"
+            "Verification could not read the artifact. Should I diagnose the OS error?"
         ),
         fix_category="session-recipe-edit",
     ),
@@ -1194,9 +1183,7 @@ class PreflightReport:
 
     @property
     def red_findings(self) -> tuple[PreflightFinding, ...]:
-        return tuple(
-            finding for finding in self.findings if finding.severity == "red"
-        )
+        return tuple(finding for finding in self.findings if finding.severity == "red")
 
     @property
     def yellow_findings(self) -> tuple[PreflightFinding, ...]:
@@ -1398,52 +1385,61 @@ def _resolve_preflight_context(
         )
 
     if not canonical_cwd.exists():
-        return None, (
-            _finding(
-                "red",
-                "workspace-root",
-                f"workspace root does not exist: {canonical_cwd}",
-                path=str(canonical_cwd),
+        return (
+            None,
+            (
+                _finding(
+                    "red",
+                    "workspace-root",
+                    f"workspace root does not exist: {canonical_cwd}",
+                    path=str(canonical_cwd),
+                ),
             ),
-        ), summaries
+            summaries,
+        )
     if not canonical_cwd.is_dir():
-        return None, (
-            _finding(
-                "red",
-                "workspace-root",
-                f"workspace root is not a directory: {canonical_cwd}",
-                path=str(canonical_cwd),
+        return (
+            None,
+            (
+                _finding(
+                    "red",
+                    "workspace-root",
+                    f"workspace root is not a directory: {canonical_cwd}",
+                    path=str(canonical_cwd),
+                ),
             ),
-        ), summaries
+            summaries,
+        )
 
     try:
         workspace = workspaces.resolve_workspace(canonical_cwd, registry)
     except workspaces.WorkspaceError as error:
         message = str(error)
-        return None, (
-            _finding(
-                "red",
-                _workspace_error_category(message),
-                message,
-                path=str(canonical_cwd),
+        return (
+            None,
+            (
+                _finding(
+                    "red",
+                    _workspace_error_category(message),
+                    message,
+                    path=str(canonical_cwd),
+                ),
             ),
-        ), summaries
+            summaries,
+        )
 
     context = VerificationContext.resolved_workspace(workspace)
     summaries = _repository_summaries(registry, context)
     inventory_findings: list[PreflightFinding] = []
     registered_by_path = {
-        repository.repository.path: repository
-        for repository in workspace.repositories
+        repository.repository.path: repository for repository in workspace.repositories
     }
     for repository in registered_by_path.values():
         fingerprint = repository_evidence.capture_repository_fingerprint(
             repository.root,
             plan_dir,
         )
-        unavailable = repository_evidence.repository_evidence_unavailable(
-            fingerprint
-        )
+        unavailable = repository_evidence.repository_evidence_unavailable(fingerprint)
         if unavailable is not None or not fingerprint.get("git"):
             inventory_findings.append(
                 _finding(
@@ -1452,9 +1448,7 @@ def _resolve_preflight_context(
                     "repository evidence is unavailable for registered "
                     f"repository {repository.alias}",
                     path=str(repository.root),
-                    detail=str(
-                        unavailable or {"reason": "repository-unavailable"}
-                    ),
+                    detail=str(unavailable or {"reason": "repository-unavailable"}),
                 )
             )
 
@@ -1547,8 +1541,7 @@ def _check_manifest_readiness_block(
                 "manifest readiness SHA-256 does not match current plan content",
                 path=str(snapshot.manifest_path),
                 detail=(
-                    f"recorded {readiness.readiness_sha256}; "
-                    f"expected {expected_hash}"
+                    f"recorded {readiness.readiness_sha256}; expected {expected_hash}"
                 ),
             )
         )
@@ -1623,7 +1616,8 @@ def _check_session_contracts(
                 _finding(
                     "red",
                     "missing-contract",
-                    f"session {session.id} is missing a {COMPLETION_CONTRACT_HEADING} section",
+                    f"session {session.id} is missing a {COMPLETION_CONTRACT_HEADING} "
+                    f"section",
                     session_id=session.id,
                     path=str(session.path),
                     detail=(
@@ -1658,7 +1652,8 @@ def _check_ambiguity_sentinels(
                     _finding(
                         "yellow",
                         "ambiguity-sentinel",
-                        f"session {session.id} contains ambiguity sentinel {sentinel!r}",
+                        f"session {session.id} contains ambiguity sentinel "
+                        f"{sentinel!r}",
                         session_id=session.id,
                         path=str(session.path),
                         line=line_index + 1,
@@ -1718,9 +1713,7 @@ def _check_path_references(
         contract = contracts_by_session[session_id]
         for check in contract.verify.checks:
             path_value: str | None = None
-            if isinstance(check, FileExistsCheck):
-                path_value = check.path
-            elif isinstance(check, RegexInFileCheck):
+            if isinstance(check, (FileExistsCheck, RegexInFileCheck)):
                 path_value = check.path
             else:
                 continue
@@ -1877,27 +1870,21 @@ def _repository_intent_candidates(
         for status in snapshot.sessions:
             text = _read_session_text(status.session)
             if text is not None:
-                candidates.extend(
-                    repository_intent.candidates_from_plan_document(text)
-                )
+                candidates.extend(repository_intent.candidates_from_plan_document(text))
     if plan_dir is not None:
         for name in ("context.md", "manifest.md"):
             try:
                 text = (plan_dir / name).read_text(encoding="utf-8")
             except OSError:
                 continue
-            candidates.extend(
-                repository_intent.candidates_from_plan_document(text)
-            )
+            candidates.extend(repository_intent.candidates_from_plan_document(text))
         try:
             metadata = load_plan_metadata(plan_dir)
         except PlanError:
             metadata = None
         if metadata is not None:
             candidates.extend(
-                repository_intent.candidates_from_plan_metadata(
-                    metadata.to_dict()
-                )
+                repository_intent.candidates_from_plan_metadata(metadata.to_dict())
             )
     candidates.extend(repository_intent.candidates_from_execution_roots([root]))
     return tuple(candidates)
@@ -1919,9 +1906,7 @@ def _check_repository_intent(
     if registry is not None:
         return (), None
     intent = repository_intent.resolve_intent(
-        _repository_intent_candidates(
-            plan_dir, contracts_by_session, snapshot, root
-        ),
+        _repository_intent_candidates(plan_dir, contracts_by_session, snapshot, root),
         root=root,
         exempt_roots=() if plan_dir is None else (plan_dir,),
     )
@@ -2035,9 +2020,7 @@ def _check_duplicate_verification_commands(
                         f"{check.name!r} run the same command"
                     ),
                     session_id=session_id,
-                    detail=(
-                        f"argv: {list(check.argv)!r}; cwd: {cwd!r}"
-                    ),
+                    detail=(f"argv: {list(check.argv)!r}; cwd: {cwd!r}"),
                 )
             )
     return tuple(findings)
@@ -2407,9 +2390,7 @@ def run_core_preflight(plan_dir: str | Path) -> PreflightReport:
     canonical_dir = canonicalize_path(plan_dir)
     findings: list[PreflightFinding] = []
 
-    registry_findings, repository_registry = _check_repository_registry(
-        canonical_dir
-    )
+    registry_findings, repository_registry = _check_repository_registry(canonical_dir)
     findings.extend(registry_findings)
     structure_findings, snapshot = _check_plan_structure(
         canonical_dir,
@@ -2536,11 +2517,10 @@ def _run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str] | N
         return subprocess.run(
             ["git", "-C", str(cwd), *args],
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError, OSError:
         return None
 
 
@@ -2895,9 +2875,7 @@ def run_environment_preflight(
     ``run_preflight`` to aggregate both.
     """
     canonical_dir = canonicalize_path(plan_dir)
-    registry_findings, repository_registry = _check_repository_registry(
-        canonical_dir
-    )
+    registry_findings, repository_registry = _check_repository_registry(canonical_dir)
     snapshot: PlanSnapshot | None = None
     if canonical_dir.is_dir():
         try:
@@ -2908,12 +2886,10 @@ def run_environment_preflight(
         except PlanError:
             snapshot = None
 
-    verification_context, workspace_findings, repositories = (
-        _resolve_preflight_context(
-            plan_dir=canonical_dir,
-            cwd=cwd,
-            registry=repository_registry,
-        )
+    verification_context, workspace_findings, repositories = _resolve_preflight_context(
+        plan_dir=canonical_dir,
+        cwd=cwd,
+        registry=repository_registry,
     )
 
     env_findings = _run_environment_checks(
@@ -2992,12 +2968,10 @@ def run_resume_preflight(
         repository_registry = read_repository_registry(canonical_dir)
     except PlanError:
         return None
-    verification_context, workspace_findings, repositories = (
-        _resolve_preflight_context(
-            plan_dir=canonical_dir,
-            cwd=cwd,
-            registry=repository_registry,
-        )
+    verification_context, workspace_findings, repositories = _resolve_preflight_context(
+        plan_dir=canonical_dir,
+        cwd=cwd,
+        registry=repository_registry,
     )
     findings = _run_environment_checks(
         plan_dir=canonical_dir,
@@ -3066,18 +3040,16 @@ def run_unhashed_state_checks(
         resolved_registry,
         workspaces.RepositoryRegistry,
     ):
-        raise TypeError(
-            "repository_registry must be a RepositoryRegistry or None"
-        )
+        raise TypeError("repository_registry must be a RepositoryRegistry or None")
     workspace_findings: tuple[PreflightFinding, ...] = ()
     verification_context = context
     if verification_context is None:
         verification_context, workspace_findings, _repositories = (
             _resolve_preflight_context(
-            plan_dir=canonical_dir,
-            cwd=cwd,
-            registry=resolved_registry,
-        )
+                plan_dir=canonical_dir,
+                cwd=cwd,
+                registry=resolved_registry,
+            )
         )
     contract_findings, contracts_by_session = _check_session_contracts(
         snapshot,
@@ -3135,12 +3107,10 @@ def run_preflight(
     ``inspect_plan`` runs at most once per call.
     """
     core_report = run_core_preflight(plan_dir)
-    verification_context, workspace_findings, repositories = (
-        _resolve_preflight_context(
-            plan_dir=core_report.plan_dir,
-            cwd=cwd,
-            registry=core_report.repository_registry,
-        )
+    verification_context, workspace_findings, repositories = _resolve_preflight_context(
+        plan_dir=core_report.plan_dir,
+        cwd=cwd,
+        registry=core_report.repository_registry,
     )
     env_findings = _run_environment_checks(
         plan_dir=core_report.plan_dir,
@@ -3254,6 +3224,7 @@ class AutoRepair:
 # path containing whitespace or shell metacharacters stays a single argument
 # in the emitted command; ordinary paths are left untouched.
 
+
 def _substitute_command_placeholders(
     text: str, *, plan_dir: str, cwd: str | None
 ) -> str:
@@ -3324,9 +3295,7 @@ def _blocking_findings(
     report: PreflightReport,
 ) -> tuple[PreflightFinding, ...]:
     return tuple(
-        finding
-        for finding in report.findings
-        if finding.severity in {"red", "yellow"}
+        finding for finding in report.findings if finding.severity in {"red", "yellow"}
     )
 
 
@@ -3346,8 +3315,7 @@ def _residual_blocking_findings(
     return tuple(
         finding
         for finding in _blocking_findings(report)
-        if _override_check_id_for_finding(finding)
-        not in _AUTO_REPAIR_HANDLED_LOCK_IDS
+        if _override_check_id_for_finding(finding) not in _AUTO_REPAIR_HANDLED_LOCK_IDS
         and finding.category != "progress-journal-missing"
         and finding.category not in handled_categories
     )
@@ -3419,10 +3387,8 @@ def _registry_repair(
     from . import repository_registration  # local: it imports preflight
 
     try:
-        derived = repository_registration.derive_registration(
-            plan_dir, cwd=cwd
-        )
-    except (PlanError, OSError, workspaces.WorkspaceError):
+        derived = repository_registration.derive_registration(plan_dir, cwd=cwd)
+    except PlanError, OSError, workspaces.WorkspaceError:
         # Fails closed: the command reads the same files and would fail too.
         return _RegistryRepair()
     if not isinstance(derived, repository_registration.RegistrationPlan):
@@ -3488,9 +3454,7 @@ def build_auto_repair_plan(
             },
         )
 
-    registry = _registry_repair(
-        report, plan_dir=plan_dir, cwd=cwd, state_dir=state_dir
-    )
+    registry = _registry_repair(report, plan_dir=plan_dir, cwd=cwd, state_dir=state_dir)
     steps: list[dict[str, Any]] = list(registry.steps)
     if stale_lock is not None:
         steps.append(
@@ -3500,9 +3464,7 @@ def build_auto_repair_plan(
                 pause_reason="lock-contention",
             )
         )
-    if any(
-        finding.category == "progress-journal-missing" for finding in blocking
-    ):
+    if any(finding.category == "progress-journal-missing" for finding in blocking):
         steps.append(
             _command_repair_step(
                 ["asl", "backfill-progress", "--force", plan_dir],
@@ -3555,15 +3517,11 @@ def build_suggested_pause(
             "reason": "lock-contention",
             "detail": LOCK_CONTENTION_PAUSE_DETAIL,
         }
-    registry = _registry_repair(
-        report, plan_dir=plan_dir, cwd=cwd, state_dir=state_dir
-    )
+    registry = _registry_repair(report, plan_dir=plan_dir, cwd=cwd, state_dir=state_dir)
     residual = _residual_blocking_findings(
         report, registry_handled=bool(registry.steps)
     )
-    hard = sorted(
-        {f.category for f in residual if f.category != "manifest-readiness"}
-    )
+    hard = sorted({f.category for f in residual if f.category != "manifest-readiness"})
     if hard:
         detail = f"automatic plan repair failed: {', '.join(hard)}"
         if registry.missing_fact is not None:
@@ -3716,9 +3674,7 @@ def _print_text_preflight(
     auto_repairs: tuple[AutoRepair, ...] = (),
 ) -> None:
     counts = _counts_by_severity(report)
-    session_count = (
-        len(report.snapshot.sessions) if report.snapshot is not None else 0
-    )
+    session_count = len(report.snapshot.sessions) if report.snapshot is not None else 0
     print(f"Plan: {plan_dir_arg}")
     print(f"Sessions: {session_count}")
     if report.repository_registry is not None:
@@ -3805,7 +3761,7 @@ def _mark_loop_ready(
     metadata = ReadinessMetadata(
         state="loop-ready",
         readiness_sha256=report.expected_readiness_sha256,
-        checked_at=datetime.now(timezone.utc).isoformat(),
+        checked_at=datetime.now(UTC).isoformat(),
     )
     try:
         write_readiness_metadata(report.plan_dir, metadata)
@@ -3858,10 +3814,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
     want_json: bool = args.json
     mark_loop_ready: bool = args.mark_loop_ready
 
-    if (
-        max_pending_sessions_arg is not None
-        and max_pending_sessions_arg <= 0
-    ):
+    if max_pending_sessions_arg is not None and max_pending_sessions_arg <= 0:
         message = "--max-pending-sessions must be a positive integer"
         if want_json:
             responses.print_json(
@@ -3923,10 +3876,8 @@ def preflight_from_args(args: argparse.Namespace) -> int:
             blocker.category == "progress-journal-missing" for blocker in blockers
         ):
             try:
-                repair_result = progress_repair.repair_progress_journal(
-                    report.plan_dir
-                )
-            except (PlanError, OSError):
+                repair_result = progress_repair.repair_progress_journal(report.plan_dir)
+            except PlanError, OSError:
                 # Leave blockers in place; the refusal path below will surface
                 # them to the caller. Auto-repair is best-effort.
                 pass
@@ -4001,17 +3952,14 @@ def preflight_from_args(args: argparse.Namespace) -> int:
                     responses.error_payload(
                         "preflight",
                         reason=reason,
-                        error=mark_error
-                        or "loop-ready marking did not complete",
+                        error=mark_error or "loop-ready marking did not complete",
                         paused=False,
                         **payload_fields,
                     )
                 )
             else:
                 reason = (
-                    PREFLIGHT_EXIT_REASON_MARKED
-                    if marked
-                    else PREFLIGHT_EXIT_REASON_OK
+                    PREFLIGHT_EXIT_REASON_MARKED if marked else PREFLIGHT_EXIT_REASON_OK
                 )
                 responses.print_json(
                     responses.success_payload(
@@ -4026,8 +3974,7 @@ def preflight_from_args(args: argparse.Namespace) -> int:
                     responses.error_payload(
                         "preflight",
                         reason=PREFLIGHT_EXIT_REASON_MARK_FAILED,
-                        error=mark_error
-                        or "loop-ready marking did not complete",
+                        error=mark_error or "loop-ready marking did not complete",
                         paused=False,
                         **payload_fields,
                     )

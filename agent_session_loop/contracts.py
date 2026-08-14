@@ -13,11 +13,11 @@ error surface.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
-from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
-from typing import Literal, Union
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Literal
 
 from .plans import (
     HANDOFF_HEADING,
@@ -33,7 +33,6 @@ from .workspaces import (
     WorkspaceError,
     validate_repository_alias,
 )
-
 
 COMPLETION_CONTRACT_HEADING = "## Completion Contract"
 DONE_WHEN_HEADING = "### Done when"
@@ -108,7 +107,7 @@ class RegexInFileCheck:
     repo: str | None = None
 
 
-VerificationCheck = Union[CommandCheck, FileExistsCheck, RegexInFileCheck]
+VerificationCheck = CommandCheck | FileExistsCheck | RegexInFileCheck
 
 
 @dataclass(frozen=True)
@@ -641,8 +640,7 @@ def _parse_verify_payload(
     raw_checks = payload.get("checks")
     if not isinstance(raw_checks, list) or len(raw_checks) == 0:
         raise PlanError(
-            f"session {session_id.value} Verify JSON 'checks' must be a "
-            "non-empty list"
+            f"session {session_id.value} Verify JSON 'checks' must be a non-empty list"
         )
 
     checks: list[VerificationCheck] = []
@@ -663,9 +661,7 @@ def _parse_verify_payload(
         checks.append(check)
 
     checks_by_name = {check.name: check for check in checks}
-    gate_names = {
-        check.name for check in checks if not check.on_failure_of
-    }
+    gate_names = {check.name for check in checks if not check.on_failure_of}
     if not gate_names:
         raise PlanError(
             f"session {session_id.value} Verify JSON must contain at least one "

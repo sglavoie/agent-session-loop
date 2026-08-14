@@ -7,32 +7,32 @@ import io
 import json
 import shutil
 import subprocess
-from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
-from pathlib import Path
 import tempfile
 import unittest
+from collections.abc import Callable
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime
+from pathlib import Path
 
-from agent_session_loop import assurance_ledger
-from agent_session_loop import cli
-from agent_session_loop import events
-from agent_session_loop import harnesses
-from agent_session_loop import plans
-from agent_session_loop import repository_evidence
-from agent_session_loop import run_flags
-from agent_session_loop import runner
-from agent_session_loop import state
-from agent_session_loop import supervisor_audit
+from agent_session_loop import (
+    assurance_ledger,
+    cli,
+    events,
+    harnesses,
+    plans,
+    repository_evidence,
+    run_flags,
+    runner,
+    state,
+    supervisor_audit,
+)
 from agent_session_loop.assurance_models import (
     MAX_AUDIT_ATTEMPTS,
     RUBRIC_LANES,
     AssuranceError,
     AuditRole,
 )
-
 from tests.support import init_git_repo, write_plan
-
 
 RUN_ID = "20260810T101112123456Z-4242"
 
@@ -133,9 +133,7 @@ class AuditValidationTests(unittest.TestCase):
 
     def test_audit_harness_may_equal_review_harness(self) -> None:
         errors = run_flags.validate_run_namespace(
-            _namespace(
-                harness="codex", review_harness="claude", audit_harness="claude"
-            )
+            _namespace(harness="codex", review_harness="claude", audit_harness="claude")
         )
 
         self.assertEqual([], errors)
@@ -250,9 +248,7 @@ class AuditRoleResolutionTests(unittest.TestCase):
             )
 
     def test_the_timeout_applies_to_each_attempt_independently(self) -> None:
-        role = self._role(
-            harness="codex", review_harness="claude", audit_timeout=900
-        )
+        role = self._role(harness="codex", review_harness="claude", audit_timeout=900)
 
         self.assertEqual(900.0, role.timeout_seconds)
         self.assertEqual(
@@ -275,9 +271,7 @@ class AuditPlanTests(unittest.TestCase):
 
     def test_opting_out_skips_without_resolving_a_role(self) -> None:
         plan = supervisor_audit.plan_audit(
-            _namespace(
-                harness="codex", review_harness="claude", supervisor_audit=False
-            )
+            _namespace(harness="codex", review_harness="claude", supervisor_audit=False)
         )
 
         self.assertEqual("skipped", plan.state)
@@ -297,9 +291,7 @@ class AuditPlanTests(unittest.TestCase):
             _namespace(harness="codex", review_harness="claude")
         )
 
-        eligible = supervisor_audit.initial_summary(
-            plan, run_id=RUN_ID, eligible=True
-        )
+        eligible = supervisor_audit.initial_summary(plan, run_id=RUN_ID, eligible=True)
         ineligible = supervisor_audit.initial_summary(
             plan, run_id=RUN_ID, eligible=False
         )
@@ -355,9 +347,7 @@ class AuditRunConfigPersistenceTests(unittest.TestCase):
 
     def _run_config(self, tokens: list[str]) -> dict:
         args = _parse(["run", "/tmp/plan", *tokens])
-        return runner._run_config_payload(
-            args, cwd=Path("/tmp"), commit_mode=None
-        )
+        return runner._run_config_payload(args, cwd=Path("/tmp"), commit_mode=None)
 
     def test_new_runs_persist_audit_enabled_with_the_default_timeout(self) -> None:
         config = self._run_config([])
@@ -557,9 +547,7 @@ class AuditRunOutputTests(unittest.TestCase):
 
     def test_a_fresh_eligible_run_starts_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            payload = self._initial_payload(
-                Path(tmp), ["--review-harness", "claude"]
-            )
+            payload = self._initial_payload(Path(tmp), ["--review-harness", "claude"])
 
             assurance = payload["assurance"]
             self.assertEqual("pending", assurance["state"])
@@ -655,8 +643,7 @@ class AuditRunOutputTests(unittest.TestCase):
 
             self.assertEqual(0, code, out)
             self.assertIn(
-                "Supervisor audit: pending (claude via review role, "
-                "600s per attempt)",
+                "Supervisor audit: pending (claude via review role, 600s per attempt)",
                 out,
             )
 
@@ -776,9 +763,7 @@ class AuditStateProjectionTests(unittest.TestCase):
             output = buffer.getvalue()
 
             self.assertIn("Supervisor audit: findings", output)
-            self.assertIn(
-                "Assurance issues: 1 new, 1 recurring; ASI-1, ASI-2", output
-            )
+            self.assertIn("Assurance issues: 1 new, 1 recurring; ASI-1, ASI-2", output)
             self.assertIn("Assurance inbox: 0 open; `asl assurance list`", output)
             self.assertIn("Assurance report: ", output)
 
@@ -994,9 +979,7 @@ class RestrictedAuditTests(unittest.TestCase):
 
             self.assertEqual("mutation-detected", result.outcome)
             self.assertEqual("unavailable", result.state)
-            self.assertEqual(
-                supervisor_audit.REASON_WORKSPACE_MUTATED, result.reason
-            )
+            self.assertEqual(supervisor_audit.REASON_WORKSPACE_MUTATED, result.reason)
             self.assertEqual(["app"], (result.mutation or {})["removed"])
             self.assertEqual({}, (result.mutation or {})["changed"])
 
@@ -1290,7 +1273,9 @@ class EvidenceBundleTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        with (state_dir / events.EVENTS_FILE_NAME).open("w", encoding="utf-8") as handle:
+        with (state_dir / events.EVENTS_FILE_NAME).open(
+            "w", encoding="utf-8"
+        ) as handle:
             handle.write(
                 json.dumps(
                     {
@@ -1357,11 +1342,21 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual(one.sha256, two.sha256)
 
     def test_relocating_a_history_preserves_its_control_plane_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+        with (
+            tempfile.TemporaryDirectory() as first,
+            tempfile.TemporaryDirectory() as second,
+        ):
             one = self._collect(*self._history(Path(first))).payload
             two = self._collect(*self._history(Path(second))).payload
 
-            for section in ("turns", "events", "scopes", "review", "status", "registry"):
+            for section in (
+                "turns",
+                "events",
+                "scopes",
+                "review",
+                "status",
+                "registry",
+            ):
                 self.assertEqual(one[section], two[section], section)
 
     def test_collection_is_stable_across_repeated_reads(self) -> None:
@@ -1533,7 +1528,14 @@ class EvidenceBundleTests(unittest.TestCase):
             payload = self._collect(*self._history(Path(tmp))).payload
 
             self.assertEqual(
-                [{"session": "session-01", "available": True, "reads": ["app"], "writes": ["app"]}],
+                [
+                    {
+                        "session": "session-01",
+                        "available": True,
+                        "reads": ["app"],
+                        "writes": ["app"],
+                    }
+                ],
                 payload["scopes"]["sessions"],
             )
             self.assertTrue(payload["versions"]["package"]["available"])
@@ -1726,7 +1728,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 {lane: "pass" for lane in RUBRIC_LANES},
                 supervisor_audit.lane_rollup(results.values()),
             )
-            self.assertEqual((), supervisor_audit.findings_from_results(results.values()))
+            self.assertEqual(
+                (), supervisor_audit.findings_from_results(results.values())
+            )
             self.assertTrue(bundle.evidence)
 
     def test_a_registry_reaching_outside_the_workspace_is_a_finding(self) -> None:
@@ -1941,7 +1945,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
 
 #: Injected so an audit's timestamp is an input rather than a wall-clock read,
 #: which is what lets two identical runs produce byte-identical artifacts.
-FIXED_CLOCK = datetime(2026, 8, 10, 10, 11, 12, tzinfo=timezone.utc)
+FIXED_CLOCK = datetime(2026, 8, 10, 10, 11, 12, tzinfo=UTC)
 
 
 class _ScriptedAuditor:
@@ -2065,9 +2069,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
         )
         return f"{prose}```json\n{body}\n```\n"
 
-    def _reports(
-        self, run_dir: Path, audit: object
-    ) -> tuple[dict[str, object], str]:
+    def _reports(self, run_dir: Path, audit: object) -> tuple[dict[str, object], str]:
         report, markdown = supervisor_audit.write_audit_reports(
             run_dir, audit, durable=False
         )
@@ -2118,9 +2120,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("identity.agent-observed-drift", finding.invariant_key)
             self.assertEqual(64, len(finding.fingerprint))
             self.assertEqual((locator,), finding.evidence)
-            self.assertEqual(
-                "fail", outcome.audit.lanes[0].status
-            )
+            self.assertEqual("fail", outcome.audit.lanes[0].status)
 
     def test_an_agent_that_assigns_its_own_identity_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2258,9 +2258,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("interrupted", attempt.outcome)
             self.assertEqual("unavailable", attempt.state)
             self.assertEqual(supervisor_audit.REASON_INTERRUPTED, attempt.reason)
-            self.assertNotIn(
-                "interrupted", supervisor_audit.RETRYABLE_ATTEMPT_OUTCOMES
-            )
+            self.assertNotIn("interrupted", supervisor_audit.RETRYABLE_ATTEMPT_OUTCOMES)
 
     def test_a_localized_finding_names_its_source_in_both_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2273,7 +2271,10 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
                     [
                         self._finding(
                             locator,
-                            localization=["package/runner.py:8129", "skills/asl/SKILL.md"],
+                            localization=[
+                                "package/runner.py:8129",
+                                "skills/asl/SKILL.md",
+                            ],
                         )
                     ],
                 )
@@ -2382,7 +2383,9 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             lanes = self._lanes(bundle.evidence[0].locator)
             lanes[0]["summary"] = "table | breaker\nwith a newline"
             auditor = _ScriptedAuditor(
-                self._reply(lanes, prose="## Trust me instead\n\nI rewrote the run.\n\n")
+                self._reply(
+                    lanes, prose="## Trust me instead\n\nI rewrote the run.\n\n"
+                )
             )
 
             outcome = self._run(history, auditor, bundle=bundle)
@@ -2403,7 +2406,9 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
                 prompt.index("read ASL source to localize it"),
             )
             self.assertIn("You are not reviewing the application", prompt)
-            self.assertIn("Reviewing, grading, or commenting on the application", prompt)
+            self.assertIn(
+                "Reviewing, grading, or commenting on the application", prompt
+            )
             self.assertIn("Assigning issue IDs, fingerprints", prompt)
             self.assertIn("Editing, creating, or deleting any file", prompt)
             for lane in RUBRIC_LANES:
@@ -2443,9 +2448,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             workspace, plan_dir, _, run_dir = history
-            before = repository_evidence.capture_workspace_snapshot(
-                workspace, plan_dir
-            )
+            before = repository_evidence.capture_workspace_snapshot(workspace, plan_dir)
             auditor = _ScriptedAuditor("not an audit")
 
             outcome = self._run(history, auditor)

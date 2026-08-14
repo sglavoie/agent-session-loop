@@ -85,8 +85,14 @@ class SampleProcessTreeTests(unittest.TestCase):
         self.assertEqual([10, 100, 101, 200], [entry["pid"] for entry in tree])
         root = tree[0]
         self.assertEqual(
-            {"pid": 10, "ppid": 1, "state": "S", "cpu_seconds": 60.0,
-             "birth": _BIRTH, "command": "harness root"},
+            {
+                "pid": 10,
+                "ppid": 1,
+                "state": "S",
+                "cpu_seconds": 60.0,
+                "birth": _BIRTH,
+                "command": "harness root",
+            },
             root,
         )
         self.assertEqual(200, tree[3]["pid"])
@@ -110,9 +116,7 @@ class SampleProcessTreeTests(unittest.TestCase):
             10, run_command=lambda *args, **kwargs: _ps_result(stdout)
         )
 
-        self.assertEqual(
-            process_tree.COMMAND_MAX_CHARS, len(tree[0]["command"])
-        )
+        self.assertEqual(process_tree.COMMAND_MAX_CHARS, len(tree[0]["command"]))
         self.assertEqual(
             long_command[: process_tree.COMMAND_MAX_CHARS], tree[0]["command"]
         )
@@ -195,9 +199,7 @@ class DescendantPidsTests(unittest.TestCase):
     }
 
     def test_bfs_order_excludes_root_and_unrelated(self) -> None:
-        self.assertEqual(
-            [100, 101, 200], process_tree.descendant_pids(10, self.TABLE)
-        )
+        self.assertEqual([100, 101, 200], process_tree.descendant_pids(10, self.TABLE))
 
     def test_leaf_has_no_descendants(self) -> None:
         self.assertEqual([], process_tree.descendant_pids(200, self.TABLE))
@@ -222,20 +224,23 @@ class SampleProcessTableTests(unittest.TestCase):
     def test_single_ps_call_uses_pgid_format(self) -> None:
         run_command = mock.Mock(return_value=_ps_result(f"10 1 10 {_BIRTH} root\n"))
 
-        table = process_tree.sample_process_table(
-            run_command=run_command, timeout=1.5
-        )
+        table = process_tree.sample_process_table(run_command=run_command, timeout=1.5)
 
         self.assertEqual(
-            {10: {"pid": 10, "ppid": 1, "pgid": 10, "birth": _BIRTH,
-                  "command": "root"}},
+            {
+                10: {
+                    "pid": 10,
+                    "ppid": 1,
+                    "pgid": 10,
+                    "birth": _BIRTH,
+                    "command": "root",
+                }
+            },
             table,
         )
         run_command.assert_called_once()
         args, kwargs = run_command.call_args
-        self.assertEqual(
-            ["ps", "-axo", "pid=,ppid=,pgid=,lstart=,command="], args[0]
-        )
+        self.assertEqual(["ps", "-axo", "pid=,ppid=,pgid=,lstart=,command="], args[0])
         self.assertEqual(1.5, kwargs["timeout"])
         self.assertFalse(kwargs["check"])
         self.assertTrue(kwargs["text"])
@@ -254,8 +259,13 @@ class SampleProcessTableTests(unittest.TestCase):
 
         self.assertEqual([1, 10, 11, 999], sorted(table))
         self.assertEqual(
-            {"pid": 11, "ppid": 10, "pgid": 10, "birth": _LATER_BIRTH,
-             "command": "/bin/zsh -c echo one two three"},
+            {
+                "pid": 11,
+                "ppid": 10,
+                "pgid": 10,
+                "birth": _LATER_BIRTH,
+                "command": "/bin/zsh -c echo one two three",
+            },
             table[11],
         )
 
@@ -319,24 +329,22 @@ class SampleProcessTableTests(unittest.TestCase):
         def raise_os_error(*args, **kwargs):
             raise OSError("ps missing")
 
-        self.assertIsNone(
-            process_tree.sample_process_table(run_command=raise_os_error)
-        )
+        self.assertIsNone(process_tree.sample_process_table(run_command=raise_os_error))
 
     def test_timeout_returns_none(self) -> None:
         def raise_timeout(*args, **kwargs):
             raise subprocess.TimeoutExpired(cmd="ps", timeout=5.0)
 
-        self.assertIsNone(
-            process_tree.sample_process_table(run_command=raise_timeout)
-        )
+        self.assertIsNone(process_tree.sample_process_table(run_command=raise_timeout))
 
     def test_output_without_a_parsable_row_returns_none(self) -> None:
         for stdout in ("", "garbage\n"):
             with self.subTest(stdout=stdout):
                 self.assertIsNone(
                     process_tree.sample_process_table(
-                        run_command=lambda *args, **kwargs: _ps_result(stdout)
+                        run_command=lambda *args, _stdout=stdout, **kwargs: _ps_result(
+                            _stdout
+                        )
                     )
                 )
 
@@ -389,9 +397,7 @@ _SELF_PGID = 8888
 class SweepSurvivorsTests(unittest.TestCase):
     def setUp(self) -> None:
         for name, value in (("getpid", _SELF_PID), ("getpgrp", _SELF_PGID)):
-            patcher = mock.patch.object(
-                process_tree.os, name, return_value=value
-            )
+            patcher = mock.patch.object(process_tree.os, name, return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -414,9 +420,7 @@ class SweepSurvivorsTests(unittest.TestCase):
             f" {_SELF_PID}     1 {_SELF_PGID} python3 -m unittest\n"
             "  5555     1 5555 unrelated\n"
         )
-        run_command = mock.Mock(
-            side_effect=[_ps_result(stdout), _ps_result(after)]
-        )
+        run_command = mock.Mock(side_effect=[_ps_result(stdout), _ps_result(after)])
         kills: list[tuple[int, int]] = []
 
         report = self._sweep(
@@ -426,9 +430,7 @@ class SweepSurvivorsTests(unittest.TestCase):
             run_command=run_command,
         )
 
-        self.assertEqual(
-            [(4243, signal.SIGKILL), (4244, signal.SIGKILL)], kills
-        )
+        self.assertEqual([(4243, signal.SIGKILL), (4244, signal.SIGKILL)], kills)
         self.assertEqual([4243, 4244], report["killed"])
         self.assertEqual([], report["kill_failed"])
         self.assertEqual([], report["survivors_after"])
@@ -446,9 +448,7 @@ class SweepSurvivorsTests(unittest.TestCase):
             f" {_SELF_PID}     1 4242 python3 -m unittest\n"
             "  4243     1 4242 leftover child\n"
         )
-        run_command = mock.Mock(
-            side_effect=[_ps_result(stdout), _ps_result(stdout)]
-        )
+        run_command = mock.Mock(side_effect=[_ps_result(stdout), _ps_result(stdout)])
         kills: list[int] = []
 
         report = self._sweep(
@@ -475,8 +475,7 @@ class SweepSurvivorsTests(unittest.TestCase):
             root_pid=4242,
             expected_pgid=4242,
             prior_snapshot=[
-                {"pid": 4242, "birth": _LATER_BIRTH,
-                 "command": "someone elses shell"},
+                {"pid": 4242, "birth": _LATER_BIRTH, "command": "someone elses shell"},
             ],
             kill=lambda pid, sig: self.fail("a reused pid's group is not ours"),
             run_command=run_command,
@@ -496,9 +495,7 @@ class SweepSurvivorsTests(unittest.TestCase):
             "  4244     1 4244 unrelated process that reused the pid\n"
         )
         after = "  4244     1 4244 unrelated process that reused the pid\n"
-        run_command = mock.Mock(
-            side_effect=[_ps_result(stdout), _ps_result(after)]
-        )
+        run_command = mock.Mock(side_effect=[_ps_result(stdout), _ps_result(after)])
         kills: list[int] = []
 
         report = self._sweep(
@@ -529,9 +526,7 @@ class SweepSurvivorsTests(unittest.TestCase):
             f"  4244     1 4244 {_BIRTH} /bin/sleep 300\n"
         )
         after = f"  4243     1 4243 {_LATER_BIRTH} /bin/sleep 300\n"
-        run_command = mock.Mock(
-            side_effect=[_ps_result(stdout), _ps_result(after)]
-        )
+        run_command = mock.Mock(side_effect=[_ps_result(stdout), _ps_result(after)])
         kills: list[int] = []
 
         report = self._sweep(
@@ -600,9 +595,7 @@ class SweepSurvivorsTests(unittest.TestCase):
 
         self.assertEqual([], report["killed"])
         self.assertEqual([], report["enumeration"]["pgid_members"])
-        self.assertEqual(
-            "own_process_group", report["enumeration"]["pgid_skipped"]
-        )
+        self.assertEqual("own_process_group", report["enumeration"]["pgid_skipped"])
 
     def test_pgid_of_one_or_less_is_never_enumerated(self) -> None:
         stdout = "    1     0    1 /sbin/launchd\n  4243     1    1 orphan\n"
@@ -634,9 +627,7 @@ class SweepSurvivorsTests(unittest.TestCase):
         )
 
         self.assertEqual([], report["killed"])
-        self.assertEqual(
-            [4243], [entry["pid"] for entry in report["kill_failed"]]
-        )
+        self.assertEqual([4243], [entry["pid"] for entry in report["kill_failed"]])
         self.assertIn("not permitted", report["kill_failed"][0]["error"])
         self.assertEqual(1, run_command.call_count)
 
@@ -661,9 +652,7 @@ class SweepSurvivorsTests(unittest.TestCase):
     def test_survivor_ignored_when_the_pid_was_reused(self) -> None:
         stdout = "  4243     1 4242 leftover\n"
         after = "  4243     1 4243 something new\n"
-        run_command = mock.Mock(
-            side_effect=[_ps_result(stdout), _ps_result(after)]
-        )
+        run_command = mock.Mock(side_effect=[_ps_result(stdout), _ps_result(after)])
 
         report = self._sweep(
             root_pid=4242,
@@ -723,9 +712,7 @@ class SweepSurvivorsTests(unittest.TestCase):
     def test_default_settle_sleeps_before_the_resample(self) -> None:
         stdout = "  4243     1 4242 leftover\n"
         after = "  5555     1 5555 unrelated\n"
-        run_command = mock.Mock(
-            side_effect=[_ps_result(stdout), _ps_result(after)]
-        )
+        run_command = mock.Mock(side_effect=[_ps_result(stdout), _ps_result(after)])
 
         with mock.patch.object(process_tree.time, "sleep") as sleep:
             report = process_tree.sweep_survivors(
@@ -799,9 +786,7 @@ class SweepEnabledTests(unittest.TestCase):
         )
 
     def test_reads_the_process_environment_by_default(self) -> None:
-        with mock.patch.dict(
-            os.environ, {process_tree.SWEEP_DISABLED_ENV_VAR: "1"}
-        ):
+        with mock.patch.dict(os.environ, {process_tree.SWEEP_DISABLED_ENV_VAR: "1"}):
             self.assertFalse(process_tree.sweep_enabled())
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertTrue(process_tree.sweep_enabled())

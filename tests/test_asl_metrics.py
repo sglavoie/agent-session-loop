@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+from agent_session_loop import assurance_models as assurance
+from agent_session_loop import assurance_projection as assurance_projection
 from agent_session_loop import (
     cli,
     events,
@@ -20,10 +22,7 @@ from agent_session_loop import (
     review_continuation,
     review_repair,
 )
-from agent_session_loop import assurance_models as assurance
-from agent_session_loop import assurance_projection as assurance_projection
 from tests.support import write_plan_with_ids
-
 
 AUDIT_RUN_ID = "20260810T101112123456Z-4242"
 
@@ -160,7 +159,7 @@ class MetricsCollectionTests(unittest.TestCase):
         self.tmp_path = Path(self._tmp.name)
         self.state_root = self.tmp_path / "state"
         self.state_root.mkdir()
-        self.now = datetime.now(timezone.utc)
+        self.now = datetime.now(UTC)
 
     def _collect(self, since_days: int = 7) -> metrics.MetricsReport:
         return metrics.collect_metrics(
@@ -648,9 +647,7 @@ class MetricsCollectionTests(unittest.TestCase):
         self.assertEqual(
             narrow["unique_materializations"], narrow["repairs_materialized"]
         )
-        self.assertEqual(
-            wide["unique_materializations"], wide["repairs_materialized"]
-        )
+        self.assertEqual(wide["unique_materializations"], wide["repairs_materialized"])
 
     def test_state_dirs_untouched_in_window_are_skipped_before_events(
         self,
@@ -819,7 +816,7 @@ class AssuranceMetricsSectionTests(unittest.TestCase):
         self.tmp_path = Path(self._tmp.name)
         self.state_root = self.tmp_path / "state"
         self.state_root.mkdir()
-        self.now = datetime.now(timezone.utc)
+        self.now = datetime.now(UTC)
 
     def _collect(self) -> metrics.MetricsReport:
         return metrics.collect_metrics(
@@ -903,7 +900,7 @@ class MetricsCliTests(unittest.TestCase):
 
     def test_metrics_text_output_reports_sections(self) -> None:
         state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-a")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         _write_turn_result(
             state_dir,
             run_id="run-1",
@@ -926,7 +923,7 @@ class MetricsCliTests(unittest.TestCase):
         self.assertIn("recurrence after resolution", stdout)
 
     def test_metrics_text_reports_what_the_audit_found(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         _publish_audit(self.state_root, recorded_at=_iso(now, hours_ago=2))
 
         exit_code, stdout, _ = self._run_cli(
@@ -939,7 +936,14 @@ class MetricsCliTests(unittest.TestCase):
 
     def test_metrics_rejects_invalid_since_days(self) -> None:
         exit_code, stdout, _ = self._run_cli(
-            ["metrics", "--state-dir", str(self.state_root), "--since-days", "0", "--json"]
+            [
+                "metrics",
+                "--state-dir",
+                str(self.state_root),
+                "--since-days",
+                "0",
+                "--json",
+            ]
         )
         self.assertEqual(1, exit_code)
         payload = json.loads(stdout)

@@ -6,15 +6,14 @@ in the plan directory's `session-N.md` handoff status lines.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import json
-from pathlib import Path
 import threading
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from . import durability
-
 
 # Schema version stamped on every event record. Readers must treat the
 # absence of a ``version`` key as v1 and accept v2 records that carry it.
@@ -71,9 +70,7 @@ RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CANCELED = "stop-after-current-canceled"
 RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED = "stop-after-current-consumed"
 RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED = "abort-turn-requested"
 RUN_CONTROL_ACTION_ABORT_TURN_HONORED = "abort-turn-honored"
-RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER = (
-    "abort-turn-satisfied-by-worker"
-)
+RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER = "abort-turn-satisfied-by-worker"
 # Delivery receipt for one accepted external control command, appended for every
 # command the runner drains — including the ones that change no state — so a
 # supervisor can tell a duplicate or already-applied command from a lost one.
@@ -128,16 +125,12 @@ PAUSE_REASON_MALFORMED_REVIEW_REPAIR = "malformed-review-repair"
 PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE = "review-guard-unavailable"
 # Registered implementation turns stay disabled until their write guard can
 # prove mutations remained inside the selected session's writable aliases.
-PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE = (
-    "workspace-write-guard-unavailable"
-)
+PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE = "workspace-write-guard-unavailable"
 # A registered implementation turn changed a repository outside the selected
 # session's authoritative write aliases. Contents are deliberately retained;
 # the session is returned to pending so an operator can repair the durable
 # scope and refresh expansion/preflight evidence.
-PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION = (
-    "workspace-write-scope-violation"
-)
+PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION = "workspace-write-scope-violation"
 # A legacy run resolved declarations reaching more than one Git top-level. The
 # value matches ``repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED``; it is
 # spelled literally here so the low-level event vocabulary keeps no dependency
@@ -151,9 +144,7 @@ PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION = "workspace-repository-contention"
 # The subset of harness-failure categories that a supervisor may safely retry
 # by relaunching the same session. Quota, authentication, invalid-model, and
 # unclassified (fail-closed ``nonzero-exit``) failures are never in this set.
-RETRYABLE_HARNESS_FAILURE_REASONS: tuple[str, ...] = (
-    PAUSE_REASON_TRANSPORT_FAILED,
-)
+RETRYABLE_HARNESS_FAILURE_REASONS: tuple[str, ...] = (PAUSE_REASON_TRANSPORT_FAILED,)
 
 PAUSE_REASONS: tuple[str, ...] = (
     PAUSE_REASON_NONZERO_EXIT,
@@ -200,9 +191,7 @@ class Event:
 
     name: str
     payload: dict[str, Any]
-    created_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     version: int = EVENT_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -219,8 +208,7 @@ def append_event(path: str | Path, event: Event) -> None:
     event_path = Path(path)
     event_path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(event.to_dict(), sort_keys=True) + "\n"
-    with _EVENT_WRITE_LOCK:
-        with event_path.open("a", encoding="utf-8") as event_file:
-            event_file.write(line)
-            event_file.flush()
-            durability.fullsync(event_file.fileno())
+    with _EVENT_WRITE_LOCK, event_path.open("a", encoding="utf-8") as event_file:
+        event_file.write(line)
+        event_file.flush()
+        durability.fullsync(event_file.fileno())

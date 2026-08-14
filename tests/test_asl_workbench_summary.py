@@ -4,84 +4,42 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
-import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
-import signal
-import stat
-import subprocess
-import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
-    config,
-    contracts,
-    control_queue,
     events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
     qna,
     review,
     review_repair,
-    run_control,
-    runner,
     state,
-    tail,
-    verification,
     workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
+    _WORKBENCH_DEAD_PID,
     DEFAULT_MULTI_REPO_SPECS,
+    _discovered,
+    _make_workbench_plan,
+    _structured_review_finding,
+    _write_lock_file,
+    _write_state_payload,
     init_multi_repo_workspace,
+    write_completed_review_plan,
     write_multi_repo_plan,
     write_plan,
-    write_completed_review_plan,
     write_review_cycle_event,
-    _structured_review_finding,
-    _WORKBENCH_DEAD_PID,
-    _make_workbench_plan,
-    _write_state_payload,
-    _write_lock_file,
-    _discovered,
 )
 
 
 class WorkbenchSummaryTests(unittest.TestCase):
-    def test_registered_summary_exposes_workspace_and_ordered_repositories(self) -> None:
+    def test_registered_summary_exposes_workspace_and_ordered_repositories(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             specs = DEFAULT_MULTI_REPO_SPECS[:2]
@@ -109,7 +67,9 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(str(workspace_root.resolve()), payload["workspace_root"])
             self.assertEqual(2, payload["repository_count"])
             self.assertNotIn("workspace_inventory_excludes", payload)
-            self.assertEqual(["SVC", "OAK"], [row["alias"] for row in payload["repositories"]])
+            self.assertEqual(
+                ["SVC", "OAK"], [row["alias"] for row in payload["repositories"]]
+            )
 
     def test_invalid_when_plan_directory_does_not_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -223,12 +183,8 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual("view", summary.recommended_action)
             self.assertIn("cap of 1", summary.next_action_hint)
             self.assertEqual(status_payload["review_resume"], summary.review_resume)
-            self.assertEqual(
-                summary.review_resume, summary.recovery["review_resume"]
-            )
-            self.assertEqual(
-                "higher-cap-required", summary.review_resume["blocker"]
-            )
+            self.assertEqual(summary.review_resume, summary.recovery["review_resume"])
+            self.assertEqual("higher-cap-required", summary.review_resume["blocker"])
             self.assertEqual(
                 plan_before,
                 {
@@ -263,17 +219,13 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
 
             self.assertEqual("complete", summary.primary_state)
-            self.assertEqual(
-                "higher-cap-required", summary.review_resume["blocker"]
-            )
+            self.assertEqual("higher-cap-required", summary.review_resume["blocker"])
             self.assertIsNone(summary.review_resume["selected_cap"])
             self.assertEqual(
                 "Review repairs require a review-fix cap to resume",
                 summary.detail,
             )
-            self.assertIn(
-                "Supply a review-fix cap of 1", summary.next_action_hint
-            )
+            self.assertIn("Supply a review-fix cap of 1", summary.next_action_hint)
             self.assertNotIn("exhaust", summary.detail.lower())
             self.assertEqual("Review-fix cap required", recovery.title)
             self.assertIn("after supplying", recovery.summary)
@@ -355,9 +307,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
 
             findings[-1]["repair_group"] = "g7"
             (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
-                json.dumps(
-                    {"version": 2, "outcome": "findings", "findings": findings}
-                ),
+                json.dumps({"version": 2, "outcome": "findings", "findings": findings}),
                 encoding="utf-8",
             )
             ready = workbench.build_workbench_summary(
@@ -402,9 +352,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                     "ok": False,
                     "paused": True,
                     "reason": events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
-                    "pause_reason": (
-                        events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR
-                    ),
+                    "pause_reason": (events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR),
                     "pause_message": "Review artifact validation failed",
                     "run_id": "run-malformed-review",
                     "run_started_at": "2026-06-19T14:00:00+00:00",
@@ -438,9 +386,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
 
             findings[-1]["repair_group"] = "g7"
             (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
-                json.dumps(
-                    {"version": 2, "outcome": "findings", "findings": findings}
-                ),
+                json.dumps({"version": 2, "outcome": "findings", "findings": findings}),
                 encoding="utf-8",
             )
 
@@ -464,15 +410,11 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual("review-continuation", ready_recovery.kind)
             self.assertEqual("info", ready_recovery.severity)
             self.assertEqual("review-profile", ready_recovery.actions[0].id)
-            self.assertEqual(
-                "review-profile", resumed.recovery["primary_action"]["id"]
-            )
+            self.assertEqual("review-profile", resumed.recovery["primary_action"]["id"])
             self.assertEqual(ready_recovery.title, resumed.next_action_hint)
             self.assertEqual(ready_recovery.summary, resumed.detail)
             self.assertEqual(ready_recovery.review_resume, resumed.review_resume)
-            self.assertEqual(
-                resumed.review_resume, resumed.recovery["review_resume"]
-            )
+            self.assertEqual(resumed.review_resume, resumed.recovery["review_resume"])
 
     def test_completed_review_repairs_use_zero_pending_continuation_badge(
         self,
@@ -584,9 +526,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(2, payload["assurance"]["issue_count"])
             self.assertFalse(payload["assurance"]["issue_ids_truncated"])
             self.assertEqual(1, payload["assurance"]["new_issue_count"])
-            self.assertEqual(
-                "asl assurance list", payload["assurance"]["list_command"]
-            )
+            self.assertEqual("asl assurance list", payload["assurance"]["list_command"])
             json.dumps(payload)
 
     def test_assurance_summary_is_bounded(self) -> None:
@@ -1180,9 +1120,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(2, len(summaries))
             self.assertEqual("ready", summaries[0].primary_state)
             self.assertEqual("invalid", summaries[1].primary_state)
-            self.assertIn(
-                "workspace metadata unreadable", summaries[1].detail or ""
-            )
+            self.assertIn("workspace metadata unreadable", summaries[1].detail or "")
             self.assertEqual(
                 "Workspace metadata cannot be inspected",
                 summaries[1].recovery["title"],
@@ -1274,9 +1212,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(
                 workbench.URGENCY_RANK_BY_STATE["running"], summary.urgency_rank
             )
-            self.assertEqual(
-                "2026-06-19T12:01:30+00:00", summary.last_activity_at
-            )
+            self.assertEqual("2026-06-19T12:01:30+00:00", summary.last_activity_at)
             self.assertEqual("active-turn", summary.last_activity_source)
             self.assertIn("turn 4", summary.concise_reason)
             self.assertIn("claude", summary.searchable_text)
@@ -1319,12 +1255,8 @@ class WorkbenchSummaryTests(unittest.TestCase):
 
             self.assertEqual("verifying", summary.primary_state)
             self.assertEqual("in-progress", summary.urgency_group)
-            self.assertEqual(
-                "2026-06-19T13:00:20+00:00", summary.last_activity_at
-            )
-            self.assertEqual(
-                "active-verification", summary.last_activity_source
-            )
+            self.assertEqual("2026-06-19T13:00:20+00:00", summary.last_activity_at)
+            self.assertEqual("active-verification", summary.last_activity_source)
             self.assertIn("pytest-suite", summary.concise_reason)
             self.assertIn("2/2", summary.concise_reason)
 
@@ -1376,9 +1308,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 workbench.URGENCY_RANK_BY_STATE["paused-for-reply"],
                 summary.urgency_rank,
             )
-            self.assertEqual(
-                "2026-06-19T14:00:00+00:00", summary.last_activity_at
-            )
+            self.assertEqual("2026-06-19T14:00:00+00:00", summary.last_activity_at)
             self.assertEqual("run-started", summary.last_activity_source)
             self.assertEqual("Awaiting confirmation", summary.concise_reason)
             self.assertIn("v1 column", summary.searchable_text)
@@ -1415,9 +1345,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
             )
 
             self.assertEqual("paused-for-reply", summary.primary_state)
-            self.assertEqual(
-                "2026-06-19T14:00:00+00:00", summary.last_activity_at
-            )
+            self.assertEqual("2026-06-19T14:00:00+00:00", summary.last_activity_at)
             self.assertEqual("run-started", summary.last_activity_source)
             self.assertEqual("agent-question", summary.concise_reason)
 
@@ -1449,9 +1377,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
 
             self.assertEqual("failed", summary.primary_state)
             self.assertEqual("needs-action", summary.urgency_group)
-            self.assertEqual(
-                "2026-06-19T12:05:00+00:00", summary.last_activity_at
-            )
+            self.assertEqual("2026-06-19T12:05:00+00:00", summary.last_activity_at)
             self.assertEqual("run-finished", summary.last_activity_source)
             self.assertEqual("verify-failed", summary.concise_reason)
             self.assertIn("verify-failed", summary.searchable_text)
@@ -1475,9 +1401,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
 
             self.assertEqual("stale", summary.primary_state)
             self.assertEqual("needs-action", summary.urgency_group)
-            self.assertEqual(
-                "2026-06-19T00:00:00+00:00", summary.last_activity_at
-            )
+            self.assertEqual("2026-06-19T00:00:00+00:00", summary.last_activity_at)
             self.assertEqual("lock-created", summary.last_activity_source)
 
     def test_triage_fields_for_recent_run(self) -> None:
@@ -1507,9 +1431,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
 
             self.assertEqual("recent", summary.primary_state)
             self.assertEqual("ready", summary.urgency_group)
-            self.assertEqual(
-                "2026-06-19T12:30:00+00:00", summary.last_activity_at
-            )
+            self.assertEqual("2026-06-19T12:30:00+00:00", summary.last_activity_at)
             self.assertEqual("run-finished", summary.last_activity_source)
             self.assertIn("12:30:00", summary.concise_reason)
 
@@ -1543,9 +1465,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
 
             self.assertEqual("complete", summary.primary_state)
             self.assertEqual("complete", summary.urgency_group)
-            self.assertEqual(
-                "2026-06-19T15:10:00+00:00", summary.last_activity_at
-            )
+            self.assertEqual("2026-06-19T15:10:00+00:00", summary.last_activity_at)
             self.assertEqual("progress-journal", summary.last_activity_source)
             self.assertEqual(
                 workbench.URGENCY_RANK_BY_STATE["complete"], summary.urgency_rank
@@ -1587,15 +1507,11 @@ class WorkbenchSummaryTests(unittest.TestCase):
             self.assertEqual(summary.urgency_group, payload["urgency_group"])
             self.assertEqual(summary.activity_label, payload["activity_label"])
             self.assertEqual(summary.concise_reason, payload["concise_reason"])
-            self.assertEqual(
-                summary.last_activity_at, payload["last_activity_at"]
-            )
+            self.assertEqual(summary.last_activity_at, payload["last_activity_at"])
             self.assertEqual(
                 summary.last_activity_source, payload["last_activity_source"]
             )
-            self.assertEqual(
-                summary.searchable_text, payload["searchable_text"]
-            )
+            self.assertEqual(summary.searchable_text, payload["searchable_text"])
             self.assertEqual(summary.recovery, payload["recovery"])
             self.assertEqual("none", payload["recovery"]["kind"])
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from agent_session_loop import authoring, repository_intent
 from agent_session_loop.workspaces import canonicalize_filesystem_path
@@ -29,9 +29,7 @@ class CandidateExtractionTests(unittest.TestCase):
 
         surfaces = _surfaces(repository_intent.candidates_from_text(text))
 
-        self.assertEqual(
-            "absolute-path", surfaces["/Users/dev/work/repoA/src/main.py"]
-        )
+        self.assertEqual("absolute-path", surfaces["/Users/dev/work/repoA/src/main.py"])
         self.assertEqual("backtick-path", surfaces["tests/support.py"])
         # A span holding whitespace is a command, not a location.
         self.assertNotIn("python3 -m unittest -q", surfaces)
@@ -63,9 +61,7 @@ class CandidateExtractionTests(unittest.TestCase):
 
         values = {
             candidate.value
-            for candidate in repository_intent.candidates_from_plan_document(
-                text
-            )
+            for candidate in repository_intent.candidates_from_plan_document(text)
         }
 
         self.assertEqual({"/Users/dev/work/repoA/src/main.py"}, values)
@@ -173,9 +169,7 @@ class CandidateExtractionTests(unittest.TestCase):
         )
         self.assertEqual({"plan-metadata"}, set(metadata_surfaces.values()))
         self.assertEqual("execution-root", execution_surfaces["/w/repoA"])
-        self.assertEqual(
-            "task-packet", packet_surfaces["/plans/p/session-1.md"]
-        )
+        self.assertEqual("task-packet", packet_surfaces["/plans/p/session-1.md"])
 
 
 class ResolveIntentTests(unittest.TestCase):
@@ -191,9 +185,7 @@ class ResolveIntentTests(unittest.TestCase):
         self.second = canonicalize_filesystem_path(self.repositories["OAK"])
 
     def _resolve(self, *candidates, **kwargs):
-        return repository_intent.resolve_intent(
-            candidates, root=self.first, **kwargs
-        )
+        return repository_intent.resolve_intent(candidates, root=self.first, **kwargs)
 
     def test_two_repositories_require_a_registry(self) -> None:
         intent = self._resolve(
@@ -270,9 +262,7 @@ class ResolveIntentTests(unittest.TestCase):
         )
 
         self.assertEqual((self.first,), intent.git_roots)
-        self.assertEqual(
-            self.first / "README.md", intent.candidates[0].resolved
-        )
+        self.assertEqual(self.first / "README.md", intent.candidates[0].resolved)
 
     def test_non_git_artifacts_never_force_a_registry(self) -> None:
         artifact = self.root / "artifacts" / "report.json"
@@ -404,9 +394,7 @@ class IntentReportTests(unittest.TestCase):
             )
             for index in range(12)
         ]
-        intent = repository_intent.resolve_intent(
-            candidates, root=self.repository
-        )
+        intent = repository_intent.resolve_intent(candidates, root=self.repository)
 
         report = repository_intent.intent_report(intent, limit=5)
 
@@ -445,10 +433,7 @@ class PlanIntentTests(unittest.TestCase):
         self.second = canonicalize_filesystem_path(self.repositories["OAK"])
 
     def test_source_only_evidence_can_be_conclusive(self) -> None:
-        text = (
-            f"Edit {self.first}/README.md.\n"
-            f"Then add {self.second}/src/new.py.\n"
-        )
+        text = f"Edit {self.first}/README.md.\nThen add {self.second}/src/new.py.\n"
 
         intent = repository_intent.plan_intent(text, root=self.first)
 

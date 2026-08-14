@@ -4,77 +4,37 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
-import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
 import shutil
-import signal
-import stat
-import subprocess
-import sys
 import tempfile
 import threading
-import time
 import unittest
 import urllib.parse
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
     artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
-    config,
-    contracts,
     control_cli,
     control_queue,
     events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
-    review_repair,
-    run_control,
-    runner,
     state,
-    tail,
-    verification,
     workbench,
     workbench_server,
 )
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
-)
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
-    write_plan,
-    write_multi_repo_plan,
-    write_plan_with_ids,
-    _write_state_payload,
-    _write_raw_state_payload,
-    _write_lock_file,
     _discovered,
     _http_request,
+    _write_lock_file,
+    _write_raw_state_payload,
+    _write_state_payload,
+    write_multi_repo_plan,
+    write_plan,
+    write_plan_with_ids,
 )
 
 
@@ -180,9 +140,7 @@ class WorkbenchServerTests(unittest.TestCase):
             "searchable_text",
         ):
             self.assertIn(key, plan_payload)
-        self.assertIn(
-            plan_payload["urgency_group"], workbench.URGENCY_GROUPS
-        )
+        self.assertIn(plan_payload["urgency_group"], workbench.URGENCY_GROUPS)
         self.assertIsInstance(plan_payload["urgency_rank"], int)
         self.assertIn("alpha plan", plan_payload["searchable_text"])
 
@@ -209,16 +167,12 @@ class WorkbenchServerTests(unittest.TestCase):
         )
         broken_payload = plans_by_dir[str(canonical_broken)]
         self.assertEqual("invalid", broken_payload["primary_state"])
-        self.assertIn(
-            "workspace metadata unreadable", broken_payload["detail"]
-        )
+        self.assertIn("workspace metadata unreadable", broken_payload["detail"])
 
     def test_plan_endpoint_exposes_triage_payload_fields(self) -> None:
         server = self._start_server()
         query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/plan?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/plan?{query}")
 
         self.assertEqual(200, status)
         plan_payload = body["plan"]
@@ -233,9 +187,7 @@ class WorkbenchServerTests(unittest.TestCase):
             "searchable_text",
         ):
             self.assertIn(key, plan_payload)
-        self.assertIn(
-            plan_payload["urgency_group"], workbench.URGENCY_GROUPS
-        )
+        self.assertIn(plan_payload["urgency_group"], workbench.URGENCY_GROUPS)
 
     def test_queue_and_plan_expose_compact_recovery_payload(self) -> None:
         _write_state_payload(
@@ -260,9 +212,7 @@ class WorkbenchServerTests(unittest.TestCase):
         workbench.save_registry(registry, self.registry_path)
 
         server = self._start_server()
-        status, queue_body, _ = _http_request(
-            f"{self._base_url(server)}/api/queue"
-        )
+        status, queue_body, _ = _http_request(f"{self._base_url(server)}/api/queue")
 
         self.assertEqual(200, status)
         queue_recovery = queue_body["plans"][0]["recovery"]
@@ -350,9 +300,7 @@ class WorkbenchServerTests(unittest.TestCase):
         recovery_keys = ("recovery",)
 
         server = self._start_server()
-        status, queue_body, _ = _http_request(
-            f"{self._base_url(server)}/api/queue"
-        )
+        status, queue_body, _ = _http_request(f"{self._base_url(server)}/api/queue")
         self.assertEqual(200, status)
         plans_payload = queue_body["plans"]
         self.assertEqual(1, len(plans_payload))
@@ -416,18 +364,14 @@ class WorkbenchServerTests(unittest.TestCase):
                 "active_verification": None,
             },
         )
-        registry = workbench.upsert_pin(
-            registry, failed_plan, label="Failed plan"
-        )
+        registry = workbench.upsert_pin(registry, failed_plan, label="Failed plan")
 
         workbench.save_registry(registry, self.registry_path)
 
         server = self._start_server()
         status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
         self.assertEqual(200, status)
-        plans_by_dir = {
-            payload["plan_dir"]: payload for payload in body["plans"]
-        }
+        plans_by_dir = {payload["plan_dir"]: payload for payload in body["plans"]}
         self.assertEqual(
             {str(ready_plan), str(complete_plan), str(failed_plan)},
             set(plans_by_dir),
@@ -551,15 +495,11 @@ class WorkbenchServerTests(unittest.TestCase):
     def test_plan_endpoint_returns_single_summary(self) -> None:
         server = self._start_server()
         query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/plan?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/plan?{query}")
 
         self.assertEqual(200, status)
         plan_payload = body["plan"]
-        self.assertEqual(
-            str(self.canonical_plan_dir), plan_payload["plan_dir"]
-        )
+        self.assertEqual(str(self.canonical_plan_dir), plan_payload["plan_dir"])
         self.assertIn("primary_state", plan_payload)
         self.assertIn(plan_payload["recommended_action"], workbench.RECOMMENDED_ACTIONS)
 
@@ -598,8 +538,10 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual("not-loop-ready", body["recovery"]["compact"]["kind"])
         self.assertEqual("run-recovery", body["run_id"])
         self.assertTrue(
-            any(command["command"].endswith("--mark-loop-ready")
-                for command in body["recovery"]["commands"])
+            any(
+                command["command"].endswith("--mark-loop-ready")
+                for command in body["recovery"]["commands"]
+            )
         )
         self.assertTrue(
             any(artifact["kind"] == "state" for artifact in body["artifacts"])
@@ -611,9 +553,7 @@ class WorkbenchServerTests(unittest.TestCase):
         registry = plans.read_repository_registry(registered)
         assert registry is not None
         workspace_root = self.tmp_path / "workspace"
-        plans.save_workspace_plan_metadata(
-            registered, workspace_root, registry.digest
-        )
+        plans.save_workspace_plan_metadata(registered, workspace_root, registry.digest)
         canonical = plans.canonicalize_path(registered)
         server = self._start_server()
         query = urllib.parse.urlencode({"plan_dir": str(canonical)})
@@ -672,9 +612,7 @@ class WorkbenchServerTests(unittest.TestCase):
         workbench.save_registry(registry, self.registry_path)
 
         server = self._start_server(token="warning-boundary-token")
-        status, queue_body, _ = _http_request(
-            f"{self._base_url(server)}/api/queue"
-        )
+        status, queue_body, _ = _http_request(f"{self._base_url(server)}/api/queue")
 
         self.assertEqual(200, status)
         queue_recovery = queue_body["plans"][0]["recovery"]
@@ -753,9 +691,7 @@ class WorkbenchServerTests(unittest.TestCase):
 
     def test_artifacts_endpoint_describes_known_paths(self) -> None:
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         status, body, _ = _http_request(
             f"{self._base_url(server)}/api/artifacts?{query}"
         )
@@ -1272,9 +1208,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual("invalid-request", body["reason"])
 
     def test_queue_exposes_archivable_and_maintenance_fields(self) -> None:
-        server = self._start_server(
-            plan_roots=(str(self.tmp_path / "plans"),)
-        )
+        server = self._start_server(plan_roots=(str(self.tmp_path / "plans"),))
         status, body, _ = _http_request(f"{self._base_url(server)}/api/queue")
         self.assertEqual(200, status)
         self.assertIn("archive_retention_days", body)
@@ -1299,16 +1233,12 @@ class WorkbenchServerTests(unittest.TestCase):
                 {
                     "plan_dir": str(canonical_second),
                     "run_finished_at": "2026-07-03T12:00:00+00:00",
-                    "active_turn": {
-                        "last_activity_at": "2026-07-03T12:00:00+00:00"
-                    },
+                    "active_turn": {"last_activity_at": "2026-07-03T12:00:00+00:00"},
                 }
             ),
             encoding="utf-8",
         )
-        server = self._start_server(
-            plan_roots=(str(self.tmp_path / "plans"),)
-        )
+        server = self._start_server(plan_roots=(str(self.tmp_path / "plans"),))
         status, body, _ = _http_request(
             f"{self._base_url(server)}/api/queue?sort=oldest"
         )
@@ -1504,15 +1434,11 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertIsNone(body["abort_reason"])
         self.assertEqual(control_cli.NO_ACTIVE_RUN_NOTE, body["note"])
         queued = body["queued_command"]
-        self.assertEqual(
-            control_queue.COMMAND_REQUEST_ABORT_TURN, queued["command"]
-        )
+        self.assertEqual(control_queue.COMMAND_REQUEST_ABORT_TURN, queued["command"])
         queue_path = control_queue.queue_path_for_plan(
             self.canonical_plan_dir, self.state_dir
         )
-        record = json.loads(
-            queue_path.read_text(encoding="utf-8").splitlines()[0]
-        )
+        record = json.loads(queue_path.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(queued["id"], record["id"])
         self.assertEqual(
             control_queue.DEFAULT_ABORT_GRACE_SECONDS, record["grace_seconds"]
@@ -1537,9 +1463,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual("supervisor stop", body["queued_command"]["reason"])
 
     def test_control_abort_reports_active_turn(self) -> None:
-        _write_lock_file(
-            self.canonical_plan_dir, self.state_dir, pid=os.getpid()
-        )
+        _write_lock_file(self.canonical_plan_dir, self.state_dir, pid=os.getpid())
         plan_state = state.plan_state_dir(self.canonical_plan_dir, self.state_dir)
         (plan_state / events.STATE_FILE_NAME).write_text(
             json.dumps(
@@ -1565,9 +1489,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual(control_cli.ABORT_WILL_APPLY_NOTE, body["note"])
 
     def test_control_abort_degrades_note_without_active_turn(self) -> None:
-        _write_lock_file(
-            self.canonical_plan_dir, self.state_dir, pid=os.getpid()
-        )
+        _write_lock_file(self.canonical_plan_dir, self.state_dir, pid=os.getpid())
         server = self._start_server()
 
         status, body, _ = _http_request(
@@ -1588,9 +1510,7 @@ class WorkbenchServerTests(unittest.TestCase):
         link_root = self.tmp_path / "link"
         link_root.symlink_to(self.tmp_path / "plans", target_is_directory=True)
         linked_plan_dir = link_root / "alpha"
-        _write_lock_file(
-            self.canonical_plan_dir, self.state_dir, pid=os.getpid()
-        )
+        _write_lock_file(self.canonical_plan_dir, self.state_dir, pid=os.getpid())
         server = self._start_server()
 
         status, body, _ = _http_request(
@@ -1625,9 +1545,7 @@ class WorkbenchServerTests(unittest.TestCase):
                     headers=self._auth(server),
                 )
                 self.assertEqual(400, status)
-                self.assertEqual(
-                    control_queue.REJECT_INVALID_GRACE, body["reason"]
-                )
+                self.assertEqual(control_queue.REJECT_INVALID_GRACE, body["reason"])
         queue_path = control_queue.queue_path_for_plan(
             self.canonical_plan_dir, self.state_dir
         )
@@ -1791,9 +1709,7 @@ class WorkbenchServerTests(unittest.TestCase):
 
     def test_unknown_route_returns_404(self) -> None:
         server = self._start_server()
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/does-not-exist"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/does-not-exist")
         self.assertEqual(404, status)
         self.assertEqual("not-found", body["reason"])
 
@@ -1848,9 +1764,7 @@ class WorkbenchServerTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertTrue(body["ok"])
 
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/registry"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/registry")
         self.assertEqual(200, status)
         pins = body["registry"]["pins"]
         self.assertEqual(1, len(pins))
@@ -1897,9 +1811,7 @@ class WorkbenchServerTests(unittest.TestCase):
             self.assertEqual(200, status, msg=f"case={label}")
             self.assertTrue(body["ok"], msg=f"case={label}")
 
-            status, body, _ = _http_request(
-                f"{self._base_url(server)}/api/registry"
-            )
+            status, body, _ = _http_request(f"{self._base_url(server)}/api/registry")
             self.assertEqual(200, status, msg=f"case={label}")
             pins = body["registry"]["pins"]
             self.assertEqual(1, len(pins), msg=f"case={label}")
@@ -1908,9 +1820,7 @@ class WorkbenchServerTests(unittest.TestCase):
             # assert the key is present so a future regression that drops
             # the field entirely cannot pass silently.
             self.assertIn("unsafe_bypass", profile, msg=f"case={label}")
-            self.assertIn(
-                "allow_not_loop_ready", profile, msg=f"case={label}"
-            )
+            self.assertIn("allow_not_loop_ready", profile, msg=f"case={label}")
             self.assertIs(
                 unsafe_value,
                 profile["unsafe_bypass"],
@@ -2045,7 +1955,7 @@ class WorkbenchQuestionsAPITests(unittest.TestCase):
             "result_path": str(plan_state / "result.json"),
         }
         payload = {
-            "ok": False if paused else True,
+            "ok": not paused,
             "paused": paused,
             "reason": "runner-pause",
             "pause_reason": "runner-pause",
@@ -2115,9 +2025,7 @@ class WorkbenchQuestionsAPITests(unittest.TestCase):
 
     def test_questions_endpoint_requires_plan_dir(self) -> None:
         server = self._start_server()
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/questions"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/questions")
         self.assertEqual(400, status)
         self.assertFalse(body["ok"])
         self.assertEqual("invalid-request", body["reason"])
@@ -2177,9 +2085,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
 
     def _write_state(self, payload: dict) -> Path:
         state_path = self.plan_state_dir / "state.json"
-        state_path.write_text(
-            json.dumps(payload, sort_keys=True), encoding="utf-8"
-        )
+        state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         return state_path
 
     def _write_events(self, records: list[dict]) -> Path:
@@ -2220,9 +2126,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         )
         server = self._start_server()
         query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/state?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/state?{query}")
         self.assertEqual(200, status)
         self.assertTrue(body["ok"])
         self.assertEqual("run-x", body["state"]["run_id"])
@@ -2241,9 +2145,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
     def test_state_endpoint_handles_missing_state(self) -> None:
         server = self._start_server()
         query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/state?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/state?{query}")
         self.assertEqual(200, status)
         self.assertFalse(body["state"]["present"])
         self.assertEqual(["1", "2"], [s["id"] for s in body["sessions"]])
@@ -2257,9 +2159,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         server = self._start_server()
         query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
 
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/state?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/state?{query}")
 
         self.assertEqual(200, status)
         self.assertIsNone(body["cwd"])
@@ -2310,9 +2210,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         canonical_dotted = plans.canonicalize_path(dotted_plan_dir)
         server = self._start_server()
         query = urllib.parse.urlencode({"plan_dir": str(canonical_dotted)})
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/state?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/state?{query}")
         self.assertEqual(200, status)
         self.assertTrue(body["ok"])
         self.assertEqual(
@@ -2333,15 +2231,11 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         (self.canonical_plan_dir / "manifest.md").unlink()
         server = self._start_server()
         query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/state?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/state?{query}")
         self.assertEqual(500, status)
         self.assertFalse(body["ok"])
         self.assertEqual("malformed-plan", body["reason"])
-        self.assertEqual(
-            str(self.canonical_plan_dir), body["details"]["plan_dir"]
-        )
+        self.assertEqual(str(self.canonical_plan_dir), body["details"]["plan_dir"])
 
     def test_events_endpoint_paginates_and_filters_by_run(self) -> None:
         records = [
@@ -2373,9 +2267,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
 
         server = self._start_server()
         query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/events?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/events?{query}")
         self.assertEqual(200, status)
         self.assertEqual("run-b", body["run_id"])
         self.assertEqual(1, body["total"])
@@ -2387,9 +2279,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
                 "limit": "2",
             }
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/events?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/events?{query}")
         self.assertEqual(200, status)
         self.assertEqual(3, body["total"])
         self.assertEqual(2, len(body["events"]))
@@ -2403,9 +2293,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
                 "offset": "2",
             }
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/events?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/events?{query}")
         self.assertEqual(200, status)
         self.assertEqual(1, len(body["events"]))
         self.assertIsNone(body["next_offset"])
@@ -2415,9 +2303,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         query = urllib.parse.urlencode(
             {"plan_dir": str(self.canonical_plan_dir), "offset": "-1"}
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/events?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/events?{query}")
         self.assertEqual(400, status)
         self.assertEqual("invalid-request", body["reason"])
 
@@ -2429,9 +2315,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
                 "limit": str(workbench_server.MAX_EVENT_LIMIT + 1),
             }
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/events?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/events?{query}")
         self.assertEqual(400, status)
         self.assertEqual("invalid-request", body["reason"])
 
@@ -2455,9 +2339,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
                 "max_bytes": "1024",
             }
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/logs?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/logs?{query}")
         self.assertEqual(200, status)
         self.assertEqual("line 4\nline 5", body["text"])
         self.assertTrue(body["exists"])
@@ -2481,9 +2363,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
                 "max_bytes": "4",
             }
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/logs?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/logs?{query}")
         self.assertEqual(200, status)
         self.assertEqual("4567", body["text"])
         self.assertEqual(4, body["offset"])
@@ -2495,9 +2375,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         nested = self.plan_state_dir / "runs" / "turn-001" / "verification"
         nested.mkdir(parents=True)
         gz_path = nested / "c1-stdout.gz"
-        artifacts.atomic_write_gzip(
-            gz_path, b"line 1\nline 2\nline 3\nline 4\n"
-        )
+        artifacts.atomic_write_gzip(gz_path, b"line 1\nline 2\nline 3\nline 4\n")
         server = self._start_server()
         query = urllib.parse.urlencode(
             {
@@ -2507,9 +2385,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
                 "max_bytes": "1024",
             }
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/logs?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/logs?{query}")
         self.assertEqual(200, status)
         self.assertTrue(body["exists"])
         self.assertEqual("line 3\nline 4", body["text"])
@@ -2529,9 +2405,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
                 "max_bytes": "4",
             }
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/logs?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/logs?{query}")
         self.assertEqual(200, status)
         self.assertEqual("4567", body["text"])
         self.assertEqual(4, body["offset"])
@@ -2545,9 +2419,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         query = urllib.parse.urlencode(
             {"plan_dir": str(self.canonical_plan_dir), "stream": "stdout"}
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/logs?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/logs?{query}")
         self.assertEqual(404, status)
         self.assertEqual("not-found", body["reason"])
 
@@ -2561,9 +2433,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
                 "path": str(outside),
             }
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/logs?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/logs?{query}")
         self.assertEqual(400, status)
         self.assertEqual("invalid-request", body["reason"])
 
@@ -2582,20 +2452,14 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
                 "max_bytes": "1024",
             }
         )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/logs?{query}"
-        )
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/logs?{query}")
         self.assertEqual(200, status)
         self.assertEqual("inside\n", body["text"])
 
     def test_logs_endpoint_requires_stream_or_path(self) -> None:
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/logs?{query}"
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/logs?{query}")
         self.assertEqual(400, status)
         self.assertEqual("invalid-request", body["reason"])
 
@@ -2604,9 +2468,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         last_message.write_text("hello world\n" * 200, encoding="utf-8")
         self._write_state(
             {
-                "active_turn": self._make_turn(
-                    last_message_path=str(last_message)
-                ),
+                "active_turn": self._make_turn(last_message_path=str(last_message)),
                 "active_verification": None,
             }
         )
@@ -2626,9 +2488,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
 
     def test_last_message_endpoint_404_when_unset(self) -> None:
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         status, body, _ = _http_request(
             f"{self._base_url(server)}/api/last-message?{query}"
         )
@@ -2648,12 +2508,8 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
             }
         )
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/result?{query}"
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/result?{query}")
         self.assertEqual(200, status)
         self.assertEqual("complete", body["result"]["status_result"])
         self.assertEqual(["asl", "run"], body["result"]["argv"])
@@ -2678,23 +2534,15 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
             }
         )
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/result?{query}"
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/result?{query}")
         self.assertEqual(200, status)
         self.assertEqual(redacted_argv, body["result"]["argv"])
 
     def test_result_endpoint_404_when_missing(self) -> None:
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/result?{query}"
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/result?{query}")
         self.assertEqual(404, status)
         self.assertEqual("not-found", body["reason"])
 
@@ -2715,9 +2563,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
             }
         )
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         status, body, _ = _http_request(
             f"{self._base_url(server)}/api/verification?{query}"
         )
@@ -2727,9 +2573,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
 
     def test_verification_endpoint_returns_none_when_idle(self) -> None:
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         status, body, _ = _http_request(
             f"{self._base_url(server)}/api/verification?{query}"
         )
@@ -2783,12 +2627,8 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
             }
         )
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
-        status, body, _ = _http_request(
-            f"{self._base_url(server)}/api/commits?{query}"
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/commits?{query}")
         self.assertEqual(200, status)
         commits = body["commits"]
         self.assertEqual(2, len(commits))
@@ -2820,9 +2660,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
             encoding="utf-8",
         )
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         status, body, _ = _http_request(
             f"{self._base_url(server)}/api/progress?{query}"
         )
@@ -2837,9 +2675,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
 
     def test_progress_endpoint_returns_empty_when_missing(self) -> None:
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         status, body, _ = _http_request(
             f"{self._base_url(server)}/api/progress?{query}"
         )
@@ -2853,9 +2689,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
             "# Progress Journal\nno schema header\n", encoding="utf-8"
         )
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         status, body, _ = _http_request(
             f"{self._base_url(server)}/api/progress?{query}"
         )
@@ -2917,9 +2751,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
         registry = plans.read_repository_registry(registered)
         assert registry is not None
         workspace_root = self.tmp_path / "workspace"
-        plans.save_workspace_plan_metadata(
-            registered, workspace_root, registry.digest
-        )
+        plans.save_workspace_plan_metadata(registered, workspace_root, registry.digest)
         (registered / workbench.FINAL_REVIEW_FILE_NAME).write_text(
             "# Findings\n", encoding="utf-8"
         )
@@ -2943,9 +2775,7 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
 
     def test_final_review_endpoint_404_when_missing(self) -> None:
         server = self._start_server()
-        query = urllib.parse.urlencode(
-            {"plan_dir": str(self.canonical_plan_dir)}
-        )
+        query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
         status, body, _ = _http_request(
             f"{self._base_url(server)}/api/final-review?{query}"
         )
@@ -2961,12 +2791,8 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
             "/api/progress",
             "/api/verification",
         ):
-            query = urllib.parse.urlencode(
-                {"plan_dir": str(self.canonical_plan_dir)}
-            )
-            status, _, _ = _http_request(
-                f"{self._base_url(server)}{endpoint}?{query}"
-            )
+            query = urllib.parse.urlencode({"plan_dir": str(self.canonical_plan_dir)})
+            status, _, _ = _http_request(f"{self._base_url(server)}{endpoint}?{query}")
             self.assertIn(status, (200, 404), f"endpoint={endpoint}")
 
     def test_read_endpoints_require_plan_dir(self) -> None:
@@ -2982,13 +2808,9 @@ class WorkbenchArtifactReadAPITests(unittest.TestCase):
             "/api/progress",
             "/api/final-review",
         ):
-            status, body, _ = _http_request(
-                f"{self._base_url(server)}{endpoint}"
-            )
+            status, body, _ = _http_request(f"{self._base_url(server)}{endpoint}")
             self.assertEqual(400, status, f"endpoint={endpoint}")
-            self.assertEqual(
-                "invalid-request", body["reason"], f"endpoint={endpoint}"
-            )
+            self.assertEqual("invalid-request", body["reason"], f"endpoint={endpoint}")
 
 
 if __name__ == "__main__":

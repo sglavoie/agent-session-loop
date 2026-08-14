@@ -20,7 +20,6 @@ from typing import Any
 
 from . import events
 
-
 # Pause reasons the supervisor treats as transient and same-session retryable.
 # ``verify-failed``, ``timeout``, and ``no-status-change`` are cases where
 # relaunching the same session can succeed without any human answer, and

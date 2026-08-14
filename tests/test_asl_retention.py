@@ -10,23 +10,22 @@ otherwise break by reclaiming a lock it proved dead.
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
-from pathlib import Path
 import socket
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
 from agent_session_loop import plans, retention, state
 
-
-NOW = datetime(2026, 8, 4, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 DEAD_PID = 4_242_424
 
 RUN_OLD = "20260601T000000000000Z-11"
@@ -66,9 +65,7 @@ class RetentionTestBase(unittest.TestCase):
 
     def _write_lock(self, *, plan_dir: Path | None = None, **fields: object) -> Path:
         target = plan_dir if plan_dir is not None else self.plan_dir
-        lock_path = (
-            state.plan_state_dir(target, self.state_root) / state.LOCK_FILE_NAME
-        )
+        lock_path = state.plan_state_dir(target, self.state_root) / state.LOCK_FILE_NAME
         payload = {
             "plan_dir": str(plans.canonicalize_path(target)),
             "created_at": "2026-08-01T00:00:00+00:00",
@@ -89,9 +86,7 @@ class RetentionTestBase(unittest.TestCase):
     ) -> Path:
         target = plan_dir if plan_dir is not None else self.plan_dir
         run_dir = (
-            state.plan_state_dir(target, self.state_root)
-            / state.RUNS_DIR_NAME
-            / run_id
+            state.plan_state_dir(target, self.state_root) / state.RUNS_DIR_NAME / run_id
         )
         turn_dir = run_dir / "turn-0001-session-1"
         turn_dir.mkdir(parents=True)
@@ -223,7 +218,9 @@ class RetentionSelectionTests(RetentionTestBase):
 
         payload = self._report().to_dict()
 
-        self.assertEqual(payload["plan_dir"], str(plans.canonicalize_path(self.plan_dir)))
+        self.assertEqual(
+            payload["plan_dir"], str(plans.canonicalize_path(self.plan_dir))
+        )
         self.assertEqual(payload["state_dir"], str(self.plan_state))
         self.assertEqual(payload["run_count"], 2)
         self.assertEqual(payload["reclaimable_run_count"], 1)
@@ -523,9 +520,7 @@ class AssurancePinningTests(RetentionTestBase):
         self._write_run(RUN_NEW, finished_at=_stamp(1))
         self._publish(RUN_OLD)
 
-        report = retention.run_gc(
-            self.plan_dir, state_dir=self.state_root, now=NOW
-        )
+        report = retention.run_gc(self.plan_dir, state_dir=self.state_root, now=NOW)
 
         self.assertEqual(report.scope, "plan")
         self.assertEqual(report.assurance["missing_run_references"], [])
@@ -540,11 +535,7 @@ class AssurancePinningTests(RetentionTestBase):
         self.ledger_path.mkdir()
 
     def _reasons(self, report: retention.GCReport) -> set[str]:
-        return {
-            run.reason
-            for entry in report.plans
-            for run in entry.retention.runs
-        }
+        return {run.reason for entry in report.plans for run in entry.retention.runs}
 
     def test_unreadable_ledger_blocks_collection_and_says_so(self) -> None:
         self._write_run(RUN_OLD, finished_at=_stamp(45), log_bytes=1000)
@@ -651,9 +642,7 @@ class DryRunPurityTests(RetentionTestBase):
         super().setUp()
         self._write_run(RUN_OLD, finished_at=_stamp(45), log_bytes=1000)
         self._write_run(RUN_NEW, finished_at=_stamp(1))
-        self.lock_path = self._write_lock(
-            pid=DEAD_PID, hostname=socket.gethostname()
-        )
+        self.lock_path = self._write_lock(pid=DEAD_PID, hostname=socket.gethostname())
 
     def _lock_state(self) -> tuple[bytes, int, int]:
         info = self.lock_path.stat()
@@ -667,9 +656,7 @@ class DryRunPurityTests(RetentionTestBase):
     def _corpus_report(self, **kwargs: object) -> retention.PlanRetention:
         corpus = retention.corpus_retention(self.state_root, now=NOW, **kwargs)
         canonical = str(plans.canonicalize_path(self.plan_dir))
-        return next(
-            entry for entry in corpus.plans if entry.plan_dir == canonical
-        )
+        return next(entry for entry in corpus.plans if entry.plan_dir == canonical)
 
     def test_the_ordinary_read_would_have_removed_this_lock(self) -> None:
         # Without this the tests below could pass against a lock nothing
@@ -714,9 +701,7 @@ class DryRunPurityTests(RetentionTestBase):
 
     def test_both_scopes_reach_the_same_decision(self) -> None:
         plan_scope = self._decisions(
-            retention.plan_retention(
-                self.plan_dir, state_dir=self.state_root, now=NOW
-            )
+            retention.plan_retention(self.plan_dir, state_dir=self.state_root, now=NOW)
         )
         # Re-establish the lock so the second scope judges the same corpus as
         # the first even when the first removed it. The bytes are identical,

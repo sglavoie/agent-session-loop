@@ -4,77 +4,34 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
-import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
 import shutil
-import signal
-import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
     baseline,
     baseline_cache,
-    cli,
-    compact_state,
-    config,
     contracts,
-    control_queue,
-    events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
-    review_repair,
-    run_control,
-    runner,
-    state,
-    tail,
     verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
-    write_plan,
-    init_git_repo,
-    init_multi_repo_workspace,
-    git_stdout,
-    write_multi_repo_plan,
     _baseline_contract_text,
     _command_contract,
     _contract_block,
+    git_stdout,
+    init_git_repo,
+    init_multi_repo_workspace,
+    write_multi_repo_plan,
+    write_plan,
 )
 
 
@@ -151,9 +108,7 @@ class BaselineContractTests(unittest.TestCase):
                         }
                     )
                 )
-                with self.assertRaisesRegex(
-                    plans.PlanError, "baseline_expectation"
-                ):
+                with self.assertRaisesRegex(plans.PlanError, "baseline_expectation"):
                     contracts.parse_completion_contract(text, session_id="1")
 
     def test_legacy_contract_without_field_parses_unchanged(self) -> None:
@@ -227,14 +182,12 @@ class BaselineContractTests(unittest.TestCase):
 
 class BaselineCacheTests(unittest.TestCase):
     def _command_recipe(
-        self, name: str, argv: tuple[str, ...] = ("python3", "-m", "unittest", "tests.t")
+        self,
+        name: str,
+        argv: tuple[str, ...] = ("python3", "-m", "unittest", "tests.t"),
     ) -> contracts.VerifyRecipe:
         return contracts.VerifyRecipe(
-            checks=(
-                contracts.CommandCheck(
-                    name=name, argv=argv, timeout_seconds=30.0
-                ),
-            )
+            checks=(contracts.CommandCheck(name=name, argv=argv, timeout_seconds=30.0),)
         )
 
     def test_equivalent_recipes_normalize_and_key_identically(self) -> None:
@@ -318,7 +271,9 @@ class BaselineCacheTests(unittest.TestCase):
         recipe_skip = contracts.VerifyRecipe(
             checks=(
                 contracts.CommandCheck(
-                    name="c", argv=("true",), timeout_seconds=5.0,
+                    name="c",
+                    argv=("true",),
+                    timeout_seconds=5.0,
                     baseline_expectation="skip",
                 ),
             )
@@ -326,7 +281,9 @@ class BaselineCacheTests(unittest.TestCase):
         recipe_pass = contracts.VerifyRecipe(
             checks=(
                 contracts.CommandCheck(
-                    name="c", argv=("true",), timeout_seconds=5.0,
+                    name="c",
+                    argv=("true",),
+                    timeout_seconds=5.0,
                     baseline_expectation="pass",
                 ),
             )
@@ -351,9 +308,7 @@ class BaselineCacheTests(unittest.TestCase):
 
         normalized = baseline_cache.normalize_recipe(recipe("SVC"))
         self.assertIn('"repo":"SVC"', normalized)
-        self.assertNotEqual(
-            normalized, baseline_cache.normalize_recipe(recipe("OAK"))
-        )
+        self.assertNotEqual(normalized, baseline_cache.normalize_recipe(recipe("OAK")))
 
     def test_cwd_executable_and_environment_change_the_key(self) -> None:
         recipe = self._command_recipe("c")
@@ -409,9 +364,7 @@ class BaselineCacheTests(unittest.TestCase):
         sig_b = baseline_cache.environment_signature({"PATH": "/b"})
         self.assertNotEqual(sig_a, sig_b)
         # A key outside the selected set does not change the signature.
-        sig_c = baseline_cache.environment_signature(
-            {"PATH": "/a", "UNSELECTED": "x"}
-        )
+        sig_c = baseline_cache.environment_signature({"PATH": "/a", "UNSELECTED": "x"})
         self.assertEqual(sig_a, sig_c)
 
     def test_repository_fingerprint_invalidated_by_dirty_staged_untracked(
@@ -449,9 +402,7 @@ class BaselineCacheTests(unittest.TestCase):
             fingerprint = baseline_cache.repository_fingerprint(tmp)
             self.assertTrue(fingerprint.startswith("non-git:"))
             # Stable across calls for the same directory.
-            self.assertEqual(
-                fingerprint, baseline_cache.repository_fingerprint(tmp)
-            )
+            self.assertEqual(fingerprint, baseline_cache.repository_fingerprint(tmp))
 
     def test_cache_roundtrip_save_and_load(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -523,9 +474,7 @@ class BaselineCacheTests(unittest.TestCase):
             )
 
             self.assertEqual(content_before, plans.plan_content_sha256(plan_dir))
-            self.assertEqual(
-                readiness_before, plans.stable_readiness_sha256(plan_dir)
-            )
+            self.assertEqual(readiness_before, plans.stable_readiness_sha256(plan_dir))
 
 
 class BaselineTotalBudgetTests(unittest.TestCase):
@@ -552,9 +501,7 @@ class BaselineTotalBudgetTests(unittest.TestCase):
                 ("pending", "pending"),
                 contracts_by_id={
                     "1": _command_contract('["true"]', session="1"),
-                    "2": _command_contract(
-                        '["echo", "x"]', session="2", name="cmd2"
-                    ),
+                    "2": _command_contract('["echo", "x"]', session="2", name="cmd2"),
                 },
             )
             seen_timeouts: list[float] = []
@@ -564,9 +511,7 @@ class BaselineTotalBudgetTests(unittest.TestCase):
                 return self._pass_result(check, 4.0)
 
             with mock.patch.object(baseline, "run_check", fake_run_check):
-                result = baseline.run_baseline(
-                    plan_dir, repo_root, total_timeout=10.0
-                )
+                result = baseline.run_baseline(plan_dir, repo_root, total_timeout=10.0)
 
             # First check gets the full remaining budget (10s), the second
             # only what the first left over (10 - 4 = 6s), not its own 120s
@@ -593,9 +538,7 @@ class BaselineTotalBudgetTests(unittest.TestCase):
                 return self._pass_result(check, 6.0)
 
             with mock.patch.object(baseline, "run_check", fake_run_check):
-                result = baseline.run_baseline(
-                    plan_dir, repo_root, total_timeout=5.0
-                )
+                result = baseline.run_baseline(plan_dir, repo_root, total_timeout=5.0)
 
             outcome = result.outcomes[0]
             self.assertEqual("pass", outcome.status)
@@ -621,9 +564,7 @@ class BaselineTotalBudgetTests(unittest.TestCase):
                 ("pending", "pending"),
                 contracts_by_id={
                     "1": _command_contract('["true"]', session="1"),
-                    "2": _command_contract(
-                        '["echo", "x"]', session="2", name="cmd2"
-                    ),
+                    "2": _command_contract('["echo", "x"]', session="2", name="cmd2"),
                 },
             )
 
@@ -631,9 +572,7 @@ class BaselineTotalBudgetTests(unittest.TestCase):
                 return self._pass_result(check, 5.0)
 
             with mock.patch.object(baseline, "run_check", fake_run_check):
-                result = baseline.run_baseline(
-                    plan_dir, repo_root, total_timeout=5.0
-                )
+                result = baseline.run_baseline(plan_dir, repo_root, total_timeout=5.0)
 
             skipped = result.outcomes[1]
             self.assertEqual("skip", skipped.status)
@@ -674,9 +613,7 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
             _digest, available = baseline._registered_repository_fingerprint(
                 context, plan_dir
             )
-            run = baseline.run_baseline(
-                plan_dir, workspace_root, context=context
-            )
+            run = baseline.run_baseline(plan_dir, workspace_root, context=context)
 
             self.assertFalse(available)
             self.assertFalse(run.all_satisfied)
@@ -761,13 +698,15 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
                     "same-digest",
                     baseline.aggregate_repository_fingerprint(context, plan_dir),
                 )
-            with mock.patch.object(
-                baseline,
-                "_registered_repository_fingerprint",
-                return_value=("same-digest", False),
+            with (
+                mock.patch.object(
+                    baseline,
+                    "_registered_repository_fingerprint",
+                    return_value=("same-digest", False),
+                ),
+                self.assertRaisesRegex(plans.PlanError, "unavailable"),
             ):
-                with self.assertRaisesRegex(plans.PlanError, "unavailable"):
-                    baseline.aggregate_repository_fingerprint(context, plan_dir)
+                baseline.aggregate_repository_fingerprint(context, plan_dir)
 
     def test_records_registry_aggregate_and_invalidates_on_other_repo_change(
         self,
@@ -811,9 +750,7 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
                 plan_dir, workspace_root
             )
             self.assertTrue(
-                baseline.baseline_evidence_is_current(
-                    record.result, context, plan_dir
-                )
+                baseline.baseline_evidence_is_current(record.result, context, plan_dir)
             )
 
             (repositories["OAK"] / "untracked.txt").write_text(
@@ -821,9 +758,7 @@ class MultiRepositoryBaselineTests(unittest.TestCase):
             )
 
             self.assertFalse(
-                baseline.baseline_evidence_is_current(
-                    record.result, context, plan_dir
-                )
+                baseline.baseline_evidence_is_current(record.result, context, plan_dir)
             )
 
 

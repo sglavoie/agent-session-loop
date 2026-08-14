@@ -15,13 +15,12 @@ exercise it without real sleeps.
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
 import threading
+from pathlib import Path
 from typing import Any, TextIO
 
 from . import plans, progress_repair, responses, tail
-
 
 DEFAULT_POLL_INTERVAL_SECONDS = tail.POLL_INTERVAL_SECONDS
 

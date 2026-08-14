@@ -29,17 +29,16 @@ a deliberate ``asl unlock``.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 import json
 import os
-from pathlib import Path
 import shutil
 import sys
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from . import assurance_ledger, assurance_report, plans, session_overview, state
-
 
 __all__ = [
     "DEFAULT_MAX_AGE_DAYS",
@@ -272,9 +271,7 @@ def live_run_keys(state_dir: str | Path | None = None) -> frozenset[tuple[str, s
     rows, _stale_locks, _skipped = session_overview.scan_running_rows(
         state_dir, reclaim=False
     )
-    return frozenset(
-        (str(row.state_dir), row.run_id) for row in rows if row.run_id
-    )
+    return frozenset((str(row.state_dir), row.run_id) for row in rows if row.run_id)
 
 
 def pinned_run_ids(
@@ -331,9 +328,7 @@ def _plan_report(
             detail = f"finished after the {max_age_days:g}-day cutoff"
         else:
             reason, detail = "", ""
-        age_seconds = (
-            (now - finished).total_seconds() if finished is not None else None
-        )
+        age_seconds = (now - finished).total_seconds() if finished is not None else None
         runs.append(
             RunCandidate(
                 run_id=run_dir.name,
@@ -383,7 +378,7 @@ def plan_retention(
         plan_state=state.plan_state_dir(canonical_plan_dir, state_dir),
         lock_info=state.inspect_lock_info(canonical_plan_dir, state_dir),
         max_age_days=max_age_days,
-        now=now if now is not None else datetime.now(timezone.utc),
+        now=now if now is not None else datetime.now(UTC),
         live_runs=live_runs if live_runs is not None else live_run_keys(state_dir),
         pinned=pinned if pinned is not None else pinned_run_ids(state_dir),
     )
@@ -391,15 +386,15 @@ def plan_retention(
 
 def _recover_plan_dir(plan_state: Path) -> Path | None:
     """Recover the plan directory a state directory belongs to, or ``None``."""
-    state_plan_dir, lock_plan_dir = (
-        session_overview._read_state_dir_plan_dir_fallbacks(plan_state)
+    state_plan_dir, lock_plan_dir = session_overview._read_state_dir_plan_dir_fallbacks(
+        plan_state
     )
     for candidate in (state_plan_dir, lock_plan_dir):
         if not candidate:
             continue
         try:
             canonical = plans.canonicalize_path(candidate)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         if plans.path_sha256(canonical) == plan_state.name:
             return canonical
@@ -423,7 +418,7 @@ def corpus_retention(
     if max_age_days < 0:
         raise ValueError("max_age_days must be non-negative")
     root = state.state_root(state_dir)
-    moment = now if now is not None else datetime.now(timezone.utc)
+    moment = now if now is not None else datetime.now(UTC)
     live = live_run_keys(root)
     pins = pinned if pinned is not None else pinned_run_ids(root)
     reports: list[PlanRetention] = []
@@ -726,9 +721,7 @@ def _print_report(report: GCReport) -> None:
     if unresolved:
         plan_line += f", {unresolved} state dir(s) unresolved and not judged"
     print(plan_line)
-    print(
-        f"Runs: {report.reclaimable_run_count} reclaimable of {report.run_count}"
-    )
+    print(f"Runs: {report.reclaimable_run_count} reclaimable of {report.run_count}")
     print(
         f"Reclaimable: {_format_bytes(report.reclaimable_bytes)} of "
         f"{_format_bytes(report.total_bytes)} measured"
@@ -738,10 +731,7 @@ def _print_report(report: GCReport) -> None:
         for run in report.plans[0].retention.runs:
             marker = "reclaim" if run.reclaimable else run.reason
             detail = f": {run.detail}" if run.detail else ""
-            print(
-                f"  {run.run_id}  {_format_bytes(run.size_bytes)}  "
-                f"{marker}{detail}"
-            )
+            print(f"  {run.run_id}  {_format_bytes(run.size_bytes)}  {marker}{detail}")
     else:
         reclaiming = sorted(
             (entry for entry in report.plans if entry.retention.reclaimable_runs),
@@ -801,8 +791,7 @@ def _print_report(report: GCReport) -> None:
         for entry in report.plans:
             for run_id, error in entry.failures:
                 print(
-                    f"  failed to remove {run_id} "
-                    f"({entry.retention.plan_dir}): {error}"
+                    f"  failed to remove {run_id} ({entry.retention.plan_dir}): {error}"
                 )
     elif report.reclaimable_run_count:
         print("Re-run with --apply to delete the reclaimable runs.")

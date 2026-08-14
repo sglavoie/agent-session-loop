@@ -4,75 +4,29 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
-import io
-import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
-import signal
-import stat
-import subprocess
-import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
-    config,
-    contracts,
-    control_queue,
     events,
-    harnesses,
-    install_verify,
-    plans,
     preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
     review_repair,
-    run_control,
     runner,
     state,
-    tail,
-    verification,
     workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
+    _WORKBENCH_DEAD_PID,
+    _discovered,
+    _make_workbench_plan,
+    _structured_review_finding,
+    _write_lock_file,
+    _write_state_payload,
     write_completed_review_plan,
     write_review_cycle_event,
-    _structured_review_finding,
-    _WORKBENCH_DEAD_PID,
-    _make_workbench_plan,
-    _write_state_payload,
-    _write_lock_file,
-    _discovered,
 )
 
 
@@ -94,13 +48,9 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             _write_lock_file(plan_dir, state_root, pid=lock_pid)
         discovered = _discovered(plan_dir)
         if pid_running is None:
-            return workbench.build_workbench_recovery(
-                discovered, state_dir=state_root
-            )
+            return workbench.build_workbench_recovery(discovered, state_dir=state_root)
         with mock.patch.object(state, "is_pid_running", side_effect=pid_running):
-            return workbench.build_workbench_recovery(
-                discovered, state_dir=state_root
-            )
+            return workbench.build_workbench_recovery(discovered, state_dir=state_root)
 
     def test_ready_plan_has_no_recovery_needed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,18 +189,14 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             self.assertIn(
                 f"--max-review-fix-cycles to {required_cap}", recovery.summary
             )
-            self.assertIn(
-                f"{required_cap} or higher", recovery.actions[0].description
-            )
+            self.assertIn(f"{required_cap} or higher", recovery.actions[0].description)
 
     def test_ready_continuation_exhausted_group_avoids_cap_guidance(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            plan_dir = _make_workbench_plan(
-                tmp_path, "ready-continuation-exhausted"
-            )
+            plan_dir = _make_workbench_plan(tmp_path, "ready-continuation-exhausted")
             required_cap = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
             resume = workbench.review_continuation.ReviewResume(
                 source_cycle=2,
@@ -290,9 +236,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 f"--max-review-fix-cycles to {required_cap}", recovery.summary
             )
             self.assertEqual("inspect-artifacts", recovery.actions[0].id)
-            self.assertNotIn(
-                "--max-review-fix-cycles", recovery.actions[0].description
-            )
+            self.assertNotIn("--max-review-fix-cycles", recovery.actions[0].description)
 
     def test_ready_rereview_omits_cap_above_runner_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -324,9 +268,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             self.assertIn("--review-harness", recovery.summary)
             self.assertIn("--review-harness", recovery.actions[0].description)
             self.assertNotIn("--max-review-fix-cycles", recovery.summary)
-            self.assertNotIn(
-                "--max-review-fix-cycles", recovery.actions[0].description
-            )
+            self.assertNotIn("--max-review-fix-cycles", recovery.actions[0].description)
 
     def test_state_read_warning_details_cover_stable_codes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -409,13 +351,13 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                     raise FileNotFoundError(state_path)
                 return original_read_text(path, *args, **kwargs)
 
-            with mock.patch.object(Path, "exists", new=exists_with_state_race):
-                with mock.patch.object(
-                    Path, "read_text", new=read_text_with_state_race
-                ):
-                    recovery = workbench.build_workbench_recovery(
-                        _discovered(plan_dir), state_dir=state_root
-                    )
+            with (
+                mock.patch.object(Path, "exists", new=exists_with_state_race),
+                mock.patch.object(Path, "read_text", new=read_text_with_state_race),
+            ):
+                recovery = workbench.build_workbench_recovery(
+                    _discovered(plan_dir), state_dir=state_root
+                )
 
             payload = recovery.to_payload()
 
@@ -848,8 +790,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             action_payload = [action.to_payload() for action in recovery.actions]
             self.assertTrue(
                 any(
-                    action["endpoint"] == "/api/launch"
-                    and action["target"] == "launch"
+                    action["endpoint"] == "/api/launch" and action["target"] == "launch"
                     for action in action_payload
                 )
             )
@@ -903,7 +844,9 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             self.assertEqual("reply-needed", recovery.kind)
             self.assertEqual("2", recovery.session_id)
             self.assertEqual(2, recovery.turn_index)
-            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            artifact_payload = [
+                artifact.to_payload() for artifact in recovery.artifacts
+            ]
             self.assertTrue(
                 any(
                     artifact["source"] == "paused-turn"
@@ -921,8 +864,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             action_payload = [action.to_payload() for action in recovery.actions]
             self.assertTrue(
                 any(
-                    action["endpoint"] == "/api/reply"
-                    and action["target"] == "reply"
+                    action["endpoint"] == "/api/reply" and action["target"] == "reply"
                     for action in action_payload
                 )
             )
@@ -947,8 +889,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             action_payload = [action.to_payload() for action in recovery.actions]
             self.assertTrue(
                 any(
-                    action["endpoint"] == "/api/unlock"
-                    and action["target"] == "unlock"
+                    action["endpoint"] == "/api/unlock" and action["target"] == "unlock"
                     for action in action_payload
                 )
             )
@@ -981,8 +922,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             action_payload = [action.to_payload() for action in recovery.actions]
             self.assertTrue(
                 any(
-                    action["endpoint"] == "/api/unlock"
-                    and action["target"] == "unlock"
+                    action["endpoint"] == "/api/unlock" and action["target"] == "unlock"
                     for action in action_payload
                 )
             )
@@ -1021,8 +961,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             action_payload = [action.to_payload() for action in recovery.actions]
             self.assertTrue(
                 any(
-                    action["endpoint"] == "/api/unlock"
-                    and action["target"] == "unlock"
+                    action["endpoint"] == "/api/unlock" and action["target"] == "unlock"
                     for action in action_payload
                 )
             )
@@ -1064,7 +1003,9 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             self.assertFalse(recovery.recoverable)
             self.assertEqual("1", recovery.session_id)
             self.assertEqual(2, recovery.turn_index)
-            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            artifact_payload = [
+                artifact.to_payload() for artifact in recovery.artifacts
+            ]
             self.assertTrue(
                 any(
                     artifact["source"] == "active-turn"
@@ -1138,7 +1079,9 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 any("asl verify" in command["command"] for command in command_payload)
             )
             self.assertTrue(
-                any("asl preflight" in command["command"] for command in command_payload)
+                any(
+                    "asl preflight" in command["command"] for command in command_payload
+                )
             )
             evidence_values = [row.value for row in recovery.evidence]
             self.assertIn("file-missing", evidence_values)
@@ -1148,7 +1091,9 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                     for row in recovery.evidence
                 )
             )
-            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            artifact_payload = [
+                artifact.to_payload() for artifact in recovery.artifacts
+            ]
             self.assertTrue(
                 any(
                     artifact["source"] == "failed-turn"
@@ -1165,8 +1110,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             action_payload = [action.to_payload() for action in recovery.actions]
             self.assertTrue(
                 any(
-                    action["endpoint"] == "/api/launch"
-                    and action["target"] == "launch"
+                    action["endpoint"] == "/api/launch" and action["target"] == "launch"
                     for action in action_payload
                 )
             )
@@ -1234,8 +1178,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             self.assertIn(str(stderr_artifact), paths)
             self.assertTrue(
                 all(
-                    artifact["kind"] == "verification-output"
-                    for artifact in check_refs
+                    artifact["kind"] == "verification-output" for artifact in check_refs
                 )
             )
 
@@ -1300,7 +1243,9 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             self.assertEqual("verify-failed", recovery.kind)
             self.assertEqual("2", recovery.session_id)
             self.assertEqual(5, recovery.turn_index)
-            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            artifact_payload = [
+                artifact.to_payload() for artifact in recovery.artifacts
+            ]
             self.assertTrue(
                 any(
                     artifact["source"] == "failed-turn"
@@ -1370,7 +1315,9 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             action_targets = {action.target for action in recovery.actions}
             self.assertIn("artifacts", action_targets)
             self.assertIn("launch", action_targets)
-            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            artifact_payload = [
+                artifact.to_payload() for artifact in recovery.artifacts
+            ]
             self.assertTrue(
                 any(
                     artifact["source"] == "failed-turn"
@@ -1496,7 +1443,9 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             self.assertEqual("generic", recovery.kind)
             self.assertEqual("3", recovery.session_id)
             self.assertEqual(4, recovery.turn_index)
-            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            artifact_payload = [
+                artifact.to_payload() for artifact in recovery.artifacts
+            ]
             self.assertTrue(
                 any(
                     artifact["source"] == "failed-turn"
@@ -1560,7 +1509,9 @@ class WorkbenchRecoveryTests(unittest.TestCase):
 
             self.assertEqual("commit-failed", recovery.kind)
             self.assertEqual(1, recovery.commit_index)
-            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            artifact_payload = [
+                artifact.to_payload() for artifact in recovery.artifacts
+            ]
             self.assertTrue(
                 any(
                     artifact["source"] == "failed-commit"
@@ -1570,8 +1521,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             )
             self.assertFalse(
                 any(
-                    artifact["source"] == "active-turn"
-                    for artifact in artifact_payload
+                    artifact["source"] == "active-turn" for artifact in artifact_payload
                 )
             )
             action_payload = [action.to_payload() for action in recovery.actions]
@@ -1646,8 +1596,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                     self.assertTrue(
                         any(
                             artifact["source"] == "failed-commit"
-                            and artifact["path"]
-                            == str(commit_artifact / "result.json")
+                            and artifact["path"] == str(commit_artifact / "result.json")
                             for artifact in artifact_payload
                         )
                     )
@@ -1687,7 +1636,9 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             self.assertTrue(
                 any(action["target"] == "profile" for action in action_payload)
             )
-            artifact_payload = [artifact.to_payload() for artifact in recovery.artifacts]
+            artifact_payload = [
+                artifact.to_payload() for artifact in recovery.artifacts
+            ]
             self.assertTrue(
                 any(
                     artifact["kind"] == "config"

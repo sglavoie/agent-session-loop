@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import datetime, timezone
 import json
-from pathlib import Path
 import subprocess
 import tempfile
-from typing import get_args
 import unittest
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import get_args
 
 from agent_session_loop import authoring, plans, repository_registration
 from agent_session_loop.contracts import parse_completion_contract
@@ -25,8 +25,7 @@ from tests.support import (
     write_plan,
 )
 
-
-FIXED_NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+FIXED_NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
 TWO_REPO_SPECS: tuple[tuple[str, str, str], ...] = (
@@ -152,15 +151,11 @@ class RegistrationDerivationTests(unittest.TestCase):
         before_plan = _tree_state(self.plan_dir)
         before_workspace = _tree_state(self.workspace)
 
-        derived = repository_registration.derive_registration(
-            self.plan_dir, cwd=svc
-        )
+        derived = repository_registration.derive_registration(self.plan_dir, cwd=svc)
 
         self.assertIsInstance(derived, repository_registration.RegistrationPlan)
         self.assertEqual(self.workspace, derived.workspace_root)
-        self.assertEqual(
-            ("tundra_OAK", "tundra_svc"), derived.registry.aliases
-        )
+        self.assertEqual(("tundra_OAK", "tundra_svc"), derived.registry.aliases)
         self.assertEqual(
             [
                 ("tundra_OAK", "tundra_OAK", "github.com/tundra/OAK"),
@@ -178,18 +173,14 @@ class RegistrationDerivationTests(unittest.TestCase):
         self.assertEqual("tundra_OAK", first["oak-suite"].repo)
         self.assertEqual(".", first["oak-suite"].cwd)
 
-        second = {
-            check.name: check for check in derived.contracts["2"].verify.checks
-        }
+        second = {check.name: check for check in derived.contracts["2"].verify.checks}
         self.assertEqual("tundra_OAK", second["oak-regex"].repo)
         self.assertEqual("README.md", second["oak-regex"].path)
         # No cwd, no absolute argv: the session's sole write repository owns it.
         self.assertEqual("tundra_OAK", second["inherited"].repo)
         self.assertIsNone(second["inherited"].cwd)
 
-        self.assertEqual(
-            ("tundra_OAK", "tundra_svc"), derived.scopes["1"].writes
-        )
+        self.assertEqual(("tundra_OAK", "tundra_svc"), derived.scopes["1"].writes)
         self.assertEqual(("tundra_OAK",), derived.scopes["2"].writes)
         for session_id, scope in derived.scopes.items():
             self.assertEqual(
@@ -200,9 +191,7 @@ class RegistrationDerivationTests(unittest.TestCase):
 
         for session_id, contract in derived.contracts.items():
             parse_completion_contract(
-                _contract_block(
-                    session_id, _verify_payload(contract)["checks"]
-                ),
+                _contract_block(session_id, _verify_payload(contract)["checks"]),
                 session_id=session_id,
                 repository_registry=derived.registry,
             )
@@ -238,9 +227,7 @@ class RegistrationDerivationTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        derived = repository_registration.derive_registration(
-            self.plan_dir, cwd=svc
-        )
+        derived = repository_registration.derive_registration(self.plan_dir, cwd=svc)
 
         scope = derived.scopes["1"]
         self.assertEqual(("tundra_OAK", "tundra_svc"), scope.reads)
@@ -279,13 +266,9 @@ class RegistrationDerivationTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        derived = repository_registration.derive_registration(
-            self.plan_dir, cwd=svc
-        )
+        derived = repository_registration.derive_registration(self.plan_dir, cwd=svc)
 
-        checks = {
-            check.name: check for check in derived.contracts["1"].verify.checks
-        }
+        checks = {check.name: check for check in derived.contracts["1"].verify.checks}
         self.assertEqual("tundra_OAK", checks["oak-tool"].repo)
 
     def test_missing_origin_remote_refuses_with_repository_origin(self) -> None:
@@ -316,9 +299,7 @@ class RegistrationDerivationTests(unittest.TestCase):
             },
         )
 
-        derived = repository_registration.derive_registration(
-            self.plan_dir, cwd=svc
-        )
+        derived = repository_registration.derive_registration(self.plan_dir, cwd=svc)
 
         self.assertEqual("refused", derived.status)
         self.assertEqual("repository-origin", derived.missing_fact)
@@ -347,9 +328,7 @@ class RegistrationDerivationTests(unittest.TestCase):
             },
         )
 
-        derived = repository_registration.derive_registration(
-            self.plan_dir, cwd=outer
-        )
+        derived = repository_registration.derive_registration(self.plan_dir, cwd=outer)
 
         self.assertEqual("refused", derived.status)
         self.assertEqual("workspace-root", derived.missing_fact)
@@ -383,14 +362,10 @@ class RegistrationDerivationTests(unittest.TestCase):
             },
         )
 
-        derived = repository_registration.derive_registration(
-            self.plan_dir, cwd=svc
-        )
+        derived = repository_registration.derive_registration(self.plan_dir, cwd=svc)
 
         self.assertEqual("refused", derived.status)
-        self.assertEqual(
-            "contract-path-outside-registry", derived.missing_fact
-        )
+        self.assertEqual("contract-path-outside-registry", derived.missing_fact)
         self.assertIn("'stray'", derived.detail)
         self.assertEqual(self.workspace, derived.workspace_root)
 
@@ -425,9 +400,7 @@ class RegistrationDerivationTests(unittest.TestCase):
             },
         )
 
-        derived = repository_registration.derive_registration(
-            self.plan_dir, cwd=svc
-        )
+        derived = repository_registration.derive_registration(self.plan_dir, cwd=svc)
 
         self.assertEqual("refused", derived.status)
         self.assertEqual("command-check-repo", derived.missing_fact)
@@ -435,9 +408,7 @@ class RegistrationDerivationTests(unittest.TestCase):
 
     def test_registered_plan_is_already_registered(self) -> None:
         repositories = self._init_two_repositories()
-        write_multi_repo_plan(
-            self.plan_dir, ("pending",), specs=TWO_REPO_SPECS
-        )
+        write_multi_repo_plan(self.plan_dir, ("pending",), specs=TWO_REPO_SPECS)
 
         derived = repository_registration.derive_registration(
             self.plan_dir, cwd=repositories["SVC"]
@@ -658,9 +629,7 @@ class RegistrationApplicationTests(unittest.TestCase):
         )
 
     def _session_text(self, session_id: str) -> str:
-        return (self.plan_dir / f"session-{session_id}.md").read_text(
-            encoding="utf-8"
-        )
+        return (self.plan_dir / f"session-{session_id}.md").read_text(encoding="utf-8")
 
     def _set_handoff(
         self, session_id: str, *, status: str, files_modified: str
@@ -752,9 +721,7 @@ class RegistrationApplicationTests(unittest.TestCase):
         self.assertEqual(
             metadata_before, _tree_state(self.plan_dir)["plan-metadata.json"]
         )
-        self.assertEqual(
-            plans.stable_readiness_sha256(self.plan_dir), result.readiness
-        )
+        self.assertEqual(plans.stable_readiness_sha256(self.plan_dir), result.readiness)
         readiness = plans.read_readiness_metadata(self.plan_dir)
         self.assertEqual(result.readiness, readiness.readiness_sha256)
         self.assertEqual("reviewed", readiness.state)
@@ -834,8 +801,7 @@ class RegistrationApplicationTests(unittest.TestCase):
         self.assertEqual(
             ("complete", "pending"),
             tuple(
-                status.status
-                for status in plans.inspect_plan(self.plan_dir).sessions
+                status.status for status in plans.inspect_plan(self.plan_dir).sessions
             ),
         )
 
@@ -850,8 +816,7 @@ class RegistrationApplicationTests(unittest.TestCase):
         self.assertEqual(
             ("complete", "pending"),
             tuple(
-                status.status
-                for status in plans.inspect_plan(self.plan_dir).sessions
+                status.status for status in plans.inspect_plan(self.plan_dir).sessions
             ),
         )
 
@@ -966,29 +931,22 @@ class SourcePlanRegistrationTests(unittest.TestCase):
     ) -> None:
         text = self._source_plan()
 
-        result = repository_registration.register_source_plan(
-            text, cwd=self.svc
-        )
+        result = repository_registration.register_source_plan(text, cwd=self.svc)
 
         self.assertEqual("applied", result.status)
         self.assertEqual(self.workspace, result.workspace_root)
         self.assertEqual(("1", "2"), result.sessions_changed)
         migrated = result.markdown
-        self.assertLess(
-            migrated.index("## Context"), migrated.index("## Repositories")
-        )
+        self.assertLess(migrated.index("## Context"), migrated.index("## Repositories"))
         self.assertLess(
             migrated.index("## Repositories"),
             migrated.index("## Session 1: First"),
         )
 
         parsed = authoring.parse_plan_document(migrated)
-        self.assertEqual(
-            ("tundra_OAK", "tundra_svc"), parsed.registry.aliases
-        )
+        self.assertEqual(("tundra_OAK", "tundra_svc"), parsed.registry.aliases)
         scopes = {
-            session.session_id.value: session.scope
-            for session in parsed.sessions
+            session.session_id.value: session.scope for session in parsed.sessions
         }
         self.assertEqual(
             plans.SessionScope(
@@ -998,9 +956,7 @@ class SourcePlanRegistrationTests(unittest.TestCase):
             scopes["1"],
         )
         self.assertEqual(
-            plans.SessionScope(
-                reads=("tundra_OAK",), writes=("tundra_OAK",)
-            ),
+            plans.SessionScope(reads=("tundra_OAK",), writes=("tundra_OAK",)),
             scopes["2"],
         )
         self.assertIn("Add the module.", migrated)
@@ -1022,16 +978,12 @@ class SourcePlanRegistrationTests(unittest.TestCase):
             )
             for session in parsed.sessions
         }
-        first = {
-            check.name: check for check in contracts["1"].verify.checks
-        }
+        first = {check.name: check for check in contracts["1"].verify.checks}
         self.assertEqual("tundra_svc", first["svc-file"].repo)
         self.assertEqual("src/new.py", first["svc-file"].path)
         self.assertEqual("tundra_OAK", first["oak-suite"].repo)
         self.assertEqual(".", first["oak-suite"].cwd)
-        second = {
-            check.name: check for check in contracts["2"].verify.checks
-        }
+        second = {check.name: check for check in contracts["2"].verify.checks}
         self.assertEqual("tundra_OAK", second["oak-regex"].repo)
         self.assertEqual("README.md", second["oak-regex"].path)
 
@@ -1046,9 +998,7 @@ class SourcePlanRegistrationTests(unittest.TestCase):
 
         self.assertEqual((), lint.findings)
         self.assertEqual(("1", "2"), lint.session_ids)
-        self.assertEqual(
-            ("tundra_OAK", "tundra_svc"), lint.registry.aliases
-        )
+        self.assertEqual(("tundra_OAK", "tundra_svc"), lint.registry.aliases)
 
     def test_migrating_a_migrated_plan_is_already_registered_and_verbatim(
         self,
@@ -1057,9 +1007,7 @@ class SourcePlanRegistrationTests(unittest.TestCase):
             self._source_plan(), cwd=self.svc
         ).markdown
 
-        again = repository_registration.register_source_plan(
-            migrated, cwd=self.svc
-        )
+        again = repository_registration.register_source_plan(migrated, cwd=self.svc)
 
         self.assertEqual("already-registered", again.status)
         self.assertEqual(migrated, again.markdown)
@@ -1080,9 +1028,7 @@ class SourcePlanRegistrationTests(unittest.TestCase):
             ]
         )
 
-        result = repository_registration.register_source_plan(
-            text, cwd=self.svc
-        )
+        result = repository_registration.register_source_plan(text, cwd=self.svc)
 
         self.assertEqual("not-required", result.status)
         self.assertEqual(text, result.markdown)
@@ -1093,18 +1039,14 @@ class SourcePlanRegistrationTests(unittest.TestCase):
         )
 
         self.assertEqual("refused", result.status)
-        self.assertEqual(
-            "contract-path-outside-registry", result.missing_fact
-        )
+        self.assertEqual("contract-path-outside-registry", result.missing_fact)
         self.assertIn("'stray'", result.detail)
         self.assertIsNone(result.markdown)
 
     def test_deriving_from_text_writes_nothing_to_the_workspace(self) -> None:
         before = _tree_state(self.workspace)
 
-        repository_registration.register_source_plan(
-            self._source_plan(), cwd=self.svc
-        )
+        repository_registration.register_source_plan(self._source_plan(), cwd=self.svc)
 
         self.assertEqual(before, _tree_state(self.workspace))
 

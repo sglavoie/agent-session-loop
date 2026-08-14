@@ -19,18 +19,18 @@ command here and let the runner own the state transition.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+import contextlib
 import fcntl
 import json
 import os
-from pathlib import Path
 import uuid
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from . import harnesses, run_control, state
-
 
 CONTROL_QUEUE_FILE_NAME = "control-queue.jsonl"
 
@@ -164,7 +164,7 @@ def _new_command_id() -> str:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _operation_from_fields(
@@ -175,9 +175,7 @@ def _operation_from_fields(
     clear_present: bool,
     value_name: str,
 ) -> run_control.OverrideOperation:
-    if set_present and (
-        not isinstance(set_value, str) or set_value == ""
-    ):
+    if set_present and (not isinstance(set_value, str) or set_value == ""):
         raise ValueError(f"invalid-{value_name}")
     if clear_present and not isinstance(clear_value, bool):
         raise ValueError(REJECT_INVALID_CLEAR_OPERATION)
@@ -224,9 +222,11 @@ def _abort_fields(payload: dict[str, Any]) -> tuple[int, str | None]:
     raw_grace = payload.get("grace_seconds")
     if raw_grace is None:
         grace = DEFAULT_ABORT_GRACE_SECONDS
-    elif isinstance(raw_grace, bool) or not isinstance(raw_grace, int):
-        raise ValueError(REJECT_INVALID_GRACE)
-    elif not MIN_ABORT_GRACE_SECONDS <= raw_grace <= MAX_ABORT_GRACE_SECONDS:
+    elif (
+        isinstance(raw_grace, bool)
+        or not isinstance(raw_grace, int)
+        or not MIN_ABORT_GRACE_SECONDS <= raw_grace <= MAX_ABORT_GRACE_SECONDS
+    ):
         raise ValueError(REJECT_INVALID_GRACE)
     else:
         grace = raw_grace
@@ -274,9 +274,7 @@ def append_command(
     resolved_reason: str | None = None
     if command == COMMAND_SELECT_FUTURE_HARNESS:
         if harness is None or harness == "":
-            raise ControlQueueError(
-                "select-future-harness requires a harness value"
-            )
+            raise ControlQueueError("select-future-harness requires a harness value")
         if harness not in harnesses.HARNESS_NAMES:
             raise ControlQueueError(
                 f"unsupported harness for select-future-harness: {harness!r}"
@@ -338,10 +336,8 @@ def append_command(
         fcntl.flock(fd, fcntl.LOCK_EX)
         os.write(fd, line.encode("utf-8"))
     finally:
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
         os.close(fd)
 
     return ControlCommand(
@@ -379,10 +375,8 @@ def _read_and_truncate(queue_path: Path) -> str | None:
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
         os.close(fd)
     return b"".join(chunks).decode("utf-8", errors="replace")
 
@@ -494,12 +488,9 @@ def drain_queue(
                 )
                 continue
         elif command_value == COMMAND_SET_IMPLEMENTATION_MODEL:
-            if (
-                harness_value is not None
-                and (
-                    not isinstance(harness_value, str)
-                    or harness_value not in harnesses.HARNESS_NAMES
-                )
+            if harness_value is not None and (
+                not isinstance(harness_value, str)
+                or harness_value not in harnesses.HARNESS_NAMES
             ):
                 rejected.append(
                     RejectedCommand(
@@ -511,9 +502,7 @@ def drain_queue(
                 )
                 continue
             try:
-                model_operation, effort_operation = (
-                    _model_control_operations(payload)
-                )
+                model_operation, effort_operation = _model_control_operations(payload)
             except ValueError as error:
                 reason = str(error)
                 rejected.append(

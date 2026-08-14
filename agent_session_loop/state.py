@@ -8,19 +8,20 @@ record.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+import contextlib
 import fcntl
 import json
 import math
 import os
-from pathlib import Path
 import shlex
 import socket
 import sys
 import time
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from . import (
@@ -35,7 +36,6 @@ from . import (
     workspaces,
 )
 from .formatting import format_duration_seconds
-
 
 LOCK_FILE_NAME = "lock.json"
 # Sidecar `flock` target that serializes abandonment. Deliberately not the
@@ -125,8 +125,7 @@ class AmbiguousPlanError(StateError):
         self.state_root = state_root
         joined = ", ".join(str(candidate) for candidate in self.candidates)
         super().__init__(
-            f"plan label {label!r} is ambiguous under {state_root}: "
-            f"matches {joined}"
+            f"plan label {label!r} is ambiguous under {state_root}: matches {joined}"
         )
 
 
@@ -222,7 +221,9 @@ def plan_state_dir(plan_dir: str | Path, state_dir: str | Path | None = None) ->
     return state_root(state_dir) / plans.path_sha256(plan_dir)
 
 
-def lock_path_for_plan(plan_dir: str | Path, state_dir: str | Path | None = None) -> Path:
+def lock_path_for_plan(
+    plan_dir: str | Path, state_dir: str | Path | None = None
+) -> Path:
     return plan_state_dir(plan_dir, state_dir) / LOCK_FILE_NAME
 
 
@@ -249,11 +250,11 @@ def _read_json_object_safe(path: Path) -> dict[str, Any] | None:
     """
     try:
         raw = path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     try:
         parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -364,9 +365,7 @@ def iter_plan_state_dirs(state_root: Path) -> Iterator[Path]:
     try:
         children = sorted(state_root.iterdir())
     except OSError as error:
-        raise StateError(
-            f"could not scan state root {state_root}: {error}"
-        ) from error
+        raise StateError(f"could not scan state root {state_root}: {error}") from error
     for child in children:
         try:
             if child.is_dir():
@@ -401,7 +400,7 @@ def resolve_plan_reference(raw_value: str, state_root: Path) -> Path:
         for raw_plan_dir in _collect_plan_dir_strings(state_dir):
             try:
                 candidate = plans.canonicalize_path(raw_plan_dir)
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 continue
             key = str(candidate)
             if key in matches:
@@ -440,7 +439,7 @@ def _recorded_plan_dir(state_dir: Path) -> Path | None:
     for raw_plan_dir in _collect_plan_dir_strings(state_dir):
         try:
             return plans.canonicalize_path(raw_plan_dir)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
     return None
 
@@ -505,7 +504,7 @@ def is_pid_running(pid: int) -> bool:
 def _coerce_pid(value: Any) -> int | None:
     try:
         pid = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     return pid if pid > 0 else None
 
@@ -549,10 +548,8 @@ def _plan_lock_mutex(
     finally:
         if fd is not None:
             if held:
-                try:
+                with suppress(OSError):
                     fcntl.flock(fd, fcntl.LOCK_UN)
-                except OSError:
-                    pass
             os.close(fd)
 
 
@@ -660,9 +657,13 @@ def _read_lock_path(
     )
 
 
-def read_lock_info(plan_dir: str | Path, state_dir: str | Path | None = None) -> LockInfo | None:
+def read_lock_info(
+    plan_dir: str | Path, state_dir: str | Path | None = None
+) -> LockInfo | None:
     canonical_plan_dir = plans.canonicalize_path(plan_dir)
-    return _read_lock_path(lock_path_for_plan(canonical_plan_dir, state_dir), canonical_plan_dir)
+    return _read_lock_path(
+        lock_path_for_plan(canonical_plan_dir, state_dir), canonical_plan_dir
+    )
 
 
 def inspect_lock_info(
@@ -705,10 +706,8 @@ def _publish_lock_payload(lock_path: Path, payload: dict[str, Any]) -> None:
             lock_file.write("\n")
         os.replace(temp_path, lock_path)
     except BaseException:
-        try:
+        with suppress(OSError):
             temp_path.unlink()
-        except OSError:
-            pass
         raise
 
 
@@ -762,7 +761,7 @@ def acquire_lock(
         "plan_path_hash": snapshot.path_hash,
         "plan_hash": snapshot.plan_hash,
         "repositories": _sorted_repository_roots(repository_roots),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
     stolen_lock: LockInfo | None = None
@@ -779,10 +778,8 @@ def acquire_lock(
             if existing is not None:
                 if existing.stale and not existing.foreign_host:
                     stolen_lock = existing
-                    try:
+                    with suppress(FileNotFoundError):
                         lock_path.unlink()
-                    except FileNotFoundError:
-                        pass
                     continue
                 if existing.foreign_host:
                     raise StateError(
@@ -791,9 +788,7 @@ def acquire_lock(
                         "tell whether that runner is alive — clear it with "
                         "'asl unlock' once you have confirmed it is gone"
                     )
-                raise StateError(
-                    f"plan is locked by pid {existing.pid} at {lock_path}"
-                )
+                raise StateError(f"plan is locked by pid {existing.pid} at {lock_path}")
 
             _publish_lock_payload(lock_path, payload)
             lock_info = _read_lock_path(lock_path, snapshot.plan_dir, reclaim=False)
@@ -867,13 +862,12 @@ def unlock_plan(
 
         if lock_info.active and not force:
             raise StateError(
-                f"active lock held by pid {lock_info.pid} at {lock_path}; use --force to remove it"
+                f"active lock held by pid {lock_info.pid} at {lock_path}; use --force "
+                f"to remove it"
             )
 
-        try:
+        with suppress(FileNotFoundError):
             lock_path.unlink()
-        except FileNotFoundError:
-            pass
 
     state_label = "active" if lock_info.active else "stale"
     return UnlockResult(
@@ -958,7 +952,7 @@ def _parse_wait_moment(raw: Any) -> datetime | None:
     except ValueError:
         return None
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     return moment
 
 
@@ -987,9 +981,7 @@ def waiting_for_reply_ceiling(
         or ceiling <= 0
     ):
         return deadline
-    last_lease = _parse_wait_moment(
-        waiting_for_reply.get("last_lease_activity_at")
-    )
+    last_lease = _parse_wait_moment(waiting_for_reply.get("last_lease_activity_at"))
     if last_lease is None:
         return deadline
     return max(deadline, last_lease + timedelta(seconds=ceiling))
@@ -1005,9 +997,9 @@ def waiting_for_reply_status(
     ceiling_deadline = waiting_for_reply_ceiling(waiting_for_reply)
     if ceiling_deadline is None:
         return WAITING_FOR_REPLY_STATUS_INVALID
-    resolved_now = now if now is not None else datetime.now(timezone.utc)
+    resolved_now = now if now is not None else datetime.now(UTC)
     if resolved_now.tzinfo is None:
-        resolved_now = resolved_now.replace(tzinfo=timezone.utc)
+        resolved_now = resolved_now.replace(tzinfo=UTC)
     if ceiling_deadline <= resolved_now:
         return WAITING_FOR_REPLY_STATUS_EXPIRED
     if lock_info is None or not lock_info.active:
@@ -1210,9 +1202,7 @@ def _mailbox_status_payload(
         payload.update(
             {
                 "present": (
-                    mailbox_present
-                    or mailbox_path.exists()
-                    or view.size_bytes > 0
+                    mailbox_present or mailbox_path.exists() or view.size_bytes > 0
                 ),
                 "size_bytes": view.size_bytes,
                 "full": view.full,
@@ -1341,7 +1331,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -1373,7 +1363,7 @@ def _abandonment_is_proven(
         started_at = _parse_timestamp(state_obj.get("run_started_at"))
         if started_at is None:
             return False
-        age_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+        age_seconds = (datetime.now(UTC) - started_at).total_seconds()
         if age_seconds < ABANDONED_NO_LOCK_GRACE_SECONDS:
             return False
         # A booting runner writes state.json before its lock, so re-read the
@@ -1549,10 +1539,8 @@ def _abandonment_claim(plan_state_dir_path: Path) -> Iterator[bool]:
     finally:
         if fd is not None:
             if held:
-                try:
+                with suppress(OSError):
                     fcntl.flock(fd, fcntl.LOCK_UN)
-                except OSError:
-                    pass
             os.close(fd)
 
 
@@ -1606,7 +1594,7 @@ def mark_run_abandoned(
             if current is None or _unfinished_run_id(current) != run_id:
                 return False
 
-            detected_at = datetime.now(timezone.utc).isoformat()
+            detected_at = datetime.now(UTC).isoformat()
             payload = dict(current)
             payload.update(
                 {
@@ -1644,15 +1632,15 @@ def mark_run_abandoned(
                     "run_id": run_id,
                     "recorded_at": detected_at,
                     "skip": record["skip"],
-                    "path": str(
-                        Path(record["run_dir"]) / ASSURANCE_PENDING_FILE_NAME
-                    ),
+                    "path": str(Path(record["run_dir"]) / ASSURANCE_PENDING_FILE_NAME),
                 }
             events_path = plan_state_dir_path / events.EVENTS_FILE_NAME
             artifacts.atomic_write_bytes(
                 state_path, _dump_state_bytes(payload), durable=True
             )
-            try:
+            # The terminal state is already durable; an unwritable events
+            # file must not downgrade that to a failure the caller retries.
+            with contextlib.suppress(OSError):
                 events.append_event(
                     events_path,
                     events.Event(
@@ -1664,10 +1652,6 @@ def mark_run_abandoned(
                         ),
                     ),
                 )
-            except OSError:
-                # The terminal state is already durable; an unwritable events
-                # file must not downgrade that to a failure the caller retries.
-                pass
             return True
     except Exception:
         # Death has already cost the caller its run; refusing to record that
@@ -1737,9 +1721,7 @@ def orphaned_state_candidates(
     for candidate_dir in state_dirs:
         if candidate_dir == plan_state:
             continue
-        state_obj = _read_json_object_safe(
-            candidate_dir / events.STATE_FILE_NAME
-        )
+        state_obj = _read_json_object_safe(candidate_dir / events.STATE_FILE_NAME)
         if state_obj is None:
             continue
         recorded_plan_dir = _nonempty_str(state_obj.get("plan_dir"))
@@ -1750,7 +1732,7 @@ def orphaned_state_candidates(
             continue
         try:
             still_exists = plans.canonicalize_path(recorded_plan_dir).is_dir()
-        except (OSError, ValueError):
+        except OSError, ValueError:
             still_exists = False
         if still_exists:
             continue
@@ -1821,9 +1803,7 @@ def status_payload(
         # instead of the orphan it found; this is also the only backfill path
         # for runs that died before abandonment tracking existed.
         runner_state = _runner_state_payload(state_path, lock_info=lock_info)
-        stale_unfinished, stale_reason = _stale_runner_state(
-            runner_state, lock_info
-        )
+        stale_unfinished, stale_reason = _stale_runner_state(runner_state, lock_info)
     runner_state["stale_unfinished"] = stale_unfinished
     runner_state["stale_reason"] = stale_reason
     mailbox_status = _mailbox_status_payload(
@@ -1853,9 +1833,7 @@ def status_payload(
     if not workspace_fields:
         registry = plans.read_repository_registry(snapshot.plan_dir)
         metadata = plans.load_plan_metadata(snapshot.plan_dir)
-        if registry is not None and isinstance(
-            metadata, plans.WorkspacePlanMetadata
-        ):
+        if registry is not None and isinstance(metadata, plans.WorkspacePlanMetadata):
             workspace_root = plans.canonicalize_path(metadata.workspace_root)
             workspace_fields = {
                 "workspace_root": str(workspace_root),
@@ -1866,19 +1844,13 @@ def status_payload(
                         "path": repository.path,
                         "origin": repository.origin,
                         "resolved_root": str(
-                            plans.canonicalize_path(
-                                workspace_root / repository.path
-                            )
+                            plans.canonicalize_path(workspace_root / repository.path)
                         ),
                     }
                     for repository in registry.repositories
                 ],
             }
-    cwd_fields = (
-        {"cwd": workspace_fields["workspace_root"]}
-        if workspace_fields
-        else {}
-    )
+    cwd_fields = {"cwd": workspace_fields["workspace_root"]} if workspace_fields else {}
     return responses.success_payload(
         "status",
         plan_dir=str(snapshot.plan_dir),
@@ -1894,15 +1866,11 @@ def status_payload(
         active_turn=runner_state.get("active_turn"),
         active_verification=runner_state.get("active_verification"),
         waiting_for_reply=runner_state.get("waiting_for_reply"),
-        waiting_for_reply_status=runner_state.get(
-            "waiting_for_reply_status"
-        ),
+        waiting_for_reply_status=runner_state.get("waiting_for_reply_status"),
         mailbox=mailbox_status,
         counts=_status_counts(snapshot),
         next_pending=(
-            _session_compat_value(next_pending.id)
-            if next_pending is not None
-            else None
+            _session_compat_value(next_pending.id) if next_pending is not None else None
         ),
         next_pending_id=next_pending.id if next_pending is not None else None,
         sessions=[_session_payload(session) for session in snapshot.sessions],
@@ -1993,9 +1961,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             # valid record sizes differ.
             if not full_suffix and mailbox_status.get("accepts_questions") is False:
                 accepts_replies = mailbox_status.get("accepts_replies") is True
-                accepts_resolutions = (
-                    mailbox_status.get("accepts_resolutions") is True
-                )
+                accepts_resolutions = mailbox_status.get("accepts_resolutions") is True
                 if accepts_replies and accepts_resolutions:
                     full_suffix = (
                         ", non-closure writes refused "
@@ -2003,8 +1969,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
                     )
                 elif accepts_replies:
                     full_suffix = (
-                        ", non-closure writes refused "
-                        "(only replies still accepted)"
+                        ", non-closure writes refused (only replies still accepted)"
                     )
                 else:
                     full_suffix = (
@@ -2040,8 +2005,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
 
         if mailbox_status.get("lease_error"):
             print(
-                "Mailbox lease: malformed/unreadable "
-                f"({mailbox_status['lease_error']})"
+                f"Mailbox lease: malformed/unreadable ({mailbox_status['lease_error']})"
             )
         elif mailbox_status.get("lease_fresh"):
             print(
@@ -2100,9 +2064,7 @@ def _print_text_status(payload: dict[str, Any]) -> None:
         check_count = active_verification.get("check_count")
         check_index = active_verification.get("current_check_index")
         if check_index is None:
-            check_position = (
-                f"-/{check_count}" if check_count is not None else "-"
-            )
+            check_position = f"-/{check_count}" if check_count is not None else "-"
         else:
             check_position = (
                 f"{int(check_index) + 1}/{check_count}"
@@ -2110,13 +2072,17 @@ def _print_text_status(payload: dict[str, Any]) -> None:
                 else str(int(check_index) + 1)
             )
         check_name = active_verification.get("current_check_name") or "pending"
+        check_elapsed = format_duration_seconds(
+            active_verification.get("check_elapsed_seconds")
+        )
         print(
             "Active verification: "
             f"session {_session_label_from_payload(active_verification)} "
             f"turn {active_verification.get('turn_index')} "
             f"check {check_position} {check_name} "
-            f"elapsed {format_duration_seconds(active_verification.get('elapsed_seconds'))} "
-            f"check elapsed {format_duration_seconds(active_verification.get('check_elapsed_seconds'))}"
+            f"elapsed "
+            f"{format_duration_seconds(active_verification.get('elapsed_seconds'))} "
+            f"check elapsed {check_elapsed}"
         )
         check_kind = active_verification.get("current_check_kind")
         if check_kind:
@@ -2286,7 +2252,7 @@ def _unlock_error_details(args: argparse.Namespace) -> dict[str, Any]:
             "plan_dir": str(canonical_plan_dir),
             "lock_path": str(lock_path_for_plan(canonical_plan_dir, args.state_dir)),
         }
-    except (plans.PlanError, OSError):
+    except plans.PlanError, OSError:
         return {"plan_dir": str(args.plan_dir)}
 
 
@@ -2410,8 +2376,7 @@ def migrate_plan_state(
     if old_state_dir == new_state_dir:
         raise MigrationError(
             "noop-migration",
-            "source and destination state directories are identical: "
-            f"{old_state_dir}",
+            f"source and destination state directories are identical: {old_state_dir}",
             {"state_dir": str(old_state_dir)},
         )
 
@@ -2439,8 +2404,7 @@ def migrate_plan_state(
     if source_plan_exists:
         raise MigrationError(
             "source-plan-exists",
-            "source plan directory still exists and is not orphaned: "
-            f"{old_plan_dir}",
+            f"source plan directory still exists and is not orphaned: {old_plan_dir}",
             {"from_plan_dir": str(old_plan_dir)},
         )
 
@@ -2477,7 +2441,7 @@ def migrate_plan_state(
             recorded_matches = (
                 plans.canonicalize_path(recorded_plan_dir) == old_plan_dir
             )
-        except (OSError, ValueError):
+        except OSError, ValueError:
             recorded_matches = False
     if not recorded_matches:
         raise MigrationError(
@@ -2507,9 +2471,7 @@ def migrate_plan_state(
 
     # Count historical per-turn result.json artifacts; their embedded paths
     # point at the old plan directory and are intentionally left unrewritten.
-    result_artifacts = sum(
-        1 for _ in _iter_result_paths(old_state_dir / RUNS_DIR_NAME)
-    )
+    result_artifacts = sum(1 for _ in _iter_result_paths(old_state_dir / RUNS_DIR_NAME))
     unmigrated_note = None
     if result_artifacts:
         plural = "" if result_artifacts == 1 else "s"

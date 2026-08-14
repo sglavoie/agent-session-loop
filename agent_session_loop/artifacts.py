@@ -23,18 +23,18 @@ memory.
 from __future__ import annotations
 
 import codecs
-from dataclasses import dataclass
+import contextlib
 import gzip
 import hashlib
 import os
-from pathlib import Path
 import re
 import shutil
 import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import durability
-
 
 # Previews standardize on the first 8 KiB and last 8 KiB of each stream.
 PREVIEW_HEAD_BYTES = 8 * 1024
@@ -87,15 +87,11 @@ def sha256_hex(data: bytes) -> str:
 
 
 def _cleanup(path: Path) -> None:
-    try:
+    with contextlib.suppress(OSError):
         path.unlink()
-    except OSError:
-        pass
 
 
-def atomic_write_bytes(
-    path: Path | str, data: bytes, *, durable: bool = False
-) -> None:
+def atomic_write_bytes(path: Path | str, data: bytes, *, durable: bool = False) -> None:
     """Write ``data`` to ``path`` via temp-file + :func:`os.replace`.
 
     The destination is never left half-written: on any failure the temp file is
@@ -120,9 +116,7 @@ def atomic_write_bytes(
         os.replace(tmp_path, path)
     except OSError as error:
         _cleanup(tmp_path)
-        raise ArtifactError(
-            f"could not finalize artifact {path}: {error}"
-        ) from error
+        raise ArtifactError(f"could not finalize artifact {path}: {error}") from error
     if durable:
         try:
             directory_fd = os.open(path.parent, os.O_RDONLY)
@@ -209,10 +203,7 @@ def derive_artifact_stem(name: str | None) -> str:
     """
     raw = name or _DEFAULT_ARTIFACT_NAME
     sanitized = sanitize_artifact_name(raw)
-    if (
-        sanitized == raw
-        and len(sanitized.encode("utf-8")) <= _ARTIFACT_STEM_MAX_BYTES
-    ):
+    if sanitized == raw and len(sanitized.encode("utf-8")) <= _ARTIFACT_STEM_MAX_BYTES:
         return sanitized
     prefix = _truncate_utf8(sanitized, _ARTIFACT_PREFIX_MAX_BYTES)
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -264,7 +255,7 @@ class OutputMetadata:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "OutputMetadata":
+    def from_dict(cls, payload: dict[str, Any]) -> OutputMetadata:
         version = payload.get("version")
         if version != OUTPUT_METADATA_VERSION:
             raise ArtifactError(
@@ -359,9 +350,7 @@ def _promote_spool(
         os.replace(tmp_path, target)
     except OSError as error:
         _cleanup(tmp_path)
-        raise ArtifactError(
-            f"could not finalize artifact {target}: {error}"
-        ) from error
+        raise ArtifactError(f"could not finalize artifact {target}: {error}") from error
     return str(target)
 
 
@@ -407,7 +396,7 @@ class StreamCapture:
 
     def _open_spool(self) -> None:
         try:
-            handle = tempfile.NamedTemporaryFile(
+            handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 - closed by _drop_spool/finalize, outlives this scope
                 prefix="asl-stream-spool-", suffix=".gz", delete=False
             )
             self._spool_handle = handle
@@ -423,15 +412,11 @@ class StreamCapture:
 
     def _drop_spool(self) -> None:
         if self._spool_gzip is not None:
-            try:
+            with contextlib.suppress(OSError):
                 self._spool_gzip.close()
-            except OSError:
-                pass
         if self._spool_handle is not None:
-            try:
+            with contextlib.suppress(OSError):
                 self._spool_handle.close()
-            except OSError:
-                pass
         if self._spool_path is not None:
             _cleanup(self._spool_path)
         self._spool_gzip = None

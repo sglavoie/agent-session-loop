@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from collections import OrderedDict
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import plans, repository_evidence, runner, workspaces
@@ -50,9 +50,7 @@ class RepositoryEvidenceParityTests(unittest.TestCase):
             capture_output=True,
             check=True,
         )
-        (self.repository / "untracked.txt").write_text(
-            "untracked\n", encoding="utf-8"
-        )
+        (self.repository / "untracked.txt").write_text("untracked\n", encoding="utf-8")
 
         extracted = repository_evidence.capture_repository_fingerprint(
             self.repository, self.plan_dir
@@ -98,9 +96,7 @@ class WorkspaceInventoryTests(unittest.TestCase):
         (source / ".git" / "phantom" / ".git").mkdir(parents=True)
         outside = self.root / "outside"
         init_git_repo(outside)
-        (self.workspace / "outside-link").symlink_to(
-            outside, target_is_directory=True
-        )
+        (self.workspace / "outside-link").symlink_to(outside, target_is_directory=True)
 
         discovered = repository_evidence.discover_git_worktrees(self.workspace)
 
@@ -174,9 +170,7 @@ class WorkspaceInventoryTests(unittest.TestCase):
 
         self.assertEqual(["added"], comparison["added"])
         self.assertEqual(["gone"], comparison["removed"])
-        self.assertEqual(
-            ["unavailable", "vanished"], list(comparison["unavailable"])
-        )
+        self.assertEqual(["unavailable", "vanished"], list(comparison["unavailable"]))
         self.assertEqual(
             "git-command-failed",
             comparison["unavailable"]["unavailable"]["after"]["reason"],
@@ -220,11 +214,7 @@ class WorkspaceInventoryTests(unittest.TestCase):
             directory_names = [".cache", "visible"]
             yield str(walk_root), directory_names, []
             if ".cache" in directory_names:
-                onerror(
-                    PermissionError(
-                        1, "not permitted", str(walk_root / ".cache")
-                    )
-                )
+                onerror(PermissionError(1, "not permitted", str(walk_root / ".cache")))
             if "visible" in directory_names:
                 yield str(walk_root / "visible"), [".git"], []
 
@@ -250,9 +240,7 @@ class WorkspaceInventoryTests(unittest.TestCase):
         malformed.parent.mkdir(parents=True)
         malformed.write_text("not Git metadata\n", encoding="utf-8")
 
-        inventory = repository_evidence.discover_git_worktree_inventory(
-            self.workspace
-        )
+        inventory = repository_evidence.discover_git_worktree_inventory(self.workspace)
 
         self.assertEqual((visible.resolve(),), inventory.repositories)
         self.assertEqual(1, inventory.skipped_hidden_subtrees)
@@ -318,9 +306,7 @@ class WorkspaceInventoryTests(unittest.TestCase):
                 elif case == "renamed":
                     readme.rename(repository / "renamed.md")
                 else:
-                    (repository / "new.txt").write_text(
-                        "untracked\n", encoding="utf-8"
-                    )
+                    (repository / "new.txt").write_text("untracked\n", encoding="utf-8")
                 after = repository_evidence.capture_workspace_snapshot(
                     self.workspace, self.plan_dir
                 )
@@ -427,9 +413,7 @@ class RegisteredSnapshotTests(unittest.TestCase):
         )
 
         self.assertEqual([], list(after))
-        comparison = repository_evidence.compare_workspace_snapshots(
-            before, after
-        )
+        comparison = repository_evidence.compare_workspace_snapshots(before, after)
         self.assertEqual(["alpha"], comparison["removed"])
         self.assertEqual({}, comparison["changed"])
 
@@ -488,9 +472,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         write_multi_repo_plan(self.plan_dir, ("pending",), specs=specs)
         registry = plans.read_repository_registry(self.plan_dir)
         assert registry is not None
-        self.workspace = workspaces.resolve_workspace(
-            self.workspace_root, registry
-        )
+        self.workspace = workspaces.resolve_workspace(self.workspace_root, registry)
 
     def test_guard_classifies_read_only_and_topology_changes(self) -> None:
         comparison = {
@@ -512,9 +494,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         }
         evidence = runner._workspace_write_guard_evidence(
             workspace=self.workspace,
-            scope=plans.SessionScope(
-                reads=("SVC", "OAK"), writes=("SVC",)
-            ),
+            scope=plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",)),
             comparison=comparison,
             exclude=(),
             include_ignored=False,
@@ -545,9 +525,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
                 "added": [],
                 "removed": [],
                 "unavailable": {
-                    "tundra_svc": {
-                        "after": {"reason": "git-command-failed"}
-                    }
+                    "tundra_svc": {"after": {"reason": "git-command-failed"}}
                 },
             },
             exclude=(),
@@ -596,9 +574,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
             frozenset({"tundra_svc", "tundra_OAK"}),
         )
 
-        self.assertEqual(
-            ["tundra_OAK", "deregistered-repository"], suppressed
-        )
+        self.assertEqual(["tundra_OAK", "deregistered-repository"], suppressed)
         self.assertEqual(["surprise-repository"], repaired["added"])
         self.assertEqual(["tundra_svc"], repaired["removed"])
 

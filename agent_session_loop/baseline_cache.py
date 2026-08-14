@@ -9,9 +9,9 @@ This module provides:
 - :func:`normalize_recipe` — a deterministic, name-independent projection of a
   :class:`~agent_session_loop.contracts.VerifyRecipe` so equivalent recipes in
   different sessions hash to the same value (deduplication).
-- :func:`repository_fingerprint` — the legacy git-aware fingerprint that changes when the
-  working tree is dirty, staged, or has untracked files, so stale cache entries
-  are invalidated.
+- :func:`repository_fingerprint` — the legacy git-aware fingerprint that changes
+  when the working tree is dirty, staged, or has untracked files, so stale cache
+  entries are invalidated.
 - :func:`cache_key` / :func:`compute_cache_key` — a composite key over the
   normalized recipe, working directory, repository fingerprint, optional
   registry digest, executable identity, and relevant environment.
@@ -26,18 +26,17 @@ The module is stdlib-only.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 
 from . import contracts
 from .contracts import VerifyRecipe
 from .plans import canonicalize_path
-
 
 #: Derived journal filename. Excluded from content/readiness hashes because the
 #: hashers only walk context.md, manifest.md, session files, and expansion files.
@@ -62,7 +61,7 @@ def _normalized_check(check: object) -> dict:
     command under different check names still deduplicate to one recipe.
     """
     data: dict[str, object] = {
-        "type": getattr(check, "kind"),
+        "type": check.kind,
         "baseline_expectation": getattr(
             check, "baseline_expectation", contracts.DEFAULT_BASELINE_EXPECTATION
         ),
@@ -101,7 +100,7 @@ def _git(root: Path, *args: str) -> str | None:
             text=True,
             capture_output=True,
         )
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     if completed.returncode != 0:
         return None
@@ -221,7 +220,7 @@ class BaselineRecord:
         return {"key": self.key, "recipe": self.recipe, "result": self.result}
 
     @classmethod
-    def from_dict(cls, data: dict) -> "BaselineRecord":
+    def from_dict(cls, data: dict) -> BaselineRecord:
         return cls(
             key=str(data.get("key", "")),
             recipe=str(data.get("recipe", "")),
@@ -242,13 +241,13 @@ class BaselineCache:
         self._entries: dict[str, BaselineRecord] = {}
 
     @classmethod
-    def load(cls, path: str | Path) -> "BaselineCache":
+    def load(cls, path: str | Path) -> BaselineCache:
         cache = cls(path)
         if not cache.path.exists():
             return cache
         try:
             data = json.loads(cache.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             return cache
         if not isinstance(data, dict) or data.get("version") != BASELINE_CACHE_VERSION:
             return cache
@@ -271,7 +270,9 @@ class BaselineCache:
         Returns the cache key. Identical recipes deduplicate to one entry.
         """
         key = compute_cache_key(recipe, cwd)
-        self.put(key, BaselineRecord(key=key, recipe=normalize_recipe(recipe), result=result))
+        self.put(
+            key, BaselineRecord(key=key, recipe=normalize_recipe(recipe), result=result)
+        )
         return key
 
     def entries(self) -> dict[str, BaselineRecord]:
@@ -286,9 +287,7 @@ class BaselineCache:
     def to_dict(self) -> dict:
         return {
             "version": BASELINE_CACHE_VERSION,
-            "entries": {
-                key: record.to_dict() for key, record in self._entries.items()
-            },
+            "entries": {key: record.to_dict() for key, record in self._entries.items()},
         }
 
     def save(self) -> None:

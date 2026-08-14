@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 
 from agent_session_loop import assurance_ledger as ledger
 from agent_session_loop import assurance_models as models
 from agent_session_loop import assurance_projection as projection
 from agent_session_loop.assurance_projection import AuditPublication, ProjectionError
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,7 +27,7 @@ OTHER_INPUT_DIGEST = "b" * 64
 THIRD_INPUT_DIGEST = "c" * 64
 
 
-_PUBLISH_WORKER_SOURCE = """
+_PUBLISH_WORKER_SOURCE = f"""
 import sys
 from pathlib import Path
 
@@ -47,7 +46,7 @@ finding = models.Finding(
     evidence=("events.jsonl",),
 )
 publication = projection.AuditPublication(
-    run_id="%s",
+    run_id="{RUN_ID}",
     state="findings",
     eligible=True,
     findings=(finding,),
@@ -55,16 +54,16 @@ publication = projection.AuditPublication(
         models.EvidenceRef(
             kind="artifact",
             locator="supervisor-audit-input.json",
-            digest="%s",
+            digest="{INPUT_DIGEST}",
         ),
     ),
-    completed_at="%s",
+    completed_at="{TIMESTAMP}",
 )
 result = projection.publish_audit(
-    publication, state_dir=state_dir, recorded_at="%s"
+    publication, state_dir=state_dir, recorded_at="{TIMESTAMP}"
 )
 sys.stdout.write("created" if result.created else "existing")
-""" % (RUN_ID, INPUT_DIGEST, TIMESTAMP, TIMESTAMP)
+"""
 
 
 def _finding(**overrides) -> models.Finding:
@@ -113,9 +112,7 @@ class ProjectionTestCase(unittest.TestCase):
 
     def publish(self, publication: AuditPublication, **kwargs):
         kwargs.setdefault("recorded_at", TIMESTAMP)
-        return projection.publish_audit(
-            publication, state_dir=self.state_dir, **kwargs
-        )
+        return projection.publish_audit(publication, state_dir=self.state_dir, **kwargs)
 
     def read(self) -> projection.AssuranceProjection:
         return projection.read_projection(state_dir=self.state_dir)
@@ -191,7 +188,9 @@ class ProjectionTestCase(unittest.TestCase):
 
 
 class PublicationTests(ProjectionTestCase):
-    def test_publishing_writes_the_summary_and_one_observation_per_finding(self) -> None:
+    def test_publishing_writes_the_summary_and_one_observation_per_finding(
+        self,
+    ) -> None:
         result = self.publish(
             _publication(
                 findings=(_finding(), _finding(invariant_key="scope.no-escape"))
@@ -316,7 +315,9 @@ class PublicationTests(ProjectionTestCase):
         self.assertEqual(2, len(ledger.read_ledger(state_dir=self.state_dir).records))
         projected = self.read()
         self.assertEqual((RUN_ID,), tuple(run.run_id for run in projected.runs))
-        self.assertEqual(("ASI-1",), tuple(issue.issue_id for issue in projected.issues))
+        self.assertEqual(
+            ("ASI-1",), tuple(issue.issue_id for issue in projected.issues)
+        )
 
     def test_a_linked_issue_the_ledger_opened_is_named_once(self) -> None:
         self.publish(_publication())
@@ -496,11 +497,15 @@ class DeduplicationTests(ProjectionTestCase):
         issue = self.read().issue("ASI-1")
         self.assertEqual("critical", issue.finding.severity)
         self.assertEqual("Now it is worse.", issue.finding.summary)
-        self.assertEqual(("high", "critical"), tuple(o.severity for o in issue.occurrences))
+        self.assertEqual(
+            ("high", "critical"), tuple(o.severity for o in issue.occurrences)
+        )
 
 
 class LifecycleTests(ProjectionTestCase):
-    def _observe_again(self, timestamp: str = LATER_TIMESTAMP, run_id: str = OTHER_RUN_ID) -> None:
+    def _observe_again(
+        self, timestamp: str = LATER_TIMESTAMP, run_id: str = OTHER_RUN_ID
+    ) -> None:
         self.publish(
             _publication(run_id=run_id, completed_at=timestamp),
             recorded_at=timestamp,
@@ -563,9 +568,7 @@ class LifecycleTests(ProjectionTestCase):
 
     def test_disposing_an_unknown_issue_is_refused(self) -> None:
         with self.assertRaises(ProjectionError) as caught:
-            projection.record_disposition(
-                "ASI-9", "resolve", state_dir=self.state_dir
-            )
+            projection.record_disposition("ASI-9", "resolve", state_dir=self.state_dir)
         self.assertEqual(projection.UNKNOWN_ISSUE, caught.exception.reason)
         self.assertFalse(self.ledger_path.exists())
 
@@ -580,7 +583,12 @@ class LifecycleTests(ProjectionTestCase):
         view = ledger.read_ledger(state_dir=self.state_dir)
         kinds = [record.kind for record in view.records]
         self.assertEqual(
-            ["audit_completed", "issue_observed", "issue_disposition", "issue_disposition"],
+            [
+                "audit_completed",
+                "issue_observed",
+                "issue_disposition",
+                "issue_disposition",
+            ],
             kinds,
         )
         self.assertEqual("dismissed", self.read().issue("ASI-1").state)
@@ -814,9 +822,7 @@ class ReplayTests(ProjectionTestCase):
         self.build_every_kind()
         first = self.read()
         data = self.ledger_path.read_bytes()
-        replayed = projection.project(
-            ledger.parse_ledger_bytes(data, self.ledger_path)
-        )
+        replayed = projection.project(ledger.parse_ledger_bytes(data, self.ledger_path))
         self.assertEqual(first, replayed)
 
     def test_a_copied_ledger_with_no_cache_reconstructs_identical_state(self) -> None:
@@ -837,7 +843,9 @@ class ReplayTests(ProjectionTestCase):
 
 
 class AnomalyTests(ProjectionTestCase):
-    def test_a_disposition_for_an_unobserved_issue_is_reported_not_applied(self) -> None:
+    def test_a_disposition_for_an_unobserved_issue_is_reported_not_applied(
+        self,
+    ) -> None:
         self.publish(_publication())
         self.force_record(
             ledger.KIND_ISSUE_DISPOSITION,
@@ -879,9 +887,7 @@ class AnomalyTests(ProjectionTestCase):
     def test_a_closeout_without_an_audit_record_is_reported(self) -> None:
         self.force_record(
             ledger.KIND_HUMAN_CLOSEOUT,
-            models.Closeout(
-                run_id=RUN_ID, outcome="accepted", recorded_at=TIMESTAMP
-            ),
+            models.Closeout(run_id=RUN_ID, outcome="accepted", recorded_at=TIMESTAMP),
         )
         projected = self.read()
         self.assertEqual((), projected.runs)
@@ -996,7 +1002,9 @@ class CloseoutTests(ProjectionTestCase):
 
         second = self.closeout(outcome="escaped", replace=True)
 
-        self.assertEqual(projection.closeout_reference(first.seq), second.payload.replaces)
+        self.assertEqual(
+            projection.closeout_reference(first.seq), second.payload.replaces
+        )
         recorded = self.read().run(RUN_ID)
         # Superseding appends: both verdicts, and the order they were reached
         # in, stay readable, and the later one is the one in force.
@@ -1020,9 +1028,11 @@ class CloseoutTests(ProjectionTestCase):
             {"rework_minutes": float("nan")},
             {"rework_minutes": float("inf")},
         ):
-            with self.subTest(**kwargs):
-                with self.assertRaises(models.AssuranceError):
-                    self.closeout(**kwargs)
+            with (
+                self.subTest(**kwargs),
+                self.assertRaises(models.AssuranceError),
+            ):
+                self.closeout(**kwargs)
         self.assertIsNone(self.read().run(RUN_ID).closeout)
 
 

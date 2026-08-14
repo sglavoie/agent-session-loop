@@ -25,15 +25,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from pathlib import Path
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
-from . import contracts
-from . import plans
-from . import workspaces
-
+from . import contracts, plans, workspaces
 
 FINAL_REVIEW_FILENAME = "final-review.md"
 FINAL_REVIEW_ARTIFACT_FILENAME = "final-review.json"
@@ -108,9 +105,7 @@ REVIEW_REASON_CONTRADICTORY_ARTIFACT = "contradictory-review-artifact"
 
 # Message prefix contracts._parse_check interpolates; stripped when re-raising
 # check-validation failures in finding context.
-_CONTRACT_CHECK_MESSAGE_PREFIX_RE = re.compile(
-    r"^session \S+ contract check #[0-9]+ "
-)
+_CONTRACT_CHECK_MESSAGE_PREFIX_RE = re.compile(r"^session \S+ contract check #[0-9]+ ")
 _CHECK_VALIDATION_SESSION_ID = plans.parse_session_id("1")
 
 
@@ -246,9 +241,7 @@ def _require_finding_str(finding_id: str, value: object, *, label: str) -> str:
 
 
 def _validate_evidence(finding_id: str, value: object) -> list[dict[str, Any]]:
-    return _validate_evidence_for_registry(
-        finding_id, value, repository_registry=None
-    )
+    return _validate_evidence_for_registry(finding_id, value, repository_registry=None)
 
 
 def _validate_repository_alias(
@@ -329,9 +322,7 @@ def _validate_evidence_for_registry(
     return evidence
 
 
-def _validate_string_list(
-    finding_id: str, value: object, *, label: str
-) -> list[str]:
+def _validate_string_list(finding_id: str, value: object, *, label: str) -> list[str]:
     if not isinstance(value, list) or not value:
         raise ReviewArtifactError(
             f"finding {finding_id!r} field {label!r} must be a non-empty list"
@@ -403,8 +394,7 @@ def _validate_finding(
     unknown = set(payload) - set(required_keys)
     if unknown:
         raise ReviewArtifactError(
-            f"finding #{index + 1} has unknown keys: "
-            f"{', '.join(sorted(unknown))}"
+            f"finding #{index + 1} has unknown keys: {', '.join(sorted(unknown))}"
         )
     missing = [key for key in required_keys if key not in payload]
     if missing:
@@ -428,9 +418,7 @@ def _validate_finding(
     finding = {
         "id": finding_id,
         "severity": severity,
-        "title": _require_finding_str(
-            finding_id, payload.get("title"), label="title"
-        ),
+        "title": _require_finding_str(finding_id, payload.get("title"), label="title"),
         "evidence": _validate_evidence_for_registry(
             finding_id,
             payload.get("evidence"),
@@ -532,9 +520,7 @@ def parse_review_artifact(
             repository_registry=finding_registry,
         )
         if finding["id"] in seen_ids:
-            raise ReviewArtifactError(
-                f"finding id {finding['id']!r} is duplicated"
-            )
+            raise ReviewArtifactError(f"finding id {finding['id']!r} is duplicated")
         seen_ids.add(finding["id"])
         tally[finding["severity"]] += 1
         findings.append(finding)
@@ -642,9 +628,7 @@ def load_review_verdict(
         return {
             "ok": False,
             "reason": REVIEW_REASON_MALFORMED_ARTIFACT,
-            "error": (
-                f"could not read {FINAL_REVIEW_ARTIFACT_FILENAME}: {error}"
-            ),
+            "error": (f"could not read {FINAL_REVIEW_ARTIFACT_FILENAME}: {error}"),
             "review_output_path": str(review_path),
             "review_artifact_path": str(artifact_path),
         }
@@ -814,9 +798,7 @@ def review_verdict_payload(
     review_resume = review_continuation.evaluate_review_continuation(
         snapshot, event_path
     ).to_payload()
-    review_session_version = _relevant_review_session_version(
-        snapshot, review_resume
-    )
+    review_session_version = _relevant_review_session_version(snapshot, review_resume)
     verdict = load_review_verdict(
         snapshot.plan_dir,
         require_artifact=(

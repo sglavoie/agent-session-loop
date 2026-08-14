@@ -4,75 +4,29 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
-import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
-import signal
-import stat
 import subprocess
-import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
-from unittest import mock
+from pathlib import Path
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
     config,
-    contracts,
-    control_queue,
     events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
-    review_repair,
-    run_control,
-    runner,
     state,
-    tail,
-    verification,
     workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     REPO_ROOT,
+    _BrokenStdinFakePopen,
+    _FakePopen,
     init_multi_repo_workspace,
+    install_fake_codex,
     write_multi_repo_plan,
     write_plan,
-    install_fake_codex,
-    _FakePopen,
-    _BrokenStdinFakePopen,
 )
 
 
@@ -131,9 +85,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
             self.assertIn("--timeout", argv)
             self.assertEqual(argv[argv.index("--timeout") + 1], "900")
             self.assertIn("--max-review-fix-cycles", argv)
-            self.assertEqual(
-                argv[argv.index("--max-review-fix-cycles") + 1], "3"
-            )
+            self.assertEqual(argv[argv.index("--max-review-fix-cycles") + 1], "3")
             self.assertIn("--commit-per-session", argv)
             self.assertNotIn("--commit-at-end", argv)
             self.assertIn("--unsafe-bypass", argv)
@@ -202,7 +154,9 @@ class WorkbenchLaunchTests(unittest.TestCase):
                 self.assertNotIn(unexpected, argv)
             self.assertIn("--json", argv)
 
-    def test_registered_launch_uses_prepared_workspace_and_projects_repositories(self) -> None:
+    def test_registered_launch_uses_prepared_workspace_and_projects_repositories(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             specs = DEFAULT_MULTI_REPO_SPECS[:2]
@@ -232,7 +186,9 @@ class WorkbenchLaunchTests(unittest.TestCase):
             payload = launched.to_payload()
             self.assertEqual(str(workspace_root.resolve()), payload["cwd"])
             self.assertEqual(str(workspace_root.resolve()), payload["workspace_root"])
-            self.assertEqual(["SVC", "OAK"], [row["alias"] for row in payload["repositories"]])
+            self.assertEqual(
+                ["SVC", "OAK"], [row["alias"] for row in payload["repositories"]]
+            )
 
     def test_registered_launch_rejects_child_repository_as_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -244,14 +200,19 @@ class WorkbenchLaunchTests(unittest.TestCase):
             write_multi_repo_plan(plan_dir, ("pending",), specs=specs)
             registry = plans.read_repository_registry(plan_dir)
             assert registry is not None
-            plans.save_workspace_plan_metadata(plan_dir, workspace_root, registry.digest)
+            plans.save_workspace_plan_metadata(
+                plan_dir, workspace_root, registry.digest
+            )
 
             with self.assertRaises(workbench.LaunchError) as caught:
                 workbench.build_launch_argv(
-                    plan_dir, profile=workbench.LaunchProfile(cwd=str(repositories["SVC"]))
+                    plan_dir,
+                    profile=workbench.LaunchProfile(cwd=str(repositories["SVC"])),
                 )
 
-            self.assertEqual(workbench.LAUNCH_REASON_INVALID_PROFILE, caught.exception.reason)
+            self.assertEqual(
+                workbench.LAUNCH_REASON_INVALID_PROFILE, caught.exception.reason
+            )
             self.assertIn("--rebind-workspace", caught.exception.message)
 
     def test_invalid_plan_dir_missing_raises_invalid_plan(self) -> None:
@@ -319,9 +280,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = self._seed_launchable_plan(tmp_path)
-            profile = workbench.LaunchProfile(
-                review_harness_model="claude-sonnet"
-            )
+            profile = workbench.LaunchProfile(review_harness_model="claude-sonnet")
 
             with self.assertRaises(workbench.LaunchError) as ctx:
                 workbench.build_launch_argv(plan_dir, profile=profile)
@@ -399,9 +358,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
 
             self.assertIsNone(registry.pins[0].profile.max_review_fix_cycles)
             self.assertEqual(
-                (
-                    "pin[0]: ignoring negative max_review_fix_cycles -1",
-                ),
+                ("pin[0]: ignoring negative max_review_fix_cycles -1",),
                 registry.warnings,
             )
 
@@ -434,9 +391,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
             self.assertNotIn("--reply-stdin", result.argv)
             self.assertNotIn("--reply", result.argv)
             self.assertEqual(plan_dir, result.plan_dir)
-            self.assertEqual(
-                (tmp_path / "state").resolve(), result.state_dir
-            )
+            self.assertEqual((tmp_path / "state").resolve(), result.state_dir)
             payload = result.to_payload()
             self.assertEqual("codex", payload["profile"]["harness"])
             self.assertEqual(42, payload["profile"]["timeout"])
@@ -575,9 +530,7 @@ class WorkbenchLaunchTests(unittest.TestCase):
             env["XDG_CONFIG_HOME"] = str(config_home)
             env["FAKE_CODEX_MODE"] = "success"
             env["FAKE_CODEX_SLEEP"] = "0"
-            env["PYTHONPATH"] = (
-                str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-            )
+            env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
 
             profile = workbench.LaunchProfile(
                 cwd=str(REPO_ROOT),

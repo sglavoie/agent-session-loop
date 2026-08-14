@@ -7,14 +7,13 @@ SHAs, and reconstructs an unfinished group after a process restart.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
 import copy
-from datetime import datetime, timezone
 import hashlib
 import json
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
 
 GROUP_SCHEMA_VERSION = 1
 LEGACY_REPOSITORY_KEY = "."
@@ -33,7 +32,7 @@ class CommitGroupError(RuntimeError):
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def repository_key(alias: str | None) -> str:
@@ -89,13 +88,13 @@ def create_group(
         "group_id": group_id,
         "identity": identity,
         "scope": scope,
-        "session": int(session_id) if session_id and session_id.isdigit() else session_id,
+        "session": int(session_id)
+        if session_id and session_id.isdigit()
+        else session_id,
         "session_id": session_id,
         "ordered_aliases": ordered_aliases,
         "repositories": target_rows,
-        "initial_heads": {
-            alias: initial_heads.get(alias) for alias in ordered_aliases
-        },
+        "initial_heads": {alias: initial_heads.get(alias) for alias in ordered_aliases},
         "successful_repositories": [],
         "skipped_repositories": [],
         "failed_alias": None,
@@ -128,8 +127,10 @@ def validate_group(group: Mapping[str, Any]) -> dict[str, Any]:
     if copied.get("version") != GROUP_SCHEMA_VERSION:
         raise CommitGroupError("commit group version is unsupported")
     group_id = copied.get("group_id")
-    if not isinstance(group_id, str) or len(group_id) != 64 or any(
-        character not in "0123456789abcdef" for character in group_id
+    if (
+        not isinstance(group_id, str)
+        or len(group_id) != 64
+        or any(character not in "0123456789abcdef" for character in group_id)
     ):
         raise CommitGroupError("commit group id is invalid")
     ordered = copied.get("ordered_aliases")
@@ -349,7 +350,7 @@ def load_unresolved_group(
 
     try:
         state_payload = json.loads(state_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+    except FileNotFoundError, OSError, ValueError, json.JSONDecodeError:
         state_payload = {}
     if isinstance(state_payload, dict) and isinstance(
         state_payload.get("commit_group_load_error"), str
@@ -371,12 +372,12 @@ def load_unresolved_group(
 
     try:
         lines = event_path.read_text(encoding="utf-8").splitlines()
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError, OSError:
         lines = []
     for line in lines:
         try:
             record = json.loads(line)
-        except (ValueError, json.JSONDecodeError):
+        except ValueError, json.JSONDecodeError:
             continue
         if not isinstance(record, Mapping):
             continue
@@ -399,7 +400,9 @@ def load_unresolved_group(
                 _merge_finished_commit(groups[group_id], payload)
 
     unresolved = [
-        group for group in groups.values() if group.get("status") != GROUP_STATUS_COMPLETE
+        group
+        for group in groups.values()
+        if group.get("status") != GROUP_STATUS_COMPLETE
     ]
     if not unresolved:
         return None

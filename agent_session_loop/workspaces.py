@@ -7,17 +7,16 @@ credential-free, filesystem-verified workspace binding.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from dataclasses import dataclass, field
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import subprocess
 import unicodedata
 import urllib.parse
-
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 REPOSITORY_ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 REGISTRY_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -46,9 +45,7 @@ class WorkspaceError(ValueError):
 def validate_repository_alias(alias: str) -> str:
     """Return ``alias`` when it is canonical and safe for exact lookup."""
     if not isinstance(alias, str) or REPOSITORY_ALIAS_RE.fullmatch(alias) is None:
-        raise WorkspaceError(
-            "repository alias must match [A-Za-z][A-Za-z0-9_-]*"
-        )
+        raise WorkspaceError("repository alias must match [A-Za-z][A-Za-z0-9_-]*")
     return alias
 
 
@@ -124,9 +121,7 @@ def _canonicalize_origin(origin: str, *, prefer_scp: bool) -> str:
             prefer_scp or "@" in origin or origin.lower().endswith(".git")
         )
         if canonical_match is not None and not source_scp:
-            host = _canonical_origin_host(
-                canonical_match.group("host").strip("[]")
-            )
+            host = _canonical_origin_host(canonical_match.group("host").strip("[]"))
             port_text = canonical_match.group("port")
             port = int(port_text) if port_text is not None else None
             if port is not None and not 1 <= port <= 65535:
@@ -184,9 +179,9 @@ def origins_equal(first: str, second: str) -> bool:
         isinstance(value, str) and "://" not in value and "@" in value
         for value in (first, second)
     )
-    return _canonicalize_origin(
-        first, prefer_scp=prefer_scp
-    ) == _canonicalize_origin(second, prefer_scp=prefer_scp)
+    return _canonicalize_origin(first, prefer_scp=prefer_scp) == _canonicalize_origin(
+        second, prefer_scp=prefer_scp
+    )
 
 
 def _canonical_origin_host(host: str) -> str:
@@ -384,15 +379,14 @@ class WorkspaceBinding:
     registry_digest: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.workspace_root, str) or not Path(
-            self.workspace_root
-        ).is_absolute():
+        if (
+            not isinstance(self.workspace_root, str)
+            or not Path(self.workspace_root).is_absolute()
+        ):
             raise WorkspaceError("workspace root must be a canonical absolute path")
         canonical = str(canonicalize_filesystem_path(self.workspace_root))
         if self.workspace_root != canonical:
-            raise WorkspaceError(
-                "workspace root must be a canonical absolute path"
-            )
+            raise WorkspaceError("workspace root must be a canonical absolute path")
         if (
             not isinstance(self.registry_digest, str)
             or REGISTRY_DIGEST_RE.fullmatch(self.registry_digest) is None
@@ -405,8 +399,7 @@ def _git_stdout(root: Path, *args: str) -> str:
         completed = subprocess.run(
             ["git", "-C", str(root), *args],
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     except FileNotFoundError as error:

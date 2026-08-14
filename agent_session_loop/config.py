@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import json
 import os
-from pathlib import Path
 import tomllib
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
-
 
 APP_NAME = "agent-session-loop"
 HARNESS_CONFIG_NAME = "harnesses.json"
@@ -43,7 +42,11 @@ def default_config_path() -> Path:
     """Return the optional user harness configuration path."""
     xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
     if xdg_config_home:
-        return Path(xdg_config_home).expanduser().resolve() / APP_NAME / HARNESS_CONFIG_NAME
+        return (
+            Path(xdg_config_home).expanduser().resolve()
+            / APP_NAME
+            / HARNESS_CONFIG_NAME
+        )
     return Path("~/.config").expanduser().resolve() / APP_NAME / HARNESS_CONFIG_NAME
 
 
@@ -157,7 +160,7 @@ def _codex_native_model_payload() -> dict[str, str]:
     config_path = Path("~/.codex/config.toml").expanduser()
     try:
         raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+    except OSError, tomllib.TOMLDecodeError, UnicodeDecodeError:
         return _unresolved_native_model_payload()
     if not isinstance(raw, Mapping):
         return _unresolved_native_model_payload()
@@ -171,7 +174,7 @@ def _copilot_native_model_payload() -> dict[str, str]:
     config_path = Path("~/.copilot/settings.json").expanduser()
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except OSError, json.JSONDecodeError, UnicodeDecodeError:
         return _unresolved_native_model_payload()
     if not isinstance(raw, Mapping):
         return _unresolved_native_model_payload()

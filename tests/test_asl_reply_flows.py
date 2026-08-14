@@ -6,77 +6,44 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import dataclasses
-from datetime import datetime, timedelta, timezone
-import errno
-import hashlib
-import importlib.util
 import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
-import signal
-import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
-import urllib.parse
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
     agent_mux_delivery,
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
     cli,
-    compact_state,
     config,
-    contracts,
     control_queue,
     events,
     harnesses,
-    install_verify,
     mailbox,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
     qna,
-    review,
-    review_repair,
-    run_control,
     runner,
     state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     REPO_ROOT,
-    agent_mux_notify_enabled,
-    write_plan,
-    install_fake_codex,
-    init_git_repo,
-    read_jsonl,
     _contract_block,
     _write_lock_file,
     _write_state_payload,
+    agent_mux_notify_enabled,
+    init_git_repo,
+    install_fake_codex,
+    read_jsonl,
+    write_plan,
 )
 
 
@@ -218,9 +185,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual(1, code)
             payload = json.loads(out)
             self.assertFalse(payload["ok"])
-            self.assertEqual(
-                qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"]
-            )
+            self.assertEqual(qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"])
             self.assertEqual("1", payload["details"]["paused_session_id"])
             self.assertEqual("2", payload["details"]["next_pending_id"])
 
@@ -234,8 +199,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 last_message_text="Pick 1a or 1b?\n",
             )
             state_path = (
-                state.plan_state_dir(plan_dir, state_dir)
-                / events.STATE_FILE_NAME
+                state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
             )
             paused_state = state_path.read_text(encoding="utf-8")
             args = self._build_args(
@@ -301,9 +265,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
             self.assertEqual(0, code, out)
             self.assertIn("Resolver prompt:", out)
-            self.assertIn(
-                "# Paused Agent Session - Resolver Prompt", out
-            )
+            self.assertIn("# Paused Agent Session - Resolver Prompt", out)
             self.assertIn(runner.REPLY_CONTEXT_HEADING, out)
 
     def test_dry_run_without_reply_keeps_session_prompt_kind(self) -> None:
@@ -364,9 +326,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     stderr="",
                 )
 
-            args = self._build_args(
-                plan_dir, state_dir, reply="use 1a", cwd=tmp_dir
-            )
+            args = self._build_args(plan_dir, state_dir, reply="use 1a", cwd=tmp_dir)
 
             with mock.patch.object(
                 runner.harnesses, "run_harness", side_effect=fake_run_harness
@@ -382,9 +342,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertIn("use 1a", first_prompt)
             if len(calls) >= 2:
                 second_prompt = calls[1].kwargs.get("prompt")
-                self.assertNotIn(
-                    runner.REPLY_CONTEXT_HEADING, second_prompt
-                )
+                self.assertNotIn(runner.REPLY_CONTEXT_HEADING, second_prompt)
 
             plan_state = state.plan_state_dir(plan_dir, state_dir)
             events_path = plan_state / events.EVENTS_FILE_NAME
@@ -403,9 +361,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual("run-prev", source["run_id"])
             self.assertEqual("1", source["session_id"])
             self.assertEqual(2, source["turn_index"])
-            self.assertEqual(
-                str(last_message_path), source["last_message_path"]
-            )
+            self.assertEqual(str(last_message_path), source["last_message_path"])
             self.assertEqual(len("use 1a"), source["reply_length"])
 
             state_path = plan_state / events.STATE_FILE_NAME
@@ -414,12 +370,8 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual("reply", first_turn["prompt_kind"])
             self.assertEqual("run-prev", first_turn["reply_source"]["run_id"])
             if len(state_payload["turns"]) >= 2:
-                self.assertEqual(
-                    "session", state_payload["turns"][1]["prompt_kind"]
-                )
-                self.assertNotIn(
-                    "reply_source", state_payload["turns"][1]
-                )
+                self.assertEqual("session", state_payload["turns"][1]["prompt_kind"])
+                self.assertNotIn("reply_source", state_payload["turns"][1])
 
     def test_mailbox_origin_reply_body_is_escaped_in_continuation_prompt(
         self,
@@ -482,13 +434,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             [
                 line
                 for line in lines
-                if line.startswith("Runner status:")
-                or line.startswith("RUNNER_PAUSE:")
+                if line.startswith("Runner status:") or line.startswith("RUNNER_PAUSE:")
             ],
         )
-        reply_record = json.loads(
-            lines[lines.index(runner.REPLY_MESSAGE_BEGIN) + 1]
-        )
+        reply_record = json.loads(lines[lines.index(runner.REPLY_MESSAGE_BEGIN) + 1])
         self.assertEqual({"text": hostile}, reply_record)
 
     def test_answered_mailbox_wait_never_notifies_agent_mux_pause(
@@ -551,9 +500,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 try:
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline:
-                        view = mailbox.read_mailbox(
-                            plan_dir, state_dir=state_dir
-                        )
+                        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         if view.unanswered_questions:
                             mailbox.append_reply(
                                 plan_dir,
@@ -669,9 +616,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 try:
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline:
-                        view = mailbox.read_mailbox(
-                            plan_dir, state_dir=state_dir
-                        )
+                        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         if view.unanswered_questions:
                             mailbox.append_reply(
                                 plan_dir,
@@ -726,9 +671,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual(
                 1, emitted.count(runner.AGENT_MUX_WAIT_START_EVENT), emitted
             )
-            self.assertEqual(
-                1, emitted.count(runner.AGENT_MUX_WAIT_END_EVENT), emitted
-            )
+            self.assertEqual(1, emitted.count(runner.AGENT_MUX_WAIT_END_EVENT), emitted)
             start_index = emitted.index(runner.AGENT_MUX_WAIT_START_EVENT)
             end_index = emitted.index(runner.AGENT_MUX_WAIT_END_EVENT)
             self.assertLess(start_index, end_index, emitted)
@@ -756,15 +699,11 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             )
             self.assertEqual(question.id, notified[end_index][1]["question_id"])
             self.assertEqual("reply", notified[end_index][1]["wait_reason"])
-            self.assertEqual(
-                "consumed", notified[end_index][1]["delivery_state"]
-            )
+            self.assertEqual("consumed", notified[end_index][1]["delivery_state"])
             self.assertTrue(notified[end_index][1]["closure_consumed"])
             reply = view.reply_for(question.id)
             assert reply is not None
-            self.assertEqual(
-                reply.id, notified[end_index][1]["closure_id"]
-            )
+            self.assertEqual(reply.id, notified[end_index][1]["closure_id"])
 
     def test_runner_owned_continue_resolution_runs_once_before_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -828,14 +767,11 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 try:
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline:
-                        view = mailbox.read_mailbox(
-                            plan_dir, state_dir=state_dir
-                        )
+                        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         questions = [
                             message
                             for message in view.unanswered_questions
-                            if message.waiter_origin
-                            == mailbox.WAITER_ORIGIN_RUNNER
+                            if message.waiter_origin == mailbox.WAITER_ORIGIN_RUNNER
                         ]
                         if questions:
                             question = questions[0]
@@ -990,9 +926,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 try:
                     deadline = time.monotonic() + 5
                     while time.monotonic() < deadline:
-                        view = mailbox.read_mailbox(
-                            plan_dir, state_dir=state_dir
-                        )
+                        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         if view.unanswered_questions:
                             question = view.unanswered_questions[0]
                             assert question.run_id is not None
@@ -1106,9 +1040,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 calls += 1
                 plan_state = state.plan_state_dir(plan_dir, state_dir)
                 state_payload = json.loads(
-                    (plan_state / events.STATE_FILE_NAME).read_text(
-                        encoding="utf-8"
-                    )
+                    (plan_state / events.STATE_FILE_NAME).read_text(encoding="utf-8")
                 )
                 active_turn = state_payload["active_turn"]
                 question = mailbox.append_question(
@@ -1318,8 +1250,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     stdout="waiting\n",
                     stderr="",
                     last_message=(
-                        "Choose option 1a or 1b.\n"
-                        f"RUNNER_PAUSE: {pause_message}\n"
+                        f"Choose option 1a or 1b.\nRUNNER_PAUSE: {pause_message}\n"
                     ),
                 )
 
@@ -2001,7 +1932,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             poll_seconds=1.0,
             io_grace_seconds=1.0,
         )
-        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
+        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
         suspend_seconds = 8 * 3600.0
         # Well past the awake grace, so the lapse is judged on freshness alone.
         supervision_ends = 100.0
@@ -2013,9 +1944,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             base_deadline=epoch + timedelta(seconds=settings.base_seconds),
             unsupervised_deadline_at=epoch
             + timedelta(seconds=settings.unsupervised_ceiling_seconds),
-            unsupervised_ceiling_seconds=(
-                settings.unsupervised_ceiling_seconds
-            ),
+            unsupervised_ceiling_seconds=(settings.unsupervised_ceiling_seconds),
             last_lease_activity_at=None,
         )
         payload = {"run_id": "run-1", "waiting_for_reply": dict(waiting)}
@@ -2098,8 +2027,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         # The base keeps its surviving budget, but the ceiling re-anchors at
         # the wake in full: nobody could prove liveness while the lid was shut.
         self.assertEqual(
-            detection_wall
-            + timedelta(seconds=settings.unsupervised_ceiling_seconds),
+            detection_wall + timedelta(seconds=settings.unsupervised_ceiling_seconds),
             hard_after,
         )
         self.assertGreater(base_after, detection_wall)
@@ -2160,9 +2088,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         lease_stale_from: float | None = None,
         reply_from: float | None = None,
         suspend_seconds: float = 3600.0,
-    ) -> tuple[
-        runner._MailboxReplyWaitResult, float, list[float], list[float]
-    ]:
+    ) -> tuple[runner._MailboxReplyWaitResult, float, list[float], list[float]]:
         """Run a wait whose first poll sleep hides a machine suspend.
 
         The wall clock jumps ``suspend_seconds`` during the first sleep, so
@@ -2216,7 +2142,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             fresh=False,
             reason=mailbox.LEASE_EXPIRED,
         )
-        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
+        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
         now = [0.0]
         wall_jump = [0.0]
         probe_times: list[float] = []
@@ -2356,9 +2282,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 {
                     "run_id": "run-1",
                     "waiting_for_reply": {
-                        "question_id": (
-                            "00000000-0000-0000-0000-000000000044"
-                        ),
+                        "question_id": ("00000000-0000-0000-0000-000000000044"),
                         "session_id": "9",
                         "turn_index": 3,
                     },
@@ -2369,9 +2293,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 lease_reason=result.lease_reason,
                 lease_supervisor_id=result.lease_supervisor_id,
                 suspend_skew_seconds=result.suspend_skew_seconds,
-                suspend_lease_grace_seconds=(
-                    result.suspend_lease_grace_seconds
-                ),
+                suspend_lease_grace_seconds=(result.suspend_lease_grace_seconds),
                 persistence=runner._RunPersistence(write_state=False),
             )
             [cleared_event] = read_jsonl(event_path)
@@ -2692,7 +2614,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             poll_seconds=1.0,
             io_grace_seconds=1.0,
         )
-        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
+        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
         waiting = runner._waiting_for_reply_payload(
             question_id=question_id,
             session_id="9",
@@ -2701,9 +2623,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             base_deadline=epoch + timedelta(seconds=settings.base_seconds),
             unsupervised_deadline_at=epoch
             + timedelta(seconds=settings.unsupervised_ceiling_seconds),
-            unsupervised_ceiling_seconds=(
-                settings.unsupervised_ceiling_seconds
-            ),
+            unsupervised_ceiling_seconds=(settings.unsupervised_ceiling_seconds),
             last_lease_activity_at=None,
         )
         payload = {"run_id": "run-1", "waiting_for_reply": dict(waiting)}
@@ -2775,7 +2695,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     def test_rebase_waiting_deadlines_skips_when_question_id_mismatches(
         self,
     ) -> None:
-        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
+        epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
         waiting = {
             "question_id": "question-owned-by-another-wait",
             "base_deadline": "2026-07-24T12:04:00+00:00",
@@ -2791,8 +2711,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 payload,
                 question_id="question-this-wait-expected",
                 base_deadline=epoch + timedelta(hours=8, minutes=4),
-                unsupervised_deadline_at=epoch
-                + timedelta(hours=8, minutes=20),
+                unsupervised_deadline_at=epoch + timedelta(hours=8, minutes=20),
                 persistence=runner._RunPersistence(),
             )
 
@@ -2912,9 +2831,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             messages=(question,),
             last_seq=1,
             size_bytes=(
-                mailbox.MAILBOX_MAX_BYTES
-                - mailbox.MAILBOX_MIN_APPEND_BYTES
-                + 1
+                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_MIN_APPEND_BYTES + 1
             ),
         )
         settings = runner._MailboxReplyWaitSettings(
@@ -2954,9 +2871,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 ),
                 started_monotonic=0.0,
                 monotonic=lambda: 0.0,
-                sleep=lambda _seconds: self.fail(
-                    "exhausted mailbox must not poll"
-                ),
+                sleep=lambda _seconds: self.fail("exhausted mailbox must not poll"),
             )
 
         self.assertIsNone(result.reply)
@@ -3049,9 +2964,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     ),
                     started_monotonic=0.0,
                     monotonic=lambda: 0.0,
-                    sleep=lambda _seconds: self.fail(
-                        "available reply must not poll"
-                    ),
+                    sleep=lambda _seconds: self.fail("available reply must not poll"),
                 )
 
             self.assertEqual(appended_reply, result.reply)
@@ -3199,9 +3112,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                         runner.mailbox,
                         "append_question",
                     ) as append_question,
-                    self.assertRaises(
-                        runner._MailboxReplyWaitUnavailable
-                    ) as raised,
+                    self.assertRaises(runner._MailboxReplyWaitUnavailable) as raised,
                 ):
                     runner._ensure_mailbox_question(
                         plan_dir=Path("/tmp/plan"),
@@ -3217,9 +3128,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 append_question.assert_not_called()
 
     @staticmethod
-    def _question_context(
-        last_message: str, last_message_path: Path
-    ) -> qna.QnAContext:
+    def _question_context(last_message: str, last_message_path: Path) -> qna.QnAContext:
         return qna.QnAContext(
             plan_dir=Path("/tmp/plan"),
             state_dir=Path("/tmp/state"),
@@ -3249,9 +3158,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         self,
     ) -> None:
         cap = runner.MAILBOX_QUESTION_TEXT_MAX_CHARS
-        oversized = "".join(
-            f"line {index}\n" for index in range(cap // 4)
-        )
+        oversized = "".join(f"line {index}\n" for index in range(cap // 4))
         self.assertGreater(len(oversized), cap)
         artifact_path = Path("/tmp/artifacts/last-message.txt")
 
@@ -3264,9 +3171,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         retried_text = runner._mailbox_question_text(
             self._question_context(oversized, artifact_path)
         )
-        self.assertEqual(
-            first_text.encode("utf-8"), retried_text.encode("utf-8")
-        )
+        self.assertEqual(first_text.encode("utf-8"), retried_text.encode("utf-8"))
         self.assertTrue(first_text.startswith(oversized[:cap]))
         self.assertLess(len(first_text), cap + 200)
         footer = first_text[cap:]
@@ -3343,8 +3248,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             messages=(),
             last_seq=0,
             size_bytes=(
-                mailbox.MAILBOX_MAX_BYTES
-                - mailbox.MAILBOX_QUESTION_RESERVE_BYTES
+                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_QUESTION_RESERVE_BYTES
             ),
         )
         # The guard must fire on the reduced question cap even though the
@@ -3374,9 +3278,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 turn_index=1,
             )
 
-        self.assertEqual(
-            mailbox.ERROR_MAILBOX_FULL, raised.exception.reason
-        )
+        self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
         append_question.assert_not_called()
 
     def test_abandoned_escalation_stops_counting_once_the_run_pauses(
@@ -3423,9 +3325,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             )
             _write_lock_file(plan_dir, state_dir, pid=os.getpid())
 
-            payload = state.status_payload(
-                plans.inspect_plan(plan_dir), state_dir
-            )
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
 
             status = payload["mailbox"]
             self.assertEqual(1, status["unanswered_questions"])
@@ -3444,9 +3344,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
-            mailbox_path = mailbox.mailbox_path_for_plan(
-                plan_dir, state_dir
-            )
+            mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
             mailbox_path.parent.mkdir(parents=True, exist_ok=True)
             mailbox_path.write_bytes(b"{" * mailbox.MAILBOX_MAX_BYTES)
             pause_message = "blocked - mailbox capacity fallback"
@@ -3459,8 +3357,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     stdout="waiting\n",
                     stderr="",
                     last_message=(
-                        "Choose option 1a or 1b.\n"
-                        f"RUNNER_PAUSE: {pause_message}\n"
+                        f"Choose option 1a or 1b.\nRUNNER_PAUSE: {pause_message}\n"
                     ),
                 )
 
@@ -3485,8 +3382,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertNotIn("waiting_for_reply", payload)
 
             records = read_jsonl(
-                state.plan_state_dir(plan_dir, state_dir)
-                / events.EVENTS_FILE_NAME
+                state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
             )
             self.assertEqual(
                 [],
@@ -3501,8 +3397,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual(
                 1,
                 sum(
-                    record.get("name") == events.RUN_PAUSED_EVENT
-                    for record in records
+                    record.get("name") == events.RUN_PAUSED_EVENT for record in records
                 ),
             )
             self.assertEqual(
@@ -3560,9 +3455,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
         self.assertEqual("x" * runner.AGENT_MUX_QUESTION_PREVIEW_CHARS, capped)
 
         multiline = runner._question_preview("line\n" * 400)
-        self.assertLessEqual(
-            len(multiline), runner.AGENT_MUX_QUESTION_PREVIEW_CHARS
-        )
+        self.assertLessEqual(len(multiline), runner.AGENT_MUX_QUESTION_PREVIEW_CHARS)
         self.assertNotIn("\n", multiline)
 
     def test_wait_started_delivers_bounded_question_identity(self) -> None:
@@ -3570,9 +3463,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
             payload = self._wait_payload(Path(tmp))
 
             with (
-                mock.patch.object(
-                    runner.shutil, "which", return_value="/opt/amx"
-                ),
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -3594,9 +3485,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
             self.assertEqual("question-1", hook_payload["question_id"])
             preview = hook_payload["question_preview"]
             self.assertTrue(preview.startswith("Should we use 1a or 1b? detail"))
-            self.assertLessEqual(
-                len(preview), runner.AGENT_MUX_QUESTION_PREVIEW_CHARS
-            )
+            self.assertLessEqual(len(preview), runner.AGENT_MUX_QUESTION_PREVIEW_CHARS)
             self.assertNotIn("wait_reason", hook_payload)
 
     def test_wait_started_omits_preview_for_blank_question_text(self) -> None:
@@ -3604,9 +3493,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
             payload = self._wait_payload(Path(tmp))
 
             with (
-                mock.patch.object(
-                    runner.shutil, "which", return_value="/opt/amx"
-                ),
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -3630,34 +3517,34 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
             runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             "error",
         ):
-            with self.subTest(wait_reason=wait_reason):
-                with tempfile.TemporaryDirectory() as tmp:
-                    payload = self._wait_payload(Path(tmp))
+            with (
+                self.subTest(wait_reason=wait_reason),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                payload = self._wait_payload(Path(tmp))
 
-                    with (
-                        mock.patch.object(
-                            runner.shutil, "which", return_value="/opt/amx"
-                        ),
-                        mock.patch.object(
-                            runner.subprocess,
-                            "run",
-                            return_value=self._accepted_delivery(),
-                        ) as run,
-                    ):
-                        runner._notify_agent_mux_loop_wait_ended(
-                            payload,
-                            question_id="question-1",
-                            wait_reason=wait_reason,
-                        )
+                with (
+                    mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                    mock.patch.object(
+                        runner.subprocess,
+                        "run",
+                        return_value=self._accepted_delivery(),
+                    ) as run,
+                ):
+                    runner._notify_agent_mux_loop_wait_ended(
+                        payload,
+                        question_id="question-1",
+                        wait_reason=wait_reason,
+                    )
 
-                    args, kwargs = run.call_args
-                    self.assertEqual("AgentSessionLoopWaitEnded", args[0][-1])
-                    hook_payload = json.loads(kwargs["input"])
-                    self.assertEqual("wait_ended", hook_payload["reason"])
-                    self.assertEqual("between", hook_payload["phase"])
-                    self.assertEqual("question-1", hook_payload["question_id"])
-                    self.assertEqual(wait_reason, hook_payload["wait_reason"])
-                    self.assertNotIn("question_preview", hook_payload)
+                args, kwargs = run.call_args
+                self.assertEqual("AgentSessionLoopWaitEnded", args[0][-1])
+                hook_payload = json.loads(kwargs["input"])
+                self.assertEqual("wait_ended", hook_payload["reason"])
+                self.assertEqual("between", hook_payload["phase"])
+                self.assertEqual("question-1", hook_payload["question_id"])
+                self.assertEqual(wait_reason, hook_payload["wait_reason"])
+                self.assertNotIn("question_preview", hook_payload)
 
     def test_wait_notifications_stay_fail_open_when_amx_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3749,9 +3636,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
             payload = self._hang_payload(Path(tmp))
 
             with (
-                mock.patch.object(
-                    runner.shutil, "which", return_value="/opt/amx"
-                ),
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -3786,9 +3671,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
             payload = self._hang_payload(Path(tmp))
 
             with (
-                mock.patch.object(
-                    runner.shutil, "which", return_value="/opt/amx"
-                ),
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -3818,9 +3701,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
             payload = self._hang_payload(Path(tmp))
 
             with (
-                mock.patch.object(
-                    runner.shutil, "which", return_value="/opt/amx"
-                ),
+                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -3917,9 +3798,7 @@ class RunResumeConfigTests(unittest.TestCase):
         plan_dir, state_dir, _ = RunReplyResumeFlowTests()._seed_paused_plan(
             tmp_dir, last_message_text="Pick 1a or 1b?\n"
         )
-        state_path = (
-            state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
-        )
+        state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
         payload = json.loads(state_path.read_text(encoding="utf-8"))
         if run_config is not None:
             payload["run_config"] = run_config
@@ -3981,9 +3860,7 @@ class RunResumeConfigTests(unittest.TestCase):
     def test_resume_explicit_flag_overrides_run_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            plan_dir, _ = self._seed(
-                tmp_dir, run_config=self._full_run_config(tmp_dir)
-            )
+            plan_dir, _ = self._seed(tmp_dir, run_config=self._full_run_config(tmp_dir))
             state_dir_arg = str(tmp_dir / "state")
             tokens = [
                 "run",
@@ -4018,9 +3895,7 @@ class RunResumeConfigTests(unittest.TestCase):
         # flag and would otherwise let the persisted value clobber it).
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            plan_dir, _ = self._seed(
-                tmp_dir, run_config=self._full_run_config(tmp_dir)
-            )
+            plan_dir, _ = self._seed(tmp_dir, run_config=self._full_run_config(tmp_dir))
             state_dir_arg = str(tmp_dir / "state")
             argv = [
                 "run",
@@ -4061,9 +3936,7 @@ class RunResumeConfigTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             plan_dir, _ = self._seed(
                 tmp_dir,
-                run_config=self._full_run_config(
-                    tmp_dir, review_harness="codex"
-                ),
+                run_config=self._full_run_config(tmp_dir, review_harness="codex"),
             )
             state_dir_arg = str(tmp_dir / "state")
             tokens = [
@@ -4144,9 +4017,7 @@ class RunResumeConfigTests(unittest.TestCase):
     def test_resume_with_reply_stdin_combined(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
-            plan_dir, _ = self._seed(
-                tmp_dir, run_config=self._full_run_config(tmp_dir)
-            )
+            plan_dir, _ = self._seed(tmp_dir, run_config=self._full_run_config(tmp_dir))
             state_dir_arg = str(tmp_dir / "state")
             tokens = [
                 "run",
@@ -4225,16 +4096,18 @@ class RunResumeConfigTests(unittest.TestCase):
             ]
             args = cli.build_parser().parse_args(tokens)
             out, err = io.StringIO(), io.StringIO()
-            with mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=fake_run_harness
+            with (
+                mock.patch.object(
+                    runner.harnesses, "run_harness", side_effect=fake_run_harness
+                ),
+                redirect_stdout(out),
+                redirect_stderr(err),
             ):
-                with redirect_stdout(out), redirect_stderr(err):
-                    code = runner.run_from_args(args)
+                code = runner.run_from_args(args)
 
             self.assertEqual(0, code, err.getvalue() or out.getvalue())
             state_path = (
-                state.plan_state_dir(plan_dir, state_dir)
-                / events.STATE_FILE_NAME
+                state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
             )
             run_config = json.loads(state_path.read_text(encoding="utf-8"))[
                 "run_config"
@@ -4246,9 +4119,7 @@ class RunResumeConfigTests(unittest.TestCase):
             self.assertEqual(5, run_config["max_pending_sessions"])
             self.assertTrue(run_config["allow_not_loop_ready"])
             self.assertTrue(run_config["unsafe_bypass"])
-            self.assertEqual(
-                str(plans.canonicalize_path(tmp_dir)), run_config["cwd"]
-            )
+            self.assertEqual(str(plans.canonicalize_path(tmp_dir)), run_config["cwd"])
             self.assertEqual(str(state_dir), run_config["state_dir_override"])
 
 
@@ -4293,9 +4164,12 @@ class RunReplyStdinFlowTests(unittest.TestCase):
     ) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         fake_stdin = io.StringIO(stdin_text)
-        with mock.patch.object(runner.sys, "stdin", fake_stdin):
-            with redirect_stdout(out), redirect_stderr(err):
-                code = runner.run_from_args(args)
+        with (
+            mock.patch.object(runner.sys, "stdin", fake_stdin),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
+            code = runner.run_from_args(args)
         return code, out.getvalue(), err.getvalue()
 
     def test_reply_stdin_and_reply_are_mutually_exclusive_at_cli(self) -> None:
@@ -4372,17 +4246,13 @@ class RunReplyStdinFlowTests(unittest.TestCase):
 
             self.assertEqual(1, code)
             payload = json.loads(out)
-            self.assertEqual(
-                qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"]
-            )
+            self.assertEqual(qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"])
 
     def test_reply_stdin_missing_question_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             seeder = RunReplyResumeFlowTests()
-            plan_dir, state_dir, last_message_path = seeder._seed_paused_plan(
-                tmp_dir
-            )
+            plan_dir, state_dir, last_message_path = seeder._seed_paused_plan(tmp_dir)
             last_message_path.unlink()
             args = self._build_args(plan_dir, state_dir, reply_stdin=True)
 
@@ -4390,9 +4260,7 @@ class RunReplyStdinFlowTests(unittest.TestCase):
 
             self.assertEqual(1, code)
             payload = json.loads(out)
-            self.assertEqual(
-                qna.REASON_MISSING_QUESTION_CONTEXT, payload["reason"]
-            )
+            self.assertEqual(qna.REASON_MISSING_QUESTION_CONTEXT, payload["reason"])
 
     def test_reply_stdin_dry_run_marks_stdin_origin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4480,9 +4348,7 @@ class RunReplyStdinFlowTests(unittest.TestCase):
             source = reply_payload["source"]
             self.assertEqual("stdin", source["origin"])
             self.assertEqual(len(reply_text), source["reply_length"])
-            self.assertEqual(
-                str(last_message_path), source["last_message_path"]
-            )
+            self.assertEqual(str(last_message_path), source["last_message_path"])
             # Reply text must never leak into any persisted artifact.
             self.assertNotIn(reply_text, json.dumps(reply_events[0]))
 
@@ -4517,9 +4383,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         self.config_home = self.tmp_path / "config"
         init_git_repo(self.repo_root)
         self.fake_codex = install_fake_codex(self.tmp_path)
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps({"codex": {"executable": str(self.fake_codex)}}),
@@ -4550,9 +4414,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
                 "XDG_CONFIG_HOME": str(self.config_home),
                 "FAKE_CODEX_MODE": mode,
                 "FAKE_CODEX_STEP_SLEEP": "0",
-                "PYTHONPATH": str(REPO_ROOT)
-                + os.pathsep
-                + env.get("PYTHONPATH", ""),
+                "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
             }
         )
         return env
@@ -4670,24 +4532,19 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self.addCleanup(
-            lambda: process.kill() if process.poll() is None else None
-        )
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
         return process
 
     def _wait_for_runner_question(self) -> str:
         state_path = (
-            state.plan_state_dir(self.plan_dir, self.state_dir)
-            / events.STATE_FILE_NAME
+            state.plan_state_dir(self.plan_dir, self.state_dir) / events.STATE_FILE_NAME
         )
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if state_path.exists():
                 try:
-                    state_payload = json.loads(
-                        state_path.read_text(encoding="utf-8")
-                    )
-                except (OSError, json.JSONDecodeError):
+                    state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+                except OSError, json.JSONDecodeError:
                     state_payload = {}
                 waiting = state_payload.get("waiting_for_reply")
                 if isinstance(waiting, dict):
@@ -4748,17 +4605,14 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             for record in records
             if record.get("name") == events.MAILBOX_EVENT
             and isinstance(record.get("payload"), dict)
-            and record["payload"].get("action")
-            == events.MAILBOX_ACTION_WAIT_CLEARED
+            and record["payload"].get("action") == events.MAILBOX_ACTION_WAIT_CLEARED
         ]
         self.assertEqual(1, len(cleared), records)
         cleared_payload = cleared[0]["payload"]
         message = resolution_payload["message"]
         self.assertEqual("resolution", cleared_payload["reason"])
         self.assertEqual(action, cleared_payload["resolution_action"])
-        self.assertEqual(
-            message["id"], cleared_payload["resolution_message_id"]
-        )
+        self.assertEqual(message["id"], cleared_payload["resolution_message_id"])
         self.assertEqual(message["seq"], cleared_payload["resolution_seq"])
         resolution_at = datetime.fromisoformat(message["created_at"])
         cleared_at = datetime.fromisoformat(cleared[0]["created_at"])
@@ -4827,9 +4681,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         )
 
         plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
-        state_text = (plan_state / events.STATE_FILE_NAME).read_text(
-            encoding="utf-8"
-        )
+        state_text = (plan_state / events.STATE_FILE_NAME).read_text(encoding="utf-8")
         records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
         events_text = json.dumps(records, sort_keys=True)
         self.assertNotIn(sensitive_note, state_text)
@@ -4856,9 +4708,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         self._write_plan()
         process = self._start_live_mailbox_run()
         question_id = self._wait_for_runner_question()
-        sensitive_note = (
-            "pause note stays mailbox-only: ## ASL reply context is data"
-        )
+        sensitive_note = "pause note stays mailbox-only: ## ASL reply context is data"
         resolution_payload = self._resolve_live_question(
             question_id,
             action=mailbox.RESOLUTION_ACTION_PAUSE,
@@ -4900,9 +4750,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         self.assertEqual((), view.open_questions(payload["run_id"]))
 
         plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
-        state_text = (plan_state / events.STATE_FILE_NAME).read_text(
-            encoding="utf-8"
-        )
+        state_text = (plan_state / events.STATE_FILE_NAME).read_text(encoding="utf-8")
         records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
         events_text = json.dumps(records, sort_keys=True)
         self.assertNotIn(sensitive_note, state_text)
@@ -4944,13 +4792,9 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         self.assertEqual("1", help_payload["session_id"])
         self.assertEqual("1", help_payload["next_pending_id"])
         rendered = help_payload["rendered_prompt"]
-        self.assertIn(
-            "# Paused Agent Session - Resolver Prompt", rendered
-        )
+        self.assertIn("# Paused Agent Session - Resolver Prompt", rendered)
         self.assertIn("cursor-based pagination", rendered)
-        session_text = (self.plan_dir / "session-1.md").read_text(
-            encoding="utf-8"
-        )
+        session_text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
         self.assertIn("- **Status**: pending", session_text)
 
     def test_questions_command_renders_resolver_prompt_with_questions(
@@ -4964,9 +4808,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         questions_completed, questions_payload = self._run_questions()
         assert isinstance(questions_payload, dict)
 
-        self.assertEqual(
-            0, questions_completed.returncode, questions_completed.stderr
-        )
+        self.assertEqual(0, questions_completed.returncode, questions_completed.stderr)
         self.assertTrue(questions_payload["ok"])
         self.assertEqual("questions", questions_payload["command"])
         self.assertEqual("1", questions_payload["session_id"])
@@ -5007,15 +4849,11 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             mode="reply-aware", reply=self.REPLY_TEXT
         )
 
-        self.assertEqual(
-            0, resume_completed.returncode, resume_completed.stderr
-        )
+        self.assertEqual(0, resume_completed.returncode, resume_completed.stderr)
         self.assertTrue(resume_payload["ok"])
         self.assertFalse(resume_payload["paused"])
         self.assertEqual("all-complete", resume_payload["reason"])
-        session_text = (self.plan_dir / "session-1.md").read_text(
-            encoding="utf-8"
-        )
+        session_text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
         self.assertIn("- **Status**: complete", session_text)
         # The first persisted turn should record the reply prompt kind, while
         # the operator reply text is redacted at the persistence boundary.
@@ -5088,9 +4926,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self.addCleanup(
-            lambda: process.kill() if process.poll() is None else None
-        )
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
 
         plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
         state_path = plan_state / events.STATE_FILE_NAME
@@ -5099,10 +4935,8 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         while time.monotonic() < deadline:
             if state_path.exists():
                 try:
-                    state_payload = json.loads(
-                        state_path.read_text(encoding="utf-8")
-                    )
-                except (OSError, json.JSONDecodeError):
+                    state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+                except OSError, json.JSONDecodeError:
                     state_payload = {}
                 raw_waiting = state_payload.get("waiting_for_reply")
                 if isinstance(raw_waiting, dict):
@@ -5166,18 +5000,12 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         self.assertEqual("reply", payload["turns"][1]["prompt_kind"])
         self.assertNotIn("waiting_for_reply", payload)
 
-        session_one = (self.plan_dir / "session-1.md").read_text(
-            encoding="utf-8"
-        )
-        session_two = (self.plan_dir / "session-2.md").read_text(
-            encoding="utf-8"
-        )
+        session_one = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
+        session_two = (self.plan_dir / "session-2.md").read_text(encoding="utf-8")
         self.assertIn("- **Status**: complete", session_one)
         self.assertIn("- **Status**: pending", session_two)
 
-        mailbox_view = mailbox.read_mailbox(
-            self.plan_dir, state_dir=self.state_dir
-        )
+        mailbox_view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
         questions = [
             message
             for message in mailbox_view.messages
@@ -5287,9 +5115,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             reply=self.REPLY_TEXT,
         )
 
-        self.assertEqual(
-            0, resume_completed.returncode, resume_completed.stderr
-        )
+        self.assertEqual(0, resume_completed.returncode, resume_completed.stderr)
         self.assertTrue(resume_payload["ok"])
         self.assertFalse(resume_payload["paused"])
         self.assertEqual("all-complete", resume_payload["reason"])
@@ -5314,9 +5140,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             allow_not_loop_ready=False,
         )
 
-        self.assertEqual(
-            0, resume_completed.returncode, resume_completed.stderr
-        )
+        self.assertEqual(0, resume_completed.returncode, resume_completed.stderr)
         self.assertTrue(resume_payload["ok"])
         self.assertFalse(resume_payload["paused"])
         self.assertEqual("all-complete", resume_payload["reason"])
@@ -5329,9 +5153,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             "loop-ready", repair_payload["auto_repairs"][0]["target_state"]
         )
         self.assertEqual("reply", resume_payload["turns"][0]["prompt_kind"])
-        session_text = (self.plan_dir / "session-1.md").read_text(
-            encoding="utf-8"
-        )
+        session_text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
         self.assertIn("- **Status**: complete", session_text)
         # The reply was actually consumed: only metadata, not the operator
         # text, leaks into the persisted reply event.
@@ -5388,9 +5210,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             reply=self.REPLY_TEXT,
         )
 
-        self.assertEqual(
-            0, resume_completed.returncode, resume_completed.stderr
-        )
+        self.assertEqual(0, resume_completed.returncode, resume_completed.stderr)
         self.assertTrue(resume_payload["ok"])
         self.assertFalse(resume_payload["paused"])
         self.assertEqual("all-complete", resume_payload["reason"])
@@ -5443,22 +5263,16 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             json.dumps(state_payload), encoding="utf-8"
         )
 
-        completed, payload = self._run_run(
-            mode="reply-aware", reply=self.REPLY_TEXT
-        )
+        completed, payload = self._run_run(mode="reply-aware", reply=self.REPLY_TEXT)
 
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertFalse(payload["ok"])
         self.assertEqual("run", payload["command"])
-        self.assertEqual(
-            qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"]
-        )
+        self.assertEqual(qna.REASON_REPLY_CONTEXT_MISMATCH, payload["reason"])
         self.assertEqual("1", payload["details"]["paused_session_id"])
         self.assertEqual("2", payload["details"]["next_pending_id"])
         # The pending session is not advanced when the reply is rejected.
-        session_two = (self.plan_dir / "session-2.md").read_text(
-            encoding="utf-8"
-        )
+        session_two = (self.plan_dir / "session-2.md").read_text(encoding="utf-8")
         self.assertIn("- **Status**: pending", session_two)
 
     def test_run_with_empty_reply_returns_stable_empty_reply_reason(
@@ -5468,9 +5282,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         first_completed, _first_payload = self._run_run(mode="reply-aware")
         self.assertEqual(1, first_completed.returncode, first_completed.stderr)
 
-        completed, payload = self._run_run(
-            mode="reply-aware", reply="   \n  "
-        )
+        completed, payload = self._run_run(mode="reply-aware", reply="   \n  ")
 
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertFalse(payload["ok"])

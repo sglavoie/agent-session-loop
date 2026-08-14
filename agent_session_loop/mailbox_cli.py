@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-from datetime import datetime, timezone
+import contextlib
 import hashlib
 import math
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Sequence
 import uuid
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from . import (
     agent_mux_delivery,
@@ -24,7 +26,6 @@ from . import (
     mailbox_rendering,
     responses,
 )
-
 
 COMMAND_INBOX_GUIDANCE = "inbox-guidance"
 COMMAND_INBOX_REPLY = "inbox-reply"
@@ -140,9 +141,7 @@ def _message_references(
         boundary_count = max_rendered // 2
         selected = records[:boundary_count] + records[-boundary_count:]
         omitted_count = len(records) - len(selected)
-    references = [
-        f"seq {message.seq} (id {message.id})" for message in selected
-    ]
+    references = [f"seq {message.seq} (id {message.id})" for message in selected]
     if omitted_count:
         references.insert(
             len(selected) // 2,
@@ -502,9 +501,7 @@ def _body_from_args(
             command_name=command_name,
             text_label=text_label,
             reason=mailbox.REJECT_MISSING_TEXT,
-            error=(
-                f"exactly one of {inline_source} and --text-stdin is required"
-            ),
+            error=(f"exactly one of {inline_source} and --text-stdin is required"),
         )
         return None
     if inline is not None and from_stdin:
@@ -513,9 +510,7 @@ def _body_from_args(
             command_name=command_name,
             text_label=text_label,
             reason=ERROR_INVALID_TEXT_SOURCE,
-            error=(
-                f"exactly one of {inline_source} and --text-stdin is required"
-            ),
+            error=(f"exactly one of {inline_source} and --text-stdin is required"),
         )
         return None
     if from_stdin:
@@ -617,13 +612,9 @@ def _validated_timeout(
 ) -> float | None:
     try:
         timeout = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         timeout = math.nan
-    if (
-        not math.isfinite(timeout)
-        or timeout < 0
-        or timeout > MAX_WAIT_TIMEOUT_SECONDS
-    ):
+    if not math.isfinite(timeout) or timeout < 0 or timeout > MAX_WAIT_TIMEOUT_SECONDS:
         _print_input_error(
             args,
             command_name=command_name,
@@ -730,7 +721,7 @@ def _write_supervisor_lease(
     lease: mailbox.MailboxLease | None
     try:
         view = mailbox.read_lease(plan_dir, state_dir=state_dir)
-    except (OSError, mailbox.MailboxError):
+    except OSError, mailbox.MailboxError:
         lease = None
     else:
         lease = view.lease if view.fresh else None
@@ -747,9 +738,7 @@ def _write_supervisor_lease(
             run_id=lease.run_id,
             projection_seq=lease.projection_seq,
             unanswered_questions=lease.unanswered_questions,
-            latest_unanswered_question_id=(
-                lease.latest_unanswered_question_id
-            ),
+            latest_unanswered_question_id=(lease.latest_unanswered_question_id),
             latest_unanswered_question_created_at=(
                 lease.latest_unanswered_question_created_at
             ),
@@ -777,10 +766,9 @@ def _supervisor_write(
     if context is None:
         return None
     if before_lease is not None:
-        try:
+        # Optional evidence stays fail-open.
+        with contextlib.suppress(Exception):
             before_lease(context)
-        except Exception:  # noqa: BLE001 - optional evidence stays fail-open
-            pass
     try:
         # Establish the lease first.  If the state root is unwritable, this
         # avoids appending a command the caller may retry after seeing failure.
@@ -925,7 +913,7 @@ def _mailbox_reply_projection(
             context.snapshot.plan_dir,
             state_dir=args.state_dir,
         )
-    except (OSError, mailbox.MailboxError):
+    except OSError, mailbox.MailboxError:
         return None
     lease = view.lease
     if (
@@ -950,14 +938,13 @@ def _mailbox_reply_projection(
             context.snapshot.plan_dir,
             state_dir=args.state_dir,
         )
-    except (OSError, mailbox.MailboxError):
+    except OSError, mailbox.MailboxError:
         return None
     question = next(
         (
             message
             for message in snapshot.messages
-            if message.kind == mailbox.KIND_QUESTION
-            and message.id == question_id
+            if message.kind == mailbox.KIND_QUESTION and message.id == question_id
         ),
         None,
     )
@@ -998,9 +985,8 @@ def _notify_agent_mux_mailbox_reply(
             context.snapshot.plan_dir,
             state_dir=args.state_dir,
         )
-        if (
-            post_reply.last_seq < message.seq
-            or post_reply.open_questions(projection.run_id)
+        if post_reply.last_seq < message.seq or post_reply.open_questions(
+            projection.run_id
         ):
             return None
 
@@ -1038,9 +1024,7 @@ def _notify_agent_mux_mailbox_reply(
                     if projection.lease_predates_question
                     else projection.projection_seq
                 ),
-                "source_event_id": (
-                    f"{projection.run_id}:mailbox-reply:{message.seq}"
-                ),
+                "source_event_id": (f"{projection.run_id}:mailbox-reply:{message.seq}"),
             },
             enabled=agent_mux_delivery.notify_enabled(),
             timeout=agent_mux_delivery.notify_timeout(),
@@ -1048,7 +1032,7 @@ def _notify_agent_mux_mailbox_reply(
             record_outcome=lambda _outcome: None,
             resolve_binary=shutil.which,
             run_command=subprocess.run,
-            emitted_at=lambda: datetime.now(timezone.utc),
+            emitted_at=lambda: datetime.now(UTC),
         )
     except Exception:  # noqa: BLE001 - mailbox replies never depend on AgentMux
         return None
@@ -1076,9 +1060,8 @@ def _notify_agent_mux_mailbox_resolution(
             context.snapshot.plan_dir,
             state_dir=args.state_dir,
         )
-        if (
-            post_resolution.last_seq < message.seq
-            or post_resolution.open_questions(projection.run_id)
+        if post_resolution.last_seq < message.seq or post_resolution.open_questions(
+            projection.run_id
         ):
             return None
 
@@ -1124,7 +1107,7 @@ def _notify_agent_mux_mailbox_resolution(
             record_outcome=lambda _outcome: None,
             resolve_binary=shutil.which,
             run_command=subprocess.run,
-            emitted_at=lambda: datetime.now(timezone.utc),
+            emitted_at=lambda: datetime.now(UTC),
         )
     except Exception:  # noqa: BLE001 - resolutions never depend on AgentMux
         return None
@@ -1162,7 +1145,7 @@ def _outbox_question_projection(
             context.snapshot.plan_dir,
             state_dir=args.state_dir,
         )
-    except (OSError, mailbox.MailboxError):
+    except OSError, mailbox.MailboxError:
         lease_view = None
     if (
         lease_view is not None
@@ -1207,17 +1190,15 @@ def _outbox_question_projection(
             latest_unanswered_question_id=latest.id,
             latest_unanswered_question_created_at=latest.created_at,
         )
-    try:
+    # Observation and AgentMux delivery remain fail-open after the initial
+    # lease establishment; the returned question is still authoritative.
+    with contextlib.suppress(OSError, mailbox.MailboxError):
         mailbox.write_lease(
             context.snapshot.plan_dir,
             wait_result.supervisor_id,
             state_dir=args.state_dir,
             **projection_kwargs,
         )
-    except (OSError, mailbox.MailboxError):
-        # Observation and AgentMux delivery remain fail-open after the initial
-        # lease establishment; the returned question is still authoritative.
-        pass
 
     if not actionable or not open_questions:
         return None
@@ -1266,9 +1247,7 @@ def _notify_agent_mux_mailbox_question(
                 "question_created_at": latest.created_at,
                 "unanswered_questions": len(projection.open_questions),
                 "delivery_state": "open",
-                "mailbox_projection_sequence": str(
-                    projection.projection_seq
-                ),
+                "mailbox_projection_sequence": str(projection.projection_seq),
                 "source_event_id": (
                     f"{projection.run_id}:mailbox-question:{latest.seq}"
                 ),
@@ -1279,7 +1258,7 @@ def _notify_agent_mux_mailbox_question(
             record_outcome=lambda _outcome: None,
             resolve_binary=shutil.which,
             run_command=subprocess.run,
-            emitted_at=lambda: datetime.now(timezone.utc),
+            emitted_at=lambda: datetime.now(UTC),
         )
     except Exception:  # noqa: BLE001 - outbox delivery never depends on AgentMux
         return None
@@ -1296,7 +1275,8 @@ def _record_notice_published_event(
     text = message.text
     if not isinstance(text, str):
         return
-    try:
+    # Notice publication stays authoritative.
+    with contextlib.suppress(Exception):
         events.append_event(
             events_path,
             events.Event(
@@ -1313,8 +1293,6 @@ def _record_notice_published_event(
                 },
             ),
         )
-    except Exception:  # noqa: BLE001 - notice publication stays authoritative
-        pass
 
 
 def inbox_guidance_from_args(args: argparse.Namespace) -> int:
@@ -1364,9 +1342,7 @@ def _mailbox_path(
     context: cli_common.PlanCommandContext,
     args: argparse.Namespace,
 ) -> Path:
-    return mailbox.mailbox_path_for_plan(
-        context.snapshot.plan_dir, args.state_dir
-    )
+    return mailbox.mailbox_path_for_plan(context.snapshot.plan_dir, args.state_dir)
 
 
 def _consumption_wait_timeout(
@@ -1388,9 +1364,7 @@ def _consumption_wait_timeout(
         return None
     return _validated_timeout(
         args,
-        value=(
-            DEFAULT_ASK_WAIT_TIMEOUT_SECONDS if requested is None else requested
-        ),
+        value=(DEFAULT_ASK_WAIT_TIMEOUT_SECONDS if requested is None else requested),
         option="--wait-timeout",
         command_name=command_name,
         text_label=text_label,
@@ -1660,9 +1634,7 @@ def inbox_read_from_args(args: argparse.Namespace) -> int:
         guidance=[_message_payload(message) for message in guidance],
         acknowledged=acknowledgement is not None,
         acknowledgement=(
-            None
-            if acknowledgement is None
-            else _message_payload(acknowledgement)
+            None if acknowledgement is None else _message_payload(acknowledgement)
         ),
         acknowledgement_error=acknowledgement_error,
     )
@@ -1765,8 +1737,7 @@ def _question_from_view(
         (
             message
             for message in view.messages
-            if message.kind == mailbox.KIND_QUESTION
-            and message.id == question_id
+            if message.kind == mailbox.KIND_QUESTION and message.id == question_id
         ),
         None,
     )
@@ -1899,9 +1870,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
             error="exactly one of question text and --question-id is required",
         )
         return 1
-    if text is not None and (
-        not isinstance(text, str) or text.strip() == ""
-    ):
+    if text is not None and (not isinstance(text, str) or text.strip() == ""):
         _print_input_error(
             args,
             command_name=COMMAND_ASK,
@@ -1982,10 +1951,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
 
             if args.wait:
                 wait_start = initial_view.active_wait_for(question.id)
-                if (
-                    wait_start is None
-                    and initial_view.closure_for(question.id) is None
-                ):
+                if wait_start is None and initial_view.closure_for(question.id) is None:
                     wait_start = mailbox.append_wait_start(
                         context.snapshot.plan_dir,
                         question.id,
@@ -1993,9 +1959,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
                     )
 
         closure = (
-            initial_view.closure_for(question.id)
-            if initial_view is not None
-            else None
+            initial_view.closure_for(question.id) if initial_view is not None else None
         )
         if (
             args.wait
@@ -2037,8 +2001,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
         return 1
 
     reply = (
-        closure if closure is not None and closure.kind == mailbox.KIND_REPLY
-        else None
+        closure if closure is not None and closure.kind == mailbox.KIND_REPLY else None
     )
     resolution = (
         closure
@@ -2046,8 +2009,7 @@ def ask_from_args(args: argparse.Namespace) -> int:
         else None
     )
     pause_required = bool(
-        resolution is not None
-        and resolution.action == mailbox.RESOLUTION_ACTION_PAUSE
+        resolution is not None and resolution.action == mailbox.RESOLUTION_ACTION_PAUSE
     )
     receipt = None
     if closure is not None:
@@ -2071,12 +2033,8 @@ def ask_from_args(args: argparse.Namespace) -> int:
         pause_required=pause_required,
         timed_out=timed_out,
         reply=None if reply is None else _message_payload(reply),
-        resolution=(
-            None if resolution is None else _message_payload(resolution)
-        ),
-        wait_start=(
-            None if wait_start is None else _message_payload(wait_start)
-        ),
+        resolution=(None if resolution is None else _message_payload(resolution)),
+        wait_start=(None if wait_start is None else _message_payload(wait_start)),
         delivery_state=(
             "consumed"
             if consumed
@@ -2213,9 +2171,7 @@ def _wait_for_questions(
                 raise last_read_error
             next_since = max(
                 since,
-                0
-                if last_successful_view is None
-                else last_successful_view.last_seq,
+                0 if last_successful_view is None else last_successful_view.last_seq,
             )
             return _OutboxWaitResult(
                 questions=(),
@@ -2240,7 +2196,7 @@ def _wait_for_questions(
                     state_dir,
                     supervisor_id,
                 )
-            except (OSError, mailbox.MailboxError):
+            except OSError, mailbox.MailboxError:
                 lease_degraded = True
                 lease_renewal_failures += 1
             else:
@@ -2328,8 +2284,7 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
     own_supervision_ends = tuple(
         supervision_end
         for supervision_end in wait_result.supervision_ends
-        if supervision_id is None
-        or supervision_end.supervision_id == supervision_id
+        if supervision_id is None or supervision_end.supervision_id == supervision_id
     )
     payload = responses.success_payload(
         COMMAND_OUTBOX_WAIT,
@@ -2344,14 +2299,8 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
         timeout=timeout,
         timed_out=wait_result.timed_out,
         include=wait_result.include,
-        questions=[
-            _message_payload(question)
-            for question in wait_result.questions
-        ],
-        notices=[
-            _message_payload(notice)
-            for notice in wait_result.notices
-        ],
+        questions=[_message_payload(question) for question in wait_result.questions],
+        notices=[_message_payload(notice) for notice in wait_result.notices],
         supervision_ends=[
             _message_payload(supervision_end)
             for supervision_end in wait_result.supervision_ends
@@ -2388,19 +2337,13 @@ def outbox_wait_from_args(args: argparse.Namespace) -> int:
             print(f"No {selected_label} after seq {since}; timed out.")
         else:
             if wait_result.questions:
-                print(
-                    "\n".join(
-                        _outbox_question_text_lines(wait_result.questions)
-                    )
-                )
+                print("\n".join(_outbox_question_text_lines(wait_result.questions)))
             if wait_result.notices:
                 print("\n".join(_outbox_notice_text_lines(wait_result.notices)))
             if wait_result.supervision_ends:
                 print(
                     "\n".join(
-                        _outbox_supervision_end_text_lines(
-                            wait_result.supervision_ends
-                        )
+                        _outbox_supervision_end_text_lines(wait_result.supervision_ends)
                     )
                 )
                 if supervision_id is not None and not own_supervision_ends:
@@ -2421,9 +2364,7 @@ def _open_questions_in(
         return wait_result.questions
     unanswered = {question.id for question in view.unanswered_questions}
     return tuple(
-        question
-        for question in wait_result.questions
-        if question.id in unanswered
+        question for question in wait_result.questions if question.id in unanswered
     )
 
 

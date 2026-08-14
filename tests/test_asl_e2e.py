@@ -4,65 +4,24 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
-import hashlib
-import importlib.util
-import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
 import shlex
-import shutil
-import signal
 import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
-from unittest import mock
+from pathlib import Path
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
-    compact_state,
     config,
-    contracts,
-    control_queue,
     events,
-    harnesses,
-    install_verify,
     plans,
-    preflight,
     prepare,
-    progress_cli,
-    progress_repair,
-    qna,
     review,
-    review_repair,
-    run_control,
     runner,
     state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -106,9 +65,7 @@ class EndToEndQATests(unittest.TestCase):
         init_git_repo(self.repo_root)
         self.fake_codex = install_fake_codex(self.tmp_path)
         self.fake_claude = install_fake_harness(self.tmp_path, "claude")
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps(
@@ -135,9 +92,7 @@ class EndToEndQATests(unittest.TestCase):
                 "XDG_STATE_HOME": str(self.state_dir),
                 "FAKE_CODEX_MODE": mode,
                 "FAKE_CODEX_SLEEP": "5",
-                "PYTHONPATH": str(REPO_ROOT)
-                + os.pathsep
-                + env.get("PYTHONPATH", ""),
+                "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
             }
         )
         return env
@@ -215,9 +170,7 @@ class EndToEndQATests(unittest.TestCase):
         if review_harness is not None:
             argv.extend(["--review-harness", review_harness])
         if max_review_fix_cycles is not None:
-            argv.extend(
-                ["--max-review-fix-cycles", str(max_review_fix_cycles)]
-            )
+            argv.extend(["--max-review-fix-cycles", str(max_review_fix_cycles)])
         env = self._base_env(mode=mode)
         if review_outcomes is not None:
             env["FAKE_CODEX_REVIEW_OUTCOMES"] = review_outcomes
@@ -249,9 +202,7 @@ class EndToEndQATests(unittest.TestCase):
             encoding="utf-8",
         )
         asl_wrapper.chmod(asl_wrapper.stat().st_mode | stat.S_IXUSR)
-        pythonpath = str(REPO_ROOT) + os.pathsep + os.environ.get(
-            "PYTHONPATH", ""
-        )
+        pythonpath = str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")
         command = shlex.join(
             [
                 f"XDG_CONFIG_HOME={self.config_home}",
@@ -278,13 +229,7 @@ class EndToEndQATests(unittest.TestCase):
         completed = subprocess.run(
             [
                 sys.executable,
-                str(
-                    REPO_ROOT
-                    / "skills"
-                    / "asl"
-                    / "scripts"
-                    / "asl-autopilot.py"
-                ),
+                str(REPO_ROOT / "skills" / "asl" / "scripts" / "asl-autopilot.py"),
                 "--command",
                 command,
                 "--json",
@@ -307,8 +252,7 @@ class EndToEndQATests(unittest.TestCase):
             ("pending",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme"}',
                     session="1",
                 )
             },
@@ -360,8 +304,7 @@ class EndToEndQATests(unittest.TestCase):
             ("pending",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme"}',
                     session="1",
                 )
             },
@@ -472,7 +415,9 @@ class EndToEndQATests(unittest.TestCase):
             "exceed the maximum of 8",
             invalid_payload["review_resume"]["artifact_error"],
         )
-        self.assertEqual(1, invalid_payload["review_resume"]["historical_materializations"])
+        self.assertEqual(
+            1, invalid_payload["review_resume"]["historical_materializations"]
+        )
 
         # Artifact correction is external. Preserve all nine findings while
         # normalizing them from nine repair groups to the supported eight.
@@ -536,9 +481,7 @@ class EndToEndQATests(unittest.TestCase):
             '{"type": "file_exists", "path": "README.md", "name": "readme"}',
             session="1",
         )
-        write_plan(
-            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
-        )
+        write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
         sha = plans.stable_readiness_sha256(self.plan_dir)
         plans.write_readiness_metadata(
             self.plan_dir,
@@ -562,9 +505,7 @@ class EndToEndQATests(unittest.TestCase):
         )
         self.assertEqual(1, before.returncode)
         self.assertFalse(before_payload["ok"])
-        before_categories = {
-            f["category"] for f in before_payload["findings"]
-        }
+        before_categories = {f["category"] for f in before_payload["findings"]}
         self.assertIn("manifest-readiness", before_categories)
         self.assertIn("missing-contract", before_categories)
         # Repair hints stay aligned with findings 1:1 for the guided skill.
@@ -604,9 +545,7 @@ class EndToEndQATests(unittest.TestCase):
         self.assertFalse(run_payload["paused"])
         self.assertEqual("all-complete", run_payload["reason"])
         self.assertEqual("complete", run_payload["readiness_state_final"])
-        session_text = (self.plan_dir / "session-1.md").read_text(
-            encoding="utf-8"
-        )
+        session_text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
         self.assertIn("- **Status**: complete", session_text)
         verify_payload = run_payload["turns"][0]["verification"]
         self.assertEqual("ok", verify_payload["reason"])
@@ -618,9 +557,7 @@ class EndToEndQATests(unittest.TestCase):
             '{"type": "file_exists", "path": "later.txt", "name": "later"}',
             session="1",
         )
-        write_plan(
-            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
-        )
+        write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
         sha = plans.stable_readiness_sha256(self.plan_dir)
         plans.write_readiness_metadata(
             self.plan_dir,
@@ -638,9 +575,7 @@ class EndToEndQATests(unittest.TestCase):
         self.assertEqual("verify-failed", first_payload["pause_reason"])
         pause_details = first_payload["pause_details"]
         self.assertEqual(["later"], pause_details["recipe"]["names"])
-        self.assertEqual("file-missing", pause_details["failures"][0][
-            "failure_reason"
-        ])
+        self.assertEqual("file-missing", pause_details["failures"][0]["failure_reason"])
         session_path = self.plan_dir / "session-1.md"
         session_text = session_path.read_text(encoding="utf-8")
         self.assertIn("- **Status**: pending", session_text)
@@ -680,8 +615,7 @@ class EndToEndQATests(unittest.TestCase):
             ("pending",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme"}',
                     session="1",
                 )
             },
@@ -706,9 +640,7 @@ class EndToEndQATests(unittest.TestCase):
         )
         self.assertEqual(1, completed.returncode)
         self.assertFalse(payload["ok"])
-        lock_findings = [
-            f for f in payload["findings"] if f["category"] == "env-lock"
-        ]
+        lock_findings = [f for f in payload["findings"] if f["category"] == "env-lock"]
         self.assertEqual(1, len(lock_findings))
         self.assertEqual("yellow", lock_findings[0]["severity"])
         self.assertIn("stale lock", lock_findings[0]["message"])
@@ -716,7 +648,7 @@ class EndToEndQATests(unittest.TestCase):
         lock_hints = [
             hint
             for hint, finding in zip(
-                payload["repair_hints"], payload["findings"]
+                payload["repair_hints"], payload["findings"], strict=False
             )
             if finding["category"] == "env-lock"
         ]
@@ -732,24 +664,19 @@ class EndToEndQATests(unittest.TestCase):
             ("pending",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme"}',
                     session="1",
                 )
             },
         )
-        (self.repo_root / "dirty.txt").write_text(
-            "uncommitted\n", encoding="utf-8"
-        )
+        (self.repo_root / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
         path_value = self._path_value("codex", "spec", "amx")
         completed, payload = self._run_preflight(
             commit_mode="per-session", path_value=path_value
         )
         self.assertEqual(1, completed.returncode)
         self.assertFalse(payload["ok"])
-        git_findings = [
-            f for f in payload["findings"] if f["category"] == "env-git"
-        ]
+        git_findings = [f for f in payload["findings"] if f["category"] == "env-git"]
         self.assertEqual(1, len(git_findings))
         self.assertEqual("yellow", git_findings[0]["severity"])
         self.assertIn("dirty", git_findings[0]["message"])
@@ -770,9 +697,7 @@ class EndToEndQATests(unittest.TestCase):
             '{"type": "file_exists", "path": "README.md", "name": "readme"}',
             session="1",
         )
-        write_plan(
-            self.plan_dir, ("pending",), contracts_by_id={"1": contract}
-        )
+        write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
         sha = plans.stable_readiness_sha256(self.plan_dir)
         plans.write_readiness_metadata(
             self.plan_dir,
@@ -1818,9 +1743,9 @@ class KilnTwinCloneRegressionTests(unittest.TestCase):
             ),
             sorted(report["git_roots"]),
         )
-        self._assert_clones_untouched(*(
-            Path(mutation["path"]) for mutation in self._sibling_mutations()
-        ))
+        self._assert_clones_untouched(
+            *(Path(mutation["path"]) for mutation in self._sibling_mutations())
+        )
 
     def test_expansion_note_redirect_to_the_sibling_clone_launches_no_harness(
         self,
@@ -1870,9 +1795,9 @@ class KilnTwinCloneRegressionTests(unittest.TestCase):
         self.assertEqual(
             2, payload["pause_details"]["repository_intent"]["git_root_count"]
         )
-        self._assert_clones_untouched(*(
-            Path(mutation["path"]) for mutation in self._sibling_mutations()
-        ))
+        self._assert_clones_untouched(
+            *(Path(mutation["path"]) for mutation in self._sibling_mutations())
+        )
 
     def test_refusal_diagnostics_name_roots_without_leaking_credentials(
         self,
@@ -2000,9 +1925,7 @@ class VerificationRepairLoopTests(unittest.TestCase):
         self.config_home = self.tmp_path / "config"
         init_git_repo(self.repo_root)
         self.fake_codex = install_fake_codex(self.tmp_path)
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps({"codex": {"executable": str(self.fake_codex)}}),
@@ -2051,9 +1974,7 @@ class VerificationRepairLoopTests(unittest.TestCase):
                 "XDG_CONFIG_HOME": str(self.config_home),
                 "FAKE_CODEX_MODE": "success",
                 "FAKE_CODEX_SLEEP": "5",
-                "PYTHONPATH": str(REPO_ROOT)
-                + os.pathsep
-                + env.get("PYTHONPATH", ""),
+                "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
             }
         )
         if worker_mode is not None:
@@ -2203,9 +2124,7 @@ class VerificationRepairLoopTests(unittest.TestCase):
             )
         )
         # No fingerprint on the first attempt is not exhausted.
-        self.assertFalse(
-            runner._is_verification_repair_exhausted(None, (), 1)
-        )
+        self.assertFalse(runner._is_verification_repair_exhausted(None, (), 1))
 
     def test_read_prior_verification_failures_filters_by_session(self) -> None:
         event_path = self.tmp_path / "events.jsonl"
@@ -2241,9 +2160,9 @@ class VerificationRepairLoopTests(unittest.TestCase):
 
         priors = runner._read_prior_verification_failures(event_path, "1")
         self.assertEqual(2, len(priors))
-        self.assertEqual(["a", "d"], [
-            p["failures"][0]["stdout_sha256"] for p in priors
-        ])
+        self.assertEqual(
+            ["a", "d"], [p["failures"][0]["stdout_sha256"] for p in priors]
+        )
 
         state_info = runner._verification_repair_state(event_path, "1")
         self.assertEqual(3, state_info["attempt"])
@@ -2252,9 +2171,7 @@ class VerificationRepairLoopTests(unittest.TestCase):
         self.assertTrue(
             any("Prior verification attempt 2 failed" in ref for ref in references)
         )
-        self.assertTrue(
-            any("Failed check `missing`" in ref for ref in references)
-        )
+        self.assertTrue(any("Failed check `missing`" in ref for ref in references))
 
 
 if __name__ == "__main__":

@@ -40,24 +40,26 @@ atomic transaction live in :mod:`agent_session_loop.authoring`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
 import os
 import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
-from . import authoring
-from . import baseline
-from . import contracts
-from . import plans
-from . import preflight
-from . import review
-from . import state
-from . import workspaces
+from . import (
+    authoring,
+    baseline,
+    contracts,
+    plans,
+    preflight,
+    review,
+    state,
+    workspaces,
+)
 from .authoring import ManifestSession, PlanTransaction
 from .plans import PlanError, SessionId, canonicalize_path, parse_session_id
-
 
 # Generated review-repair session markers. Every materialized repair child
 # carries the base marker (so a version-agnostic reader recognizes it) plus the
@@ -300,9 +302,7 @@ def _merge_verification_checks(
     }
     for payload in named_checks:
         original_name = payload["name"]
-        repository = (
-            payload.get("repo") if repository_registry is not None else None
-        )
+        repository = payload.get("repo") if repository_registry is not None else None
         emitted_name = original_name
         if original_name in colliding_names:
             base_name = f"{repository}:{original_name}"
@@ -319,9 +319,7 @@ def _merge_verification_checks(
         dependencies = payload.get("on_failure_of")
         if not isinstance(dependencies, list):
             continue
-        repository = (
-            payload.get("repo") if repository_registry is not None else None
-        )
+        repository = payload.get("repo") if repository_registry is not None else None
         payload["on_failure_of"] = [
             emitted_names.get((repository, dependency), dependency)
             for dependency in dependencies
@@ -411,9 +409,7 @@ def _render_child_body(
         "",
     ]
     for finding in findings:
-        lines.append(
-            f"### {finding['id']} ({finding['severity']}): {finding['title']}"
-        )
+        lines.append(f"### {finding['id']} ({finding['severity']}): {finding['title']}")
         lines.append("")
         lines.append(finding["explanation"])
         lines.append("")
@@ -493,9 +489,7 @@ def _build_repair_group_plans(
                 reads=read_repositories,
                 writes=write_repositories,
             )
-            marker_version = (
-                REPOSITORY_AWARE_GENERATED_REVIEW_REPAIR_SESSION_VERSION
-            )
+            marker_version = REPOSITORY_AWARE_GENERATED_REVIEW_REPAIR_SESSION_VERSION
         checks = tuple(
             _merge_verification_checks(
                 group,
@@ -598,11 +592,7 @@ def _immediate_successor(
     sessions: Sequence[plans.SessionFile], review_id: SessionId
 ) -> plans.SessionFile | None:
     top = review_id.components[0]
-    later = [
-        session
-        for session in sessions
-        if session.session_id.components[0] > top
-    ]
+    later = [session for session in sessions if session.session_id.components[0] > top]
     if not later:
         return None
     return min(later, key=lambda session: session.session_id.sort_key)
@@ -644,11 +634,7 @@ def _read_repository_review_bases(
             "repository-aware review session is missing its ordered repository base"
         ) from error
     end = next(
-        (
-            index
-            for index in range(start, len(lines))
-            if lines[index].startswith("## ")
-        ),
+        (index for index in range(start, len(lines)) if lines[index].startswith("## ")),
         len(lines),
     )
     rows: dict[str, dict[str, Any]] = {}
@@ -757,9 +743,7 @@ def _strip_self_lock_findings(
             return False
         if finding.path != own_lock_path:
             return False
-        if lock_info.pid is not None and lock_info.pid != own_pid:
-            return False
-        return True
+        return not (lock_info.pid is not None and lock_info.pid != own_pid)
 
     filtered = tuple(
         finding for finding in report.findings if not is_self_lock(finding)
@@ -809,15 +793,12 @@ def _make_children_executable(
             "baseline_summary": baseline_summary,
         }
 
-    report = preflight.run_preflight(
-        plan_dir, cwd=canonical_cwd, state_dir=state_dir
-    )
+    report = preflight.run_preflight(plan_dir, cwd=canonical_cwd, state_dir=state_dir)
     report = _strip_self_lock_findings(report, lock_info)
     mark_blockers = preflight._mark_loop_ready_blockers(report)
     if mark_blockers:
         blockers = [
-            f"{finding.category}: {finding.message}"
-            for finding in mark_blockers
+            f"{finding.category}: {finding.message}" for finding in mark_blockers
         ]
         return {
             "loop_ready": False,
@@ -826,8 +807,7 @@ def _make_children_executable(
                 {
                     finding.category
                     for finding in mark_blockers
-                    if finding.category
-                    in preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES
+                    if finding.category in preflight.NON_BYPASSABLE_PREFLIGHT_CATEGORIES
                 }
             ),
             "baseline_summary": baseline_summary,
@@ -853,9 +833,7 @@ def _make_children_executable(
 # ---------------------------------------------------------------------------
 
 
-def _artifact_sha256_or_none(
-    digest_fn: Any, canonical_dir: Path
-) -> str | None:
+def _artifact_sha256_or_none(digest_fn: Any, canonical_dir: Path) -> str | None:
     """Return artifact provenance when readable without masking validation."""
     try:
         return str(digest_fn(canonical_dir))

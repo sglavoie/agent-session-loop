@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stdout, redirect_stderr
 import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import plans, session_overview, state
-
 
 DEAD_PID = 4_242_424
 
@@ -162,9 +161,7 @@ def _build_args(
     return argparse.Namespace(
         running=running,
         recent=recent,
-        limit=(
-            session_overview.DEFAULT_RECENT_LIMIT if limit is None else limit
-        ),
+        limit=(session_overview.DEFAULT_RECENT_LIMIT if limit is None else limit),
         state_dir=str(state_dir) if state_dir is not None else None,
         verbose=verbose,
         json=json_output,
@@ -226,9 +223,7 @@ class ScanRunningRowsTests(unittest.TestCase):
                 state_payload={"active_turn": active_turn},
             )
 
-            rows, stale_locks, skipped = session_overview.scan_running_rows(
-                state_root
-            )
+            rows, stale_locks, skipped = session_overview.scan_running_rows(state_root)
 
             self.assertEqual((), stale_locks)
             self.assertEqual((), skipped)
@@ -267,9 +262,7 @@ class ScanRunningRowsTests(unittest.TestCase):
                 },
             )
 
-            rows, stale_locks, skipped = session_overview.scan_running_rows(
-                state_root
-            )
+            rows, stale_locks, skipped = session_overview.scan_running_rows(state_root)
 
             self.assertEqual((), stale_locks)
             self.assertEqual((), skipped)
@@ -323,8 +316,8 @@ class ScanRunningRowsTests(unittest.TestCase):
             with mock.patch.object(
                 state, "is_pid_running", side_effect=_force_pid_alive
             ):
-                rows, stale_locks, skipped = (
-                    session_overview.scan_running_rows(state_root)
+                rows, stale_locks, skipped = session_overview.scan_running_rows(
+                    state_root
                 )
 
             self.assertEqual((), rows)
@@ -434,9 +427,7 @@ class ScanRunningRowsTests(unittest.TestCase):
                 state_payload={"active_turn": active_turn},
             )
 
-            rows, stale_locks, skipped = session_overview.scan_running_rows(
-                state_root
-            )
+            rows, stale_locks, skipped = session_overview.scan_running_rows(state_root)
 
             self.assertEqual((), rows)
             self.assertEqual((), stale_locks)
@@ -454,9 +445,7 @@ class ScanRunningRowsTests(unittest.TestCase):
                 state_payload={"run_id": "loop-run-id", "harness": "codex"},
             )
 
-            rows, stale_locks, skipped = session_overview.scan_running_rows(
-                state_root
-            )
+            rows, stale_locks, skipped = session_overview.scan_running_rows(state_root)
 
             self.assertEqual((), stale_locks)
             self.assertEqual((), skipped)
@@ -484,9 +473,7 @@ class ScanRunningRowsTests(unittest.TestCase):
                 },
             )
 
-            rows, stale_locks, skipped = session_overview.scan_running_rows(
-                state_root
-            )
+            rows, stale_locks, skipped = session_overview.scan_running_rows(state_root)
 
             self.assertEqual((), rows)
             self.assertEqual((), skipped)
@@ -505,9 +492,7 @@ class ScanRunningRowsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            rows, stale_locks, skipped = session_overview.scan_running_rows(
-                state_root
-            )
+            rows, stale_locks, skipped = session_overview.scan_running_rows(state_root)
 
             self.assertEqual((), rows)
             self.assertEqual((), stale_locks)
@@ -605,9 +590,7 @@ class ScanRecentRowsTests(unittest.TestCase):
                     ),
                 )
 
-            rows, skipped = session_overview.scan_recent_rows(
-                state_root, limit=2
-            )
+            rows, skipped = session_overview.scan_recent_rows(state_root, limit=2)
 
             self.assertEqual((), skipped)
             self.assertEqual(2, len(rows))
@@ -672,9 +655,7 @@ class ScanRecentRowsTests(unittest.TestCase):
 
             self.assertEqual((), skipped)
             self.assertEqual(1, len(rows))
-            self.assertEqual(
-                plans.canonicalize_path(plan_dir), rows[0].plan_dir
-            )
+            self.assertEqual(plans.canonicalize_path(plan_dir), rows[0].plan_dir)
 
     def test_unresolvable_plan_dir_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -700,9 +681,7 @@ class ScanRecentRowsTests(unittest.TestCase):
 
             self.assertEqual((), rows)
             self.assertEqual(1, len(skipped))
-            self.assertIn(
-                "unable to resolve plan directory", skipped[0].reason
-            )
+            self.assertIn("unable to resolve plan directory", skipped[0].reason)
 
     def test_malformed_artifact_reported_as_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -861,7 +840,6 @@ class BuildSessionsPayloadTests(unittest.TestCase):
                 set(payload["skipped"][0].keys()),
             )
 
-
     def test_verification_running_row_payload_includes_check_context(
         self,
     ) -> None:
@@ -933,8 +911,8 @@ class SessionsFromArgsTests(unittest.TestCase):
             lock={"pid": os.getpid()},
             state_payload={"active_turn": alpha_active},
         )
-        alpha_state_dir = (
-            state_root / plans.path_sha256(plans.canonicalize_path(plan_alpha))
+        alpha_state_dir = state_root / plans.path_sha256(
+            plans.canonicalize_path(plan_alpha)
         )
         _make_turn_artifact(
             alpha_state_dir,
@@ -950,8 +928,8 @@ class SessionsFromArgsTests(unittest.TestCase):
         )
 
         _make_plan_state_dir(state_root, plan_beta)
-        beta_state_dir = (
-            state_root / plans.path_sha256(plans.canonicalize_path(plan_beta))
+        beta_state_dir = state_root / plans.path_sha256(
+            plans.canonicalize_path(plan_beta)
         )
         _make_turn_artifact(
             beta_state_dir,
@@ -983,9 +961,7 @@ class SessionsFromArgsTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual("sessions", payload["command"])
             self.assertEqual({"running": True, "recent": True}, payload["filters"])
-            self.assertEqual(
-                session_overview.DEFAULT_RECENT_LIMIT, payload["limit"]
-            )
+            self.assertEqual(session_overview.DEFAULT_RECENT_LIMIT, payload["limit"])
             self.assertEqual(
                 str(plans.canonicalize_path(state_root)),
                 payload["state_root"],
@@ -1019,9 +995,7 @@ class SessionsFromArgsTests(unittest.TestCase):
 
             self.assertEqual(0, exit_code)
             payload = json.loads(buffer.getvalue())
-            self.assertEqual(
-                {"running": True, "recent": False}, payload["filters"]
-            )
+            self.assertEqual({"running": True, "recent": False}, payload["filters"])
             self.assertEqual([], payload["recent"])
             self.assertEqual(0, payload["counts"]["recent"])
             self.assertEqual(1, len(payload["running"]))
@@ -1039,9 +1013,7 @@ class SessionsFromArgsTests(unittest.TestCase):
 
             self.assertEqual(0, exit_code)
             payload = json.loads(buffer.getvalue())
-            self.assertEqual(
-                {"running": False, "recent": True}, payload["filters"]
-            )
+            self.assertEqual({"running": False, "recent": True}, payload["filters"])
             self.assertEqual([], payload["running"])
             self.assertEqual(0, payload["counts"]["running"])
             self.assertEqual(2, len(payload["recent"]))
@@ -1070,9 +1042,7 @@ class SessionsFromArgsTests(unittest.TestCase):
 
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                exit_code = session_overview.sessions_from_args(
-                    _build_args(state_root)
-                )
+                exit_code = session_overview.sessions_from_args(_build_args(state_root))
 
             self.assertEqual(0, exit_code)
             output = buffer.getvalue()
@@ -1118,9 +1088,7 @@ class SessionsFromArgsTests(unittest.TestCase):
 
             buffer = io.StringIO()
             with redirect_stdout(buffer):
-                exit_code = session_overview.sessions_from_args(
-                    _build_args(missing)
-                )
+                exit_code = session_overview.sessions_from_args(_build_args(missing))
 
             self.assertEqual(0, exit_code)
             output = buffer.getvalue()
@@ -1204,9 +1172,7 @@ class SessionsFromArgsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "broken"
 
-            with mock.patch.object(
-                state, "state_root", side_effect=OSError("no")
-            ):
+            with mock.patch.object(state, "state_root", side_effect=OSError("no")):
                 stdout = io.StringIO()
                 with redirect_stdout(stdout):
                     exit_code = session_overview.sessions_from_args(

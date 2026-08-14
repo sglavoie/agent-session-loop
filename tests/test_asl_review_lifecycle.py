@@ -5,88 +5,51 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
-from contextlib import (
-    ExitStack,
-    contextmanager,
-    redirect_stderr,
-    redirect_stdout,
-)
-import dataclasses
-from datetime import datetime, timezone
 import errno
 import hashlib
-import importlib.util
-import io
 import json
 import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
-import signal
 import stat
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
 import uuid
+from contextlib import (
+    ExitStack,
+)
+from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
-    artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
     cli,
-    compact_state,
     config,
-    contracts,
     control_queue,
     events,
     harnesses,
-    install_verify,
     mailbox,
     pause_policy,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
     review,
     review_continuation,
     review_repair,
-    run_control,
     runner,
     state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
     REPO_ROOT,
-    write_plan,
-    write_plan_with_ids,
+    _contract_block,
+    _structured_review_finding,
+    git_stdout,
+    init_git_repo,
     install_fake_codex,
     install_fake_harness,
     install_fake_spec,
-    git_stdout,
-    init_git_repo,
     patched_env,
     read_jsonl,
     write_completed_review_plan,
-    _contract_block,
-    _structured_review_finding,
+    write_plan,
+    write_plan_with_ids,
 )
 
 
@@ -108,9 +71,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.fake_codex = install_fake_codex(self.tmp_path)
         self.fake_claude = install_fake_harness(self.tmp_path, "claude")
         self.fake_copilot = install_fake_harness(self.tmp_path, "copilot")
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps(
@@ -191,9 +152,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         )
 
     def _valid_final_review_artifact_body(self) -> str:
-        return json.dumps(
-            {"version": 2, "outcome": "all-clear", "findings": []}
-        )
+        return json.dumps({"version": 2, "outcome": "all-clear", "findings": []})
 
     def _write_pending_review_session(self) -> plans.SessionFile:
         return runner.ensure_generated_review_session(
@@ -248,9 +207,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         if max_sessions is not None:
             argv.extend(["--max-sessions", str(max_sessions)])
         if max_review_fix_cycles is not None:
-            argv.extend(
-                ["--max-review-fix-cycles", str(max_review_fix_cycles)]
-            )
+            argv.extend(["--max-review-fix-cycles", str(max_review_fix_cycles)])
         if timeout is not None:
             argv.extend(["--timeout", str(timeout)])
         if commit_per_session:
@@ -265,9 +222,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 "XDG_CONFIG_HOME": str(self.config_home),
                 "FAKE_CODEX_MODE": mode,
                 "FAKE_CODEX_SLEEP": fake_codex_sleep,
-                "PYTHONPATH": str(REPO_ROOT)
-                + os.pathsep
-                + env.get("PYTHONPATH", ""),
+                "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
             }
         )
         if extra_env is not None:
@@ -344,15 +299,15 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                     "    )",
                     "    for path in plan_dir.glob('session-*.md')",
                     ")",
-                    f"emit_invalid = {invalid_first_attempt!r} "
-                    "and retry_notes == 0",
+                    f"emit_invalid = {invalid_first_attempt!r} and retry_notes == 0",
                     "",
                     "# Mutate files inside cwd to trigger the guard.",
                     "if not emit_invalid:",
                     f"    for rel in {tuple(mutate_paths)!r}:",
                     "        mutated = Path.cwd() / rel",
                     "        mutated.parent.mkdir(parents=True, exist_ok=True)",
-                    "        mutated.write_text('mutated by review\\n', encoding='utf-8')",
+                    "        mutated.write_text('mutated by review\\n', "
+                    "encoding='utf-8')",
                     "",
                     "session_re = re.compile(",
                     "    r'^session-([1-9][0-9]*(?:\\.[1-9][0-9]*)*)\\.md$'",
@@ -391,14 +346,17 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                     "else:",
                     "    review_body = (",
                     "        '## Findings\\n'",
-                    "        '- Reviewed agent_session_loop/runner.py for mutation guard behavior.\\n'",
-                    "        '- Checked tests/test_agent_session_loop.py for review lifecycle coverage.\\n'",
-                    "        '- Compared docs/agent-session-loop.md for operator documentation impact.\\n'",
+                    "        '- Reviewed agent_session_loop/runner.py for mutation "
+                    "guard behavior.\\n'",
+                    "        '- Checked tests/test_agent_session_loop.py for review "
+                    "lifecycle coverage.\\n'",
+                    "        '- Compared docs/agent-session-loop.md for operator "
+                    "documentation impact.\\n'",
                     "        'Status: All clear, no findings\\n'",
                     "    )",
                     "    review_json = (",
-                    "        '{\"version\": 2, \"outcome\": \"all-clear\", "
-                    "\"findings\": []}\\n'",
+                    '        \'{"version": 2, "outcome": "all-clear", '
+                    '"findings": []}\\n\'',
                     "    )",
                     "(plan_dir / 'final-review.md').write_text(",
                     "    review_body, encoding='utf-8',",
@@ -456,9 +414,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # Both impl and review turns ran with the right kind tag.
         turns = payload["turns"]
         self.assertEqual(2, len(turns))
-        self.assertEqual(
-            runner.SESSION_KIND_IMPLEMENTATION, turns[0]["session_kind"]
-        )
+        self.assertEqual(runner.SESSION_KIND_IMPLEMENTATION, turns[0]["session_kind"])
         self.assertEqual("codex", turns[0]["harness"])
         self.assertEqual(runner.SESSION_KIND_REVIEW, turns[1]["session_kind"])
         self.assertEqual("claude", turns[1]["harness"])
@@ -650,9 +606,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertTrue(progress_file.exists())
 
         repair_payload = payload["readiness_gate_repair"]
-        self.assertEqual(
-            ["progress-journal-missing"], repair_payload["attempted"]
-        )
+        self.assertEqual(["progress-journal-missing"], repair_payload["attempted"])
         self.assertEqual([], repair_payload["errors"])
         # `ok` is the strict readiness-gate state (`loop-ready`); the
         # complete plan stays at `complete`, so the strict gate stays
@@ -660,9 +614,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # complete-start exception.
         self.assertFalse(repair_payload["ok"])
         # Only the progress repair fired; manifest-readiness was not needed.
-        categories = [
-            repair["category"] for repair in repair_payload["auto_repairs"]
-        ]
+        categories = [repair["category"] for repair in repair_payload["auto_repairs"]]
         self.assertEqual(["progress-journal-missing"], categories)
         # Final on-disk readiness is `complete` (the lifecycle finishes
         # writing it after the review session completes).
@@ -676,9 +628,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # auto-repair must rewrite the manifest readiness metadata with the
         # current SHA *and* keep the state at `complete`, not downgrade to
         # `loop-ready` just to satisfy the readiness gate.
-        self._write_plan(
-            ("complete",), readiness="complete", sha_override="0" * 64
-        )
+        self._write_plan(("complete",), readiness="complete", sha_override="0" * 64)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         self._precreate_final_review()
 
@@ -692,9 +642,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("complete", payload["readiness_state_final"])
 
         repair_payload = payload["readiness_gate_repair"]
-        self.assertEqual(
-            ["manifest-readiness"], repair_payload["attempted"]
-        )
+        self.assertEqual(["manifest-readiness"], repair_payload["attempted"])
         self.assertEqual([], repair_payload["errors"])
         # `ok` is the strict readiness-gate state (`loop-ready`); the
         # complete plan stays at `complete`, so the strict gate stays
@@ -738,9 +686,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("all-complete", payload["reason"])
         self.assertTrue(payload["review_completed"])
         # The pre-existing review session must be reused, not replaced.
-        self.assertEqual(
-            review_session.session_id.value, payload["review_session_id"]
-        )
+        self.assertEqual(review_session.session_id.value, payload["review_session_id"])
         # Only the existing review session needed to run.
         self.assertEqual(1, len(payload["turns"]))
         self.assertEqual(
@@ -781,9 +727,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual("max-sessions", payload["reason"])
         self.assertFalse(payload["review_completed"])
-        self.assertEqual(
-            "max-sessions", payload["review_skipped_reason"]
-        )
+        self.assertEqual("max-sessions", payload["review_skipped_reason"])
         # Only one implementation turn ran; the loop stopped before any
         # review session could be appended.
         self.assertEqual(1, len(payload["turns"]))
@@ -847,17 +791,13 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         scope_payload = scope_events[0]["payload"]
         self.assertEqual(runner.REVIEW_SCOPE_FULL, scope_payload["scope"])
         self.assertIsNone(scope_payload["base_sha"])
-        self.assertEqual(
-            "no-prior-repair-cycle", scope_payload["fallback_reason"]
-        )
+        self.assertEqual("no-prior-repair-cycle", scope_payload["fallback_reason"])
         created_payload = next(
             entry["payload"]
             for entry in events_log
             if entry.get("name") == events.REVIEW_SESSION_CREATED_EVENT
         )
-        self.assertEqual(
-            runner.REVIEW_SCOPE_FULL, created_payload["review_scope"]
-        )
+        self.assertEqual(runner.REVIEW_SCOPE_FULL, created_payload["review_scope"])
         self.assertIsNone(created_payload["review_base_sha"])
         review_body = (
             self.plan_dir / f"session-{payload['review_session_id']}.md"
@@ -901,8 +841,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             [finding],
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}'
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}'
                 )
             },
         )
@@ -957,9 +896,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertTrue(payload["review_completed"])
-        self.assertEqual(
-            review_session.session_id.value, payload["review_session_id"]
-        )
+        self.assertEqual(review_session.session_id.value, payload["review_session_id"])
         self.assertEqual(1, len(payload["turns"]))
         resumed_body = review_session.path.read_text(encoding="utf-8")
         self.assertIn("  - `src/late.py`", resumed_body)
@@ -1002,9 +939,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             "mutated by review\n",
             (self.repo_root / "README.md").read_text(encoding="utf-8"),
         )
-        self.assertEqual(
-            "pending", plans.read_session_status(review_session).status
-        )
+        self.assertEqual("pending", plans.read_session_status(review_session).status)
         self.assertEqual(1, payload["final_snapshot"]["counts"]["pending"])
         guard = payload["turns"][0].get("review_mutation_guard")
         self.assertIsNotNone(guard)
@@ -1039,9 +974,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertTrue(payload["review_completed"])
-        self.assertEqual(
-            "complete", plans.read_session_status(review_session).status
-        )
+        self.assertEqual("complete", plans.read_session_status(review_session).status)
         guard = payload["turns"][0]["review_mutation_guard"]
         self.assertTrue(guard["passed"])
         self.assertEqual(["README.md"], guard["excluded"])
@@ -1127,9 +1060,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             ["git", "add", ".gitignore"],
             ["git", "commit", "-m", "ignore build caches"],
         ):
-            subprocess.run(
-                argv, cwd=self.repo_root, capture_output=True, check=True
-            )
+            subprocess.run(argv, cwd=self.repo_root, capture_output=True, check=True)
 
     def _write_pycache_review_plan(self) -> None:
         self._write_plan(("complete",), readiness=None)
@@ -1143,9 +1074,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
-        self._install_mutating_fake_claude(
-            ("agent_session_loop/__pycache__/x.pyc",)
-        )
+        self._install_mutating_fake_claude(("agent_session_loop/__pycache__/x.pyc",))
 
     def test_review_turn_writing_a_gitignored_cache_still_passes(self) -> None:
         self._write_pycache_review_plan()
@@ -1191,9 +1120,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             ),
         )
 
-        completed, payload = self._run(
-            mode="failure", review_harness="claude"
-        )
+        completed, payload = self._run(mode="failure", review_harness="claude")
 
         self.assertEqual(1, completed.returncode)
         self.assertTrue(payload["paused"])
@@ -1399,9 +1326,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("verify-failed", payload["pause_reason"])
         self.assertFalse(payload["review_completed"])
         self.assertIsNone(payload["review_verdict"])
-        review_text = (self.plan_dir / review_id.filename).read_text(
-            encoding="utf-8"
-        )
+        review_text = (self.plan_dir / review_id.filename).read_text(encoding="utf-8")
         self.assertIn("- **Status**: pending", review_text)
 
     def test_text_output_prints_review_path(self) -> None:
@@ -1409,9 +1334,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         self._precreate_final_review()
 
-        completed, _ = self._run(
-            review_harness="claude", json_mode=False
-        )
+        completed, _ = self._run(review_harness="claude", json_mode=False)
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         expected_path = runner.final_review_output_path(
@@ -1440,9 +1363,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             )
             for session_id, _ in statuses
         }
-        write_plan_with_ids(
-            self.plan_dir, statuses, contracts_by_id=contracts_by_id
-        )
+        write_plan_with_ids(self.plan_dir, statuses, contracts_by_id=contracts_by_id)
         if readiness is None:
             return
         sha = plans.stable_readiness_sha256(self.plan_dir)
@@ -1457,13 +1378,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
 
     def _rewrite_harness_config(self, mapping: dict[str, str]) -> None:
         """Overwrite the harness config with only the named harnesses."""
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.write_text(
-            json.dumps(
-                {name: {"executable": path} for name, path in mapping.items()}
-            ),
+            json.dumps({name: {"executable": path} for name, path in mapping.items()}),
             encoding="utf-8",
         )
 
@@ -1704,9 +1621,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             verification_checks=[{"type": "bogus", "name": "not-a-check"}]
         )
         (self.plan_dir / runner.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
-            json.dumps(
-                {"version": 2, "outcome": "findings", "findings": [finding]}
-            ),
+            json.dumps({"version": 2, "outcome": "findings", "findings": [finding]}),
             encoding="utf-8",
         )
 
@@ -1737,18 +1652,14 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         completed, payload = self._run(
             mode="success-with-review",
             review_harness="claude",
-            extra_env={
-                "FAKE_CODEX_REVIEW_OUTCOMES": "invalid-artifact,all-clear"
-            },
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "invalid-artifact,all-clear"},
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["paused"])
         self.assertTrue(payload["review_completed"])
-        self.assertEqual(
-            "all-clear", payload["review_verdict"]["outcome"]
-        )
+        self.assertEqual("all-clear", payload["review_verdict"]["outcome"])
         retries = self._review_verdict_retries()
         self.assertEqual(1, len(retries))
         self.assertEqual(1, retries[0]["attempt"])
@@ -1756,12 +1667,8 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             runner.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
             retries[0]["max_attempts"],
         )
-        self.assertEqual(
-            "malformed-review-artifact", retries[0]["failure_reason"]
-        )
-        self.assertTrue(
-            str(retries[0]["fingerprint"]).startswith("review-verdict:")
-        )
+        self.assertEqual("malformed-review-artifact", retries[0]["failure_reason"])
+        self.assertTrue(str(retries[0]["fingerprint"]).startswith("review-verdict:"))
         self.assertIn("bogus", retries[0]["error"])
         # The retry costs a turn, not a human relaunch.
         self.assertEqual(2, len(payload["turns"]))
@@ -1794,15 +1701,11 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             runner.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
             details["review_verdict_repair_max_attempts"],
         )
-        self.assertEqual(
-            "malformed-review-artifact", details["failure_reason"]
-        )
+        self.assertEqual("malformed-review-artifact", details["failure_reason"])
         retries = self._review_verdict_retries()
         self.assertEqual([1, 2], [record["attempt"] for record in retries])
         # Distinct validation errors must not collapse into one fingerprint.
-        self.assertEqual(
-            2, len({record["fingerprint"] for record in retries})
-        )
+        self.assertEqual(2, len({record["fingerprint"] for record in retries}))
         self.assertEqual(3, len(payload["turns"]))
         review_text = review_session.path.read_text(encoding="utf-8")
         self.assertIn("- **Status**: pending", review_text)
@@ -1856,9 +1759,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         guard = payload["turns"][1]["review_mutation_guard"]
         self.assertFalse(guard["passed"])
         self.assertEqual(["README.md"], guard["changed_paths"]["tracked"])
-        self.assertEqual(
-            "pending", plans.read_session_status(review_session).status
-        )
+        self.assertEqual("pending", plans.read_session_status(review_session).status)
 
     def test_stop_after_current_converts_review_verdict_retry_to_pause(
         self,
@@ -1873,9 +1774,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         completed, payload = self._run(
             mode="success-with-review",
             review_harness="claude",
-            extra_env={
-                "FAKE_CODEX_REVIEW_OUTCOMES": "invalid-artifact,all-clear"
-            },
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "invalid-artifact,all-clear"},
         )
 
         self.assertEqual(1, completed.returncode)
@@ -1896,8 +1795,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             findings,
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}',
                     session="1",
                 )
             },
@@ -1949,9 +1847,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
 
         resumed_completed, resumed = self._run(review_harness="claude")
 
-        self.assertEqual(
-            0, resumed_completed.returncode, resumed_completed.stderr
-        )
+        self.assertEqual(0, resumed_completed.returncode, resumed_completed.stderr)
         self.assertTrue(resumed["review_completed"])
         self.assertEqual("2", resumed["review_session_id"])
 
@@ -2013,15 +1909,11 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self._write_reviewed_plan([_structured_review_finding()])
         self._queue_stop_after_current()
 
-        completed, payload = self._run(
-            review_harness="claude", max_review_fix_cycles=0
-        )
+        completed, payload = self._run(review_harness="claude", max_review_fix_cycles=0)
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertEqual("all-complete", payload["reason"])
-        self.assertEqual(
-            "higher-cap-required", payload["review_resume"]["blocker"]
-        )
+        self.assertEqual("higher-cap-required", payload["review_resume"]["blocker"])
         self.assertEqual([], payload["turns"])
         self.assertFalse((self.plan_dir / "session-2.1.md").is_file())
 
@@ -2032,8 +1924,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             [finding],
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}'
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}'
                 )
             },
         )
@@ -2079,9 +1970,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             # Cycle 1's review already completed, so it consumes the first
             # scripted outcome; this delta review starts at the second.
             extra_env={
-                "FAKE_CODEX_REVIEW_OUTCOMES": (
-                    "all-clear,invalid-artifact,all-clear"
-                )
+                "FAKE_CODEX_REVIEW_OUTCOMES": ("all-clear,invalid-artifact,all-clear")
             },
         )
 
@@ -2169,9 +2058,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         completed, payload = self._run(
             mode="success-with-review",
             review_harness="claude",
-            extra_env={
-                "FAKE_CODEX_REVIEW_OUTCOMES": "invalid-markdown,all-clear"
-            },
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "invalid-markdown,all-clear"},
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
@@ -2280,9 +2167,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertIsNone(payload["review_session_id"])
         self.assertEqual(
             str(
-                runner.final_review_output_path(
-                    plans.canonicalize_path(self.plan_dir)
-                )
+                runner.final_review_output_path(plans.canonicalize_path(self.plan_dir))
             ),
             payload["review_output_path"],
         )
@@ -2314,9 +2199,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("1", turns[0]["session_id"])
         self.assertEqual("1.1", turns[1]["session_id"])
         self.assertEqual("2", turns[2]["session_id"])
-        self.assertEqual(
-            runner.SESSION_KIND_REVIEW, turns[2]["session_kind"]
-        )
+        self.assertEqual(runner.SESSION_KIND_REVIEW, turns[2]["session_kind"])
 
     def test_commit_per_session_skips_review_turn(self) -> None:
         # --commit-per-session must commit after implementation sessions but
@@ -2367,9 +2250,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # All turns are implementation, never review.
         self.assertTrue(payload["turns"])
         for turn in payload["turns"]:
-            self.assertEqual(
-                runner.SESSION_KIND_IMPLEMENTATION, turn["session_kind"]
-            )
+            self.assertEqual(runner.SESSION_KIND_IMPLEMENTATION, turn["session_kind"])
         # No generated review session file should exist.
         review_candidates = [
             path
@@ -2378,9 +2259,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         ]
         self.assertEqual([], review_candidates)
         # No final-review.md should be written either.
-        self.assertFalse(
-            runner.final_review_output_path(self.plan_dir).is_file()
-        )
+        self.assertFalse(runner.final_review_output_path(self.plan_dir).is_file())
         # No review-session-created event should have been emitted.
         review_events = [
             entry
@@ -2409,9 +2288,7 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
         init_git_repo(self.repo_root)
         fake_codex = install_fake_codex(self.tmp_path)
         fake_claude = install_fake_harness(self.tmp_path, "claude")
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps(
@@ -2441,9 +2318,7 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-        def fake_run_harness(
-            name: str, **kwargs: object
-        ) -> harnesses.HarnessResult:
+        def fake_run_harness(name: str, **kwargs: object) -> harnesses.HarnessResult:
             complete_first_pending(Path(str(kwargs["plan_dir"])))
             return harnesses.HarnessResult(
                 name=name,
@@ -2497,9 +2372,7 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
             mock.patch.object(
                 runner.harnesses, "run_harness", side_effect=fake_run_harness
             ),
-            mock.patch.object(
-                runner, "_reinspect_after_revert", recording_reinspect
-            ),
+            mock.patch.object(runner, "_reinspect_after_revert", recording_reinspect),
         ):
             lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
             try:
@@ -2536,9 +2409,7 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual("verify-failed", payload["pause_reason"])
-        session_text = (self.plan_dir / "session-1.md").read_text(
-            encoding="utf-8"
-        )
+        session_text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
         self.assertIn("- **Status**: pending", session_text)
         # The final continuation projection ran at loop exit.
         self.assertIsNotNone(payload["review_resume"])
@@ -2562,9 +2433,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
         init_git_repo(self.repo_root)
         fake_codex = install_fake_codex(self.tmp_path)
         fake_claude = install_fake_harness(self.tmp_path, "claude")
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps(
@@ -2580,8 +2449,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
             ("complete",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}',
                     session="1",
                 )
             },
@@ -2699,9 +2567,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
     def test_unavailable_after_capture_reverts_the_review_to_pending(
         self,
     ) -> None:
-        payload, harness_calls = self._run_locked(
-            [self._CLEAN, self._UNAVAILABLE]
-        )
+        payload, harness_calls = self._run_locked([self._CLEAN, self._UNAVAILABLE])
 
         self.assertTrue(payload["paused"])
         self.assertEqual(
@@ -2717,9 +2583,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
         self.assertFalse(guard["passed"])
         self.assertEqual("after", guard["phase"])
         self.assertTrue(guard["reverted_to_pending"])
-        self.assertEqual(
-            guard, payload["pause_details"]["review_mutation_guard"]
-        )
+        self.assertEqual(guard, payload["pause_details"]["review_mutation_guard"])
         self.assertIn("git-command-failed", payload["pause_message"])
 
     def test_clean_captures_still_complete_the_review(self) -> None:
@@ -2763,9 +2627,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
         init_git_repo(self.repo_root)
         fake_codex = install_fake_codex(self.tmp_path)
         fake_claude = install_fake_harness(self.tmp_path, "claude")
-        config_path = (
-            self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
-        )
+        config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             json.dumps(
@@ -2781,8 +2643,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
             ("complete",),
             contracts_by_id={
                 "1": _contract_block(
-                    '{"type": "file_exists", "path": "README.md", '
-                    '"name": "readme-1"}',
+                    '{"type": "file_exists", "path": "README.md", "name": "readme-1"}',
                     session="1",
                 )
             },
@@ -2932,9 +2793,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
 
         turn = self._assert_guard_pause(payload)
         self.assertTrue(turn["timed_out"])
-        self._assert_supervisor_will_not_relaunch(
-            payload, suppressed_reason="timeout"
-        )
+        self._assert_supervisor_will_not_relaunch(payload, suppressed_reason="timeout")
 
     def test_nonzero_exit_review_turn_trips_the_guard(self) -> None:
         payload = self._run_locked(returncode=3)
@@ -2946,7 +2805,8 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
         self,
     ) -> None:
         payload = self._run_locked(
-            last_message="Runner status: paused\nRUNNER_PAUSE: blocked - needs a decision\n",
+            last_message="Runner status: paused\nRUNNER_PAUSE: blocked - needs a "
+            "decision\n",
             forbid_mailbox_wait=True,
         )
 
@@ -2954,9 +2814,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
         self.assertIsNone(payload.get("waiting_for_reply"))
 
     def test_interrupted_review_turn_trips_the_guard(self) -> None:
-        payload = self._run_locked(
-            returncode=runner.INTERRUPTED_EXIT, interrupted=True
-        )
+        payload = self._run_locked(returncode=runner.INTERRUPTED_EXIT, interrupted=True)
 
         self._assert_guard_pause(payload)
 
@@ -3005,9 +2863,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
     def _commit_all(self, message: str) -> None:
         for argv in (["git", "add", "-A"], ["git", "commit", "-m", message]):
-            subprocess.run(
-                argv, cwd=self.repo_root, capture_output=True, check=True
-            )
+            subprocess.run(argv, cwd=self.repo_root, capture_output=True, check=True)
 
     def _stage(self, rel: str) -> None:
         subprocess.run(
@@ -3229,14 +3085,10 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self._write("generated/payload.py", "LEAKED = True\n")
         after = self._fingerprint()
 
-        self.assertEqual(
-            "", git_stdout(self.repo_root, "status", "--short")
-        )
+        self.assertEqual("", git_stdout(self.repo_root, "status", "--short"))
         self.assertEqual(
             "",
-            git_stdout(
-                self.repo_root, "ls-files", "--others", "--exclude-standard"
-            ),
+            git_stdout(self.repo_root, "ls-files", "--others", "--exclude-standard"),
         )
         self.assertEqual(before["untracked"], after["untracked"])
         self.assertNotEqual(before, after)
@@ -3270,9 +3122,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         self.assertEqual(
             ["generated/.gitignore"],
-            runner._review_guard_changed_paths(before, edited)[
-                "worktree_ignore"
-            ],
+            runner._review_guard_changed_paths(before, edited)["worktree_ignore"],
         )
         # The strict scan lists the same file under `untracked`, so the summary
         # would otherwise name it twice.
@@ -3291,9 +3141,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual([], deleted["worktree_ignore"])
         self.assertEqual(
             ["generated/.gitignore"],
-            runner._review_guard_changed_paths(edited, deleted)[
-                "worktree_ignore"
-            ],
+            runner._review_guard_changed_paths(edited, deleted)["worktree_ignore"],
         )
 
     def test_ignored_gitignore_symlink_stays_out_of_worktree_ignore_evidence(
@@ -3319,9 +3167,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual("", git_stdout(self.repo_root, "status", "--short"))
         self.assertEqual(
             "",
-            git_stdout(
-                self.repo_root, "ls-files", "--others", "--exclude-standard"
-            ),
+            git_stdout(self.repo_root, "ls-files", "--others", "--exclude-standard"),
         )
         self.assertEqual([], after["untracked"])
         self.assertEqual([], after["worktree_ignore"])
@@ -3353,14 +3199,10 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
 
-    def _ignore_config(
-        self, fingerprint: dict[str, object]
-    ) -> dict[str, list[str]]:
+    def _ignore_config(self, fingerprint: dict[str, object]) -> dict[str, list[str]]:
         entries = fingerprint["ignore_config"]
         assert isinstance(entries, list)
-        return {
-            str(rel): [str(kind), str(sha)] for _role, rel, kind, sha in entries
-        }
+        return {str(rel): [str(kind), str(sha)] for _role, rel, kind, sha in entries}
 
     def test_git_info_exclude_mutation_trips_the_guard(self) -> None:
         self._write_info_exclude("*.tmp\n")
@@ -3406,9 +3248,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         nested = self.repo_root / "nested"
         nested.mkdir()
 
-        fingerprint = runner._capture_review_repo_fingerprint(
-            nested, self.plan_dir
-        )
+        fingerprint = runner._capture_review_repo_fingerprint(nested, self.plan_dir)
 
         self.assertEqual(
             "file", self._ignore_config(fingerprint)[".git/info/exclude"][0]
@@ -3430,9 +3270,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         target = self._symlink_info_exclude("rules")
         target.write_text("*.tmp\n", encoding="utf-8")
         before = self._fingerprint()
-        self.assertEqual(
-            "symlink", self._ignore_config(before)[".git/info/exclude"][0]
-        )
+        self.assertEqual("symlink", self._ignore_config(before)[".git/info/exclude"][0])
 
         target.write_text("*.tmp\nsecret.txt\n", encoding="utf-8")
         self._write("secret.txt", "leak\n")
@@ -3440,9 +3278,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         # The link itself never moved and git hides the file its new rule names.
         self.assertEqual(before["untracked"], after["untracked"])
-        self.assertEqual(
-            "", git_stdout(self.repo_root, "status", "--short").strip()
-        )
+        self.assertEqual("", git_stdout(self.repo_root, "status", "--short").strip())
         self.assertNotEqual(before, after)
         changed = runner._review_guard_changed_paths(before, after)
         self.assertEqual(["target:.git/info/rules"], changed["ignore_config"])
@@ -3516,9 +3352,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         detail = runner._review_guard_unavailable_detail(fingerprint)
         assert detail is not None
-        self.assertEqual(
-            "ignore-config-target-path-unreadable", detail["reason"]
-        )
+        self.assertEqual("ignore-config-target-path-unreadable", detail["reason"])
         self.assertEqual("target:.git/info/rules", detail["path"])
 
     def _set_excludes_file(self, value: str) -> None:
@@ -3542,9 +3376,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         after = self._fingerprint()
 
         self.assertEqual(before["untracked"], after["untracked"])
-        self.assertEqual(
-            "", git_stdout(self.repo_root, "status", "--short").strip()
-        )
+        self.assertEqual("", git_stdout(self.repo_root, "status", "--short").strip())
         self.assertNotEqual(before, after)
         changed = runner._review_guard_changed_paths(before, after)
         self.assertIn("config:core.excludesFile", changed["ignore_config"])
@@ -3575,9 +3407,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         # Git honours the newline-terminated pathname, so every worktree scan
         # goes quiet about the file its rule hides.
         self.assertEqual(before["untracked"], after["untracked"])
-        self.assertEqual(
-            "", git_stdout(self.repo_root, "status", "--short").strip()
-        )
+        self.assertEqual("", git_stdout(self.repo_root, "status", "--short").strip())
         self.assertNotEqual(before, after)
         changed = runner._review_guard_changed_paths(before, after)
         self.assertIn("config:core.excludesFile", changed["ignore_config"])
@@ -3641,9 +3471,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         after = self._fingerprint()
 
         self.assertEqual(before["untracked"], after["untracked"])
-        self.assertEqual(
-            "", git_stdout(self.repo_root, "status", "--short").strip()
-        )
+        self.assertEqual("", git_stdout(self.repo_root, "status", "--short").strip())
         self.assertNotEqual(before, after)
         changed = runner._review_guard_changed_paths(before, after)
         self.assertEqual(["target:.git/review-rules"], changed["ignore_config"])
@@ -3683,9 +3511,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         before = self._fingerprint()
         colliding = [
-            list(entry)
-            for entry in before["ignore_config"]
-            if entry[1] == collide
+            list(entry) for entry in before["ignore_config"] if entry[1] == collide
         ]
         self.assertEqual(
             ["source", "target"], sorted(str(entry[0]) for entry in colliding)
@@ -3729,9 +3555,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         detail = runner._review_guard_unavailable_detail(fingerprint)
         assert detail is not None
-        self.assertEqual(
-            "excludes-file-target-node-unsupported", detail["reason"]
-        )
+        self.assertEqual("excludes-file-target-node-unsupported", detail["reason"])
         self.assertEqual("target:/dev/null", detail["path"])
 
     def test_absent_excludes_file_is_fingerprinted_by_its_own_kind(
@@ -3755,12 +3579,8 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
     def test_unset_excludes_file_falls_back_to_the_xdg_default(self) -> None:
         xdg = self.tmp_path / "xdg"
-        with mock.patch.dict(
-            os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False
-        ):
-            self.assertEqual(
-                xdg / "git" / "ignore", runner._default_excludes_file()
-            )
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False):
+            self.assertEqual(xdg / "git" / "ignore", runner._default_excludes_file())
             os.environ["XDG_CONFIG_HOME"] = ""
             os.environ["HOME"] = str(self.tmp_path / "home")
             self.assertEqual(
@@ -3868,9 +3688,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
     ) -> None:
         unborn = self.tmp_path / "unborn"
         unborn.mkdir()
-        subprocess.run(
-            ["git", "init"], cwd=unborn, capture_output=True, check=True
-        )
+        subprocess.run(["git", "init"], cwd=unborn, capture_output=True, check=True)
         (unborn / "tracked.txt").write_text("one\n", encoding="utf-8")
         subprocess.run(
             ["git", "add", "tracked.txt"],
@@ -3912,9 +3730,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertNotEqual(before, after)
         changed = runner._review_guard_changed_paths(before, after)
         self.assertEqual(["README.md"], changed["tracked"])
-        self.assertEqual(
-            ": README.md", runner._review_guard_changed_summary(changed)
-        )
+        self.assertEqual(": README.md", runner._review_guard_changed_summary(changed))
 
     def test_an_excluded_path_is_dropped_from_the_index_evidence_too(
         self,
@@ -3972,15 +3788,11 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self._stage("masked.txt")
         after = self._fingerprint()
 
-        self.assertEqual(
-            "", self._git("diff", "--cached", "HEAD", "--", "masked.txt")
-        )
+        self.assertEqual("", self._git("diff", "--cached", "HEAD", "--", "masked.txt"))
         self.assertEqual(["masked.txt"], before["index_changed"])
         self.assertEqual(before["index_changed"], after["index_changed"])
 
-        self.assertNotEqual(
-            before["index_diff_sha256"], after["index_diff_sha256"]
-        )
+        self.assertNotEqual(before["index_diff_sha256"], after["index_diff_sha256"])
         self.assertNotEqual(before["index_patches"], after["index_patches"])
         changed = runner._review_guard_changed_paths(before, after)
         self.assertEqual(["masked.txt"], changed["tracked"])
@@ -4064,9 +3876,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         )
         self.assertIsNone(runner._review_guard_unavailable_detail(after))
         self.assertEqual(["README.md"], after["index_changed"])
-        self.assertEqual(
-            ["README.md"], [entry[0] for entry in after["index_patches"]]
-        )
+        self.assertEqual(["README.md"], [entry[0] for entry in after["index_patches"]])
         self.assertEqual(
             ["README.md"],
             runner._review_guard_changed_paths(before, after)["tracked"],
@@ -4150,9 +3960,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         after = self._fingerprint()
 
         self.assertEqual("", self._git_status_porcelain())
-        self.assertEqual(
-            ["sparse.txt", "absent"], after["index_flagged"][0][:2]
-        )
+        self.assertEqual(["sparse.txt", "absent"], after["index_flagged"][0][:2])
         changed = runner._review_guard_changed_paths(before, after)
         self.assertEqual(["sparse.txt"], changed["tracked"])
 
@@ -4374,11 +4182,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
     def _scope_diff_commands(self, scope: str) -> list[str]:
         """Return the `git` commands the rendered scope tells a reviewer to run."""
-        return [
-            span
-            for span in scope.split("`")[1::2]
-            if span.startswith("git ")
-        ]
+        return [span for span in scope.split("`")[1::2] if span.startswith("git ")]
 
     def _scope_section(self, delta: dict[str, object]) -> str:
         """Return the `### Scope` text the reviewer is actually told to read."""
@@ -4432,9 +4236,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         self._record_repair_cycle(repo_head=base)
         # Uncommitted repair work: one edit to a tracked file and one brand new
         # file, of which the handoff declared only the first.
-        (self.repo_root / "src" / "base.py").write_text(
-            "repaired\n", encoding="utf-8"
-        )
+        (self.repo_root / "src" / "base.py").write_text("repaired\n", encoding="utf-8")
         (self.repo_root / "src" / "collateral.py").write_text(
             "collateral\n", encoding="utf-8"
         )
@@ -4445,9 +4247,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         self.assertIsNone(fallback_reason)
         assert delta is not None
         self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
-        self.assertEqual(
-            ["src/base.py", "src/collateral.py"], delta["changed_files"]
-        )
+        self.assertEqual(["src/base.py", "src/collateral.py"], delta["changed_files"])
         self.assertIn("src/collateral.py", self._scope_section(delta))
 
     def test_ignored_repair_file_stays_out_of_scope(self) -> None:
@@ -4478,9 +4278,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertIsNone(fallback_reason)
         assert delta is not None
-        self.assertEqual(
-            ["src/after.py", "src/before.py"], delta["changed_files"]
-        )
+        self.assertEqual(["src/after.py", "src/before.py"], delta["changed_files"])
 
     def test_dirty_baseline_keeps_a_restored_tracked_file_in_scope(
         self,
@@ -4497,9 +4295,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         )
         # The repair restored it to the committed content, so the current
         # base-to-worktree diff no longer mentions it at all.
-        (self.repo_root / "src" / "base.py").write_text(
-            "base\n", encoding="utf-8"
-        )
+        (self.repo_root / "src" / "base.py").write_text("base\n", encoding="utf-8")
         self._commit("src/repair.py", "repaired\n")
         self.assertEqual(
             "src/repair.py",
@@ -4511,9 +4307,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         self.assertIsNone(fallback_reason)
         assert delta is not None
         self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
-        self.assertEqual(
-            ["src/base.py", "src/repair.py"], delta["changed_files"]
-        )
+        self.assertEqual(["src/base.py", "src/repair.py"], delta["changed_files"])
         self.assertIs(True, delta["baseline_dirty"])
         scope = self._scope_section(delta)
         self.assertIn("src/base.py", scope)
@@ -4553,9 +4347,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         target.write_text("repaired\n", encoding="utf-8")
         self._git("add", "src/base.py")
         target.write_text("base\n", encoding="utf-8")
-        self.assertEqual(
-            "", self._git("diff", "--name-only", "--no-renames", base)
-        )
+        self.assertEqual("", self._git("diff", "--name-only", "--no-renames", base))
 
         delta, fallback_reason = self._compute()
 
@@ -4609,9 +4401,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         # The converter renders every content as the same constant text, so
         # git prints no patch at all without the presentation flags and this
         # regression cannot pass vacuously.
-        self.assertEqual(
-            "", self._git("diff", "--no-renames", "--no-relative", base)
-        )
+        self.assertEqual("", self._git("diff", "--no-renames", "--no-relative", base))
         self.assertEqual(
             "",
             self._git("diff", "--cached", "--no-renames", "--no-relative", base),
@@ -4619,9 +4409,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         # Both name selectors still see past the converter, so the repairs are
         # in the file list either way.
         flags = list(runner._DELTA_DIFF_FLAGS)
-        self.assertEqual(
-            "masked.txt", self._git("diff", "--name-only", *flags, base)
-        )
+        self.assertEqual("masked.txt", self._git("diff", "--name-only", *flags, base))
         self.assertEqual(
             "staged.txt",
             self._git("diff", "--cached", "--name-only", *flags, base),
@@ -4657,9 +4445,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         # directory, so this regression cannot pass vacuously.
         self.assertEqual(
             "base.py",
-            self._git(
-                "-C", "nested", "diff", "--name-only", "--no-renames", base
-            ),
+            self._git("-C", "nested", "diff", "--name-only", "--no-renames", base),
         )
         self.assertEqual(
             "",
@@ -4687,8 +4473,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         commands = self._scope_diff_commands(self._scope_section(delta))
         self.assertEqual(2, len(commands))
         patches = [
-            self._git("-C", "nested", *command.split()[1:])
-            for command in commands
+            self._git("-C", "nested", *command.split()[1:]) for command in commands
         ]
         self.assertIn("root.py", patches[0])
         self.assertIn("root_staged.py", patches[1])
@@ -4708,9 +4493,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
                 self.assertEqual(
                     "", self._git("diff", "--name-only", "--no-renames", base)
                 )
-                self.assertEqual(
-                    "", self._git("diff", "--cached", "--name-only", base)
-                )
+                self.assertEqual("", self._git("diff", "--cached", "--name-only", base))
 
                 delta, fallback_reason = self._compute()
 
@@ -4741,9 +4524,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
     def test_dirty_baseline_without_path_evidence_is_full_scope(self) -> None:
         base = self._commit("src/base.py", "base\n")
-        self._record_repair_cycle(
-            repo_head=base, worktree_dirty=True, dirty_paths=None
-        )
+        self._record_repair_cycle(repo_head=base, worktree_dirty=True, dirty_paths=None)
         self._commit("src/repair.py", "repaired\n")
 
         delta, fallback_reason = self._compute()
@@ -4756,9 +4537,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
     def test_cycle_with_unknown_dirtiness_is_full_scope(self) -> None:
         base = self._commit("src/base.py", "base\n")
         # A cycle recorded before dirty-path evidence existed.
-        self._record_repair_cycle(
-            repo_head=base, worktree_dirty=None, dirty_paths=None
-        )
+        self._record_repair_cycle(repo_head=base, worktree_dirty=None, dirty_paths=None)
         self._commit("src/repair.py", "repaired\n")
 
         delta, fallback_reason = self._compute()
@@ -4914,13 +4693,9 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         self.assertNotIn("src/late.py", original)
         # Untracked files are absent from `git diff <base>`, so the static list
         # is the only thing that can tell the reviewer to read this one.
-        (self.repo_root / "src" / "late.py").write_text(
-            "late\n", encoding="utf-8"
-        )
+        (self.repo_root / "src" / "late.py").write_text("late\n", encoding="utf-8")
 
-        refreshed = runner.rescoped_review_session_body(
-            original, self._compute()[0]
-        )
+        refreshed = runner.rescoped_review_session_body(original, self._compute()[0])
 
         assert refreshed is not None
         self.assertIn("  - `src/late.py`", refreshed)
@@ -4930,9 +4705,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         self.assertTrue(runner.is_generated_review_session_file(session_path))
         self.assertEqual(
             runner.generated_review_session_version(session_path),
-            runner.generated_review_session_version(
-                self.plan_dir / "session-2.md"
-            ),
+            runner.generated_review_session_version(self.plan_dir / "session-2.md"),
         )
         session = plans.SessionFile(
             session_id=plans.parse_session_id("3"), path=session_path
@@ -5046,9 +4819,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         self.assertEqual(["scratch.txt"], cycle["dirty_paths"])
         self.assertEqual(["scratch.txt"], recorded["dirty_paths"])
         # The reader of that record agrees on the key it was written under.
-        self.assertEqual(
-            ["scratch.txt"], runner._reviewed_baseline_dirty_paths(cycle)
-        )
+        self.assertEqual(["scratch.txt"], runner._reviewed_baseline_dirty_paths(cycle))
 
 
 class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
@@ -5122,20 +4893,14 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
     ) -> None:
         snapshot = self._write_repair_children(
             [
-                _structured_review_finding(
-                    finding_id="F1", repair_group="runner"
-                ),
-                _structured_review_finding(
-                    finding_id="F2", repair_group="docs"
-                ),
+                _structured_review_finding(finding_id="F1", repair_group="runner"),
+                _structured_review_finding(finding_id="F2", repair_group="docs"),
             ]
         )
 
         self.assertEqual(
             {"docs": 1, "runner": 1},
-            review_continuation.repair_group_attempts(
-                self.event_path, snapshot
-            ),
+            review_continuation.repair_group_attempts(self.event_path, snapshot),
         )
 
     def test_repair_group_attempts_deduplicates_events_and_children(
@@ -5169,17 +4934,13 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
 
         self.assertEqual(
             {"docs": 1, "runner": 1},
-            review_continuation.repair_group_attempts(
-                self.event_path, snapshot
-            ),
+            review_continuation.repair_group_attempts(self.event_path, snapshot),
         )
 
     def test_advance_review_cycle_stops_when_group_attempt_cap_is_exhausted(
         self,
     ) -> None:
-        initial = _structured_review_finding(
-            finding_id="F1", repair_group="runner"
-        )
+        initial = _structured_review_finding(finding_id="F1", repair_group="runner")
         rereview = _structured_review_finding(
             finding_id="F2",
             repair_group="runner",
@@ -5201,9 +4962,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
             review_harness="claude",
             plan_dir=self.plan_dir,
         ).replace("- **Status**: pending", "- **Status**: complete")
-        (self.plan_dir / "session-3.md").write_text(
-            review_body, encoding="utf-8"
-        )
+        (self.plan_dir / "session-3.md").write_text(review_body, encoding="utf-8")
         (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
             "## Findings\n"
             "- pkg/F2.py still fails.\n"
@@ -5211,9 +4970,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
             encoding="utf-8",
         )
         (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
-            json.dumps(
-                {"version": 2, "outcome": "findings", "findings": [rereview]}
-            ),
+            json.dumps({"version": 2, "outcome": "findings", "findings": [rereview]}),
             encoding="utf-8",
         )
         events.append_event(

@@ -49,6 +49,7 @@ preflight through the canonical :mod:`agent_session_loop.preflight` gate.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -61,7 +62,7 @@ import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -1027,7 +1028,8 @@ class ValidationTaskPacket:
                 )
             lines.extend(
                 [
-                    "- Repository read scopes are advisory context, not filesystem isolation.",
+                    "- Repository read scopes are advisory context, not filesystem "
+                    "isolation.",
                     "",
                     "## Session packets",
                 ]
@@ -1036,6 +1038,7 @@ class ValidationTaskPacket:
                 self.session_ids,
                 self.session_paths,
                 self.session_read_repositories,
+                strict=False,
             ):
                 roots = ", ".join(
                     f"{repository.alias}={repository.root}"
@@ -1045,7 +1048,9 @@ class ValidationTaskPacket:
                     f"- Session {session_id}: {session_path}; declared reads: {roots}"
                 )
         else:
-            for session_id, session_path in zip(self.session_ids, self.session_paths):
+            for session_id, session_path in zip(
+                self.session_ids, self.session_paths, strict=False
+            ):
                 lines.append(f"- Session {session_id}: {session_path}")
         lines.extend(
             [
@@ -1445,10 +1450,8 @@ def save_prepare_validation_cache(
         tmp_path.write_text(text, encoding="utf-8")
         os.replace(tmp_path, path)
     except OSError as error:
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
         raise PlanError(f"cannot write {path}: {error}") from error
     return path
 
@@ -1646,10 +1649,8 @@ def save_prepare_validation(
         tmp_path.write_text(text, encoding="utf-8")
         os.replace(tmp_path, path)
     except OSError as error:
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass
         raise PlanError(f"cannot write {path}: {error}") from error
     return path
 
@@ -1797,7 +1798,7 @@ def render_expansion(
     the literal ``_no contract issues found_`` line when clean.
     """
     if expanded is None:
-        expanded = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        expanded = datetime.now(UTC).strftime("%Y-%m-%d")
     display = session.session_id.display_label
     lines: list[str] = [
         f"# {display} Expansion: {session.title}",
@@ -2549,7 +2550,7 @@ def _author_plan_directory(
                 source_fingerprint=str(resolver["source_fingerprint"]),
                 content_sha256=str(resolver["content_sha256"]),
                 sessions=tuple(manifest_sessions),
-                split_date=datetime.now(timezone.utc).date().isoformat(),
+                split_date=datetime.now(UTC).date().isoformat(),
                 readiness=ReadinessMetadata(
                     state="draft",
                     readiness_sha256="pending",
@@ -2566,10 +2567,8 @@ def _author_plan_directory(
 
 def _refresh_draft_readiness(plan_dir: Path) -> None:
     """Best-effort readiness resync so a preserved directory stays consistent."""
-    try:
+    with contextlib.suppress(PlanError):
         authoring.refresh_readiness_metadata(plan_dir, state="draft")
-    except PlanError:
-        pass
 
 
 def _positive_validator_control(value: object, *, name: str) -> int:
@@ -2977,7 +2976,8 @@ def _run_validation_stage(
                                 else "codebase_root"
                             )
                             raise _fail(
-                                f"{root_field} {update.codebase_root!r} does not match the "
+                                f"{root_field} {update.codebase_root!r} does not match "
+                                f"the "
                                 f"preparation root {codebase_root!r}"
                             )
                         _validate_validation_authority(
@@ -3014,7 +3014,8 @@ def _run_validation_stage(
                     else:
                         completed_batches += 1
                         _validation_progress(
-                            f"batch {ordinal}/{len(all_batches)} completed: {', '.join(batch)}",
+                            f"batch {ordinal}/{len(all_batches)} completed: "
+                            f"{', '.join(batch)}",
                             completed=completed_batches,
                             total=len(all_batches),
                             in_flight=len(in_flight),
@@ -3849,13 +3850,15 @@ def prepare_plan(
         validator_heartbeat, name="validator heartbeat"
     )
     if validator is None:
-        selected_validator: ValidatorRunner = lambda packet: _launch_validator(
-            validator_harness,
-            packet,
-            model=validator_model,
-            effort=validator_effort,
-            timeout=validator_timeout,
-        )
+
+        def selected_validator(packet):
+            return _launch_validator(
+                validator_harness,
+                packet,
+                model=validator_model,
+                effort=validator_effort,
+                timeout=validator_timeout,
+            )
     else:
         selected_validator = validator
 

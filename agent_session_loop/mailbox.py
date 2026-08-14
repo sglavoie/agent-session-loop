@@ -13,25 +13,23 @@ an actively supervised run from stale mailbox files.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+import contextlib
 import fcntl
 import json
 import math
 import os
+import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
-import uuid
 
 from . import artifacts, durability, state
 
-
 MAILBOX_FILE_NAME = "mailbox.jsonl"
 MAILBOX_LEASE_FILE_NAME = "mailbox-lease.json"
-MAILBOX_SUPERVISION_CURSOR_FILE_TEMPLATE = (
-    "mailbox-supervision-{supervision_id}.json"
-)
+MAILBOX_SUPERVISION_CURSOR_FILE_TEMPLATE = "mailbox-supervision-{supervision_id}.json"
 MAILBOX_SUPERVISION_CURSOR_GLOB = "mailbox-supervision-*.json"
 MAILBOX_SUPERVISION_CURSOR_VERSION = 1
 MAILBOX_SUPERVISION_CURSOR_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
@@ -395,12 +393,7 @@ class MailboxCounts:
         # Preserve the exact legacy summary shape for logs without v3
         # lifecycle activity while exposing additive counts as soon as they
         # are meaningful.
-        if (
-            self.wait_starts
-            or self.wait_ends
-            or self.receipts
-            or self.supervision_ends
-        ):
+        if self.wait_starts or self.wait_ends or self.receipts or self.supervision_ends:
             payload.update(
                 wait_starts=self.wait_starts,
                 wait_ends=self.wait_ends,
@@ -510,29 +503,19 @@ class MailboxView:
     @property
     def counts(self) -> MailboxCounts:
         return MailboxCounts(
-            guidance=sum(
-                message.kind == KIND_GUIDANCE for message in self.messages
-            ),
-            questions=sum(
-                message.kind == KIND_QUESTION for message in self.messages
-            ),
+            guidance=sum(message.kind == KIND_GUIDANCE for message in self.messages),
+            questions=sum(message.kind == KIND_QUESTION for message in self.messages),
             replies=sum(message.kind == KIND_REPLY for message in self.messages),
             resolutions=sum(
                 message.kind == KIND_RESOLUTION for message in self.messages
             ),
             notices=sum(message.kind == KIND_NOTICE for message in self.messages),
-            acknowledgements=sum(
-                message.kind == KIND_ACK for message in self.messages
-            ),
+            acknowledgements=sum(message.kind == KIND_ACK for message in self.messages),
             wait_starts=sum(
                 message.kind == KIND_WAIT_START for message in self.messages
             ),
-            wait_ends=sum(
-                message.kind == KIND_WAIT_END for message in self.messages
-            ),
-            receipts=sum(
-                message.kind == KIND_RECEIPT for message in self.messages
-            ),
+            wait_ends=sum(message.kind == KIND_WAIT_END for message in self.messages),
+            receipts=sum(message.kind == KIND_RECEIPT for message in self.messages),
             supervision_ends=sum(
                 message.kind == KIND_SUPERVISION_END for message in self.messages
             ),
@@ -551,10 +534,7 @@ class MailboxView:
 
     @property
     def accepts_resolutions(self) -> bool:
-        return (
-            self.size_bytes + MAILBOX_MIN_RESOLUTION_BYTES
-            <= MAILBOX_MAX_BYTES
-        )
+        return self.size_bytes + MAILBOX_MIN_RESOLUTION_BYTES <= MAILBOX_MAX_BYTES
 
     @property
     def accepts_questions(self) -> bool:
@@ -580,8 +560,7 @@ class MailboxView:
         return tuple(
             message
             for message in self.messages
-            if message.seq > since
-            and (allowed is None or message.kind in allowed)
+            if message.seq > since and (allowed is None or message.kind in allowed)
         )
 
     def reply_for(self, question_id: str) -> MailboxMessage | None:
@@ -655,12 +634,12 @@ class MailboxLease:
             payload["projection_seq"] = self.projection_seq
             payload["unanswered_questions"] = self.unanswered_questions
             if self.latest_unanswered_question_id is not None:
-                payload[
-                    "latest_unanswered_question_id"
-                ] = self.latest_unanswered_question_id
-                payload[
-                    "latest_unanswered_question_created_at"
-                ] = self.latest_unanswered_question_created_at
+                payload["latest_unanswered_question_id"] = (
+                    self.latest_unanswered_question_id
+                )
+                payload["latest_unanswered_question_created_at"] = (
+                    self.latest_unanswered_question_created_at
+                )
         return payload
 
 
@@ -688,9 +667,7 @@ class MailboxLeaseView:
             "reason": self.reason,
             "supervisor_id": self.supervisor_id,
             "updated_at": self.updated_at,
-            "version": (
-                self.lease.version if self.lease is not None else None
-            ),
+            "version": (self.lease.version if self.lease is not None else None),
         }
         if self.lease is not None:
             payload.update(
@@ -753,9 +730,7 @@ def supervision_cursor_path_for_plan(
     if not _is_uuid(supervision_id):
         raise ValueError("supervision_id must be a UUID")
     return state.plan_state_dir(plan_dir, state_dir) / (
-        MAILBOX_SUPERVISION_CURSOR_FILE_TEMPLATE.format(
-            supervision_id=supervision_id
-        )
+        MAILBOX_SUPERVISION_CURSOR_FILE_TEMPLATE.format(supervision_id=supervision_id)
     )
 
 
@@ -778,7 +753,7 @@ def read_supervision_cursor(
             state_dir,
         )
         payload = json.loads(cursor_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return 0
     if not isinstance(payload, dict):
         return 0
@@ -831,12 +806,10 @@ def write_supervision_cursor(
         cursor_path.parent.mkdir(parents=True, exist_ok=True)
         artifacts.atomic_write_bytes(
             cursor_path,
-            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(
-                "utf-8"
-            )
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
             + b"\n",
         )
-    except (OSError, artifacts.ArtifactError):
+    except OSError, artifacts.ArtifactError:
         pass
 
 
@@ -874,7 +847,7 @@ def _new_id() -> str:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _utc_now_iso() -> str:
@@ -886,7 +859,7 @@ def _is_uuid(value: object) -> bool:
         return False
     try:
         uuid.UUID(value)
-    except (ValueError, AttributeError):
+    except ValueError, AttributeError:
         return False
     return True
 
@@ -911,16 +884,11 @@ def _valid_run_id(value: object) -> bool:
 
 
 def _valid_session_id(value: object) -> bool:
-    if (
-        not isinstance(value, str)
-        or len(value) > MAILBOX_MAX_SESSION_ID_CHARS
-    ):
+    if not isinstance(value, str) or len(value) > MAILBOX_MAX_SESSION_ID_CHARS:
         return False
     components = value.split(".")
     return bool(components) and all(
-        component.isascii()
-        and component.isdigit()
-        and component[0] != "0"
+        component.isascii() and component.isdigit() and component[0] != "0"
         for component in components
     )
 
@@ -1617,9 +1585,7 @@ def _message_from_record(record: dict[str, Any], seq: int) -> MailboxMessage:
 
 def _encoded_records(records: list[dict[str, Any]]) -> bytes:
     return b"".join(
-        json.dumps(record, separators=(",", ":"), sort_keys=True).encode(
-            "utf-8"
-        )
+        json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
         + b"\n"
         for record in records
     )
@@ -1655,10 +1621,8 @@ def _write_locked_records(
         # acknowledge a reply, resolution, or receipt that never reached disk.
         durability.fullsync(fd)
     except OSError:
-        try:
+        with contextlib.suppress(OSError):
             os.ftruncate(fd, original_size)
-        except OSError:
-            pass
         raise
     first_seq = len(_physical_lines(existing)) + 1
     return tuple(
@@ -1712,10 +1676,8 @@ def read_mailbox(
             path=mailbox_path,
         ) from error
     finally:
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
         os.close(fd)
     return _parse_mailbox_bytes(data, mailbox_path)
 
@@ -1897,9 +1859,7 @@ def _normalize_append_record(
 
     if kind == KIND_WAIT_END:
         if wait_end_reason not in WAIT_END_REASONS:
-            raise MailboxError(
-                REJECT_INVALID_WAIT_END_REASON, str(wait_end_reason)
-            )
+            raise MailboxError(REJECT_INVALID_WAIT_END_REASON, str(wait_end_reason))
         record["reason"] = wait_end_reason
         if wait_end_reason == WAIT_END_REASON_CLOSURE:
             if not _is_uuid(closure_id):
@@ -2027,8 +1987,7 @@ def _append_record(
                 (
                     message
                     for message in current_view.messages
-                    if message.kind == KIND_QUESTION
-                    and message.id == question_id
+                    if message.kind == KIND_QUESTION and message.id == question_id
                 ),
                 None,
             )
@@ -2049,10 +2008,7 @@ def _append_record(
                     question_id,
                     path=mailbox_path,
                 )
-            if (
-                kind == KIND_RESOLUTION
-                and question.run_id != record["run_id"]
-            ):
+            if kind == KIND_RESOLUTION and question.run_id != record["run_id"]:
                 raise MailboxError(
                     REJECT_QUESTION_NOT_OPEN,
                     question_id,
@@ -2085,8 +2041,7 @@ def _append_record(
                 (
                     message
                     for message in current_view.messages
-                    if message.kind == KIND_QUESTION
-                    and message.id == question_id
+                    if message.kind == KIND_QUESTION and message.id == question_id
                 ),
                 None,
             )
@@ -2121,8 +2076,7 @@ def _append_record(
                 (
                     message
                     for message in current_view.messages
-                    if message.kind == KIND_QUESTION
-                    and message.id == question_id
+                    if message.kind == KIND_QUESTION and message.id == question_id
                 ),
                 None,
             )
@@ -2150,17 +2104,12 @@ def _append_record(
             )
             if active_wait is not None and record.get("wait_id") is None:
                 raise MailboxError(
-                    (
-                        REJECT_QUESTION_NOT_WAITING
-                        if strict
-                        else REJECT_INVALID_WAIT_ID
-                    ),
+                    (REJECT_QUESTION_NOT_WAITING if strict else REJECT_INVALID_WAIT_ID),
                     question_id,
                     path=mailbox_path,
                 )
             if strict and (
-                active_wait is None
-                or active_wait.id != record.get("wait_id")
+                active_wait is None or active_wait.id != record.get("wait_id")
             ):
                 raise MailboxError(
                     REJECT_QUESTION_NOT_WAITING,
@@ -2168,8 +2117,7 @@ def _append_record(
                     path=mailbox_path,
                 )
             if record.get("wait_id") is not None and (
-                active_wait is None
-                or active_wait.id != record["wait_id"]
+                active_wait is None or active_wait.id != record["wait_id"]
             ):
                 raise MailboxError(
                     REJECT_INVALID_WAIT_ID,
@@ -2186,9 +2134,7 @@ def _append_record(
             # supervising agent in the dead wait this record exists to end.
             effective_max_bytes = MAILBOX_MAX_BYTES
         elif kind == KIND_WAIT_END:
-            effective_max_bytes = (
-                MAILBOX_MAX_BYTES - MAILBOX_RECEIPT_RESERVE_BYTES
-            )
+            effective_max_bytes = MAILBOX_MAX_BYTES - MAILBOX_RECEIPT_RESERVE_BYTES
         elif kind in CLOSURE_KINDS and strict_wait_closure:
             effective_max_bytes = (
                 MAILBOX_MAX_BYTES
@@ -2198,9 +2144,7 @@ def _append_record(
         elif kind in CLOSURE_KINDS:
             effective_max_bytes = MAILBOX_MAX_BYTES
         else:
-            effective_max_bytes = (
-                MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
-            )
+            effective_max_bytes = MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
         # One correction is enough for a resolver that settles once, which is
         # what the terminal supervision record needs: it flips to `error` and
         # stays there. The bound keeps a resolver that never settles from
@@ -2220,9 +2164,9 @@ def _append_record(
                 fields["created_at"] = record["created_at"]
                 record = _normalize_append_record(**fields)
             encoded_record = (
-                json.dumps(
-                    record, separators=(",", ":"), sort_keys=True
-                ).encode("utf-8")
+                json.dumps(record, separators=(",", ":"), sort_keys=True).encode(
+                    "utf-8"
+                )
                 + b"\n"
             )
             append_bytes = separator + encoded_record
@@ -2260,10 +2204,8 @@ def _append_record(
                 # A regular-file write should be all-or-error, but restoring
                 # the original length also fails safe on an observable short
                 # write.
-                try:
+                with contextlib.suppress(OSError):
                     os.ftruncate(fd, original_size)
-                except OSError:
-                    pass
                 raise
             break
     except MailboxError:
@@ -2275,10 +2217,8 @@ def _append_record(
             path=mailbox_path,
         ) from error
     finally:
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
         os.close(fd)
 
     return MailboxMessage(
@@ -2389,11 +2329,11 @@ def append_wait_question(
     mailbox_path = mailbox_path_for_plan(plan_dir, state_dir)
     try:
         mailbox_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(
-            mailbox_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600
-        )
+        fd = os.open(mailbox_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
     except OSError as error:
-        raise MailboxError(ERROR_MAILBOX_WRITE, str(error), path=mailbox_path) from error
+        raise MailboxError(
+            ERROR_MAILBOX_WRITE, str(error), path=mailbox_path
+        ) from error
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         os.fchmod(fd, 0o600)
@@ -2402,28 +2342,24 @@ def append_wait_question(
         existing_ids = {message.id for message in view.messages}
         for record in (question_record, wait_record):
             if record["id"] in existing_ids:
-                raise MailboxError(
-                    REJECT_DUPLICATE_ID, record["id"], path=mailbox_path
-                )
+                raise MailboxError(REJECT_DUPLICATE_ID, record["id"], path=mailbox_path)
             existing_ids.add(record["id"])
         messages = _write_locked_records(
             fd,
             existing=existing,
             records=[question_record, wait_record],
-            effective_max_bytes=(
-                MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
-            ),
+            effective_max_bytes=(MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES),
             mailbox_path=mailbox_path,
         )
     except MailboxError:
         raise
     except OSError as error:
-        raise MailboxError(ERROR_MAILBOX_WRITE, str(error), path=mailbox_path) from error
+        raise MailboxError(
+            ERROR_MAILBOX_WRITE, str(error), path=mailbox_path
+        ) from error
     finally:
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
         os.close(fd)
     return messages[0], messages[1]
 
@@ -2546,7 +2482,9 @@ def finish_wait(
             REJECT_QUESTION_NOT_FOUND, question_id, path=mailbox_path
         ) from error
     except OSError as error:
-        raise MailboxError(ERROR_MAILBOX_WRITE, str(error), path=mailbox_path) from error
+        raise MailboxError(
+            ERROR_MAILBOX_WRITE, str(error), path=mailbox_path
+        ) from error
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         existing = _read_locked(fd)
@@ -2621,12 +2559,12 @@ def finish_wait(
     except MailboxError:
         raise
     except OSError as error:
-        raise MailboxError(ERROR_MAILBOX_WRITE, str(error), path=mailbox_path) from error
+        raise MailboxError(
+            ERROR_MAILBOX_WRITE, str(error), path=mailbox_path
+        ) from error
     finally:
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
         os.close(fd)
     return WaitCompletion(
         question=question,
@@ -2692,8 +2630,7 @@ def append_supervision_end(
     state_dir: str | Path | None = None,
     message_id: str | None = None,
     created_at: str | None = None,
-    resolve_at_commit: Callable[[], tuple[SupervisionOutcome | str, str]]
-    | None = None,
+    resolve_at_commit: Callable[[], tuple[SupervisionOutcome | str, str]] | None = None,
 ) -> MailboxMessage:
     """Append the terminal record marking the end of supervised work.
 
@@ -2760,7 +2697,7 @@ def _normalize_now(now: datetime | None) -> datetime:
     resolved = _utc_now() if now is None else now
     if resolved.tzinfo is None or resolved.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
-    return resolved.astimezone(timezone.utc)
+    return resolved.astimezone(UTC)
 
 
 def _validate_lease_age(max_age_seconds: float) -> float:
@@ -2851,9 +2788,7 @@ def write_lease(
                 )
                 is None
             ):
-                raise MailboxError(
-                    LEASE_INVALID_LATEST_QUESTION_CREATED_AT
-                )
+                raise MailboxError(LEASE_INVALID_LATEST_QUESTION_CREATED_AT)
     lease = MailboxLease(
         supervisor_id=supervisor_id,
         updated_at=resolved_updated_at,
@@ -2861,9 +2796,7 @@ def write_lease(
         projection_seq=projection_seq,
         unanswered_questions=unanswered_questions,
         latest_unanswered_question_id=latest_unanswered_question_id,
-        latest_unanswered_question_created_at=(
-            latest_unanswered_question_created_at
-        ),
+        latest_unanswered_question_created_at=(latest_unanswered_question_created_at),
     )
     data = _lease_bytes(lease)
     lease_path = lease_path_for_plan(plan_dir, state_dir)
@@ -2894,10 +2827,8 @@ def write_lease(
             path=lease_path,
         ) from error
     finally:
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
         os.close(fd)
     return lease
 
@@ -2947,10 +2878,8 @@ def read_lease(
             path=lease_path,
         ) from error
     finally:
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
         os.close(fd)
 
     if len(data) != MAILBOX_LEASE_BYTES:
@@ -2960,7 +2889,7 @@ def read_lease(
         return _invalid_lease_view(lease_path, LEASE_EMPTY)
     try:
         payload = json.loads(stripped.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except UnicodeDecodeError, json.JSONDecodeError:
         return _invalid_lease_view(lease_path, LEASE_INVALID_JSON)
     if not isinstance(payload, dict):
         return _invalid_lease_view(lease_path, LEASE_NOT_OBJECT)
@@ -2995,22 +2924,16 @@ def read_lease(
             or not isinstance(projection_seq_value, int)
             or projection_seq_value < 0
         ):
-            return _invalid_lease_view(
-                lease_path, LEASE_INVALID_PROJECTION_SEQ
-            )
+            return _invalid_lease_view(lease_path, LEASE_INVALID_PROJECTION_SEQ)
         unanswered_value = payload.get("unanswered_questions")
         if (
             isinstance(unanswered_value, bool)
             or not isinstance(unanswered_value, int)
             or unanswered_value < 0
         ):
-            return _invalid_lease_view(
-                lease_path, LEASE_INVALID_UNANSWERED_QUESTIONS
-            )
+            return _invalid_lease_view(lease_path, LEASE_INVALID_UNANSWERED_QUESTIONS)
         latest_id_value = payload.get("latest_unanswered_question_id")
-        latest_created_value = payload.get(
-            "latest_unanswered_question_created_at"
-        )
+        latest_created_value = payload.get("latest_unanswered_question_created_at")
         if unanswered_value == 0:
             if latest_id_value is not None or latest_created_value is not None:
                 return _invalid_lease_view(
@@ -3018,17 +2941,10 @@ def read_lease(
                 )
         else:
             if projection_seq_value == 0:
-                return _invalid_lease_view(
-                    lease_path, LEASE_INVALID_PROJECTION_SEQ
-                )
+                return _invalid_lease_view(lease_path, LEASE_INVALID_PROJECTION_SEQ)
             if not _is_uuid(latest_id_value):
-                return _invalid_lease_view(
-                    lease_path, LEASE_INVALID_LATEST_QUESTION_ID
-                )
-            if (
-                _parse_timestamp(latest_created_value, require_utc=True)
-                is None
-            ):
+                return _invalid_lease_view(lease_path, LEASE_INVALID_LATEST_QUESTION_ID)
+            if _parse_timestamp(latest_created_value, require_utc=True) is None:
                 return _invalid_lease_view(
                     lease_path,
                     LEASE_INVALID_LATEST_QUESTION_CREATED_AT,
@@ -3049,9 +2965,7 @@ def read_lease(
             "latest_unanswered_question_created_at",
         )
     ):
-        return _invalid_lease_view(
-            lease_path, LEASE_INCOMPLETE_QUESTION_PROJECTION
-        )
+        return _invalid_lease_view(lease_path, LEASE_INCOMPLETE_QUESTION_PROJECTION)
     lease = MailboxLease(
         supervisor_id=supervisor_id,
         updated_at=updated_at,
@@ -3059,12 +2973,10 @@ def read_lease(
         projection_seq=projection_seq,
         unanswered_questions=unanswered_questions,
         latest_unanswered_question_id=latest_unanswered_question_id,
-        latest_unanswered_question_created_at=(
-            latest_unanswered_question_created_at
-        ),
+        latest_unanswered_question_created_at=(latest_unanswered_question_created_at),
         version=version,
     )
-    updated_utc = updated.astimezone(timezone.utc)
+    updated_utc = updated.astimezone(UTC)
     if updated_utc > resolved_now:
         return _invalid_lease_view(
             lease_path,

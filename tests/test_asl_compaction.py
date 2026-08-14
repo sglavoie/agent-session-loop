@@ -4,69 +4,24 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
-import argparse
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
-import dataclasses
-from datetime import datetime, timezone
-import errno
 import hashlib
-import importlib.util
-import io
 import json
-import os
-from pathlib import Path
-import pty
-import select
-import shlex
-import shutil
-import signal
-import stat
-import subprocess
-import sys
 import tempfile
-import threading
-import time
 import unittest
-import urllib.parse
-from unittest import mock
+from pathlib import Path
 
 from agent_session_loop import (
     artifacts,
-    authoring,
-    baseline,
-    baseline_cache,
-    cli,
     compact_state,
-    config,
-    contracts,
-    control_queue,
     events,
     harnesses,
-    install_verify,
     plans,
-    preflight,
-    prepare,
-    progress_cli,
-    progress_repair,
-    qna,
-    review,
-    review_repair,
-    run_control,
     runner,
     state,
-    tail,
-    verification,
-    workbench,
-    workbench_server,
-)
-from agent_session_loop.formatting import (
-    format_duration_seconds,
-    format_turn_finished_message,
-    format_turn_started_message,
 )
 from tests.support import (
-    CODEX_USAGE_LIMIT_FIXTURE,
     CLAUDE_SESSION_LIMIT_FIXTURE,
+    CODEX_USAGE_LIMIT_FIXTURE,
     write_plan,
 )
 
@@ -158,9 +113,7 @@ class StateCompactionTests(unittest.TestCase):
         self.assertFalse((result_path.parent / "verification").exists())
 
     def test_apply_compacts_state_to_schema_v2(self) -> None:
-        state_path = self._write_state(
-            {"run_id": "r", "turns": [self._v1_turn()]}
-        )
+        state_path = self._write_state({"run_id": "r", "turns": [self._v1_turn()]})
 
         compact_state.compact_plan_state(
             self.plan_dir, state_dir=self.state_dir, apply=True
@@ -216,7 +169,9 @@ class StateCompactionTests(unittest.TestCase):
         )
 
         self.assertTrue(report.applied)
-        self.assertEqual(report.projected_bytes_reclaimed, report.actual_bytes_reclaimed)
+        self.assertEqual(
+            report.projected_bytes_reclaimed, report.actual_bytes_reclaimed
+        )
         # One passing stdout stream removed (lossy); failed stdout+stderr kept.
         self.assertEqual(1, report.pass_output_removed)
         self.assertEqual(2, report.failed_output_extracted)
@@ -236,9 +191,7 @@ class StateCompactionTests(unittest.TestCase):
 
     def _state_dir_disk_bytes(self) -> int:
         return sum(
-            path.stat().st_size
-            for path in self.plan_state.rglob("*")
-            if path.is_file()
+            path.stat().st_size for path in self.plan_state.rglob("*") if path.is_file()
         )
 
     def test_savings_are_net_of_retained_failure_artifacts(self) -> None:
@@ -328,12 +281,8 @@ class StateCompactionTests(unittest.TestCase):
                 paths = [Path(check["stdout_artifact_path"]) for check in checks]
                 self.assertNotEqual(paths[0], paths[1])
                 # Both checks' full output is retained byte-for-byte.
-                self.assertEqual(
-                    first, artifacts.read_gzip(paths[0]).decode("utf-8")
-                )
-                self.assertEqual(
-                    second, artifacts.read_gzip(paths[1]).decode("utf-8")
-                )
+                self.assertEqual(first, artifacts.read_gzip(paths[0]).decode("utf-8"))
+                self.assertEqual(second, artifacts.read_gzip(paths[1]).decode("utf-8"))
                 # The dry-run projection matches the applied reclaim
                 # byte-for-byte; before the fix both checks projected against
                 # one shared target and the figures diverged.
@@ -391,9 +340,7 @@ class StateCompactionTests(unittest.TestCase):
             with self.subTest(artifact=path.name):
                 self.assertTrue(path.exists())
                 self.assertLessEqual(len(path.name.encode("utf-8")), 255)
-                self.assertLessEqual(
-                    len(f".{path.name}.tmp".encode("utf-8")), 255
-                )
+                self.assertLessEqual(len(f".{path.name}.tmp".encode()), 255)
         # Both outputs stay byte-for-byte recoverable from the artifacts.
         self.assertEqual(first, artifacts.read_gzip(paths[0]).decode("utf-8"))
         self.assertEqual(second, artifacts.read_gzip(paths[1]).decode("utf-8"))
@@ -402,9 +349,7 @@ class StateCompactionTests(unittest.TestCase):
         self.assertEqual(
             projected.projected_bytes_reclaimed, report.actual_bytes_reclaimed
         )
-        self.assertEqual(
-            projected.artifact_bytes_added, report.artifact_bytes_added
-        )
+        self.assertEqual(projected.artifact_bytes_added, report.artifact_bytes_added)
 
     def test_events_compaction_preserves_order_and_pause_evidence(self) -> None:
         turn = self._v1_turn()
@@ -418,9 +363,7 @@ class StateCompactionTests(unittest.TestCase):
                         "run_id": "r",
                         "reason": "verify-failed",
                         "message": "verification failed",
-                        "details": {
-                            "checks": [{"name": "c1", "stdout": self.big}]
-                        },
+                        "details": {"checks": [{"name": "c1", "stdout": self.big}]},
                     },
                 },
                 {
@@ -566,12 +509,8 @@ class HarnessFailureClassificationTests(unittest.TestCase):
 
     def test_codex_usage_limit_fixture_is_quota_non_retryable(self) -> None:
         text = CODEX_USAGE_LIMIT_FIXTURE.read_text(encoding="utf-8")
-        classification = runner.classify_harness_failure(
-            self._result(stderr=text)
-        )
-        self.assertEqual(
-            events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason
-        )
+        classification = runner.classify_harness_failure(self._result(stderr=text))
+        self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason)
         self.assertFalse(classification.retryable)
         # Reset time is parsed but does not gate retryability.
         self.assertIsNotNone(classification.retry_at)
@@ -583,9 +522,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
         classification = runner.classify_harness_failure(
             self._result(last_message=text)
         )
-        self.assertEqual(
-            events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason
-        )
+        self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason)
         self.assertFalse(classification.retryable)
 
     def test_rate_limit_and_429_are_quota_non_retryable(self) -> None:
@@ -614,9 +551,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
                 classification = runner.classify_harness_failure(
                     self._result(stderr=text)
                 )
-                self.assertEqual(
-                    events.PAUSE_REASON_AUTH_FAILED, classification.reason
-                )
+                self.assertEqual(events.PAUSE_REASON_AUTH_FAILED, classification.reason)
                 self.assertFalse(classification.retryable)
 
     def test_invalid_model_failures_are_non_retryable(self) -> None:
@@ -656,9 +591,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
         classification = runner.classify_harness_failure(
             self._result(stderr="fake codex failure", returncode=3)
         )
-        self.assertEqual(
-            events.PAUSE_REASON_NONZERO_EXIT, classification.reason
-        )
+        self.assertEqual(events.PAUSE_REASON_NONZERO_EXIT, classification.reason)
         self.assertFalse(classification.retryable)
         self.assertEqual(3, classification.returncode)
         self.assertIn("exit-3", classification.fingerprint)
@@ -667,9 +600,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
         classification = runner.classify_harness_failure(
             self._result(returncode=130, interrupted=True)
         )
-        self.assertEqual(
-            events.PAUSE_REASON_INTERRUPTED, classification.reason
-        )
+        self.assertEqual(events.PAUSE_REASON_INTERRUPTED, classification.reason)
         self.assertFalse(classification.retryable)
 
     def test_quota_precedes_transport_when_both_present(self) -> None:
@@ -680,18 +611,14 @@ class HarnessFailureClassificationTests(unittest.TestCase):
                 stderr="429 rate limit; connection reset by peer",
             )
         )
-        self.assertEqual(
-            events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason
-        )
+        self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason)
         self.assertFalse(classification.retryable)
 
     def test_quota_without_reset_time_still_non_retryable(self) -> None:
         classification = runner.classify_harness_failure(
             self._result(stderr="you've hit your usage limit")
         )
-        self.assertEqual(
-            events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason
-        )
+        self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason)
         self.assertIsNone(classification.retry_at)
         self.assertFalse(classification.retryable)
 
@@ -708,9 +635,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
 
     def test_evidence_preview_is_bounded(self) -> None:
         noisy = "connection reset " + ("x" * 5000)
-        classification = runner.classify_harness_failure(
-            self._result(stderr=noisy)
-        )
+        classification = runner.classify_harness_failure(self._result(stderr=noisy))
         self.assertLessEqual(
             len(classification.evidence), runner.FAILURE_EVIDENCE_MAX_CHARS
         )

@@ -15,15 +15,14 @@ loader only reads state and never mutates it.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import json
-from pathlib import Path
 import shlex
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import events, mailbox, pause_policy, plans, responses, state
-
 
 REASON_NO_PAUSED_RUN = "no-paused-run"
 REASON_MISSING_QUESTION_CONTEXT = "missing-question-context"
@@ -238,9 +237,7 @@ def build_qna_context(
     if session_id != next_pending.id:
         source_label = "waiting" if context_kind == "waiting" else "paused"
         session_detail_key = (
-            "waiting_session_id"
-            if context_kind == "waiting"
-            else "paused_session_id"
+            "waiting_session_id" if context_kind == "waiting" else "paused_session_id"
         )
         raise QnAError(
             REASON_REPLY_CONTEXT_MISMATCH,
@@ -315,9 +312,7 @@ def build_qna_context(
         context_kind=context_kind,
         question_id=question_id,
         waiting_for_reply=(
-            dict(waiting_for_reply)
-            if waiting_for_reply is not None
-            else None
+            dict(waiting_for_reply) if waiting_for_reply is not None else None
         ),
     )
 
@@ -572,10 +567,7 @@ def _validate_waiting_identity(
     if lease_activity is not None and _optional_str(lease_activity) is None:
         raise QnAError(
             REASON_MISSING_QUESTION_CONTEXT,
-            (
-                "waiting-for-reply state has an invalid "
-                "last_lease_activity_at"
-            ),
+            ("waiting-for-reply state has an invalid last_lease_activity_at"),
             details={
                 "state_path": str(state_path),
                 "question_id": question_id,
@@ -707,12 +699,10 @@ def render_resolver_prompt(context: QnAContext) -> str:
     lines.append("## Harness")
     lines.append(f"- Harness: {_display(context.harness)}")
     lines.append(
-        f"- Model: {_display(context.model)}"
-        f"{_source_suffix(context.model_source)}"
+        f"- Model: {_display(context.model)}{_source_suffix(context.model_source)}"
     )
     lines.append(
-        f"- Effort: {_display(context.effort)}"
-        f"{_source_suffix(context.effort_source)}"
+        f"- Effort: {_display(context.effort)}{_source_suffix(context.effort_source)}"
     )
     lines.append("")
 
@@ -767,9 +757,7 @@ def render_resolver_prompt(context: QnAContext) -> str:
 
 def _render_waiting_resolver_prompt(context: QnAContext) -> str:
     waiting = (
-        dict(context.waiting_for_reply)
-        if context.waiting_for_reply is not None
-        else {}
+        dict(context.waiting_for_reply) if context.waiting_for_reply is not None else {}
     )
     lines: list[str] = []
     lines.append("# Live Agent Session - Resolver Prompt")
@@ -793,12 +781,10 @@ def _render_waiting_resolver_prompt(context: QnAContext) -> str:
     lines.append("## Harness")
     lines.append(f"- Harness: {_display(context.harness)}")
     lines.append(
-        f"- Model: {_display(context.model)}"
-        f"{_source_suffix(context.model_source)}"
+        f"- Model: {_display(context.model)}{_source_suffix(context.model_source)}"
     )
     lines.append(
-        f"- Effort: {_display(context.effort)}"
-        f"{_source_suffix(context.effort_source)}"
+        f"- Effort: {_display(context.effort)}{_source_suffix(context.effort_source)}"
     )
     lines.append("")
 
@@ -807,9 +793,7 @@ def _render_waiting_resolver_prompt(context: QnAContext) -> str:
     lines.append(f"- Started: {_display(waiting.get('started_at'))}")
     lines.append(f"- Base deadline: {_display(waiting.get('base_deadline'))}")
     if _wait_ceiling_field(waiting) == LEGACY_WAIT_CEILING_FIELD:
-        lines.append(
-            f"- Hard deadline: {_display(waiting.get('hard_deadline'))}"
-        )
+        lines.append(f"- Hard deadline: {_display(waiting.get('hard_deadline'))}")
     else:
         lines.append(
             "- Unsupervised deadline: "
@@ -821,8 +805,7 @@ def _render_waiting_resolver_prompt(context: QnAContext) -> str:
             f"{_display(waiting.get('unsupervised_ceiling_seconds'))}s"
         )
     lines.append(
-        "- Last lease activity: "
-        f"{_display(waiting.get('last_lease_activity_at'))}"
+        f"- Last lease activity: {_display(waiting.get('last_lease_activity_at'))}"
     )
     lines.append("")
 
