@@ -58,9 +58,11 @@ For each session file, scan all content **above** the `## Handoff` section for v
 
 **N — Naming claims**: variable/constant/enum/command names referenced as already existing.
 
-For each claim, record the type (P/S/F/D/B/N), the exact text from the session, and the section it appears in. In registered mode, also record its `repo` alias from the qualified `Alias:path` claim or session context and require it to be in that session's declared read scope; do not guess an alias for ambiguous unqualified prose. Ignore any legacy `## Parallel Metadata` block — do not extract, validate, or surface its fields.
+**R — Removal/alteration claims**: language that takes existing behavior away or changes it rather than describing new code — "remove", "delete", "drop", "replace", "no longer", "stop doing", "simplify to", "collapse into" — and corrections phrased as fixes to how existing code behaves. Record the symbol, file, or behavior the session intends to remove or alter. This is the Chesterton's fence claim type: an R claim is not answered by confirming the target exists (that is a P/S/N claim), it is answered by establishing why it exists.
 
-Separately collect each session's `## Completion Contract` section when present: the `### Done when` bullets, the `### Verify` fenced ```json``` block, and any top-level `"session"` field. Treat the contract as its own structural artifact, validated in Step 3 under "Contract claims (C)"; do not double-report `argv`/`path`/`pattern` references from inside it as P/S/F/D/B/N claims.
+For each claim, record the type (P/S/F/D/B/N/R), the exact text from the session, and the section it appears in. In registered mode, also record its `repo` alias from the qualified `Alias:path` claim or session context and require it to be in that session's declared read scope; do not guess an alias for ambiguous unqualified prose. Ignore any legacy `## Parallel Metadata` block — do not extract, validate, or surface its fields.
+
+Separately collect each session's `## Completion Contract` section when present: the `### Done when` bullets, the `### Verify` fenced ```json``` block, and any top-level `"session"` field. Treat the contract as its own structural artifact, validated in Step 3 under "Contract claims (C)"; do not double-report `argv`/`path`/`pattern` references from inside it as P/S/F/D/B/N/R claims.
 
 In **directory mode**, also note the manifest's readiness metadata block (`**Readiness**`, `**Readiness SHA-256**`, `**Readiness checked at**`) for the Step 7 preflight; do not treat missing readiness metadata as a path/signature claim issue.
 
@@ -74,6 +76,7 @@ Verify each claim using the most efficient tool:
 - **Dependency (D)**: `Glob`/`Grep` for import paths; `command -v <tool>` for external tools.
 - **Behavioral (B)**: `Read` the referenced code and verify the assertion; record actual behavior with a line-number range.
 - **Naming (N)**: `Grep` to confirm the name exists; record the location or flag missing.
+- **Removal (R)**: establish the origin rationale before the session removes or alters the code. Three sources, in order of cost: `git log -S '<symbol>' -- <path>` for the introducing commit and its message, `git log -L <start>,<end>:<path>` (or `git blame -L`) for the surrounding range when `-S` returns nothing useful, and a `Grep` for tests that cover the behavior. Record the rationale — commit subject, blame range, or covering test path — in the claim's `location`, since that is where the renderer surfaces it. When none of the three establishes why the code exists, emit a `removal-unjustified` issue rather than passing the claim silently: an unexplained fence is a finding, not a clean check.
 
 **Contract claims (C)** (per session, when Step 2 captured a `## Completion Contract`):
 
@@ -93,7 +96,7 @@ Here `<root>` is the legacy repository root or registered workspace root.
 - `factual-issue` / `command-not-runnable` — the authoritative red (unresolved executable) / yellow (non-importable module) finding also comes from the final `asl preflight` in Step 7; surface the contract-check `detail` rather than pre-declaring the tool installed.
 - `factual-issue` / `file-missing` or `regex-not-matched` — a missing file or a pattern that matches zero times is almost always stale.
 
-Also flag the default skeleton placeholder bullet (`<one concrete human-readable exit criterion derived from the session>` or any angle-bracketed `<...>` text in `Done when`) as a contract problem asking for a real criterion. Bundle every `ok` contract check into the per-session verified-claims tally, but do not surface `ok` checks as separate "Verified Claims" rows — reserve that table for the P/S/F/D/B/N taxonomy.
+Also flag the default skeleton placeholder bullet (`<one concrete human-readable exit criterion derived from the session>` or any angle-bracketed `<...>` text in `Done when`) as a contract problem asking for a real criterion. Bundle every `ok` contract check into the per-session verified-claims tally, but do not surface `ok` checks as separate "Verified Claims" rows — reserve that table for the P/S/F/D/B/N/R taxonomy.
 
 **Token efficiency rules**:
 
@@ -102,6 +105,7 @@ Also flag the default skeleton placeholder bullet (`<one concrete human-readable
 - Do NOT re-read content already present in `context.md`.
 - Stop researching a file after confirming all claims about it.
 - For large sessions (>200 lines), prioritize Path and Signature claims first — these cause the most execution failures.
+- Cap R research: `git log` is the most expensive tool in this skill, so budget one `git log -S` plus at most one range read (`git log -L` or `git blame -L`) plus one test `Grep` per removed symbol. Research removals of code that already exists on disk only — never run history commands against code an earlier session in the same plan creates, which has no history to read and belongs in a `to_be_created` claim instead.
 
 ### Step 4: Cross-Session Dependency Check
 
@@ -140,8 +144,11 @@ Assemble the findings for each session into a validator result JSON payload. Leg
     {
       "session_id": "<ID>",
       "title": "<session title>",
-      "claims": [{"claim": "...", "claim_type": "P|S|F|D|B|N", "location": "path/to/file.go", "line": 42, "to_be_created": false}],
-      "issues": [{"issue_type": "path-missing|signature-mismatch|field-missing|dependency-missing|behavior-incorrect|name-missing", "summary": "...", "session_ref": "<quoted text>", "actual": "...", "fix": "..."}],
+      "claims": [
+        {"claim": "...", "claim_type": "P|S|F|D|B|N|R", "location": "path/to/file.go", "line": 42, "to_be_created": false},
+        {"claim": "session removes `legacyRetry`", "claim_type": "R", "location": "path/to/file.go — added by a1b2c3d 'retry flapping backends'; covered by path/to/file_test.go:88", "line": 42, "to_be_created": false}
+      ],
+      "issues": [{"issue_type": "path-missing|signature-mismatch|field-missing|dependency-missing|behavior-incorrect|name-missing|repository-ambiguous|removal-unjustified", "summary": "...", "session_ref": "<quoted text>", "actual": "...", "fix": "..."}],
       "details": [{"path": "path/to/file.go", "notes": ["Lines X-Y: ..."]}],
       "patterns": [{"name": "...", "location": "file:line-range", "reason": "..."}],
       "dependencies": [{"direction": "requires|provides", "session_id": "<ID>", "description": "..."}],
@@ -166,8 +173,12 @@ Registered top-level shape:
     {
       "session_id": "1",
       "title": "Example",
-      "claims": [],
-      "issues": [],
+      "claims": [
+        {"claim": "session drops the `SVC` legacy retry shim", "claim_type": "R", "location": "internal/retry/shim.go — added by a1b2c3d 'retry flapping backends'; covered by internal/retry/shim_test.go:120", "line": 31, "to_be_created": false, "repo": "SVC"}
+      ],
+      "issues": [
+        {"issue_type": "removal-unjustified", "summary": "no origin rationale found for removing `parseLegacyHeader`", "session_ref": "remove the legacy header parser", "actual": "git log -S found no introducing commit inside the checkout's history and no test covers it", "fix": "state why the parser exists, or confirm with the user that it is dead code before the session removes it", "repo": "SVC"}
+      ],
       "details": [],
       "patterns": [],
       "dependencies": [],
@@ -185,6 +196,15 @@ session's read scope, and all locations are repository-relative or qualified
 when rendered. In either version, report a path that could belong to more than
 one repository, or that resolves outside the bound root, as a
 `repository-ambiguous` issue instead of selecting an alias.
+
+In both versions an `R` claim carries the Step 3 origin rationale inside its
+`location` (there is no dedicated rationale field — the renderer surfaces
+`location` verbatim in the Verified Claims table), and a removal whose rationale
+could not be established is reported as a `removal-unjustified` issue naming the
+symbol, the history commands that came back empty, and what the session must
+state before removing it. Both values are accepted by
+`prepare.CLAIM_TYPES` / `prepare.ISSUE_TYPES`; anything outside those tuples is
+rejected fail-closed with nothing written.
 
 The parser rejects (fail-closed, `PlanError`, nothing written) unknown keys, empty required strings, unknown `claim_type`/`issue_type`/`direction`, invalid/duplicate session ids, and more than 3 `patterns` per session. Claims about code to be _created_ set `"to_be_created": true` (no `line`) and render as "N/A — to be created" instead of being flagged as issues. `contract_problems` requires `contract_checked: true` and takes the Step 3 findings verbatim. `corrections` are exact factual text replacements only (`expected_text != replacement_text`) — never design changes, plan restructuring, or contract-body edits; report those as `issues` or `contract_problems`.
 
@@ -211,9 +231,9 @@ Use the legacy repository root or registered workspace root resolved in Step 1; 
 Print a concise summary:
 
 1. Number of sessions expanded.
-2. Total claims checked and total issues found.
+2. Total claims checked and total issues found, with the `R` (removal) claims researched and the `removal-unjustified` issues raised called out as their own subtotals.
 3. Per-session one-liner: `session-<ID>: <claims> checked / <issues> issues — <worst issue or "clean">`.
-4. Blocking issues highlighted prominently (wrong file paths, missing dependencies).
+4. Blocking issues highlighted prominently (wrong file paths, missing dependencies), and every `removal-unjustified` finding listed by symbol — a removal nobody can justify is a decision for the user, not a clean check.
 5. Contract issues: total across the plan and a per-session breakdown when non-zero; cite `agent_session_loop.contracts.parse_completion_contract` for schema errors.
 6. Correction outcomes: the `applied` fixes and every `blocked` outcome with its reason (`not-found`, `ambiguous`, `contract-body`, `handoff-body`, `structural`).
 7. Final preflight snapshot (directory mode): red/yellow/green counts, `reason`, `marked_loop_ready`, final `readiness.state`, and whether `session-run` is clean to start.
@@ -230,6 +250,7 @@ Otherwise (the command exits non-zero, `marked_loop_ready` is false, or the fina
 
 ## Important Notes
 
+- Mental models: read the sibling reference `../references/mental-models.md` on demand (the same relative sibling read `plan-ideal/SKILL.md:29` uses) rather than inlining it, and cite at most 3 models by name per report. This skill's assigned models are **Chesterton's fence** — why does this code exist, before a session removes or alters it, which is what an `R` claim answers and what `removal-unjustified` records the absence of — and **map vs territory**, the reason every claim is re-checked against the repository instead of trusted from the plan.
 - Never modify `context.md`; never modify `manifest.md` except through the final `asl preflight --mark-loop-ready` invocation in directory mode.
 - Skip sessions whose Handoff status is not "pending" — the codebase has already been modified by that session's execution, so checking stale claims would mislead. Note skipped sessions in the summary.
 - New code claims (files or functions to be created) are valid and should not be flagged unless they conflict with existing code.

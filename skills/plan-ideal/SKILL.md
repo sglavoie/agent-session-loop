@@ -27,7 +27,7 @@ plan-ideal PLAN.md --cwd REPO_ROOT
 
 1. Resolve the plan path and codebase root from the invocation arguments. Reject unknown flags and stop without making changes.
 2. Read the sibling skill file `../plan-iterate/SKILL.md` (the `plan-iterate` skill directory installed alongside this one).
-3. Follow its **Ideal-Only Mode (`--ideal-only`)** instructions with the resolved plan path and codebase root: Steps I1-I4 (read and deeply understand the plan, one shared research pass, envision the ideal across the eight dimensions, identify divergences ranked by impact), then print the full ideal report using that mode's output template.
+3. Follow its **Ideal-Only Mode (`--ideal-only`)** instructions with the resolved plan path and codebase root: Steps I1-I4 (read and deeply understand the plan, one shared research pass, envision the ideal across that mode's dimensions, identify divergences ranked by impact), then print the full ideal report using that mode's output template.
 4. End the report with `Next step: plan-iterate <plan-path> --ideal --cwd <repo-root>` so the user can turn the vision into durable plan edits.
 
 ## Important Notes

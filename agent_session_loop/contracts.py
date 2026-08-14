@@ -39,6 +39,8 @@ COMPLETION_CONTRACT_HEADING = "## Completion Contract"
 DONE_WHEN_HEADING = "### Done when"
 VERIFY_HEADING = "### Verify"
 
+_FENCE_RE = re.compile(r"^\s*(?P<run>`{3,}|~{3,})(?P<rest>.*)$")
+
 CommandKind = Literal["command"]
 FileExistsKind = Literal["file_exists"]
 RegexInFileKind = Literal["regex_in_file"]
@@ -163,8 +165,82 @@ def _find_heading_index(
     return None
 
 
-def _section_end(lines: list[str], start: int, max_level: int, end: int) -> int:
+def fenced_line_flags(lines: list[str]) -> list[bool]:
+    """Return, per line, whether it belongs to a fenced code block.
+
+    A fence opens on a run of at least three backticks or tildes and closes only
+    on a run of the same character, at least as long as the opener, followed by
+    nothing but whitespace. A shorter run, a different character, or an info
+    string is content, so a nested example never closes the block quoting it.
+    """
+    flags = [False] * len(lines)
+    fence_char: str | None = None
+    fence_length = 0
+    for index, line in enumerate(lines):
+        match = _FENCE_RE.match(line)
+        if fence_char is None:
+            if match is not None:
+                run = match.group("run")
+                fence_char = run[0]
+                fence_length = len(run)
+                flags[index] = True
+            continue
+        flags[index] = True
+        if match is None:
+            continue
+        run = match.group("run")
+        if (
+            run[0] == fence_char
+            and len(run) >= fence_length
+            and match.group("rest").strip() == ""
+        ):
+            fence_char = None
+            fence_length = 0
+    return flags
+
+
+def completion_contract_heading_indices(
+    lines: list[str], end: int | None = None
+) -> list[int]:
+    """Return the indices of ``## Completion Contract`` headings in ``lines``.
+
+    Headings inside fenced code blocks are quoted text, not sections, and are
+    never reported.
+    """
+    limit = len(lines) if end is None else end
+    fenced = fenced_line_flags(lines)
+    return [
+        index
+        for index in range(limit)
+        if not fenced[index] and lines[index].strip() == COMPLETION_CONTRACT_HEADING
+    ]
+
+
+def strip_completion_contract_sections(lines: list[str]) -> tuple[list[str], int]:
+    """Return ``lines`` minus every Completion Contract section, and the count cut."""
+    starts = completion_contract_heading_indices(lines)
+    if not starts:
+        return list(lines), 0
+    fenced = fenced_line_flags(lines)
+    keep = [True] * len(lines)
+    for start in starts:
+        stop = _section_end(lines, start, max_level=2, end=len(lines), fenced=fenced)
+        for index in range(start, stop):
+            keep[index] = False
+    return [line for index, line in enumerate(lines) if keep[index]], len(starts)
+
+
+def _section_end(
+    lines: list[str],
+    start: int,
+    max_level: int,
+    end: int,
+    fenced: list[bool] | None = None,
+) -> int:
+    flags = fenced_line_flags(lines) if fenced is None else fenced
     for index in range(start + 1, end):
+        if flags[index]:
+            continue
         level = _heading_level(lines[index])
         if 0 < level <= max_level:
             return index
@@ -627,7 +703,8 @@ def parse_completion_contract(
     """Parse a session file body and return its completion contract, if any.
 
     Returns ``None`` if the session text contains no ``## Completion Contract``
-    section. Raises :class:`PlanError` for any malformed contract.
+    section. Raises :class:`PlanError` for any malformed contract, and for
+    duplicate contracts: silently selecting one would run an unintended gate.
     """
     canonical_id = parse_session_id(session_id)
     lines = text.splitlines(keepends=False)
@@ -635,9 +712,17 @@ def parse_completion_contract(
     handoff_start = _final_handoff_start(lines)
     end = handoff_start if handoff_start is not None else len(lines)
 
-    contract_start = _find_heading_index(lines, COMPLETION_CONTRACT_HEADING, 0, end)
-    if contract_start is None:
+    starts = completion_contract_heading_indices(lines, end)
+    if not starts:
         return None
+    if len(starts) > 1:
+        locations = ", ".join(str(index + 1) for index in starts)
+        raise PlanError(
+            f"session {canonical_id.value} has {len(starts)} "
+            f"{COMPLETION_CONTRACT_HEADING!r} sections (lines {locations}); "
+            "exactly one is allowed"
+        )
+    contract_start = starts[0]
 
     contract_end = _section_end(lines, contract_start, max_level=2, end=end)
     section = lines[contract_start + 1 : contract_end]

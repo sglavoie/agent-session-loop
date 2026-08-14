@@ -603,6 +603,14 @@ def _print_assurance_section(assurance: dict[str, Any]) -> None:
         f"{issues['recurrence_after_resolution']} sighting(s) across "
         f"{issues['issues_recurring_after_resolution']} issue(s)"
     )
+    recurring_categories = issues["recurrence_after_resolution_by_category"]
+    if recurring_categories:
+        print(
+            "  recurrence by category: "
+            + ", ".join(
+                f"{name} {count}" for name, count in recurring_categories.items()
+            )
+        )
     dispositions = assurance["dispositions"]
     latency = dispositions["time_to_disposition"]
     median = latency["median_hours"]

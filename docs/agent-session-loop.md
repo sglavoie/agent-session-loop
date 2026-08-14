@@ -217,6 +217,12 @@ required subsections:
 ```
 ```
 
+Exactly one such block may appear per session file. `parse_completion_contract`
+refuses a file carrying two or more `## Completion Contract` headings (headings
+inside code fences are quoted text and do not count) rather than silently
+selecting one, and `asl split` drops a session's inline source contract when a
+`--contracts-file` entry supersedes it, so a generated file never holds both.
+
 The fenced block is JSON-only because the package is stdlib-only. The parser
 lives in `agent_session_loop.contracts` and is authoritative for accepted
 shapes. Required and optional fields:
@@ -2658,7 +2664,10 @@ runs, runs that reached a terminal verdict, and the resulting rate, while
 with no findings never render the same. `issues` reports sightings, new versus
 recurring, findings by severity and by category, the open backlog now, and
 recurrence after resolution — replayed over the window, because a reopen from a
-year ago says nothing about the last seven days. `dispositions` reports the
+year ago says nothing about the last seven days, and reported as corpus-wide
+totals beside a `recurrence_after_resolution_by_category` map, because a
+planner seeding a premortem needs which class of defect came back rather than
+only that one did. `dispositions` reports the
 counts by kind, the dismissal and accepted-risk rates, and the time from an
 issue's first sighting to its disposition. `closeouts` reports the outcomes,
 escaped issues, and rework minutes, counted per run through the projection so a

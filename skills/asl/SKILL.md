@@ -392,17 +392,35 @@ terminal status.
 Retry mechanics are helper-owned — see the result payload's `pause_policy`.
 The helper auto-retries recoverable same-session pauses (`verify-failed`, `transport-failed`, `timeout`, `no-status-change`) up to twice per session and reason. Only `transport-failed` backs off before relaunching (5 seconds, then 30 seconds); the other recoverable pauses retry immediately. An unclassified `nonzero-exit` pause is never retried. When a pause genuinely needs an answer, the result carries `reason: needs_agent_reply` with a `questions` block holding the resolver prompt, the paused agent's last message, the pause metadata, and artifact paths.
 
-Choose the closure conservatively:
+Choose the closure conservatively, on two axes rather than one:
+
+- **Epistemic — is the answer defensible?** Is it clearly derivable from the
+  plan, the repository, and the run artifacts referenced in the `questions`
+  block? This is circle of competence: inside it the answer is a fact to read
+  from those artifacts; outside it the answer is a guess, so relay it.
+- **Consequence — is what the answer causes reversible?** A **type-2 door** is
+  cheap to undo (an implementation detail, a naming choice, a retry, a wording
+  fix) and may be answered autonomously once defensible. A **type-1 door** is
+  hard or impossible to undo (a schema decision, a data migration, a deletion, a
+  published artifact, anything the completion contract bakes in) and relays to
+  the user **even when the answer is defensible** — the cost of being wrong,
+  not the confidence of being right, decides who answers.
+
+The resulting rule: defensible and reversible → reply; defensible but
+irreversible → relay; not defensible → relay; plainly nonblocking → resolve
+`continue`; should become ordinary paused recovery → resolve `pause`. The four
+closures in full:
 
 - Resolve `continue` autonomously only when the worker explicitly labels the
   message nonblocking or its informational nature is plain. Do not use a fake
   reply for an answerless continuation.
 - Send a factual reply only when it is clearly defensible from the plan, the
-  repository, and the run artifacts referenced in the `questions` block. Read
-  those artifacts before deciding.
+  repository, and the run artifacts referenced in the `questions` block, **and**
+  what it sets in motion is a type-2 door. Read those artifacts before deciding.
 - Relay ambiguous decisions to the user and wait for their explicit answer when
   intent, a trade-off, or information outside the plan/repository/artifacts is
-  required.
+  required — and relay a type-1 door on the same terms even when the artifacts
+  answer it.
 - Resolve `pause` only when the live wait should deliberately become ordinary
   paused-run recovery instead of continuing in place.
 
@@ -622,9 +640,18 @@ could be configured, launched, retried, or disposed of.
   tailing the helper's background output is the fallback for when the mailbox is
   unavailable. `asl outbox wait` remains the general-purpose reader, including
   for notices after the fact.
-- Keep the mailbox discipline: continue only plainly nonblocking messages,
-  reply only from clearly defensible plan/repository/artifact facts, relay
-  user-owned ambiguity, and use pause only to enter ordinary paused recovery.
+- Keep the mailbox discipline on both axes of Step 2's closure rule, which is
+  the single statement of it: continue only plainly nonblocking messages, reply
+  only from clearly defensible plan/repository/artifact facts *and* only when
+  the consequence is reversible, relay user-owned ambiguity and every
+  irreversible type-1 decision even when the artifacts answer it, and use pause
+  only to enter ordinary paused recovery.
+- Mental models: read the sibling reference `../references/mental-models.md` on
+  demand rather than inlining it, and cite at most 3 by name. This skill's
+  assigned models are **reversibility (type-1 / type-2 doors)** and **circle of
+  competence** — the two axes of the closure rule above — plus **absence of
+  evidence**, the rule that a missing `DONE` record is not proof the helper is
+  alive.
 - Mailbox failure is fail-open for supervision: continue owning the child and
   let the runner use the ordinary pause/resume flow. Never invent a mailbox
   reply, truncate the append-only log, delete a lease, or add Workbench

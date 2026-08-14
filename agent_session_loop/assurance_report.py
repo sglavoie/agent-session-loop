@@ -389,6 +389,7 @@ def _empty_metrics(path: Path, error: str | None) -> dict[str, Any]:
             "open_total": 0,
             "recurrence_after_resolution": 0,
             "issues_recurring_after_resolution": 0,
+            "recurrence_after_resolution_by_category": {},
         },
         "dispositions": {
             "total": 0,
@@ -448,16 +449,21 @@ def _recurrence_after_resolution(
     view: ledger.LedgerView,
     inbox: projection.AssuranceProjection,
     since: datetime,
-) -> tuple[int, int]:
+) -> tuple[int, int, dict[str, int]]:
     """Count in-window sightings of a defect a human had already resolved.
 
     Replayed rather than read off the projection's ``reopened_count`` so the
     answer can be windowed: the projection reports the lifetime total, and a
     reopen from a year ago says nothing about the last seven days.
+
+    The sightings are also split by the recurring finding's category, because
+    a total says only that fixes come back while a category says which class
+    of defect the last fix did not close.
     """
     resolved: set[str] = set()
     events_in_window = 0
     issues_in_window: set[str] = set()
+    by_category: dict[str, int] = {}
     for record in view.records:
         # Observations name their issue on the record, because the ID is minted
         # under the append lock; every later record names it on the payload.
@@ -479,7 +485,15 @@ def _recurrence_after_resolution(
             if recorded is not None and recorded >= since:
                 events_in_window += 1
                 issues_in_window.add(canonical)
-    return events_in_window, len(issues_in_window)
+                finding = record.payload.finding
+                by_category[finding.category] = (
+                    by_category.get(finding.category, 0) + 1
+                )
+    return (
+        events_in_window,
+        len(issues_in_window),
+        dict(sorted(by_category.items())),
+    )
 
 
 def _first_seen(
@@ -545,7 +559,9 @@ def collect_assurance_metrics(
         observations += 1
         by_severity[finding.severity] = by_severity.get(finding.severity, 0) + 1
         by_category[finding.category] = by_category.get(finding.category, 0) + 1
-    recurrences, recurring_issues = _recurrence_after_resolution(view, inbox, since)
+    recurrences, recurring_issues, recurrence_by_category = (
+        _recurrence_after_resolution(view, inbox, since)
+    )
     report["issues"] = {
         "observations": observations,
         "new": sum(
@@ -559,6 +575,7 @@ def collect_assurance_metrics(
         "open_total": len(inbox.open_issues),
         "recurrence_after_resolution": recurrences,
         "issues_recurring_after_resolution": recurring_issues,
+        "recurrence_after_resolution_by_category": recurrence_by_category,
     }
 
     by_kind: dict[str, int] = {}

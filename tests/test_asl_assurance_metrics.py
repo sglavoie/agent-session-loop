@@ -262,6 +262,42 @@ class IssueMetricsTests(AssuranceReportTestCase):
         self.assertEqual(later["recurrence_after_resolution"], 0)
         self.assertEqual(later["issues_recurring_after_resolution"], 0)
 
+    def test_recurrence_after_resolution_is_split_by_finding_category(self) -> None:
+        findings = (
+            _finding(),
+            _finding(invariant_key="retry.no-double-launch"),
+            _finding(
+                category="scope", invariant_key="scope.no-escape", severity="low"
+            ),
+        )
+        self.publish(_publication(run_id=RUN_A, findings=findings))
+        for issue_id in ("ASI-1", "ASI-2", "ASI-3"):
+            projection.record_disposition(
+                issue_id, "resolve", state_dir=self.state_dir, recorded_at=T1
+            )
+        self.publish(
+            _publication(
+                run_id=RUN_B,
+                findings=findings,
+                artifacts=_artifacts(OTHER_INPUT_DIGEST),
+                completed_at=T2,
+            ),
+            recorded_at=T2,
+        )
+
+        issues = self.metrics()["issues"]
+        self.assertEqual(
+            issues["recurrence_after_resolution_by_category"],
+            {"lifecycle": 2, "scope": 1},
+        )
+        self.assertEqual(issues["recurrence_after_resolution"], 3)
+        self.assertEqual(issues["issues_recurring_after_resolution"], 3)
+
+        later = self.metrics(
+            since=datetime(2026, 8, 11, tzinfo=timezone.utc)
+        )["issues"]
+        self.assertEqual(later["recurrence_after_resolution_by_category"], {})
+
     def test_recurrence_after_dismissal_is_not_a_reopen(self) -> None:
         self.publish(_publication(run_id=RUN_A))
         projection.record_disposition(

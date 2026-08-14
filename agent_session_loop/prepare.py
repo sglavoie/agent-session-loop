@@ -98,7 +98,10 @@ from .verification import VerificationContext
 LEGACY_PREPARE_VALIDATION_VERSION = 1
 PREPARE_VALIDATION_VERSION = 2
 PREPARE_VALIDATION_FILENAME = "prepare-validation.json"
-PREPARE_VALIDATION_CACHE_VERSION = 1
+#: Version 2 retires every entry written before the cache identity carried the
+#: packet-prompt digest; those entries are indistinguishable from current ones
+#: by identity alone even though they answered a different prompt.
+PREPARE_VALIDATION_CACHE_VERSION = 2
 PREPARE_VALIDATION_CACHE_FILENAME = "prepare-validation-cache.json"
 
 VALIDATION_PACKET_HEADING_PREFIX = "# ASL preparation validation packet"
@@ -114,8 +117,11 @@ DEFAULT_VALIDATOR_TIMEOUT_SECONDS = 900
 DEFAULT_VALIDATOR_HEARTBEAT_SECONDS = 30
 
 #: Claim taxonomy from the session-expand skill: Path, Signature,
-#: Field/property, Dependency, Behavioral, Naming.
-CLAIM_TYPES: tuple[str, ...] = ("P", "S", "F", "D", "B", "N")
+#: Field/property, Dependency, Behavioral, Naming, Removal. An ``R`` claim
+#: asserts that the session removes or alters existing behavior and carries the
+#: origin rationale — the commit, blame range, or covering test that explains
+#: why the code exists — in its ``location``.
+CLAIM_TYPES: tuple[str, ...] = ("P", "S", "F", "D", "B", "N", "R")
 
 #: Factual issue vocabulary from the session-expand skill. Corrections are
 #: derivable only from these factual categories; design changes have no
@@ -128,6 +134,7 @@ ISSUE_TYPES: tuple[str, ...] = (
     "behavior-incorrect",
     "name-missing",
     "repository-ambiguous",
+    "removal-unjustified",
 )
 
 REPOSITORY_AMBIGUITY_ISSUE = "repository-ambiguous"
@@ -1054,9 +1061,14 @@ class ValidationTaskPacket:
                     "- claims[]: {claim, claim_type, location, line, "
                     "to_be_created} with claim_type in "
                     f"{'/'.join(CLAIM_TYPES)} "
-                    "(path/signature/field/dependency/behavior/naming). Only "
-                    "include claims you verified against the codebase; mark "
-                    "code the session will create with to_be_created=true."
+                    "(path/signature/field/dependency/behavior/naming/"
+                    "removal). Only include claims you verified against the "
+                    "codebase; mark code the session will create with "
+                    "to_be_created=true. An R claim covers behavior the "
+                    "session removes or alters: put the origin rationale "
+                    "(commit, blame range, or covering test) in its location, "
+                    "and raise removal-unjustified when no rationale can be "
+                    "established."
                 ),
                 (
                     "- issues[]: {issue_type, summary, session_ref, actual, fix} "
@@ -1134,6 +1146,36 @@ class ValidationTaskPacket:
             f'{{"version": {self.version}, '
             f'"codebase_root": "{self.codebase_root}", "sessions": [...]}}'
         )
+
+
+def _validation_prompt_digest(version: int) -> str:
+    """Digest the rendered packet prompt for one validator schema version.
+
+    Rendering runs over fixed placeholder inputs so the digest tracks the
+    instructions a worker is given and nothing else: it moves when the prompt
+    text, the schema summary, or an interpolated enum changes, and stays put
+    across plans, repositories, and batch composition.
+    """
+    repositories = tuple(
+        ValidatorRepository(
+            alias=f"alias-{index}",
+            path=f"path-{index}",
+            origin=f"origin-{index}",
+            root=f"/root/{index}",
+        )
+        for index in (1, 2)
+    )
+    packet = ValidationTaskPacket(
+        plan_dir="/plan",
+        codebase_root="/root",
+        session_ids=("1", "2"),
+        session_paths=("/plan/session-1.md", "/plan/session-2.md"),
+        context_path="/plan/context.md",
+        repositories=repositories,
+        session_read_repositories=(repositories, repositories),
+        version=version,
+    )
+    return hashlib.sha256(packet.render().encode("utf-8")).hexdigest()
 
 
 def _validator_repositories(
@@ -2643,6 +2685,7 @@ def _validation_cache_identities(
     repository_identity, reusable = _validation_repository_identity(
         plan_dir, codebase_root
     )
+    prompt_sha256 = _validation_prompt_digest(validator_schema_version)
     identities: dict[str, dict[str, object]] = {}
     for session_id in session_ids:
         canonical_session_id = parse_session_id(session_id)
@@ -2658,6 +2701,7 @@ def _validation_cache_identities(
         identities[canonical_session_id.value] = {
             "cache_version": PREPARE_VALIDATION_CACHE_VERSION,
             "validator_schema_version": validator_schema_version,
+            "prompt_sha256": prompt_sha256,
             "repository": repository_identity,
             "context_sha256": hashlib.sha256(context_text.encode("utf-8")).hexdigest(),
             "session_sha256": hashlib.sha256(session_text.encode("utf-8")).hexdigest(),

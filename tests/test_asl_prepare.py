@@ -94,6 +94,43 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+    @staticmethod
+    def _registered_envelope(session: dict) -> dict:
+        return {
+            "version": prepare.PREPARE_VALIDATION_VERSION,
+            "workspace_root": "/workspace",
+            "repositories": [
+                {
+                    "alias": "SVC",
+                    "path": "svc",
+                    "origin": "github.com/org/svc",
+                    "root": "/workspace/svc",
+                }
+            ],
+            "sessions": [session],
+        }
+
+    @staticmethod
+    def _removal_overrides(*, repo: str | None = None) -> dict:
+        claim: dict[str, object] = {
+            "claim": "retry backoff branch",
+            "claim_type": "R",
+            "location": "foo/bar.py — added in a1b2c3d, covered by test_retry.py:40",
+            "line": 12,
+            "to_be_created": False,
+        }
+        issue: dict[str, object] = {
+            "issue_type": "removal-unjustified",
+            "summary": "no rationale for dropping the backoff",
+            "session_ref": "delete the backoff branch",
+            "actual": "no commit or covering test explains the branch",
+            "fix": "record the origin rationale before removing it",
+        }
+        if repo is not None:
+            claim["repo"] = repo
+            issue["repo"] = repo
+        return {"claims": [claim], "issues": [issue]}
+
     # -- fail-closed parsing -------------------------------------------------
 
     def test_parse_valid_payload_round_trips_through_to_dict(self) -> None:
@@ -453,6 +490,74 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(plans.PlanError, "issue_type"):
             prepare.parse_validator_output(payload)
 
+    def test_accepts_removal_taxonomy_in_legacy_payload(self) -> None:
+        payload = _validator_payload(**self._removal_overrides())
+
+        session = prepare.parse_validator_output(payload).sessions[0]
+
+        self.assertEqual("R", session.claims[0].claim_type)
+        self.assertIsNone(session.claims[0].repo)
+        self.assertEqual("removal-unjustified", session.issues[0].issue_type)
+
+    def test_accepts_removal_taxonomy_in_registered_payload(self) -> None:
+        payload = self._registered_envelope(
+            _validator_payload(**self._removal_overrides(repo="SVC"))["sessions"][0]
+        )
+
+        session = prepare.parse_validator_output(payload).sessions[0]
+
+        self.assertEqual(
+            ("R", "SVC"), (session.claims[0].claim_type, session.claims[0].repo)
+        )
+        self.assertEqual(
+            ("removal-unjustified", "SVC"),
+            (session.issues[0].issue_type, session.issues[0].repo),
+        )
+
+    def test_rejects_unknown_taxonomy_in_both_versions_without_writing(self) -> None:
+        mutations = (
+            (
+                "claim_type",
+                lambda session: session["claims"][0].__setitem__("claim_type", "X"),
+            ),
+            (
+                "issue_type",
+                lambda session: session["issues"][0].__setitem__(
+                    "issue_type", "removal-justified"
+                ),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                plan_dir = Path(tmp) / "plan"
+                _write_prepare_plan(plan_dir)
+                payload = _validator_payload(**self._removal_overrides())
+                mutate(payload["sessions"][0])
+                before = {
+                    path.name: path.read_bytes()
+                    for path in plan_dir.iterdir()
+                    if path.is_file()
+                }
+
+                with self.assertRaisesRegex(plans.PlanError, label):
+                    prepare.ingest_validator_output(plan_dir, payload)
+
+                after = {
+                    path.name: path.read_bytes()
+                    for path in plan_dir.iterdir()
+                    if path.is_file()
+                }
+                self.assertEqual(before, after)
+
+                registered_session = _validator_payload(
+                    **self._removal_overrides(repo="SVC")
+                )["sessions"][0]
+                mutate(registered_session)
+                with self.assertRaisesRegex(plans.PlanError, label):
+                    prepare.parse_validator_output(
+                        self._registered_envelope(registered_session)
+                    )
+
     def test_rejects_more_than_three_patterns(self) -> None:
         pattern = {"name": "p", "location": "a.py:1", "reason": "r"}
         payload = _validator_payload(
@@ -522,6 +627,34 @@ class PrepareValidatorSchemaTests(unittest.TestCase):
             self.assertNotIn("Update the retry helper", rendered)
             for issue_type in prepare.ISSUE_TYPES:
                 self.assertIn(issue_type, rendered)
+
+    def test_validation_prompt_digest_tracks_the_rendered_packet(self) -> None:
+        legacy = prepare._validation_prompt_digest(
+            prepare.LEGACY_PREPARE_VALIDATION_VERSION
+        )
+        registered = prepare._validation_prompt_digest(
+            prepare.PREPARE_VALIDATION_VERSION
+        )
+
+        self.assertNotEqual(legacy, registered)
+        self.assertEqual(
+            legacy,
+            prepare._validation_prompt_digest(
+                prepare.LEGACY_PREPARE_VALIDATION_VERSION
+            ),
+        )
+
+        original_render = prepare.ValidationTaskPacket.render
+        with mock.patch.object(
+            prepare.ValidationTaskPacket,
+            "render",
+            lambda packet: original_render(packet) + "\n- Research removal rationale.",
+        ):
+            changed = prepare._validation_prompt_digest(
+                prepare.LEGACY_PREPARE_VALIDATION_VERSION
+            )
+
+        self.assertNotEqual(legacy, changed)
 
     def test_build_validation_packet_rejects_missing_session_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -727,6 +860,116 @@ class ExpansionRendererTests(unittest.TestCase):
         self.assertIn(
             f"| `NewTests` | S | {prepare.TO_BE_CREATED_LOCATION} | "
             f"{prepare.TO_BE_CREATED_LINE} |",
+            rendered,
+        )
+
+    def test_render_places_removal_findings_in_existing_sections(self) -> None:
+        validation = self._validation(
+            claims=[
+                {
+                    "claim": "retry backoff branch",
+                    "claim_type": "R",
+                    "location": "foo/bar.py — added in a1b2c3d",
+                    "line": 12,
+                    "to_be_created": False,
+                }
+            ],
+            issues=[
+                {
+                    "issue_type": "removal-unjustified",
+                    "summary": "no rationale for dropping the backoff",
+                    "session_ref": "delete the backoff branch",
+                    "actual": "no commit or covering test explains the branch",
+                    "fix": "record the origin rationale before removing it",
+                }
+            ],
+        )
+
+        rendered = prepare.render_expansion(
+            validation.sessions[0], codebase_root="/repo", expanded="2026-07-10"
+        )
+
+        self.assertIn(
+            "| `retry backoff branch` | R | `foo/bar.py — added in a1b2c3d` | 12 |",
+            rendered,
+        )
+        self.assertIn("- **Type**: removal-unjustified", rendered)
+        self.assertEqual(1, rendered.count("## Issues"))
+        self.assertEqual(1, rendered.count("## Verified Claims"))
+
+    def test_render_without_removal_content_is_byte_identical(self) -> None:
+        validation = self._validation(
+            issues=[
+                {
+                    "issue_type": "signature-mismatch",
+                    "summary": "load_config takes two args",
+                    "session_ref": "`load_config(path)`",
+                    "actual": "load_config(path, strict)",
+                    "fix": "pass strict=True",
+                }
+            ],
+            details=[{"path": "foo/bar.py", "notes": ["Lines 1-3: retry helper"]}],
+            patterns=[
+                {"name": "retry", "location": "`foo/bar.py:1-3`", "reason": "mirror it"}
+            ],
+            dependencies=[
+                {"direction": "requires", "session_id": "2", "description": "helper"},
+                {"direction": "provides", "session_id": "3", "description": "API"},
+            ],
+            contract_problems=[
+                {"message": "stale path", "suggested_fix": "point at foo/bar.py"}
+            ],
+        )
+
+        rendered = prepare.render_expansion(
+            validation.sessions[0], codebase_root="/repo", expanded="2026-07-10"
+        )
+
+        self.assertEqual(
+            "\n".join(
+                [
+                    "# Session 1 Expansion: Test",
+                    "",
+                    "**Expanded**: 2026-07-10",
+                    "**Codebase root**: `/repo`",
+                    "**Claims checked**: 3 | **Issues found**: 1",
+                    "",
+                    "## Issues",
+                    "",
+                    "### ISSUE-1: load_config takes two args",
+                    "",
+                    "- **Type**: signature-mismatch",
+                    '- **Session ref**: "`load_config(path)`"',
+                    "- **Actual**: load_config(path, strict)",
+                    "- **Fix**: pass strict=True",
+                    "",
+                    "## Verified Claims",
+                    "",
+                    "| Claim | Type | Location | Line |",
+                    "| --- | --- | --- | --- |",
+                    "| `load_config` | S | `foo/config.py` | 12 |",
+                    "",
+                    "## Concrete Details",
+                    "",
+                    "### File: `foo/bar.py`",
+                    "",
+                    "- Lines 1-3: retry helper",
+                    "",
+                    "## Patterns to Reuse",
+                    "",
+                    "- **retry**: `foo/bar.py:1-3` — mirror it",
+                    "",
+                    "## Session Dependencies",
+                    "",
+                    "- **Requires from session 2**: helper",
+                    "- **Provides for session 3**: API",
+                    "",
+                    "## Contract Issues",
+                    "",
+                    "- `1: stale path: point at foo/bar.py`",
+                    "",
+                ]
+            ),
             rendered,
         )
 
@@ -2804,6 +3047,73 @@ class PrepareEndToEndTests(unittest.TestCase):
         for entry in cache.entries:
             stale_identity = dict(entry.identity)
             stale_identity["validator_schema_version"] = 999
+            stale_entries.append(
+                dataclasses.replace(
+                    entry,
+                    identity=stale_identity,
+                    key=prepare._canonical_json_digest(stale_identity),
+                )
+            )
+        prepare.save_prepare_validation_cache(
+            first.plan_dir,
+            prepare.PrepareValidationCache(entries=tuple(stale_entries)),
+        )
+        calls: list[prepare.ValidationTaskPacket] = []
+        resumed = self._prepare(
+            None,
+            _recording_validator(calls),
+            resume_plan_dir=first.plan_dir,
+        )
+
+        self.assertTrue(resumed.ok, resumed)
+        self.assertEqual([("1", "2")], [packet.session_ids for packet in calls])
+
+    def test_packet_prompt_change_invalidates_cached_sessions(self) -> None:
+        source = self._write_source()
+        first = self._prepare(source, _recording_validator([]))
+
+        self.assertTrue(first.ok, first)
+        assert first.plan_dir is not None
+        original_render = prepare.ValidationTaskPacket.render
+        changed_prompt = mock.patch.object(
+            prepare.ValidationTaskPacket,
+            "render",
+            lambda packet: original_render(packet) + "\n- Research removal rationale.",
+        )
+        calls: list[prepare.ValidationTaskPacket] = []
+        with changed_prompt:
+            resumed = self._prepare(
+                None,
+                _recording_validator(calls),
+                resume_plan_dir=first.plan_dir,
+            )
+
+        self.assertTrue(resumed.ok, resumed)
+        self.assertEqual([("1", "2")], [packet.session_ids for packet in calls])
+
+        stable: list[prepare.ValidationTaskPacket] = []
+        with changed_prompt:
+            reused = self._prepare(
+                None,
+                _recording_validator(stable),
+                resume_plan_dir=first.plan_dir,
+            )
+
+        self.assertTrue(reused.ok, reused)
+        self.assertEqual([], stable)
+
+    def test_cache_identity_without_a_prompt_digest_is_stale(self) -> None:
+        source = self._write_source()
+        first = self._prepare(source, _recording_validator([]))
+
+        self.assertTrue(first.ok, first)
+        assert first.plan_dir is not None
+        cache = prepare.load_prepare_validation_cache(first.plan_dir)
+        stale_entries: list[prepare.PrepareValidationCacheEntry] = []
+        for entry in cache.entries:
+            self.assertIn("prompt_sha256", entry.identity)
+            stale_identity = dict(entry.identity)
+            del stale_identity["prompt_sha256"]
             stale_entries.append(
                 dataclasses.replace(
                     entry,

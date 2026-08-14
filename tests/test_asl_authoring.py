@@ -978,6 +978,164 @@ class PlanAuthoringTests(unittest.TestCase):
                 contract=self._command_contract("2"),
             )
 
+    @staticmethod
+    def _inline_contract_lines(check_name: str) -> list[str]:
+        return [
+            "## Completion Contract",
+            "",
+            "### Done when",
+            "",
+            "- Inline criterion.",
+            "",
+            "### Verify",
+            "",
+            "```json",
+            "{",
+            '  "session": "1",',
+            '  "checks": [',
+            "    {",
+            f'      "name": "{check_name}",',
+            '      "type": "command",',
+            '      "argv": ["python3", "-c", "pass"]',
+            "    }",
+            "  ]",
+            "}",
+            "```",
+        ]
+
+    def test_render_session_file_replaces_inline_completion_contract(self) -> None:
+        instruction_lines = [
+            "Do the first thing.",
+            "",
+            *self._inline_contract_lines("inline-gate"),
+            "",
+            "---",
+        ]
+        rendered = authoring.render_session_file(
+            session_id="1",
+            title="First",
+            instruction_lines=instruction_lines,
+            is_first=True,
+            contract=self._command_contract("1"),
+        )
+
+        self.assertEqual(1, rendered.count("\n## Completion Contract\n"))
+        self.assertNotIn("inline-gate", rendered)
+        self.assertNotIn("Inline criterion.", rendered)
+        self.assertIn("Do the first thing.", rendered)
+
+        parsed = contracts.parse_completion_contract(rendered, session_id="1")
+        self.assertEqual(("Tests pass.",), parsed.done_when)
+        self.assertEqual(("c1",), tuple(check.name for check in parsed.verify.checks))
+
+    def test_render_session_file_keeps_inline_contract_without_authored_one(
+        self,
+    ) -> None:
+        instruction_lines = [
+            "Do the first thing.",
+            "",
+            *self._inline_contract_lines("inline-gate"),
+        ]
+        rendered = authoring.render_session_file(
+            session_id="1",
+            title="First",
+            instruction_lines=instruction_lines,
+            is_first=True,
+            require_contract=False,
+        )
+
+        parsed = contracts.parse_completion_contract(rendered, session_id="1")
+        self.assertEqual(("Inline criterion.",), parsed.done_when)
+        self.assertEqual(
+            ("inline-gate",), tuple(check.name for check in parsed.verify.checks)
+        )
+
+    def test_parse_completion_contract_rejects_duplicate_sections(self) -> None:
+        text = "\n".join(
+            [
+                "# Session 1",
+                "",
+                *self._inline_contract_lines("inline-gate"),
+                "",
+                *self._inline_contract_lines("authored-gate"),
+                "",
+                plans.HANDOFF_HEADING,
+                "",
+            ]
+        )
+        with self.assertRaisesRegex(
+            plans.PlanError, r"has 2 '## Completion Contract' sections"
+        ):
+            contracts.parse_completion_contract(text, session_id="1")
+
+    def test_parse_completion_contract_ignores_fenced_heading_mention(self) -> None:
+        text = "\n".join(
+            [
+                "# Session 1",
+                "",
+                "Quoting the heading below must not create a second contract:",
+                "",
+                "````markdown",
+                "## Completion Contract",
+                "````",
+                "",
+                *self._inline_contract_lines("inline-gate"),
+                "",
+                plans.HANDOFF_HEADING,
+                "",
+            ]
+        )
+        parsed = contracts.parse_completion_contract(text, session_id="1")
+        self.assertEqual(
+            ("inline-gate",), tuple(check.name for check in parsed.verify.checks)
+        )
+
+    def test_render_session_file_preserves_nested_fenced_contract_example(self) -> None:
+        quoted_example = [
+            "````markdown",
+            "```markdown",
+            "## Completion Contract",
+            "",
+            "### Done when",
+            "",
+            "- Quoted criterion.",
+            "```",
+            "````",
+        ]
+        instruction_lines = [
+            "Do the first thing.",
+            "",
+            "A session file looks like this:",
+            "",
+            *quoted_example,
+            "",
+            "Keep this trailing instruction.",
+        ]
+        rendered = authoring.render_session_file(
+            session_id="1",
+            title="First",
+            instruction_lines=instruction_lines,
+            is_first=True,
+            contract=self._command_contract("1"),
+        )
+
+        for line in quoted_example:
+            self.assertIn(f"\n{line}\n", rendered)
+        self.assertIn("Keep this trailing instruction.", rendered)
+        self.assertIn("- Quoted criterion.", rendered)
+
+        self.assertEqual(
+            1,
+            len(
+                contracts.completion_contract_heading_indices(
+                    rendered.splitlines(keepends=False)
+                )
+            ),
+        )
+        parsed = contracts.parse_completion_contract(rendered, session_id="1")
+        self.assertEqual(("Tests pass.",), parsed.done_when)
+        self.assertEqual(("c1",), tuple(check.name for check in parsed.verify.checks))
+
     def test_render_session_file_first_omits_previous_reference(self) -> None:
         rendered = authoring.render_session_file(
             session_id="1",

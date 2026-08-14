@@ -1475,9 +1475,11 @@ def render_session_file(
     """Render a full ``session-<id>.md`` file.
 
     Original instruction content is preserved verbatim except for standalone
-    heading-level normalization (see :func:`normalize_heading_levels`). When
-    ``require_contract`` is set (deterministic preparation mode), a parseable
-    ``contract`` is mandatory and its absence fails closed.
+    heading-level normalization (see :func:`normalize_heading_levels`) and,
+    when ``contract`` is given, removal of any inline ``## Completion Contract``
+    section it supersedes, so the rendered file carries exactly one contract.
+    When ``require_contract`` is set (deterministic preparation mode), a
+    parseable ``contract`` is mandatory and its absence fails closed.
     """
     canonical_id = parse_session_id(session_id)
     if require_contract and contract is None:
@@ -1511,6 +1513,10 @@ def render_session_file(
     body = normalize_heading_levels(
         _trim_body(list(instruction_lines)), heading_level
     )
+    if contract is not None:
+        body, replaced = _contracts.strip_completion_contract_sections(body)
+        if replaced:
+            body = _trim_body(body)
     parts.extend(body)
     parts.append("")
     parts.append("---")

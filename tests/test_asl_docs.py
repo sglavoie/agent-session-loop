@@ -35,6 +35,7 @@ from agent_session_loop import (
     artifacts,
     assurance_ledger,
     assurance_models,
+    assurance_report,
     authoring,
     baseline,
     baseline_cache,
@@ -573,6 +574,55 @@ class PlanWorkflowDocsTests(unittest.TestCase):
             "read-only alias for `plan-iterate --ideal-only`",
             text,
         )
+
+    def test_plan_iterate_premortem_cites_category_aware_recurrence(self) -> None:
+        text = self._plan_iterate_text()
+
+        self.assertIn("### Step 3.5: Premortem", text)
+        self.assertIn("asl metrics --json", text)
+        self.assertIn(
+            "`assurance.issues.recurrence_after_resolution_by_category` maps"
+            " each category",
+            text,
+        )
+
+    def test_plan_iterate_metrics_paths_exist_in_the_metrics_report(self) -> None:
+        cited = set(
+            re.findall(
+                r"assurance\.issues\.([a-z_]+)", self._plan_iterate_text()
+            )
+        )
+        self.assertIn("recurrence_after_resolution_by_category", cited)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = assurance_report.collect_assurance_metrics(
+                state_dir=Path(tmp) / "state",
+                since=datetime(2026, 8, 10, tzinfo=timezone.utc),
+            )
+        self.assertLessEqual(cited, set(report["issues"]))
+
+    def test_plan_iterate_cites_the_shared_mental_models_catalogue(self) -> None:
+        text = self._plan_iterate_text()
+
+        self.assertIn("../references/mental-models.md", text)
+        self.assertIn("on demand", text)
+        self.assertIn("cite at most 3 models by name per report", text)
+
+        catalogue = (
+            self.PLAN_ITERATE_PATH.parent / "../references/mental-models.md"
+        ).resolve()
+        self.assertTrue(catalogue.is_file(), catalogue)
+
+        row = next(
+            line
+            for line in catalogue.read_text(encoding="utf-8").splitlines()
+            if line.startswith("| `plan-iterate` |")
+        )
+        assigned = [model.strip() for model in row.split("|")[2].split(",")]
+        self.assertLessEqual(len(assigned), 3, assigned)
+        lowered = text.lower()
+        for model in assigned:
+            self.assertIn(model.lower(), lowered)
 
     def test_plan_ideal_is_read_only_alias_for_ideal_only_mode(self) -> None:
         text = self._plan_ideal_text()

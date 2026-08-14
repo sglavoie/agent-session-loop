@@ -128,9 +128,40 @@ Weak areas: Scope Boundaries, Design Decisions, Edge Cases
   - label: "Looks good" / description: "No changes needed, exit"
   - label: "Refine anyway" / description: "Start a Q&A round targeting depth over gaps"
 
-If user selects "Looks good", print a short confirmation and stop. If "Refine anyway", proceed to Step 4 and focus questions on deepening the strongest areas rather than filling gaps.
+If user selects "Looks good", run Step 3.5 anyway, then print a short confirmation and stop without running Step 4 — the early exit skips the Q&A rounds, never the premortem. If "Refine anyway", proceed through Step 3.5 to Step 4 and focus questions on deepening the strongest areas rather than filling gaps.
 
-**If any dimensions are thin or missing**: Proceed directly to Step 4.
+**If any dimensions are thin or missing**: Proceed to Step 3.5, then Step 4.
+
+### Step 3.5: Premortem
+
+Run exactly one AskUserQuestion round here, at **every plan size**. This step deliberately overrides both auto-adequate rules for Risk & Rollback in Step 2 — the "plans under 80 lines are automatically adequate" rule and the 30-80 line auto-mark — and it runs even when Step 3 found every dimension adequate.
+
+The eight dimensions ask "what is present?" eight times and never "how does this fail?". Rubrics find omissions; inversion finds plans that are complete and wrong. Small plans are not exempt — they are where a single wrong assumption travels furthest before anything catches it.
+
+**Seed with base rates before writing the options.** Read the historical failure classes:
+
+```bash
+asl metrics --json
+```
+
+- `assurance.issues.by_category` gives the failure categories that actually occur.
+- `assurance.issues.recurrence_after_resolution_by_category` maps each category to the number of in-window sightings that came back *after* someone had already resolved them. These are the strongest priors: a category that recurs is one the last fix did not really close.
+- `assurance.issues.recurrence_after_resolution` and `assurance.issues.issues_recurring_after_resolution` are the corpus-wide totals behind that map — sightings and distinct issues. Read them for scale; read the map to decide which category to promote.
+- Promote recurring categories to premortem options whenever the plan plausibly touches them, highest count first. Prefer a prior over an invented failure mode.
+- **Degrade silently.** No `asl` on PATH, no ledger, an empty window, or an unreadable inbox all mean the premortem runs on the plan alone. Never block planning on assurance history and never report its absence as an error — priors are an accelerant, not a dependency.
+
+**The question is fixed in form.** Do not soften it into "what are the risks?":
+
+> This plan failed. Every session ran, verification passed, and the outcome is still wrong. Why?
+
+Assuming the failure already happened forces specific mechanisms; asking for risks produces generic hedging.
+
+Offer 2-3 concrete failure modes drawn from the plan text, the base-rate priors, and opportunistic Glob/Grep, plus the standing option for the user to supply a different one. Each option must name a mechanism specific to this plan ("the backfill runs before the index exists, so every check passes and the query path is still slow"), never a category label ("performance issues"). Use the Step 4b field contract: `header` `Premortem` (within the 12-char cap), one question, 2-3 options with label and description. This is the one round where `multiSelect` is `true` — several failure modes can be live at once.
+
+**Route the answers**, using the Step 4c edit rules:
+
+- A failure mode that **can** be expressed as a check becomes one. Where the plan already carries `## Completion Contract` sections, add a `command`, `file_exists`, or `regex_in_file` entry to the `### Verify` recipe of the session that would cause that failure, following the Step I8 contract-binding rules. Where the plan has no contracts yet, add the concrete command to the plan's verification section so `session-split` can lift it into one.
+- Every failure mode that **cannot** becomes one bullet under a `## Risks` section, placed per the Step I7 durable-section rule (above the first session heading when the plan has session boundaries, otherwise near the end).
 
 ### Step 4: Iterative Q&A Rounds
 
@@ -233,6 +264,8 @@ Plan iteration complete.
 Rounds: <N> of 4
 Questions asked: <M>
 Edits applied: <K>
+Premortem: <P> failure mode(s) surfaced -> <C> verification check(s), <R> risk bullet(s)
+Base-rate priors: <"N recurring categories from asl metrics" or "unavailable">
 
 Dimensions improved:
 - <dimension>: missing -> adequate
@@ -279,7 +312,7 @@ Focus on:
 
 - Spend real effort here — this is where the merged workflow earns its value. Read key files in the affected area, not just the ones the plan mentions.
 - Use `Grep` to find related patterns across the codebase (e.g., if the plan adds a new command, find all existing commands to understand the full pattern).
-- Use `Bash` for read-only commands only: `wc`, `find ... -type f | head`, `git log --oneline -20 -- <path>`, `ls`. Never modify files.
+- Use `Bash` for read-only commands only: `wc`, `find ... -type f | head`, `git log --oneline -20 -- <path>`, `ls`, `asl metrics --json`. Never modify files.
 - Aim for 5-15 files read, depending on plan complexity. For large plans, prioritize breadth over depth.
 
 ### Step I3: Envision the Ideal
@@ -294,12 +327,14 @@ For each dimension below, describe what the **unconstrained ideal** would look l
 6. **Observability & Operations** — logging, metrics, tracing, health checks, failure detection and diagnosis, debuggability.
 7. **Extensibility & Future-Proofing** — plugin points, hooks, configuration-driven behavior, migration paths, anticipated future requirements.
 8. **Ecosystem & Integration** — unifying with or replacing adjacent functionality, standardizing cross-cutting concerns, enabling new capabilities elsewhere.
+9. **Subtraction & Consolidation** — what the ideal *removes* rather than adds: code, options, flags, layers, or steps it never builds; duplicate mechanisms it collapses into one; invariants and guarantees it retires. Ask which part of the problem disappears by deleting something, what the plan would look like if the new capability replaced an existing one instead of sitting beside it, and which existing promise the ideal is willing to stop making.
 
 **Scaling rules** — not every dimension applies equally:
 
 - Plans under 30 lines: Focus on dimensions 1, 2, 3, and 5. Treat 4, 6, 7, 8 lightly or skip with a note.
 - Plans 30-100 lines: Cover all dimensions but weight 1, 2, 3, 5 most heavily.
 - Plans over 100 lines: All dimensions get full treatment.
+- Dimension 9 is exempt from these rules and gets full treatment at **every** plan size. Unlike dimensions 4, 6, 7, and 8 it is cheapest on small plans — there is less built, so removal is still free — and it is the only dimension whose output *reduces* future obligation, so it is never wasted effort. Every other dimension can only propose additions.
 
 ### Step I4: Identify Divergences and Rank by Impact
 
@@ -309,12 +344,21 @@ Explicitly compare the ideal vision to the current plan. For each significant di
 2. **What the ideal does instead**: the unconstrained version
 3. **The gap**: what would need to change to move from current to ideal
 4. **The value**: what the user gains from the ideal version
+5. **Ongoing cost**: the permanent obligation adopting it creates — what must be maintained, held invariant, documented, migrated, or kept backward-compatible forever after. Answer "and then what?" for the state of the world after the merge, not the work up to it. Opportunity cost folds in here: against a fixed budget, name what adopting this displaces. A divergence whose ongoing cost is genuinely zero (or negative, because it retires an existing obligation — see dimension 9) should say so explicitly; that is a strong signal, not a missing field.
 
-Rank divergences by impact:
+Rank divergences by impact, weighing value **against** ongoing cost rather than by value alone. A high-value improvement that creates a permanent maintenance obligation can rank below a smaller improvement that costs nothing to keep:
 
-- **High impact**: Fundamentally changes the outcome or quality
-- **Medium impact**: Meaningfully improves maintainability, coverage, or experience
-- **Low impact**: Polish, completeness, and long-term investment
+- **High impact**: Fundamentally changes the outcome or quality, and the value clearly outweighs the obligation it creates
+- **Medium impact**: Meaningfully improves maintainability, coverage, or experience at a proportionate ongoing cost
+- **Low impact**: Polish, completeness, and long-term investment — or high value bought at an ongoing cost the plan's owner would not choose to carry
+
+### Step I4.5: Premortem
+
+After ranking divergences and before the completeness assessment, run the Default Mode Step 3.5 premortem: same fixed question, same `asl metrics --json` prior seeding, same silent degradation, same one AskUserQuestion round at every plan size. Three ideal-mode differences:
+
+- Seed the candidate failure modes from the Step I2 research as well as the plan text and the priors. The architecture, pain points, and adjacent systems you already read are the richest source of plan-specific failure mechanisms. Do not open a second research pass for this.
+- A divergence the user is about to adopt is fair game — "we adopted the ideal here and the outcome was still wrong, why?" is often the sharpest option in the set. The dimension 9 subtraction candidates and the Step I4 ongoing-cost fields both feed it.
+- Do **not** apply plan edits here. Carry the answers into Step I7 and Step I8, which bind them to contract checks and `## Risks` bullets.
 
 ### Step I5: Assess Completeness Using the Shared Research
 
@@ -341,9 +385,12 @@ If completeness dimensions remain thin or missing after the divergence decisions
 Use the Edit tool to make the decisions durable in the plan file:
 
 - **Adopted divergences**: edit the improvement into the relevant plan sections (scope, design, sessions, verification) following the Default Mode Step 4c edit rules. Accepted ideal improvements must be present in the plan file rather than only conversation history.
-- **Deferred divergences**: record each under a `## Consciously Deferred` section (create it near the end of the plan if absent) as one bullet per item with a one-line rationale, so future readers know the ceiling was considered and consciously postponed.
+- **Deferred divergences**: record each under a `## Consciously Deferred` section (create it if absent) as one bullet per item with a one-line rationale, so future readers know the ceiling was considered and consciously postponed. Include the ongoing cost that made it not worth adopting when that was the deciding factor.
 - **Rejected divergences**: do not record them in the plan.
 - **Q&A answers**: apply as in Default Mode Step 4c.
+- **Premortem output**: leave the routing to Step I8, which turns expressible failure modes into contract checks and the rest into `## Risks` bullets.
+
+**Durable-section placement** — `## Consciously Deferred` and `## Risks` are plan-level sections, not session content. When the plan has session boundaries, create either one **above the first session heading**: `parse_plan_document` collects only the lines preceding the first session heading as shared context, so a section appended after the last heading is absorbed into that session's body and never reaches `context.md`. In a plan that has no session headings yet, place them near the end — they are still preamble at that point.
 
 ### Step I8: Ensure the Plan Is Ready for `asl prepare`
 
@@ -358,6 +405,15 @@ The final plan must pass the `asl prepare` structure gate, which otherwise exits
 
 Derive done criteria and verification recipes from the plan content and the Step I2 research; ask the user (one AskUserQuestion round at most) only when a verification command is genuinely unknowable from the plan and codebase.
 
+**Bind the premortem output to enforcement.** A premortem that ends in prose changes nothing; every Step I4.5 failure mode must land in one of exactly two places:
+
+- **Expressible as a check → it becomes one.** Add a `command`, `file_exists`, or `regex_in_file` entry to the `### Verify` recipe of the session whose work would produce that failure. Author it to the contract rules in `session-split/SKILL.md:157-166` rather than restating them: no bare `python` (always `python3`), no ambiguity sentinels, `timeout_seconds <= 3600`, and in a registered plan a `repo` alias in that session's read scope with every `path` and `cwd` repository-relative and free of `..`. Prefer the narrowest check that would actually have caught the failure — a premortem check exists to fail loudly in one specific way, not to re-run the suite.
+- **Not expressible → it becomes a `## Risks` bullet.** One bullet per failure mode in the plan-level `## Risks` section, placed by the Step I7 durable-section rule, each naming the mechanism and what a reader should watch for. "Not expressible" means no check can distinguish the failure from success — not that writing the check is inconvenient.
+
+Give premortem-derived checks `baseline_expectation: "fail"` unless the check genuinely passes before any implementation. A premortem check is failing at baseline by construction: it asserts the property whose absence is the predicted failure.
+
+Both destinations survive the pipeline. `## Risks` prose above the first session heading flows into `context.md`, so every session reads it; contracts reach the split through `--contracts-file` in `session-split` Step 5.
+
 ### Step I9: Final Report
 
 Print a summary:
@@ -367,8 +423,11 @@ Plan ideal-iteration complete.
 
 Research pass: 1 (<N> files examined)
 Divergences: <H> high / <M> medium / <L> low
+Subtraction: <S> removal/consolidation opportunit(ies) identified, <SA> adopted
 Decisions: <A> adopted, <D> deferred, <R> rejected
 Edits applied: <K>
+Premortem: <P> failure mode(s) surfaced -> <C> contract check(s), <R> ## Risks bullet(s)
+Base-rate priors: <"N recurring categories from asl metrics" or "unavailable">
 Completeness: <improved dimensions or "all adequate">
 Prepare gate: session boundaries, completion contracts, and verify recipes present
 
@@ -403,12 +462,16 @@ into the codebase. Write this as a compelling description, not a checklist.>
 ### Observability & Operations
 ### Extensibility & Future-Proofing
 ### Ecosystem & Integration
+### Subtraction & Consolidation
 
 ## Divergences from Current Plan
 
+Ranked by value weighed against ongoing cost.
+
 ### High Impact
 - **<divergence title>**: <current> vs <ideal>. Gap: <what changes>.
-  Value: <why it matters>.
+  Value: <why it matters>. Ongoing cost: <the permanent obligation this
+  creates, or "none — retires <obligation>">.
 
 ### Medium Impact
 - ...
@@ -427,15 +490,17 @@ Next step: `plan-iterate <plan-path> --ideal --cwd <repo-root>`
 
 ## Important Notes
 
+- Mental models: read the sibling reference `../references/mental-models.md` on demand (the same relative sibling read `plan-ideal/SKILL.md:29` uses) rather than inlining it, and cite at most 3 models by name per report. This skill's assigned models are **inversion** — the Step 3.5 / Step I4.5 premortem, which asks how the plan fails instead of whether it is complete — **via negativa**, dimension 9's question of what the ideal removes rather than adds, and **second-order thinking**, the Step I4 ongoing-cost field's "and then what?" — the permanent obligation every new invariant, flag, and gate imposes on whoever touches the system next.
 - Never delete existing plan content unless the user explicitly asks to remove something
-- If the plan is very short (< 15 lines), it may be a quick-fix plan — keep iteration lightweight (1 round max, focus only on Context and Verification); in ideal mode, scale the vision down per the Step I3 scaling rules
+- If the plan is very short (< 15 lines), it may be a quick-fix plan — keep iteration lightweight (1 round max, focus only on Context and Verification); in ideal mode, scale the vision down per the Step I3 scaling rules. The Step 3.5 / Step I4.5 premortem round is not part of that budget and still runs, as does dimension 9
 - The conversation context naturally tracks what has been asked, preventing question repetition across rounds — no explicit history tracking is needed
 - In default mode, codebase validation is opportunistic, not exhaustive — use Glob/Grep only when the plan references specific files and a quick check would improve question quality. Do not perform a full session-expand-style validation.
 - In ideal and ideal-only modes, the Step I2 research pass is the **only** research pass — both the divergence analysis and the completeness assessment consume it. Do not research the codebase twice.
 - Ideal-only mode and the `plan-ideal` alias never modify the plan file; all output goes to the conversation
 - **Do not constrain the ideal vision** — describe the ceiling, not the floor. If the ideal requires rewriting 50 files across 10 sessions, say so. The user decides what is practical via adopt/defer/reject.
 - **Acknowledge what the plan already does well** — the ideal vision is not a criticism. If a dimension is already well-addressed, say so and describe only the incremental ideal beyond it.
-- **Bash is read-only in every mode** — only commands that do not modify the filesystem: `ls`, `find`, `wc`, `git log`, `git diff`, `head`, `tail`. Never use Bash for `mkdir`, `touch`, `rm`, `cp`, `mv`, or any write operation. Plan mutations happen exclusively through the Edit tool on the plan file.
+- **Bash is read-only in every mode** — only commands that do not modify the filesystem: `ls`, `find`, `wc`, `git log`, `git diff`, `head`, `tail`, `asl metrics --json`. Never use Bash for `mkdir`, `touch`, `rm`, `cp`, `mv`, or any write operation. Plan mutations happen exclusively through the Edit tool on the plan file.
+- `asl metrics --json` is whitelisted for the Step 3.5 / Step I4.5 priors because it mutates no state and no plan content: it reads the persisted state corpus, and its compaction figures come from a dry run. Its one filesystem side effect is that reading the assurance ledger can create a 0-byte `assurance-inbox.lock` in the state root — a lock file, not plan state, so it is accepted here. Never pass it a flag that is not `--json`, `--since-days`, or `--state-dir`.
 - If the user's answer to any question is "skip" or "not relevant", respect it and move on without editing
 - When the plan references a codebase that is not the current working directory and no `--cwd` was given, ask the user for the codebase root before attempting research
 - Only modify the provided plan file — never create new files
