@@ -2205,12 +2205,30 @@ def _check_scope_escape(context: _CheckContext) -> _Verdict:
             blind.append(f"{turn.get('name')} could not be inventoried")
     for record in context.records:
         name = record.get("name")
-        reason = _mapping(record.get("payload")).get("reason")
+        record_payload = _mapping(record.get("payload"))
+        reason = record_payload.get("reason")
         if name == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT:
             observed += 1
-            escapes.append(
-                "the run repaired a write scope that had already been exceeded"
+            repair_guard = _mapping(
+                _mapping(record_payload.get("details")).get("workspace_write_guard")
             )
+            repair_violations = [
+                _mapping(item) for item in _sequence(repair_guard.get("violations"))
+            ]
+            if repair_violations:
+                named = _names(
+                    item.get("alias") or item.get("repository")
+                    for item in repair_violations
+                )
+                escapes.append(
+                    f"the widened write scope still excludes retained changes ({named})"
+                )
+            elif _mapping(repair_guard.get("unavailable")):
+                blind.append("the widened write scope could not be inventoried")
+            elif repair_guard.get("passed") is not True:
+                blind.append(
+                    "the write-scope repair did not record a passing guard result"
+                )
         elif name != events.RUN_PAUSED_EVENT:
             continue
         elif reason == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION:
@@ -2237,8 +2255,8 @@ def _check_scope_escape(context: _CheckContext) -> _Verdict:
         )
     return _Verdict(
         "pass",
-        f"all {observed} recorded write-guard results kept every write inside "
-        "the session's declared scope",
+        f"all {observed} recorded write-guard and repair results kept every "
+        "retained write inside the session's declared scope",
         evidence,
     )
 

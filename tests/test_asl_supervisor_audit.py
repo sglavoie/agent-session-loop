@@ -1857,6 +1857,69 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("write-guard", results["mutation-commit-guards"].detail)
             self.assertEqual("unavailable", results["scope-escape"].status)
 
+    def test_a_widened_write_scope_with_a_passing_repair_is_contained(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "details": {
+                                "session_id": "01",
+                                "workspace_write_guard": {
+                                    "passed": True,
+                                    "write_aliases": ["app"],
+                                    "authorized_aliases": ["app"],
+                                    "violations": [],
+                                    "unavailable": {},
+                                },
+                            },
+                        },
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["scope-escape"].status)
+            self.assertIn(
+                "2 recorded write-guard and repair results",
+                results["scope-escape"].detail,
+            )
+
+    def test_a_scope_repair_without_a_passing_guard_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "details": {
+                                "session_id": "01",
+                                "workspace_write_guard": {},
+                            },
+                        },
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("unavailable", results["scope-escape"].status)
+            self.assertIn(
+                "did not record a passing guard", results["scope-escape"].detail
+            )
+
     def test_success_claimed_over_failed_verification_is_a_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
