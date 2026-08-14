@@ -134,6 +134,15 @@ class ParseCommandTest(unittest.TestCase):
         self.assertFalse(result["json_appended"])
         self.assertEqual(result["run_args"].count("--json"), 1)
 
+    def test_spark_opt_in_and_opt_out_are_forwarded(self) -> None:
+        enabled = autopilot.parse_command("asl run /tmp/plan --spark")
+        disabled = autopilot.parse_command("asl run /tmp/plan --no-spark")
+
+        self.assertTrue(enabled["ok"])
+        self.assertIn("--spark", enabled["run_args"])
+        self.assertTrue(disabled["ok"])
+        self.assertIn("--no-spark", disabled["run_args"])
+
     def test_quoted_args_are_preserved(self) -> None:
         result = autopilot.parse_command(
             'asl run /tmp/plan --note "fix the parser bug"'

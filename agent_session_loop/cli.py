@@ -713,7 +713,23 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     prepare_parser.add_argument(
         "--harness-model",
         dest="harness_model",
-        help="Implementation harness model for the resulting `asl run` command",
+        help=(
+            "Implementation baseline/fallback model for the resulting `asl run` command"
+        ),
+    )
+    prepare_spark = prepare_parser.add_mutually_exclusive_group()
+    prepare_spark.add_argument(
+        "--spark",
+        dest="spark",
+        action="store_true",
+        default=False,
+        help="Opt the resulting run command into eligible-session Spark routing",
+    )
+    prepare_spark.add_argument(
+        "--no-spark",
+        dest="spark",
+        action="store_false",
+        help="Clear Spark routing when preparation is resumed",
     )
     prepare_parser.add_argument(
         "--review-harness-model",

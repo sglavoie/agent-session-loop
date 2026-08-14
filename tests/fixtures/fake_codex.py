@@ -607,6 +607,18 @@ def main() -> int:
     if stderr_text is not None:
         print(stderr_text, end="", file=sys.stderr, flush=True)
 
+    spark_failure = os.environ.get("FAKE_CODEX_SPARK_FAILURE")
+    if _arg_value("--model") == "gpt-5.3-codex-spark" and spark_failure:
+        if spark_failure == "quota":
+            message = "usage limit reached; retry-after: 3600"
+        elif spark_failure == "invalid-model":
+            message = "model gpt-5.3-codex-spark is not available"
+        else:
+            message = spark_failure
+        print(message, file=sys.stderr)
+        _write_last_message(message + "\n")
+        return 7
+
     _apply_workspace_mutation()
     if mode == "timeout":
         time.sleep(float(os.environ.get("FAKE_CODEX_SLEEP", "5")))

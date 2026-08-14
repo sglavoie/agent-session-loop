@@ -63,6 +63,9 @@ from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     pause_policy as _pause_policy,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    retry_hints as _retry_hints,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     review as _review,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
@@ -2962,32 +2965,7 @@ def _parse_quota_reset_at(retry_at: object, *, now: datetime) -> datetime | None
     the caller keeps today's ``user_required`` stop instead of sleeping on a
     guess.
     """
-    if not isinstance(retry_at, str):
-        return None
-    value = retry_at.strip()
-    if not value:
-        return None
-
-    if value.isdigit():
-        return _shift_datetime(now, int(value))
-
-    duration = _QUOTA_RESET_DURATION_RE.match(value)
-    if duration is not None:
-        unit_seconds = 3600 if duration.group(2).lower().startswith("hour") else 60
-        return _shift_datetime(now, int(duration.group(1)) * unit_seconds)
-
-    if _QUOTA_RESET_ISO_RE.match(value):
-        text = value[:-1] + "+00:00" if value[-1] in "Zz" else value
-        try:
-            parsed = datetime.fromisoformat(text)
-            # Reading a naive timestamp as local time is itself a conversion
-            # that can leave the calendar (the last day of year 9999 does, in
-            # every zone), and the platform's `localtime` may fail with OSError.
-            return parsed.astimezone() if parsed.tzinfo is None else parsed
-        except ValueError, OverflowError, OSError:
-            return None
-
-    return _parse_quota_reset_clock(value, now=now)
+    return _retry_hints.resolve_retry_at(retry_at, now=now)
 
 
 def _parse_quota_reset_clock(value: str, *, now: datetime) -> datetime | None:

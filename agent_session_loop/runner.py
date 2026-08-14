@@ -44,9 +44,11 @@ from . import (
     harnesses,
     mailbox,
     mailbox_rendering,
+    model_availability,
     pause_policy,
     plans,
     preflight,
+    prepare,
     process_tree,
     progress_repair,
     qna,
@@ -54,6 +56,7 @@ from . import (
     repository_intent,
     repository_registration,
     responses,
+    retry_hints,
     review,
     review_continuation,
     review_repair,
@@ -119,6 +122,7 @@ REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION = (
 )
 SESSION_KIND_IMPLEMENTATION = "implementation"
 SESSION_KIND_REVIEW = "review"
+SPARK_MODEL = "gpt-5.3-codex-spark"
 SESSION_KINDS: tuple[str, ...] = (
     SESSION_KIND_IMPLEMENTATION,
     SESSION_KIND_REVIEW,
@@ -2393,6 +2397,146 @@ def _selected_future_harness(
     return str(selected)
 
 
+def _spark_baseline_payload(args: argparse.Namespace) -> dict[str, str]:
+    """Return the resolved Codex baseline used when Spark is enabled."""
+    return config.selected_model_payload("codex", getattr(args, "harness_model", None))
+
+
+def _initial_spark_payload(args: argparse.Namespace) -> dict[str, Any]:
+    enabled = bool(getattr(args, "spark", False))
+    baseline = _spark_baseline_payload(args)
+    if not enabled:
+        return {
+            "enabled": False,
+            "model": SPARK_MODEL,
+            "spark_model": SPARK_MODEL,
+            "baseline": baseline["model"],
+            "baseline_model": baseline["model"],
+            "baseline_source": baseline["model_source"],
+            "available": False,
+            "availability": False,
+            "reason": "disabled",
+            "retry_at": None,
+            "warning": None,
+            "active_route": None,
+        }
+    availability = model_availability.availability(
+        state.state_root(getattr(args, "state_dir", None)), SPARK_MODEL
+    )
+    return {
+        "enabled": True,
+        "model": SPARK_MODEL,
+        "spark_model": SPARK_MODEL,
+        "baseline": baseline["model"],
+        "baseline_model": baseline["model"],
+        "baseline_source": baseline["model_source"],
+        **availability.to_dict(),
+        "active_route": None,
+    }
+
+
+def _safe_initial_spark_payload(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        return _initial_spark_payload(args)
+    except OSError as error:
+        baseline = _spark_baseline_payload(args)
+        return {
+            "enabled": bool(getattr(args, "spark", False)),
+            "model": SPARK_MODEL,
+            "spark_model": SPARK_MODEL,
+            "baseline": baseline["model"],
+            "baseline_model": baseline["model"],
+            "baseline_source": baseline["model_source"],
+            "available": False,
+            "availability": False,
+            "reason": "ledger-unreadable",
+            "retry_at": None,
+            "warning": f"model availability ledger is unreadable: {error}",
+            "active_route": None,
+        }
+
+
+def _session_spark_suitability(
+    plan_dir: Path,
+    session_id: str,
+) -> tuple[bool, str]:
+    """Load one conservative preparation marker without blocking a run."""
+    try:
+        validation = prepare.load_prepare_validation(plan_dir)
+    except (OSError, plans.PlanError, ValueError) as error:
+        return False, f"Spark eligibility metadata unreadable: {error}"
+    if validation is None:
+        return False, "Spark eligibility metadata missing; using baseline"
+    session = validation.session(session_id)
+    if session is None:
+        return False, "Spark eligibility marker missing for session; using baseline"
+    return session.spark.eligible, session.spark.reason
+
+
+def _spark_turn_route(
+    args: argparse.Namespace,
+    *,
+    plan_dir: Path,
+    session_path: Path,
+    session_id: str,
+    harness: str,
+    is_review_turn: bool,
+    implementation_overrides: Mapping[str, Mapping[str, str]],
+    spark_state: Mapping[str, Any],
+    run_suppression: str | None,
+    fallback_reason: str | None = None,
+) -> tuple[str | None, dict[str, str | None], dict[str, Any]]:
+    """Select one implementation model according to Spark policy precedence."""
+    eligible, eligibility_reason = _session_spark_suitability(plan_dir, session_id)
+    baseline_model = _requested_model(
+        args,
+        harness=harness,
+        is_review_turn=is_review_turn,
+        implementation_overrides=implementation_overrides,
+    )
+    selected = _selected_model_effort_payload(
+        args,
+        harness=harness,
+        is_review_turn=is_review_turn,
+        implementation_overrides=implementation_overrides,
+    )
+    suppression: str | None = None
+    decision = "baseline"
+
+    if is_review_turn:
+        suppression = "review-or-audit"
+    elif not bool(getattr(args, "spark", False)):
+        suppression = "spark-disabled"
+    elif implementation_overrides.get(harness):
+        suppression = "live-set-model-override"
+    elif harness != "codex":
+        suppression = "non-codex-harness"
+    elif review_repair.is_generated_review_repair_session_file(session_path):
+        suppression = "generated-final-review-repair"
+    elif run_suppression is not None:
+        suppression = run_suppression
+    elif not bool(spark_state.get("available")):
+        suppression = str(spark_state.get("reason") or "spark-unavailable")
+    elif not eligible:
+        suppression = "session-ineligible"
+    else:
+        decision = "spark"
+        baseline_model = SPARK_MODEL
+        selected["model"] = SPARK_MODEL
+        selected["model_source"] = config.MODEL_SOURCE_SPARK
+
+    route = {
+        "eligible": eligible,
+        "reason": eligibility_reason,
+        "eligibility_reason": eligibility_reason,
+        "decision": decision,
+        "selected": decision,
+        "suppression_cause": suppression,
+        "fallback_reason": fallback_reason,
+    }
+    return baseline_model, selected, route
+
+
 def _safe_harness_config_payload() -> dict[str, Any]:
     try:
         return config.harness_config_payload()
@@ -2925,6 +3069,20 @@ def _validate_run_inputs(
     )
     if errors:
         raise RunError(errors[0].message)
+
+    if getattr(args, "spark", False):
+        baseline = config.selected_model_payload(
+            "codex", getattr(args, "harness_model", None)
+        )
+        if baseline["model_source"] == config.MODEL_SOURCE_UNRESOLVED:
+            raise RunError(
+                "--spark requires a distinct resolved baseline model; pass "
+                "--harness-model or configure Codex's default model"
+            )
+        if baseline["model"] == SPARK_MODEL:
+            raise RunError(
+                f"--spark baseline must differ from the Spark model {SPARK_MODEL!r}"
+            )
 
     _review_guard_excludes(args)
 
@@ -3610,16 +3768,6 @@ _FAILURE_CLASSIFICATION_RULES: tuple[tuple[str, str, bool, re.Pattern[str]], ...
     ),
 )
 
-# Best-effort reset/retry-time extraction. These are advisory only and never
-# influence the retryability decision.
-_RETRY_AT_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"retry-after:\s*(\d+)", re.IGNORECASE),
-    re.compile(r"resets?\s+(?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
-    re.compile(r"reset\s+(?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
-    re.compile(r"try again\s+(?:at|after|in|on)\s+([^\n.]{1,48})", re.IGNORECASE),
-    re.compile(r"will reset (?:at|on|in)\s+([^\n.]{1,48})", re.IGNORECASE),
-)
-
 
 @dataclass(frozen=True)
 class FailureClassification:
@@ -3685,14 +3833,7 @@ def _bounded_evidence(text: str, match: re.Match[str] | None) -> str:
 
 def _parse_retry_at(text: str) -> str | None:
     """Extract a best-effort reset/retry hint, or ``None`` when absent."""
-    for pattern in _RETRY_AT_PATTERNS:
-        match = pattern.search(text)
-        if match is None:
-            continue
-        value = _WHITESPACE_RE.sub(" ", match.group(1)).strip(" .,;:")
-        if value:
-            return value[:60]
-    return None
+    return retry_hints.extract_retry_hint(text)
 
 
 def classify_harness_failure(
@@ -3827,6 +3968,7 @@ def _write_turn_artifacts(
         "model_source": live_turn.get("model_source"),
         "effort": live_turn.get("effort"),
         "effort_source": live_turn.get("effort_source"),
+        "spark_route": live_turn.get("spark_route"),
         "argv": persisted_argv,
         "returncode": result.returncode,
         "timed_out": result.timed_out,
@@ -11590,6 +11732,7 @@ def _run_config_payload(
     return {
         "harness": args.harness,
         "harness_model": getattr(args, "harness_model", None),
+        "spark": bool(getattr(args, "spark", False)),
         "review_harness": getattr(args, "review_harness", None),
         "review_harness_model": getattr(args, "review_harness_model", None),
         "effort": getattr(args, "effort", None),
@@ -11630,6 +11773,7 @@ def _initial_payload(
 ) -> dict[str, Any]:
     context = verification_context or verification.VerificationContext.legacy(cwd)
     model_effort = _selected_model_effort_payload(args)
+    spark = _safe_initial_spark_payload(args)
     review_harness = getattr(args, "review_harness", None)
     review_requested = review_harness is not None
     review_output_path = (
@@ -11677,6 +11821,7 @@ def _initial_payload(
         cwd=str(cwd),
         kitty_window_id=_kitty_window_id_from_env(),
         harness=args.harness,
+        spark=spark,
         **model_effort,
         state_dir=str(state_dir),
         run_dir=str(run_dir),
@@ -11741,6 +11886,7 @@ def _dry_run_payload(
     audit = supervisor_audit.plan_audit(args).to_dict()
     if next_pending is None:
         model_effort = _selected_model_effort_payload(args)
+        spark = _safe_initial_spark_payload(args)
         return {
             "next_pending": None,
             "next_pending_id": None,
@@ -11756,6 +11902,7 @@ def _dry_run_payload(
             "review_requested": review_requested,
             "review_harness": review_harness,
             "review_output_path": review_output_path,
+            "spark": spark,
             **model_effort,
             **_workspace_payload_fields(context),
         }
@@ -11764,16 +11911,19 @@ def _dry_run_payload(
     turn_harness = args.review_harness if is_review_session else args.harness
     if turn_harness is None:
         raise RunError("--review-harness is required for a review session")
-    model_effort = _selected_model_effort_payload(
+    spark = _safe_initial_spark_payload(args)
+    requested_model, model_effort, spark_route = _spark_turn_route(
         args,
+        plan_dir=snapshot.plan_dir,
+        session_path=next_pending.path,
+        session_id=next_pending.id,
         harness=turn_harness,
         is_review_turn=is_review_session,
+        implementation_overrides={},
+        spark_state=spark,
+        run_suppression=None,
     )
-    requested_model = _requested_model(
-        args,
-        harness=turn_harness,
-        is_review_turn=is_review_session,
-    )
+    spark["active_route"] = spark_route
     paths = _turn_paths(run_dir, turn_index=1, session_id=next_pending.id)
     workspace = context.workspace
     session_scope = (
@@ -11888,6 +12038,8 @@ def _dry_run_payload(
         "review_requested": review_requested,
         "review_harness": review_harness,
         "review_output_path": review_output_path,
+        "spark": spark,
+        "spark_route": spark_route,
         **model_effort,
         **_workspace_payload_fields(context),
     }
@@ -11997,6 +12149,8 @@ def _run_locked(
         mailbox_activation=mailbox_activation,
         verification_context=verification_context,
     )
+    spark_run_suppression: str | None = None
+    spark_fallback_reason: str | None = None
     if normalized_review_handoffs:
         payload["normalized_review_handoffs"] = [
             str(path) for path in normalized_review_handoffs
@@ -12077,6 +12231,7 @@ def _run_locked(
             "model_source": payload["model_source"],
             "effort": payload["effort"],
             "effort_source": payload["effort_source"],
+            "spark": payload["spark"],
             "dry_run": args.dry_run,
             "max_sessions": max_sessions,
             "max_pending_sessions": getattr(args, "max_pending_sessions", None),
@@ -13318,18 +13473,34 @@ def _run_locked(
                     )
             if turn_harness is None:
                 raise RunError("--review-harness is required for a review session")
-            turn_model_effort = _selected_model_effort_payload(
+            if getattr(args, "spark", False) and spark_run_suppression is None:
+                try:
+                    refreshed_availability = model_availability.availability(
+                        state.state_root(args.state_dir), SPARK_MODEL
+                    )
+                except OSError as error:
+                    refreshed_availability = model_availability.Availability(
+                        False,
+                        "ledger-unreadable",
+                        warning=f"model availability ledger is unreadable: {error}",
+                    )
+                with persistence.lock:
+                    payload["spark"].update(refreshed_availability.to_dict())
+            requested_model, turn_model_effort, spark_route = _spark_turn_route(
                 args,
+                plan_dir=before.plan_dir,
+                session_path=pending_session.path,
+                session_id=session_id,
                 harness=turn_harness,
                 is_review_turn=is_review_session,
                 implementation_overrides=implementation_overrides,
+                spark_state=payload["spark"],
+                run_suppression=spark_run_suppression,
+                fallback_reason=spark_fallback_reason,
             )
-            requested_model = _requested_model(
-                args,
-                harness=turn_harness,
-                is_review_turn=is_review_session,
-                implementation_overrides=implementation_overrides,
-            )
+            spark_fallback_reason = None
+            with persistence.lock:
+                payload["spark"]["active_route"] = spark_route
             requested_effort = _requested_effort(
                 args,
                 harness=turn_harness,
@@ -13571,6 +13742,7 @@ def _run_locked(
                 "model_source": turn_model_effort["model_source"],
                 "effort": turn_model_effort["effort"],
                 "effort_source": turn_model_effort["effort_source"],
+                "spark_route": spark_route,
                 "stdout_path": str(paths["stdout"]),
                 "stderr_path": str(paths["stderr"]),
                 "last_message_path": str(paths["last_message"]),
@@ -14441,6 +14613,73 @@ def _run_locked(
                 break
             if result.returncode != 0:
                 classification = classify_harness_failure(result)
+                spark_failure = spark_route[
+                    "decision"
+                ] == "spark" and classification.reason in {
+                    events.PAUSE_REASON_QUOTA_EXHAUSTED,
+                    events.PAUSE_REASON_INVALID_MODEL,
+                }
+                selected_after = next(
+                    (item for item in after.sessions if item.id == session_id),
+                    None,
+                )
+                safely_retryable = (
+                    selected_after is not None
+                    and selected_after.status == "pending"
+                    and after.content_sha256 == before.content_sha256
+                )
+                if spark_failure and safely_retryable:
+                    try:
+                        cooldown = model_availability.suppress_until(
+                            state.state_root(args.state_dir),
+                            SPARK_MODEL,
+                            reason=classification.reason,
+                            retry_hint=classification.retry_at,
+                            run_id=run_id,
+                        )
+                    except OSError as error:
+                        cooldown = None
+                        with persistence.lock:
+                            payload["spark"]["warning"] = (
+                                f"could not update model availability ledger: {error}"
+                            )
+                    fallback_reason = classification.reason
+                    if cooldown is None:
+                        spark_run_suppression = (
+                            f"{classification.reason}-for-current-run"
+                        )
+                        spark_status_update = {
+                            "available": False,
+                            "availability": False,
+                            "reason": spark_run_suppression,
+                            "retry_at": None,
+                        }
+                    else:
+                        spark_status_update = cooldown.to_dict()
+                    spark_fallback_reason = fallback_reason
+                    with persistence.lock:
+                        spark_route["fallback_reason"] = fallback_reason
+                        turn_payload["spark_route"] = dict(spark_route)
+                        payload["spark"].update(spark_status_update)
+                        payload["spark"]["active_route"] = dict(spark_route)
+                        payload["final_snapshot"] = _snapshot_payload(after)
+                        _write_json_file(paths["result"], turn_payload)
+                        persistence.append_event(
+                            event_path,
+                            "spark_fallback",
+                            {
+                                "run_id": run_id,
+                                "session_id": session_id,
+                                "failed_turn_index": turn_index,
+                                "failed_model": SPARK_MODEL,
+                                "fallback_model": payload["spark"]["baseline"],
+                                "failure_classification": classification.to_dict(),
+                                "retry_at": payload["spark"].get("retry_at"),
+                            },
+                        )
+                        persistence.write_state(payload)
+                    snapshot = after
+                    continue
                 if classification.reason == events.PAUSE_REASON_NONZERO_EXIT:
                     pause_message = (
                         f"harness exited with status {result.returncode} "
@@ -14462,6 +14701,11 @@ def _run_locked(
                         **session_details,
                         "returncode": result.returncode,
                         "failure_classification": classification.to_dict(),
+                        **(
+                            {"spark_fallback_unsafe": True}
+                            if spark_failure and not safely_retryable
+                            else {}
+                        ),
                     },
                     persistence=persistence,
                 )
@@ -14987,6 +15231,7 @@ def _error_payload(
         review_skipped_reason=reason if review_requested else None,
     )
     payload.update(_selected_model_effort_payload(args))
+    payload["spark"] = _safe_initial_spark_payload(args)
     if paused:
         # Match `_set_pause`: a paused error payload carries the same
         # single-source-of-truth pause classification block.
@@ -15105,6 +15350,23 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
     if payload.get("harness") is not None:
         print(f"Harness: {payload['harness']}")
         _print_model_effort_lines(payload)
+    spark = payload.get("spark")
+    if isinstance(spark, Mapping):
+        route = spark.get("active_route")
+        route_decision = route.get("decision") if isinstance(route, Mapping) else None
+        print(
+            "Spark: "
+            f"{'enabled' if spark.get('enabled') else 'disabled'}; "
+            f"route {route_decision or 'none'}; {spark.get('reason', 'unknown')}"
+        )
+        if spark.get("retry_at"):
+            print(f"Spark retry: {spark['retry_at']}")
+        if isinstance(route, Mapping) and route.get("fallback_reason"):
+            print(f"Spark fallback: {route['fallback_reason']}")
+        if isinstance(route, Mapping) and route.get("suppression_cause"):
+            print(f"Spark suppression: {route['suppression_cause']}")
+        if spark.get("warning"):
+            print(f"Spark warning: {spark['warning']}")
     if "commit_mode" in payload:
         print(f"Commit mode: {payload.get('commit_mode') or 'none'}")
     if payload.get("run_dir") is not None:

@@ -73,6 +73,7 @@ FAST_MODULES = (
 # Integration modules: fake-harness end-to-end runs, workbench HTTP servers,
 # and subprocess-heavy flows. Ordered longest-first.
 INTEGRATION_MODULES = (
+    "tests.test_asl_spark",
     "tests.test_asl_harness_integration",
     "tests.test_asl_workbench_server",
     "tests.test_asl_review_lifecycle",

@@ -1863,6 +1863,7 @@ def status_payload(
         state_path=str(state_path),
         events_path=str(event_path),
         runner_state=runner_state,
+        spark=runner_state.get("spark"),
         active_turn=runner_state.get("active_turn"),
         active_verification=runner_state.get("active_verification"),
         waiting_for_reply=runner_state.get("waiting_for_reply"),
@@ -1893,6 +1894,24 @@ def _print_text_status(payload: dict[str, Any]) -> None:
     print(f"State dir: {payload['state_dir']}")
     print(f"State file: {payload['state_path']}")
     print(f"Events: {payload['events_path']}")
+    spark = payload.get("spark")
+    if isinstance(spark, dict):
+        enabled = "enabled" if spark.get("enabled") else "disabled"
+        line = (
+            f"Spark: {enabled}; route "
+            f"{(spark.get('active_route') or {}).get('decision', 'none')}; "
+            f"availability {spark.get('reason', 'unknown')}"
+        )
+        if spark.get("retry_at"):
+            line += f" until {spark['retry_at']}"
+        route = spark.get("active_route")
+        if isinstance(route, dict) and route.get("fallback_reason"):
+            line += f"; fallback {route['fallback_reason']}"
+        if isinstance(route, dict) and route.get("suppression_cause"):
+            line += f"; suppression {route['suppression_cause']}"
+        print(line)
+        if spark.get("warning"):
+            print(f"Spark warning: {spark['warning']}")
     if payload.get("workspace_root") is not None:
         print(f"Workspace root: {payload['workspace_root']}")
         print(f"Registry digest: {payload.get('registry_digest')}")

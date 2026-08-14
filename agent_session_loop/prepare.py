@@ -312,6 +312,25 @@ class ProposedCorrection:
 
 
 @dataclass(frozen=True)
+class SparkSuitability:
+    """Conservative per-session Spark routing assessment."""
+
+    eligible: bool
+    reason: str
+    reported: bool = True
+
+    def to_dict(self) -> dict[str, object]:
+        return {"eligible": self.eligible, "reason": self.reason}
+
+
+MISSING_SPARK_SUITABILITY = SparkSuitability(
+    eligible=False,
+    reason="Spark eligibility marker missing; using baseline",
+    reported=False,
+)
+
+
+@dataclass(frozen=True)
 class SessionValidation:
     """Validated preparation findings for one session."""
 
@@ -325,6 +344,7 @@ class SessionValidation:
     contract_checked: bool = False
     contract_problems: tuple[ContractProblem, ...] = ()
     corrections: tuple[ProposedCorrection, ...] = ()
+    spark: SparkSuitability = MISSING_SPARK_SUITABILITY
 
     @property
     def claims_checked(self) -> int:
@@ -332,7 +352,7 @@ class SessionValidation:
         return len(self.claims) + len(self.issues) + (1 if self.contract_checked else 0)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "session_id": self.session_id.value,
             "title": self.title,
             "claims": [claim.to_dict() for claim in self.claims],
@@ -346,6 +366,9 @@ class SessionValidation:
             ],
             "corrections": [correction.to_dict() for correction in self.corrections],
         }
+        if self.spark.reported:
+            payload["spark"] = self.spark.to_dict()
+        return payload
 
 
 @dataclass(frozen=True)
@@ -765,6 +788,7 @@ def _parse_session_validation(
             "contract_checked",
             "contract_problems",
             "corrections",
+            "spark",
         ),
     )
     raw_id = data.get("session_id")
@@ -806,6 +830,28 @@ def _parse_session_validation(
     if contract_problems and not contract_checked:
         raise _fail(
             f"{label} reports contract problems but 'contract_checked' is false"
+        )
+
+    raw_spark = data.get("spark")
+    if raw_spark is None:
+        spark = MISSING_SPARK_SUITABILITY
+    elif (
+        isinstance(raw_spark, dict)
+        and set(raw_spark) == {"eligible", "reason"}
+        and isinstance(raw_spark.get("eligible"), bool)
+        and isinstance(raw_spark.get("reason"), str)
+        and raw_spark["reason"].strip()
+    ):
+        spark = SparkSuitability(
+            eligible=raw_spark["eligible"],
+            reason=raw_spark["reason"].strip(),
+            reported=True,
+        )
+    else:
+        spark = SparkSuitability(
+            eligible=False,
+            reason="Spark eligibility marker malformed; using baseline",
+            reported=True,
         )
 
     return SessionValidation(
@@ -864,6 +910,7 @@ def _parse_session_validation(
                 _require_list(data.get("corrections"), label=f"{label} 'corrections'")
             )
         ),
+        spark=spark,
     )
 
 
@@ -1061,6 +1108,14 @@ class ValidationTaskPacket:
                     "- One sessions[] entry per session above: {session_id, "
                     "title, claims, issues, details, patterns, dependencies, "
                     "contract_checked, contract_problems, corrections}."
+                ),
+                (
+                    "- Every sessions[] entry must include spark: {eligible, "
+                    "reason}. Set eligible=true only for a small explicit scope "
+                    "with settled decisions, sufficient local context, and a clear "
+                    "completion contract. Set it false for broad refactors, public "
+                    "API/schema changes, migrations, high-risk work, or unresolved "
+                    "uncertainty. reason must be concise and evidence-based."
                 ),
                 (
                     "- claims[]: {claim, claim_type, location, line, "
@@ -1814,6 +1869,11 @@ def render_expansion(
             f"**Issues found**: {len(session.issues)}"
         ),
     ]
+    if session.spark.reported:
+        lines.append(
+            f"**Spark eligible**: {'yes' if session.spark.eligible else 'no'} — "
+            f"{session.spark.reason}"
+        )
 
     if session.issues:
         lines.extend(["", "## Issues"])
@@ -3265,6 +3325,7 @@ def _format_run_command(
     cwd: Path,
     harness_name: str,
     harness_model: str | None,
+    spark: bool,
     review_harness: str | None,
     review_harness_model: str | None,
 ) -> str:
@@ -3279,6 +3340,8 @@ def _format_run_command(
     ]
     if harness_model:
         argv.extend(["--harness-model", harness_model])
+    if spark:
+        argv.append("--spark")
     if review_harness:
         argv.extend(["--review-harness", review_harness])
     if review_harness_model:
@@ -3292,6 +3355,7 @@ def _format_resume_command(
     cwd: Path,
     harness_name: str,
     harness_model: str | None,
+    spark: bool,
     validator_harness: str,
     validator_model: str | None,
     validator_effort: str | None,
@@ -3324,6 +3388,8 @@ def _format_resume_command(
         argv.append("--rebind-workspace")
     if harness_model:
         argv.extend(["--harness-model", harness_model])
+    if spark:
+        argv.append("--spark")
     if validator_model is not None:
         argv.extend(["--validator-model", validator_model])
     if validator_effort is not None:
@@ -3487,6 +3553,7 @@ def _prepare_workspace_rebind(
     cwd: Path,
     harness: str,
     harness_model: str | None,
+    spark: bool,
     validator_harness: str,
     validator_model: str | None,
     validator_effort: str | None,
@@ -3544,6 +3611,7 @@ def _prepare_workspace_rebind(
         cwd=cwd,
         harness_name=harness,
         harness_model=harness_model,
+        spark=spark,
         validator_harness=validator_harness,
         validator_model=validator_model,
         validator_effort=validator_effort,
@@ -3636,6 +3704,7 @@ def _prepare_workspace_rebind(
                         cwd=cwd,
                         harness=harness,
                         harness_model=harness_model,
+                        spark=spark,
                         validator_harness=validator_harness,
                         validator_model=validator_model,
                         validator_effort=validator_effort,
@@ -3787,6 +3856,7 @@ def _prepare_workspace_rebind(
             cwd=cwd,
             harness_name=harness,
             harness_model=harness_model,
+            spark=spark,
             review_harness=review_harness,
             review_harness_model=review_harness_model,
         ),
@@ -3806,6 +3876,7 @@ def prepare_plan(
     cwd: str | Path,
     harness: str = "codex",
     harness_model: str | None = None,
+    spark: bool = False,
     validator_harness: str = "codex",
     validator_model: str | None = None,
     validator_effort: str | None = None,
@@ -3873,6 +3944,7 @@ def prepare_plan(
             cwd=canonical_cwd,
             harness=harness,
             harness_model=harness_model,
+            spark=spark,
             validator_harness=validator_harness,
             validator_model=validator_model,
             validator_effort=validator_effort,
@@ -3999,6 +4071,7 @@ def prepare_plan(
         cwd=canonical_cwd,
         harness_name=harness,
         harness_model=harness_model,
+        spark=spark,
         validator_harness=validator_harness,
         validator_model=validator_model,
         validator_effort=validator_effort,
@@ -4248,6 +4321,7 @@ def prepare_plan(
             cwd=canonical_cwd,
             harness_name=harness,
             harness_model=harness_model,
+            spark=spark,
             review_harness=review_harness,
             review_harness_model=review_harness_model,
         ),
@@ -4317,6 +4391,7 @@ def prepare_from_args(args: Any) -> int:
     rebind_workspace = bool(getattr(args, "rebind_workspace", False))
     harness_name = args.harness
     harness_model = args.harness_model
+    spark = bool(getattr(args, "spark", False))
     validator_harness = args.validator_harness
     validator_model = getattr(args, "validator_model", None)
     validator_effort = getattr(args, "validator_effort", None)
@@ -4334,6 +4409,7 @@ def prepare_from_args(args: Any) -> int:
         "cwd": str(args.cwd),
         "harness": harness_name,
         "harness_model": harness_model,
+        "spark": spark,
         "validator_harness": validator_harness,
         "validator_model": validator_model,
         "validator_effort": validator_effort,
@@ -4400,6 +4476,11 @@ def prepare_from_args(args: Any) -> int:
             PREPARE_EXIT_REASON_INPUT_ERROR,
             "--review-harness must differ from --harness",
         )
+    if spark and harness_name != "codex":
+        return _emit_input_error(
+            PREPARE_EXIT_REASON_INPUT_ERROR,
+            "--spark requires the implementation --harness to be 'codex'",
+        )
     if review_harness_model is not None and review_harness is None:
         return _emit_input_error(
             PREPARE_EXIT_REASON_INPUT_ERROR,
@@ -4442,6 +4523,7 @@ def prepare_from_args(args: Any) -> int:
             cwd=args.cwd,
             harness=harness_name,
             harness_model=harness_model,
+            spark=spark,
             validator_harness=validator_harness,
             validator_model=validator_model,
             validator_effort=validator_effort,

@@ -51,6 +51,17 @@ resume behavior. `--no-mailbox` is accepted and disables watcher construction,
 lease writes, live guidance, notice observation, and mailbox question closure
 for both launch and attach behavior.
 
+`--spark` and `--no-spark` are ordinary forwarded run flags. Spark is an
+implementation-only runner policy: eligible prepared Codex sessions may use
+`gpt-5.3-codex-spark`, while review/audit turns, generated review repairs,
+live model overrides, non-Codex harness switches, and ineligible sessions use
+the resolved baseline. Do not reinterpret or remove either flag. The runner
+owns classified quota/unavailable-model fallback, preserves the failed Spark
+turn, and immediately retries the still-pending session on the baseline; the
+Autopilot helper should supervise that continuation normally rather than add a
+second retry of its own. Surface the `spark` and `spark_route` status metadata
+when it explains a cooldown, baseline route, or fallback.
+
 `--max-sessions N` is a **global** budget: the helper stops the whole supervised
 run after `N` implementation sessions have completed, not `N` per relaunch. With
 no `--max-sessions`, a single `asl run` process drives every pending session to

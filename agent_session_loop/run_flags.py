@@ -95,7 +95,26 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
     RunFlag(
         dest="harness_model",
         option_strings=("--harness-model",),
-        help="Implementation harness model to request",
+        help="Implementation baseline/fallback harness model to request",
+    ),
+    RunFlag(
+        dest="spark",
+        option_strings=("--spark",),
+        action="store_true",
+        cli_default=False,
+        mutex_group="spark",
+        help=(
+            "Route eligible prepared Codex implementation sessions through "
+            "gpt-5.3-codex-spark with automatic baseline fallback"
+        ),
+    ),
+    RunFlag(
+        dest="spark",
+        option_strings=("--no-spark",),
+        action="store_false",
+        cli_default=False,
+        mutex_group="spark",
+        help="Disable Spark routing, including when overriding --resume state",
     ),
     RunFlag(
         dest="review_harness_model",
@@ -369,6 +388,11 @@ def _supervisor_default(cli_default: Any) -> Any:
 def _default_for(flag: RunFlag, mode: str) -> Any:
     if mode == "resume":
         return argparse.SUPPRESS
+    if mode == "supervisor" and flag.dest == "spark":
+        # The paired opt-in/opt-out flags default to False in the real CLI, but
+        # the supervisor needs a tri-state so it emits neither flag unless the
+        # operator supplied one.
+        return None
     if mode == "supervisor":
         return _supervisor_default(flag.cli_default)
     return flag.cli_default
@@ -516,6 +540,8 @@ def validate_run_namespace(
         )
 
     harness = getattr(ns, "harness", None)
+    if getattr(ns, "spark", False) and harness not in (None, "codex"):
+        errors.append(FlagError("--spark requires the initial --harness to be 'codex'"))
     review_harness = getattr(ns, "review_harness", None)
     if review_harness is not None and review_harness == harness:
         errors.append(
