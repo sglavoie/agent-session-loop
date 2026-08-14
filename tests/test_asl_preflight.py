@@ -1640,6 +1640,24 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
         self.assertEqual([], self._intent_findings(report))
         self.assertFalse(report.repository_intent.registry_required)
 
+    def test_git_target_outside_non_git_bound_root_requires_registry(self) -> None:
+        non_git_root = self.root / "operator-workspace"
+        non_git_root.mkdir()
+        self._write_plan(self.first / "README.md")
+        plans.save_plan_metadata(self.plan_dir, str(non_git_root))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        findings = self._intent_findings(report)
+        self.assertEqual(1, len(findings))
+        self.assertEqual("red", findings[0].severity)
+        self.assertTrue(report.repository_intent.registry_required)
+        self.assertIsNone(report.repository_intent.bound_git_root)
+        self.assertEqual(
+            (workspaces.canonicalize_filesystem_path(self.first),),
+            report.repository_intent.git_roots,
+        )
+
     def test_source_plan_in_another_repository_is_not_a_second_target(
         self,
     ) -> None:

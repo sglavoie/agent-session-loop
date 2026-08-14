@@ -140,14 +140,21 @@ class RepositoryIntent:
     """Every repository a set of declarations intends to reach."""
 
     root: Path
+    bound_git_root: Path | None
     candidates: tuple[ResolvedCandidate, ...]
     git_roots: tuple[Path, ...]
     non_git_paths: tuple[Path, ...]
 
     @property
     def registry_required(self) -> bool:
-        """Whether this intent spans more than one Git repository."""
-        return len(self.git_roots) > 1
+        """Whether intent exceeds the authority implied by the bound root.
+
+        A legacy plan may omit a registry only when every discovered Git target
+        belongs to the Git repository containing its bound execution root.  In
+        particular, one Git target below an unrelated non-Git root is not a
+        single-repository plan: the root grants no authority over that target.
+        """
+        return any(git_root != self.bound_git_root for git_root in self.git_roots)
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +359,7 @@ def resolve_intent(
     bound_root = canonicalize_filesystem_path(root)
     exempt = tuple(canonicalize_filesystem_path(entry) for entry in exempt_roots)
     git_root_cache: dict[Path, Path | None] = {}
+    bound_git_root = repository_scope.nearest_git_root(bound_root, git_root_cache)
     resolved_candidates: list[ResolvedCandidate] = []
     git_roots: dict[Path, None] = {}
     non_git_paths: dict[Path, None] = {}
@@ -371,6 +379,21 @@ def resolve_intent(
             )
             continue
         canonical = canonicalize_filesystem_path(resolved)
+        # A workspace-relative virtualenv executable can be a symlink into a
+        # system toolchain (notably Homebrew under /opt).  Judge both the path
+        # the plan spelled and its resolved destination so that following the
+        # symlink cannot turn an interpreter installation into plan-owned
+        # repository intent.
+        if repository_scope.is_system_path(canonical):
+            resolved_candidates.append(
+                ResolvedCandidate(
+                    candidate=candidate,
+                    resolved=canonical,
+                    git_root=None,
+                    exemption="system-path",
+                )
+            )
+            continue
         if any(is_descendant(canonical, entry, allow_equal=True) for entry in exempt):
             resolved_candidates.append(
                 ResolvedCandidate(
@@ -420,6 +443,7 @@ def resolve_intent(
 
     return RepositoryIntent(
         root=bound_root,
+        bound_git_root=bound_git_root,
         candidates=tuple(resolved_candidates),
         git_roots=tuple(sorted(git_roots, key=str)),
         non_git_paths=tuple(sorted(non_git_paths, key=str)),
@@ -471,6 +495,11 @@ def intent_report(
     )
     return {
         "root": redact_credentials(str(intent.root)),
+        "bound_git_root": (
+            redact_credentials(str(intent.bound_git_root))
+            if intent.bound_git_root is not None
+            else None
+        ),
         "registry_required": intent.registry_required,
         "reason": (
             REASON_REPOSITORY_REGISTRY_REQUIRED if intent.registry_required else None

@@ -444,6 +444,50 @@ class RegistrationDerivationTests(unittest.TestCase):
         self.assertEqual("not-required", derived.status)
         self.assertIsNone(derived.missing_fact)
 
+    def test_one_git_target_outside_non_git_root_derives_registry(self) -> None:
+        bound_root = self.workspace / "operator-root"
+        bound_root.mkdir(parents=True)
+        repository = self.workspace / "only"
+        init_git_repo(repository)
+        subprocess.run(
+            [
+                "git",
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/only.git",
+            ],
+            cwd=repository,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        write_plan(
+            self.plan_dir,
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    "1",
+                    [
+                        {
+                            "name": "file",
+                            "type": "file_exists",
+                            "path": str(repository / "README.md"),
+                        }
+                    ],
+                )
+            },
+        )
+
+        derived = repository_registration.derive_registration(
+            self.plan_dir, cwd=bound_root
+        )
+
+        self.assertIsInstance(derived, repository_registration.RegistrationPlan)
+        self.assertEqual(self.workspace, derived.workspace_root)
+        self.assertEqual(("only",), derived.registry.aliases)
+        self.assertEqual(("only",), derived.scopes["1"].writes)
+
 
 class MigratedShapeTests(unittest.TestCase):
     """A migrated file must be byte-identical to a freshly rendered one."""

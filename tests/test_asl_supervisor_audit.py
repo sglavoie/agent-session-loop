@@ -1735,6 +1735,25 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             )
             self.assertTrue(bundle.evidence)
 
+    def test_legacy_single_repository_pass_is_described_truthfully(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            repository = history[0] / "app"
+            (history[1] / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+            (history[1] / "session-01.md").rename(history[1] / "session-1.md")
+            (history[1] / "session-1.md").write_text("# Session 1\n", encoding="utf-8")
+            (history[1] / plans.PLAN_METADATA_FILE_NAME).write_text(
+                json.dumps({"version": 1, "cwd": str(repository)}),
+                encoding="utf-8",
+            )
+
+            _, results = self._audit(history, workspace_root=repository)
+
+            verdict = results["repository-intent"]
+            self.assertEqual("pass", verdict.status)
+            self.assertIn("legacy plan stays within", verdict.detail)
+            self.assertNotIn("declares a repository registry", verdict.detail)
+
     def test_a_registry_reaching_outside_the_workspace_is_a_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2476,6 +2495,10 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             )
             self.assertIn("Assigning issue IDs, fingerprints", prompt)
             self.assertIn("Editing, creating, or deleting any file", prompt)
+            self.assertIn(
+                "refused or paused before launching an unauthorized turn", prompt
+            )
+            self.assertIn("registry-free legacy plan confined", prompt)
             for lane in RUBRIC_LANES:
                 self.assertIn(f"- {lane}", prompt)
             for root in supervisor_audit.LOCALIZATION_ROOTS:

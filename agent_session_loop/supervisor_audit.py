@@ -2096,7 +2096,7 @@ def _check_repository_intent(context: _CheckContext) -> _Verdict:
         if context.roots.get(name)
     ]
     try:
-        _, report = preflight.plan_repository_intent(
+        intent, report = preflight.plan_repository_intent(
             plan_root, workspace_root, extra_exempt_roots=exempt
         )
     except (OSError, ValueError, plans.PlanError) as error:
@@ -2106,6 +2106,14 @@ def _check_repository_intent(context: _CheckContext) -> _Verdict:
             evidence,
         )
     if report is None:
+        if intent is not None:
+            reachable = _names(Path(root).name for root in intent.git_roots)
+            return _Verdict(
+                "pass",
+                "the legacy plan stays within its bound Git repository"
+                + (f": {reachable}" if reachable else ""),
+                evidence,
+            )
         return _Verdict(
             "pass",
             "the plan declares a repository registry naming every repository it "
@@ -3223,6 +3231,13 @@ Rules the answer must satisfy:
   `{package_root}/runner.py:8129`. Omit it when you did not localize anything.
 - Report a finding only for a control-plane defect. An audit with no defects
   returns an empty `findings` list and passing lanes.
+- A run that refused or paused before launching an unauthorized turn is the
+  repository-intent control working, not a repository-intent defect. Report a
+  defect only when evidence shows unauthorized work launched, the gate was
+  bypassable, or the recorded authority disagreed with the work performed.
+- A registry-free legacy plan confined to the Git repository containing its
+  bound execution root is allowed by ASL's compatibility contract. Do not infer
+  missing authority merely from the absence of registry and scope projections.
 
 Operational evidence for run {run_id}:
 

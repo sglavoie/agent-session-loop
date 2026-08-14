@@ -215,6 +215,25 @@ class ResolveIntentTests(unittest.TestCase):
         self.assertFalse(intent.registry_required)
         self.assertEqual((self.first,), intent.git_roots)
 
+    def test_one_git_target_outside_a_non_git_bound_root_requires_registry(
+        self,
+    ) -> None:
+        non_git_root = self.root / "operator-workspace"
+        non_git_root.mkdir()
+
+        intent = repository_intent.resolve_intent(
+            [
+                repository_intent.IntentCandidate(
+                    value=str(self.first / "README.md"), surface="absolute-path"
+                )
+            ],
+            root=non_git_root,
+        )
+
+        self.assertIsNone(intent.bound_git_root)
+        self.assertEqual((self.first,), intent.git_roots)
+        self.assertTrue(intent.registry_required)
+
     def test_same_origin_clones_stay_distinct_repositories(self) -> None:
         shared = "git@github.com:tundra/SVC.git"
         for repository in (self.first, self.second):
@@ -326,6 +345,23 @@ class ResolveIntentTests(unittest.TestCase):
         self.assertEqual("unresolved", exemptions["verify.parallel"])
         self.assertEqual((), intent.git_roots)
 
+    def test_workspace_symlink_resolving_into_system_toolchain_is_exempt(
+        self,
+    ) -> None:
+        tool = self.first / "venv-python"
+        tool.symlink_to("/usr/bin/env")
+
+        intent = self._resolve(
+            repository_intent.IntentCandidate(value=str(tool), surface="backtick-path")
+        )
+
+        self.assertEqual("system-path", intent.candidates[0].exemption)
+        self.assertEqual(
+            canonicalize_filesystem_path("/usr/bin/env"),
+            intent.candidates[0].resolved,
+        )
+        self.assertEqual((), intent.git_roots)
+
 
 class IntentReportTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -353,6 +389,7 @@ class IntentReportTests(unittest.TestCase):
 
         self.assertFalse(report["registry_required"])
         self.assertIsNone(report["reason"])
+        self.assertEqual(str(self.repository), report["bound_git_root"])
         self.assertEqual([str(self.repository)], report["git_roots"])
         entry = report["candidates"][0]
         self.assertEqual("absolute-path", entry["surface"])

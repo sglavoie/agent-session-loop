@@ -618,6 +618,43 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertEqual([], payload["turns"])
         self.assertFalse(payload["pause_policy"]["recoverable"])
 
+    def test_hard_gate_rejects_sole_git_target_outside_non_git_root(self) -> None:
+        target_repository = self.tmp_path / "target"
+        init_git_repo(target_repository)
+        self.repo_root = self.tmp_path / "operator-root"
+        self.repo_root.mkdir()
+        self._write_plan(
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    json.dumps(
+                        {
+                            "type": "file_exists",
+                            "path": str(target_repository / "README.md"),
+                            "name": "outside-bound-root",
+                        }
+                    ),
+                    session="1",
+                )
+            },
+        )
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual(
+            events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+            payload["pause_reason"],
+        )
+        self.assertEqual([], payload["turns"])
+        report = payload["pause_details"]["repository_intent"]
+        self.assertIsNone(report["bound_git_root"])
+        self.assertEqual(1, report["git_root_count"])
+        self.assertEqual(
+            [str(plans.canonicalize_path(target_repository))],
+            report["git_roots"],
+        )
+
     def test_hard_gate_applies_the_registry_before_the_first_session(
         self,
     ) -> None:
