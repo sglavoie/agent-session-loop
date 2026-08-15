@@ -380,7 +380,37 @@ def _event_message(name: str, payload: dict[str, Any]) -> str:
             f"source {payload.get('source', 'unknown')}): "
             f"{message}"
         )
-    if name == "turn_finished":
+    if name == events.TURN_EXECUTION_FINISHED_EVENT:
+        plan_state = "readable" if payload.get("plan_readable") else "unreadable"
+        return (
+            f"session {_format_session_label(payload)} harness exited "
+            f"(code {payload.get('returncode', 'unknown')}, "
+            f"duration {format_duration_seconds(payload.get('duration_seconds'))}, "
+            f"plan {plan_state})"
+        )
+    if name == events.TURN_HANDOFF_CORRECTION_EVENT:
+        return (
+            f"session {_format_session_label(payload)} handoff correction "
+            f"attempt {payload.get('attempt', 'unknown')} of "
+            f"{payload.get('max_attempts', 'unknown')} "
+            f"({payload.get('defect', 'unknown')}): "
+            f"{payload.get('detail', '')}"
+        )
+    if name == events.TURN_REJECTED_EVENT:
+        reopened = " and reopened" if payload.get("reopened") else ""
+        return (
+            f"session {_format_session_label(payload)} turn rejected{reopened} "
+            f"by {payload.get('guard', 'unknown')}: "
+            f"{payload.get('reason', 'unknown')}"
+        )
+    if name == events.SESSION_REOPENED_EVENT:
+        return (
+            f"session {_format_session_label(payload)} returned to "
+            f"{payload.get('to_status', 'unknown')} from "
+            f"{payload.get('from_status', 'unknown')} "
+            f"by {payload.get('guard', 'unknown')}"
+        )
+    if name == events.TURN_FINISHED_EVENT:
         return format_turn_finished_message(payload)
     if name == events.COMMIT_STARTED_EVENT:
         return (

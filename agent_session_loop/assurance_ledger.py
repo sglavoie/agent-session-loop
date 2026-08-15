@@ -17,6 +17,11 @@ around what a crash, a race, or a lost cache may do to it:
 * **Issue IDs are allocated under the append lock.** ``ASI-N`` is chosen and
   written inside the same critical section, so two processes cannot mint the
   same ID and no ID is ever reused.
+* **Identity keys are bound once and never rebound.** A binding says which
+  allocated issue an allocated key names; it is decided against the whole ledger
+  inside the append lock, and a key that already names an issue is refused
+  rather than repointed. Records written before schema v2 knew no keys, so a v1
+  line claiming the binding kind is rejected instead of being read as one.
 * **The index is a cache with no authority.** ``assurance-index.json`` is
   rebuilt whenever it is missing, stale, or malformed, and every answer that
   matters is derived from the ledger bytes. Deleting the index changes nothing
@@ -51,6 +56,7 @@ from .assurance_models import (
     Closeout,
     Disposition,
     ImprovementPlanDraft,
+    IssueIdentityBinding,
     IssueMerge,
     IssueObservation,
     canonical_json_bytes,
@@ -58,8 +64,10 @@ from .assurance_models import (
     parse_assurance_summary,
     parse_closeout,
     parse_disposition,
+    parse_identity_key,
     parse_improvement_plan_draft,
     parse_issue_id,
+    parse_issue_identity_binding,
     parse_issue_merge,
     parse_issue_observation,
 )
@@ -71,9 +79,12 @@ LEDGER_LOCK_FILE_NAME = "assurance-inbox.lock"
 LEDGER_INDEX_FILE_NAME = "assurance-index.json"
 
 #: Bumped when the meaning of the record envelope changes. Records written by a
-#: newer build are rejected rather than guessed at.
-LEDGER_SCHEMA_VERSION = 1
-SUPPORTED_LEDGER_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
+#: newer build are rejected rather than guessed at. v2 adds the identity-binding
+#: kind and nothing else, so every v1 line means in v2 exactly what it meant when
+#: it was written and the whole prior history reads without reinterpretation.
+LEDGER_SCHEMA_VERSION = 2
+LEDGER_LEGACY_SCHEMA_VERSION = 1
+SUPPORTED_LEDGER_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2})
 
 #: The cache format is versioned separately: it may change freely because a
 #: version this build does not recognize simply triggers a rebuild.
@@ -99,6 +110,7 @@ LedgerKind = Literal[
     "issue_merged",
     "human_closeout",
     "improvement_plan_drafted",
+    "issue_identity_bound",
 ]
 
 KIND_AUDIT_PENDING = "audit_pending"
@@ -110,6 +122,7 @@ KIND_ISSUE_DISPOSITION = "issue_disposition"
 KIND_ISSUE_MERGED = "issue_merged"
 KIND_HUMAN_CLOSEOUT = "human_closeout"
 KIND_IMPROVEMENT_PLAN_DRAFTED = "improvement_plan_drafted"
+KIND_ISSUE_IDENTITY_BOUND = "issue_identity_bound"
 
 #: Every record kind the ledger stores, in the order they occur in a run's life.
 LEDGER_KINDS: tuple[LedgerKind, ...] = (
@@ -122,12 +135,28 @@ LEDGER_KINDS: tuple[LedgerKind, ...] = (
     KIND_ISSUE_MERGED,
     KIND_HUMAN_CLOSEOUT,
     KIND_IMPROVEMENT_PLAN_DRAFTED,
+    KIND_ISSUE_IDENTITY_BOUND,
 )
+
+#: The kinds a v1 envelope may carry. A v1 line claiming a kind introduced later
+#: is rejected as an unknown kind for its version rather than read as if the
+#: build that wrote it had meant the new one.
+LEGACY_LEDGER_KINDS: frozenset[str] = frozenset(LEDGER_KINDS) - {
+    KIND_ISSUE_IDENTITY_BOUND
+}
 
 #: The only kind that mints an issue ID. Keeping the set explicit is what makes
 #: "allocated under the append lock" a property of the module rather than of a
 #: caller remembering to ask.
 ISSUE_ALLOCATING_KINDS: frozenset[str] = frozenset({KIND_ISSUE_OBSERVED})
+
+#: Kinds whose validity depends on the ledger as a whole rather than on the
+#: record alone, and the entry point that decides them inside the append lock.
+#: The generic writer refuses them so that lock-scoped validation is structural.
+GUARDED_KINDS: Mapping[str, str] = {
+    KIND_ISSUE_OBSERVED: "append_issue_observation",
+    KIND_ISSUE_IDENTITY_BOUND: "append_identity_binding",
+}
 
 ENVELOPE_KEYS: tuple[str, ...] = (
     "version",
@@ -156,6 +185,7 @@ _PAYLOAD_PARSERS: Mapping[str, Callable[[Any], Any]] = {
     KIND_ISSUE_MERGED: parse_issue_merge,
     KIND_HUMAN_CLOSEOUT: parse_closeout,
     KIND_IMPROVEMENT_PLAN_DRAFTED: parse_improvement_plan_draft,
+    KIND_ISSUE_IDENTITY_BOUND: parse_issue_identity_binding,
 }
 
 _PAYLOAD_TYPES: Mapping[str, type[Any]] = {
@@ -168,6 +198,7 @@ _PAYLOAD_TYPES: Mapping[str, type[Any]] = {
     KIND_ISSUE_MERGED: IssueMerge,
     KIND_HUMAN_CLOSEOUT: Closeout,
     KIND_IMPROVEMENT_PLAN_DRAFTED: ImprovementPlanDraft,
+    KIND_ISSUE_IDENTITY_BOUND: IssueIdentityBinding,
 }
 
 
@@ -194,6 +225,10 @@ ERROR_LEDGER_WRITE = "ledger-write-failed"
 ERROR_RECORD_TOO_LARGE = "record-too-large"
 ERROR_INVALID_KIND = "invalid-kind"
 ERROR_INVALID_PAYLOAD = "invalid-payload"
+ERROR_UNKNOWN_ISSUE = "unknown-issue"
+ERROR_ISSUE_NOT_CANONICAL = "issue-not-canonical"
+ERROR_IDENTITY_ALREADY_BOUND = "identity-key-already-bound"
+ERROR_IDENTITY_KEY_CONFLICT = "identity-key-conflict"
 
 
 class LedgerError(AssuranceError):
@@ -348,6 +383,29 @@ class LedgerView:
         return None if issue_id is None else self.canonical_issue_id(issue_id)
 
     @property
+    def identity_bindings(self) -> dict[str, str]:
+        """Map each bound identity key to the issue it was bound to.
+
+        The first binding of a key wins. A key is a durable name rather than a
+        mutable pointer, so a later record naming an already-bound key is history
+        to report rather than history that renames the issue.
+        """
+        bindings: dict[str, str] = {}
+        for record in self.records_of_kind(KIND_ISSUE_IDENTITY_BOUND):
+            bindings.setdefault(record.payload.identity_key, record.payload.issue_id)
+        return bindings
+
+    def issue_id_for_identity_key(self, identity_key: str) -> str | None:
+        """Return the issue a bound key names today, or ``None`` when unbound.
+
+        The answer follows the merge chain: binding a key is not a promise that
+        its issue never merges, only that the key keeps pointing at whoever owns
+        that history.
+        """
+        issue_id = self.identity_bindings.get(parse_identity_key(identity_key))
+        return None if issue_id is None else self.canonical_issue_id(issue_id)
+
+    @property
     def next_issue_number(self) -> int:
         """The next ``ASI-N`` number, chosen so no allocated ID can recur.
 
@@ -386,6 +444,11 @@ def _issue_ids_in(record: LedgerRecord) -> Iterator[str]:
     elif isinstance(payload, IssueMerge):
         yield payload.source_issue_id
         yield payload.target_issue_id
+    elif isinstance(payload, IssueIdentityBinding):
+        yield payload.issue_id
+        # The key names an issue too, so counting it keeps the allocator from
+        # minting an ID a stored key already claims.
+        yield payload.named_issue_id
     elif isinstance(payload, (Closeout, AssuranceSummary)):
         yield from payload.issue_ids
 
@@ -690,13 +753,21 @@ def parse_ledger_bytes(data: bytes, path: Path) -> LedgerView:
                 detail=f"version {version!r} is not one this build reads",
             )
             continue
-        if envelope.get("kind") not in LEDGER_KINDS:
+        allowed_kinds: frozenset[str] | tuple[LedgerKind, ...] = (
+            LEGACY_LEDGER_KINDS
+            if version == LEDGER_LEGACY_SCHEMA_VERSION
+            else LEDGER_KINDS
+        )
+        if envelope.get("kind") not in allowed_kinds:
             _reject(
                 rejected,
                 seq=seq,
                 reason=REJECT_UNKNOWN_KIND,
                 raw=raw,
-                detail=f"kind {envelope.get('kind')!r} is not a ledger record kind",
+                detail=(
+                    f"kind {envelope.get('kind')!r} is not a ledger record kind "
+                    f"at schema v{version}"
+                ),
             )
             continue
         try:
@@ -955,11 +1026,13 @@ def append_record(
             ERROR_INVALID_KIND,
             f"{kind!r} is not one of {', '.join(LEDGER_KINDS)}",
         )
-    if kind in ISSUE_ALLOCATING_KINDS:
+    entry_point = GUARDED_KINDS.get(kind)
+    if entry_point is not None:
         raise LedgerError(
             ERROR_INVALID_KIND,
-            f"{kind!r} allocates an issue id and must be appended through "
-            "append_issue_observation so the id is minted under the append lock",
+            f"{kind!r} is only valid against the ledger as a whole and must be "
+            f"appended through {entry_point} so it is decided under the append "
+            "lock that writes it",
         )
     return _append(
         kind,
@@ -996,3 +1069,62 @@ def append_issue_observation(
         recorded_at=recorded_at,
         allocate_issue_id=True,
     )
+
+
+def append_identity_binding(
+    binding: IssueIdentityBinding,
+    *,
+    state_dir: str | Path | None = None,
+    recorded_at: str | None = None,
+) -> LedgerRecord:
+    """Append one identity binding, deciding it against the whole ledger.
+
+    Both names in a binding must already exist: an identity key names an issue
+    ASL minted, and the issue it resolves to must be the one that owns its
+    history today. A key that is already bound is refused rather than rebound,
+    because the point of the key is that it keeps meaning what it meant — and a
+    request aimed at a merged-away issue is refused rather than redirected, since
+    silently repointing an identity statement would record something other than
+    what the caller reviewed.
+    """
+    if not isinstance(binding, IssueIdentityBinding):
+        raise LedgerError(
+            ERROR_INVALID_PAYLOAD,
+            f"a binding must be an IssueIdentityBinding; got {type(binding).__name__}",
+        )
+
+    def build(view: LedgerView) -> tuple[PendingRecord, ...]:
+        allocated = view.allocated_issue_ids
+        if binding.issue_id not in allocated:
+            raise LedgerError(
+                ERROR_UNKNOWN_ISSUE,
+                f"{binding.issue_id} names no issue in the inbox",
+            )
+        if binding.named_issue_id not in allocated:
+            raise LedgerError(
+                ERROR_UNKNOWN_ISSUE,
+                f"{binding.identity_key} names {binding.named_issue_id}, which "
+                "no observation minted",
+            )
+        canonical = view.canonical_issue_id(binding.issue_id)
+        if canonical != binding.issue_id:
+            raise LedgerError(
+                ERROR_ISSUE_NOT_CANONICAL,
+                f"{binding.issue_id} merged into {canonical}, which owns its "
+                "history now; bind the key to that issue instead",
+            )
+        bound = view.identity_bindings.get(binding.identity_key)
+        if bound == binding.issue_id:
+            raise LedgerError(
+                ERROR_IDENTITY_ALREADY_BOUND,
+                f"{binding.identity_key} already names {bound}",
+            )
+        if bound is not None:
+            raise LedgerError(
+                ERROR_IDENTITY_KEY_CONFLICT,
+                f"{binding.identity_key} already names {bound} and cannot also "
+                f"name {binding.issue_id}",
+            )
+        return (PendingRecord(kind=KIND_ISSUE_IDENTITY_BOUND, payload=binding),)
+
+    return append_transaction(build, state_dir=state_dir, recorded_at=recorded_at)[0]

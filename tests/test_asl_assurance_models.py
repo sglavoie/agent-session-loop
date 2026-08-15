@@ -524,6 +524,181 @@ class IssueIdTests(unittest.TestCase):
                 models.parse_issue_id(value)
 
 
+class IdentityKeyTests(unittest.TestCase):
+    def test_a_key_is_minted_from_an_allocated_issue_id(self) -> None:
+        self.assertEqual("issue.asi-42", models.identity_key_for_issue("ASI-42"))
+        self.assertEqual("issue.asi-42", models.identity_key_for_issue(42))
+        self.assertEqual("ASI-42", models.issue_id_for_identity_key("issue.asi-42"))
+
+    def test_keys_outside_the_minted_space_are_rejected(self) -> None:
+        for value in (
+            "issue.asi-0",
+            "issue.asi-007",
+            "issue.ASI-42",
+            "ASI-42",
+            "issue.asi-",
+            "issue.asi-42 ",
+            "asi-42",
+            "",
+            42,
+            True,
+            None,
+        ):
+            with self.subTest(value=value), self.assertRaises(AssuranceError):
+                models.parse_identity_key(value)
+
+    def test_an_oversized_key_is_rejected_before_it_is_matched(self) -> None:
+        with self.assertRaisesRegex(AssuranceError, "identity key"):
+            models.parse_identity_key(f"issue.asi-{'1' * models.MAX_TOKEN_CHARS}")
+
+
+class IssueIdentityBindingTests(unittest.TestCase):
+    def _binding(self, **overrides) -> models.IssueIdentityBinding:
+        payload = {
+            "identity_key": "issue.asi-1",
+            "issue_id": "ASI-1",
+            "source": "allocation",
+            "bound_at": TIMESTAMP,
+        }
+        payload.update(overrides)
+        return models.IssueIdentityBinding(**payload)
+
+    def test_a_binding_round_trips_through_its_parser(self) -> None:
+        binding = self._binding(source="merge", issue_id="ASI-9", note="reviewed")
+        self.assertEqual(
+            binding, models.parse_issue_identity_binding(binding.to_dict())
+        )
+
+    def test_the_key_names_the_issue_it_was_minted_with(self) -> None:
+        binding = self._binding(
+            identity_key="issue.asi-2", issue_id="ASI-1", source="merge"
+        )
+        self.assertEqual("ASI-2", binding.named_issue_id)
+        self.assertEqual("ASI-1", binding.issue_id)
+
+    def test_an_allocation_binding_must_name_its_own_issue(self) -> None:
+        with self.assertRaisesRegex(AssuranceError, "claims to be the key allocated"):
+            self._binding(identity_key="issue.asi-2", issue_id="ASI-1")
+
+    def test_a_merge_binding_may_point_a_key_at_another_issue(self) -> None:
+        binding = self._binding(
+            identity_key="issue.asi-2", issue_id="ASI-1", source="merge"
+        )
+        self.assertEqual("issue.asi-2", binding.identity_key)
+
+    def test_an_unknown_source_is_rejected(self) -> None:
+        with self.assertRaises(AssuranceError):
+            self._binding(source="renamed")
+
+    def test_a_malformed_timestamp_is_rejected(self) -> None:
+        with self.assertRaises(AssuranceError):
+            self._binding(bound_at="2026-08-10")
+
+    def test_an_unknown_payload_key_is_rejected(self) -> None:
+        payload = self._binding().to_dict()
+        payload["reason"] = "the agent decided so"
+
+        with self.assertRaisesRegex(AssuranceError, "unknown key"):
+            models.parse_issue_identity_binding(payload)
+
+    def test_an_oversized_note_is_rejected(self) -> None:
+        with self.assertRaises(AssuranceError):
+            self._binding(note="n" * (models.MAX_TEXT_CHARS + 1))
+
+
+class NormalizedFindingTextTests(unittest.TestCase):
+    def test_a_localization_pointer_normalizes_to_the_file_it_names(self) -> None:
+        self.assertEqual(
+            "agent_session_loop/runner.py",
+            models.normalize_localization("agent_session_loop/runner.py:8129"),
+        )
+        self.assertEqual(
+            "agent_session_loop/runner.py",
+            models.normalize_localization("agent_session_loop/runner.py:8129:14"),
+        )
+        self.assertEqual(
+            "agent_session_loop/runner.py",
+            models.normalize_localization("agent_session_loop/runner.py"),
+        )
+
+    def test_two_sightings_of_one_file_normalize_together(self) -> None:
+        self.assertEqual(
+            models.normalize_localization("skills/asl/SKILL.md:12"),
+            models.normalize_localization("skills/asl/SKILL.md:4001"),
+        )
+
+    def test_a_version_in_a_filename_survives_normalization(self) -> None:
+        self.assertEqual(
+            "agent_session_loop/state_v2.py",
+            models.normalize_localization("agent_session_loop/state_v2.py"),
+        )
+
+    def test_summary_tokens_are_lowercased_sorted_and_deduplicated(self) -> None:
+        self.assertEqual(
+            ("after", "budget", "exhausted", "ran", "retry"),
+            models.normalize_summary_tokens(
+                "A retry ran after the budget was exhausted; the retry ran."
+            ),
+        )
+
+    def test_rewording_a_summary_keeps_the_shared_tokens(self) -> None:
+        first = set(
+            models.normalize_summary_tokens(
+                "A retry ran after the budget was exhausted."
+            )
+        )
+        second = set(
+            models.normalize_summary_tokens(
+                "The retry budget was exhausted and a retry still ran."
+            )
+        )
+        self.assertEqual({"budget", "exhausted", "retry", "ran"}, first & second)
+
+    def test_a_negation_is_never_dropped_as_a_stopword(self) -> None:
+        for word in ("not", "no", "never", "none", "nor", "without", "nothing"):
+            with self.subTest(word=word):
+                self.assertNotIn(word, models.SUMMARY_STOPWORDS)
+        self.assertNotEqual(
+            models.normalize_summary_tokens("The guard fired."),
+            models.normalize_summary_tokens("The guard did not fire."),
+        )
+
+    def test_punctuation_and_path_separators_split_summary_tokens(self) -> None:
+        self.assertEqual(
+            ("guard", "py", "runner", "scope"),
+            models.normalize_summary_tokens("`runner.py` scope-guard"),
+        )
+
+    def test_an_empty_summary_yields_no_tokens(self) -> None:
+        self.assertEqual((), models.normalize_summary_tokens("   -- ,, "))
+
+    def test_an_invariant_key_splits_into_sorted_segments(self) -> None:
+        self.assertEqual(
+            ("budget", "respected", "retry"),
+            models.normalize_invariant_tokens("retry.budget-respected"),
+        )
+
+    def test_renaming_one_segment_keeps_the_others(self) -> None:
+        self.assertEqual(
+            {"budget", "retry"},
+            set(models.normalize_invariant_tokens("retry.budget-respected"))
+            & set(models.normalize_invariant_tokens("retry.budget-clamped")),
+        )
+
+    def test_unrelated_invariants_share_no_segment(self) -> None:
+        self.assertEqual(
+            set(),
+            set(models.normalize_invariant_tokens("retry.budget-respected"))
+            & set(models.normalize_invariant_tokens("scope.no-escape")),
+        )
+
+    def test_no_stopword_is_dropped_from_an_invariant_key(self) -> None:
+        self.assertEqual(
+            ("do", "not", "the", "thing"),
+            models.normalize_invariant_tokens("the.do-not-thing"),
+        )
+
+
 class SummaryInvariantTests(unittest.TestCase):
     def _summary(self, **overrides) -> models.AssuranceSummary:
         payload = {"run_id": RUN_ID, "state": "pending", "eligible": True}

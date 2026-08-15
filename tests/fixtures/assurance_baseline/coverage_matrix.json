@@ -1,0 +1,379 @@
+{
+  "schema_version": 1,
+  "description": "Frozen coverage matrix for the assurance remediation plan. Each open canonical issue at plan time maps to exactly one owning implementation session, an expected disposition, and the regression scenario that must prove the fix. Sanitized: no absolute paths, run identifiers, digests, or private log text.",
+  "baseline": {
+    "captured_on": "2026-08-14",
+    "canonical_issue_count": 53,
+    "open_issue_count": 38,
+    "projection_anomaly_count": 0,
+    "rejected_ledger_record_count": 0,
+    "open_by_severity": {
+      "high": 9,
+      "low": 6,
+      "medium": 23
+    }
+  },
+  "dispositions": [
+    "fixed",
+    "merged"
+  ],
+  "owning_session_counts": {
+    "7": 1,
+    "8": 2,
+    "9": 5,
+    "10": 5,
+    "11": 2,
+    "12": 5,
+    "13": 2,
+    "14": 2,
+    "15": 3,
+    "16": 2,
+    "17": 2,
+    "18": 4,
+    "19": 3
+  },
+  "issues": [
+    {
+      "issue_id": "ASI-1",
+      "severity": "low",
+      "component": "harness-launch-diagnostics",
+      "owning_session": 12,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "diagnostics.optional-tool-degradation-recorded"
+    },
+    {
+      "issue_id": "ASI-4",
+      "severity": "medium",
+      "component": "terminal-artifacts",
+      "owning_session": 9,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "commit.terminal-artifacts-durable-before-finish"
+    },
+    {
+      "issue_id": "ASI-6",
+      "severity": "medium",
+      "component": "review-continuation",
+      "owning_session": 15,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "readiness.blocker-and-eligible-are-exclusive"
+    },
+    {
+      "issue_id": "ASI-10",
+      "severity": "low",
+      "component": "unclassified-evidence",
+      "owning_session": 18,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "audit.every-failure-classified"
+    },
+    {
+      "issue_id": "ASI-11",
+      "severity": "low",
+      "component": "supervisor-audit-scopes",
+      "owning_session": 18,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "audit.expansion-documents-excluded-from-scopes"
+    },
+    {
+      "issue_id": "ASI-12",
+      "severity": "medium",
+      "component": "review-repair-readiness",
+      "owning_session": 15,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "readiness.stale-progress-journal-repaired"
+    },
+    {
+      "issue_id": "ASI-14",
+      "severity": "medium",
+      "component": "agent-session-loop/supervisor-audit",
+      "owning_session": 19,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "availability.workspace-mutated-fail-closed"
+    },
+    {
+      "issue_id": "ASI-15",
+      "severity": "medium",
+      "component": "turn-anomaly-classification",
+      "owning_session": 9,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "commit.anomaly-flag-matches-rejected-turn"
+    },
+    {
+      "issue_id": "ASI-16",
+      "severity": "medium",
+      "component": "turn-lifecycle-events",
+      "owning_session": 9,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "commit.turn-finished-digest-matches-persisted-result"
+    },
+    {
+      "issue_id": "ASI-19",
+      "severity": "high",
+      "component": "workspace-write-guard",
+      "owning_session": 13,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "writeguard.external-home-write-rejected"
+    },
+    {
+      "issue_id": "ASI-23",
+      "severity": "high",
+      "component": "success-claim",
+      "owning_session": 18,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "audit.skipped-required-check-contradicts-success"
+    },
+    {
+      "issue_id": "ASI-24",
+      "severity": "medium",
+      "component": "status-projection",
+      "owning_session": 10,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "status.action-required-cleared-after-reply"
+    },
+    {
+      "issue_id": "ASI-27",
+      "severity": "medium",
+      "component": "pause-policy",
+      "owning_session": 10,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "status.pause-policy-owner-dependent-mapping"
+    },
+    {
+      "issue_id": "ASI-30",
+      "severity": "medium",
+      "component": "status-projection",
+      "owning_session": 10,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "status.session-reopen-emits-event"
+    },
+    {
+      "issue_id": "ASI-32",
+      "severity": "medium",
+      "component": "agent-session-loop/supervisor-audit",
+      "owning_session": 19,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "availability.malformed-output-bounded-correction"
+    },
+    {
+      "issue_id": "ASI-33",
+      "severity": "medium",
+      "component": "agent-session-loop/supervisor-audit",
+      "owning_session": 19,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "availability.incomplete-lane-coverage-reported"
+    },
+    {
+      "issue_id": "ASI-34",
+      "severity": "high",
+      "component": "post-turn-plan-recovery",
+      "owning_session": 8,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "handoff.unqualified-files-modified-correction"
+    },
+    {
+      "issue_id": "ASI-35",
+      "severity": "medium",
+      "component": "reply-provenance-redaction",
+      "owning_session": 12,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "redaction.reply-origin-enum-preserved"
+    },
+    {
+      "issue_id": "ASI-42",
+      "severity": "medium",
+      "component": "workspace-write-guard",
+      "owning_session": 13,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "writeguard.linked-worktree-mutation-detected"
+    },
+    {
+      "issue_id": "ASI-43",
+      "severity": "medium",
+      "component": "review-verdict-recording",
+      "owning_session": 17,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "review.valid-artifact-verdict-preserved"
+    },
+    {
+      "issue_id": "ASI-53",
+      "severity": "low",
+      "component": "audit.bundle",
+      "owning_session": 18,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "audit.progress-journal-indexed-or-omitted"
+    },
+    {
+      "issue_id": "ASI-69",
+      "severity": "medium",
+      "component": "final-verification",
+      "owning_session": 16,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "verification.baseline-gate-after-final-repair"
+    },
+    {
+      "issue_id": "ASI-72",
+      "severity": "low",
+      "component": "hang-detector",
+      "owning_session": 12,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "telemetry.cpu-progress-null-without-delta"
+    },
+    {
+      "issue_id": "ASI-78",
+      "severity": "high",
+      "component": "state-and-events",
+      "owning_session": 9,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "commit.plan-snapshot-reparsed-after-repair-materialization"
+    },
+    {
+      "issue_id": "ASI-79",
+      "severity": "medium",
+      "component": "runner-status-signal",
+      "owning_session": 11,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "signals.runner-status-not-read-from-stderr"
+    },
+    {
+      "issue_id": "ASI-80",
+      "severity": "medium",
+      "component": "harness-model-projection",
+      "owning_session": 11,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "signals.observed-model-preferred-over-default-label"
+    },
+    {
+      "issue_id": "ASI-81",
+      "severity": "medium",
+      "component": "runner.readiness-gate",
+      "owning_session": 15,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "readiness.core-rerun-after-plan-change"
+    },
+    {
+      "issue_id": "ASI-82",
+      "severity": "high",
+      "component": "terminal-status-projection",
+      "owning_session": 10,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "status.repair-group-exhausted-not-all-complete"
+    },
+    {
+      "issue_id": "ASI-83",
+      "severity": "high",
+      "component": "runner.verification-recipe",
+      "owning_session": 16,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "verification.review-authored-checks-are-additive"
+    },
+    {
+      "issue_id": "ASI-85",
+      "severity": "medium",
+      "component": "runner.review-fix-cycle",
+      "owning_session": 17,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "review.identity-tracked-finding-recurrence"
+    },
+    {
+      "issue_id": "ASI-91",
+      "severity": "medium",
+      "component": "supervisor-audit-redaction",
+      "owning_session": 12,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "redaction.secret-key-path-segment-match"
+    },
+    {
+      "issue_id": "ASI-94",
+      "severity": "medium",
+      "component": "prompt-renderer",
+      "owning_session": 14,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "packet.review-turn-renders-review-prompt"
+    },
+    {
+      "issue_id": "ASI-96",
+      "severity": "low",
+      "component": "turn-timing",
+      "owning_session": 12,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "telemetry.idle-excludes-active-verification"
+    },
+    {
+      "issue_id": "ASI-105",
+      "severity": "medium",
+      "component": "verification/review-output-gate",
+      "owning_session": 8,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "verification.structured-validator-failure-detail"
+    },
+    {
+      "issue_id": "ASI-113",
+      "severity": "high",
+      "component": "mailbox-completion-guard",
+      "owning_session": 9,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "commit.guards-precede-turn-finished"
+    },
+    {
+      "issue_id": "ASI-114",
+      "severity": "high",
+      "component": "pause-status-projection",
+      "owning_session": 10,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "status.unanswered-blocking-question-requires-user"
+    },
+    {
+      "issue_id": "ASI-119",
+      "severity": "high",
+      "component": "plan-directory-access",
+      "owning_session": 14,
+      "expected_disposition": "fixed",
+      "merges_into": null,
+      "regression_scenario": "packet.foreign-expansion-mutation-rejected"
+    },
+    {
+      "issue_id": "ASI-123",
+      "severity": "medium",
+      "component": "model-projection",
+      "owning_session": 7,
+      "expected_disposition": "merged",
+      "merges_into": "ASI-80",
+      "regression_scenario": "reconcile.duplicate-model-projection-merge"
+    }
+  ]
+}

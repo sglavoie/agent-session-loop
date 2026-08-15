@@ -1880,6 +1880,33 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="assurance_cli:assurance_plan_from_args",
     )
 
+    assurance_reconcile_parser = assurance_sub.add_parser(
+        "reconcile",
+        help=("Preview the inbox's identity repairs, or apply a reviewed manifest."),
+    )
+    assurance_reconcile_parser.add_argument(
+        "--apply",
+        metavar="MANIFEST",
+        help="Apply the reviewed decisions in this manifest instead of previewing",
+    )
+    assurance_reconcile_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Do not ask before applying merges, which cannot be undone",
+    )
+    assurance_reconcile_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    assurance_reconcile_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    assurance_reconcile_parser.set_defaults(
+        handler_ref="assurance_cli:assurance_reconcile_from_args",
+    )
+
     return parser
 
 

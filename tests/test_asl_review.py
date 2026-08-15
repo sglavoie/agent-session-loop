@@ -3095,7 +3095,12 @@ class ReviewRepairCycleTests(unittest.TestCase):
         )
 
         self.assertEqual("paused", action)
-        self.assertIs(snapshot, after)
+        # The pause reports a re-read of the plan rather than the snapshot the
+        # cycle started from, because materialization already wrote to it.
+        self.assertIsNot(snapshot, after)
+        self.assertEqual(
+            plans.inspect_plan(self.plan_dir).fingerprint, after.fingerprint
+        )
         self.assertEqual("malformed-review-repair", payload["pause_reason"])
         cycles = payload["review_cycles"]
         self.assertEqual(1, len(cycles))

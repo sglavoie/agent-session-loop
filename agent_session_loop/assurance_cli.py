@@ -22,6 +22,13 @@ canonical form, so an ID printed anywhere pastes into another command
 unchanged. And one payload builder feeds the text and JSON renderers, so the
 two surfaces cannot disagree about what an issue is.
 
+``reconcile`` repairs identity itself rather than an issue's lifecycle, and it
+splits into a read and a write for that reason. The preview reads the inbox and
+writes nothing, including no file; a person turns its suggestions into explicit
+decisions; ``--apply MANIFEST`` replays only those decisions, as one append,
+against the catalog the reviewer saw. No suggestion is ever acted on
+automatically, because every one of them rests on text an agent wrote.
+
 ``process-pending`` and ``plan`` are the two commands here that run a harness,
 and both defer that import into the handler so browsing never loads it.
 ``process-pending`` audits the runs whose own process died before it could audit
@@ -40,21 +47,27 @@ rejected lines would hide the only evidence that the ledger is damaged.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from . import assurance_ledger as ledger
 from . import assurance_projection as projection
+from . import assurance_reconcile as reconcile
 from . import responses, state
 from .assurance_models import (
     CLOSEOUT_OUTCOMES,
+    DECISION_MERGE,
     ISSUE_STATES,
     SEVERITIES,
     AssuranceError,
+    ReconciliationManifest,
     issue_id_number,
     parse_issue_id,
+    parse_reconciliation_manifest,
 )
 
 COMMAND_ASSURANCE_LIST = "assurance-list"
@@ -63,6 +76,11 @@ COMMAND_ASSURANCE_MERGE = "assurance-merge"
 COMMAND_ASSURANCE_CLOSEOUT = "assurance-closeout"
 COMMAND_ASSURANCE_PROCESS_PENDING = "assurance-process-pending"
 COMMAND_ASSURANCE_PLAN = "assurance-plan"
+#: Preview and apply are two commands rather than two modes of one, because
+#: their payloads share no field: one describes an inbox and the other describes
+#: a write. A consumer that switched on ``ok`` alone could not tell them apart.
+COMMAND_ASSURANCE_RECONCILE = "assurance-reconcile"
+COMMAND_ASSURANCE_RECONCILE_APPLY = "assurance-reconcile-apply"
 
 TEXT_LABEL_LIST = "assurance list"
 TEXT_LABEL_SHOW = "assurance show"
@@ -70,6 +88,7 @@ TEXT_LABEL_MERGE = "assurance merge"
 TEXT_LABEL_CLOSEOUT = "assurance closeout"
 TEXT_LABEL_PROCESS_PENDING = "assurance process-pending"
 TEXT_LABEL_PLAN = "assurance plan"
+TEXT_LABEL_RECONCILE = "assurance reconcile"
 
 #: What each disposition claims about the future, which is the part an operator
 #: needs to hear back. None of them removes the issue: a later recurrence is
@@ -102,6 +121,11 @@ MAX_RENDERED_WARNINGS = 20
 #: line, so the row carries a preview and ``show`` carries the whole thing.
 SUMMARY_PREVIEW_CHARS = 100
 
+#: Proposed bindings and suggested pairs printed by the text preview. The JSON
+#: form always carries every one, because that is the form a manifest is cut
+#: from; the text form is a summary a person reads before asking for the JSON.
+MAX_RENDERED_RECONCILE_ROWS = 20
+
 REASON_INPUT_ERROR = "input-error"
 REASON_INVALID_ISSUE_ID = "invalid-issue-id"
 REASON_UNKNOWN_ISSUE = "unknown-issue"
@@ -111,6 +135,7 @@ REASON_UNKNOWN_RUN = projection.UNKNOWN_RUN
 REASON_AMBIGUOUS_RUN = "ambiguous-run"
 REASON_AMBIGUOUS_PLAN = "ambiguous-plan"
 REASON_CANCELLED = "cancelled"
+REASON_MANIFEST_READ_FAILED = "manifest-read-failed"
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +291,7 @@ def _issue_row(issue: projection.Issue) -> dict[str, Any]:
         "last_seen_at": issue.last_seen_at,
         "component": issue.finding.component,
         "summary": issue.finding.summary,
+        "primary_identity_key": issue.primary_identity_key,
     }
 
 
@@ -323,6 +349,8 @@ def _issue_detail(
         "last_seen_at": issue.last_seen_at,
         "fingerprint": issue.fingerprint,
         "fingerprints": list(issue.fingerprints),
+        "primary_identity_key": issue.primary_identity_key,
+        "identity_keys": list(issue.identity_keys),
         "schema_version": finding.schema_version,
         "category": finding.category,
         "component": finding.component,
@@ -515,6 +543,12 @@ def _show_text_lines(payload: dict[str, Any]) -> list[str]:
     absorbed_fingerprints = issue["fingerprints"][1:]
     if absorbed_fingerprints:
         lines.append(f"  also observed as {', '.join(absorbed_fingerprints)}")
+    lines.append(f"  identity key    {issue['primary_identity_key'] or 'unbound'}")
+    absorbed_keys = [
+        key for key in issue["identity_keys"] if key != issue["primary_identity_key"]
+    ]
+    if absorbed_keys:
+        lines.append(f"  also named by   {', '.join(absorbed_keys)}")
     lines.extend(
         (
             f"History: {issue['occurrence_count']} occurrence(s)  "
@@ -1284,5 +1318,195 @@ def assurance_plan_from_args(args: argparse.Namespace) -> int:
         responses.print_json(payload)
         return 0
     for line in _plan_text_lines(payload):
+        print(line)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# asl assurance reconcile
+# ---------------------------------------------------------------------------
+
+
+_RECONCILE_HINTS: dict[str, str] = {
+    reconcile.STALE_CATALOG_DIGEST: (
+        "run `asl assurance reconcile --json` again and review the new preview"
+    ),
+    reconcile.UNRESOLVED_DECISION: (
+        "rewrite each 'review' decision as 'merge' or 'keep-distinct'"
+    ),
+    reconcile.IDENTITY_KEY_CONFLICT: (
+        "run `asl assurance show ISSUE` to see which issue already owns the key"
+    ),
+    REASON_MANIFEST_READ_FAILED: (
+        "generate one with `asl assurance reconcile --json | jq .manifest`"
+    ),
+}
+
+
+def _read_manifest(args: argparse.Namespace) -> ReconciliationManifest:
+    """Load and validate the reviewed manifest named by ``--apply``."""
+    path = Path(args.apply).expanduser()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise AssuranceError(f"cannot read manifest {path}: {error}") from error
+    try:
+        payload = json.loads(raw)
+    except ValueError as error:
+        raise AssuranceError(f"manifest {path} is not valid JSON: {error}") from error
+    return parse_reconciliation_manifest(payload)
+
+
+def _reconcile_preview_text_lines(payload: dict[str, Any]) -> list[str]:
+    lines = [
+        f"Inbox: {payload['issue_count']} canonical issue(s), "
+        f"{payload['bound_count']} with an identity key.",
+        f"Catalog: {payload['catalog_digest']}",
+    ]
+    bindings = payload["bindings"]
+    if not bindings:
+        lines.append("Every canonical issue already has its identity key.")
+    else:
+        lines.append(f"Safe bindings to add ({len(bindings)}):")
+        for item in bindings[:MAX_RENDERED_RECONCILE_ROWS]:
+            lines.append(f"  bind {item['identity_key']} -> {item['issue_id']}")
+        omitted = len(bindings) - MAX_RENDERED_RECONCILE_ROWS
+        if omitted > 0:
+            lines.append(f"  ... and {omitted} more")
+    for item in payload["blocked"]:
+        lines.append(
+            f"  blocked {item['issue_id']} ({item['reason']}): {item['detail']}"
+        )
+    unresolved = payload["unresolved"]
+    if not unresolved:
+        lines.append("No pairs need review.")
+    else:
+        lines.append(f"Pairs awaiting a verdict ({len(unresolved)}):")
+        for item in unresolved[:MAX_RENDERED_RECONCILE_ROWS]:
+            reasons = ", ".join(item["reasons"]) or "none"
+            lines.append(
+                f"  review {' + '.join(item['issue_ids'])} "
+                f"(reasons: {reasons}; similarity {item['similarity']:.2f})"
+            )
+        omitted = len(unresolved) - MAX_RENDERED_RECONCILE_ROWS
+        if omitted > 0:
+            lines.append(f"  ... and {omitted} more")
+    if payload["truncated_pairs"]:
+        lines.append(
+            f"{payload['truncated_pairs']} weaker pair(s) were not offered; "
+            "reconcile again after applying this manifest to see them."
+        )
+    lines.append("Nothing was written. To act on this:")
+    lines.append("  asl assurance reconcile --json | jq .manifest > manifest.json")
+    lines.append("  # rewrite each 'review' decision as 'merge' or 'keep-distinct'")
+    lines.append("  asl assurance reconcile --apply manifest.json --yes")
+    return lines
+
+
+def _reconcile_apply_text_lines(payload: dict[str, Any]) -> list[str]:
+    if not payload["applied"]:
+        return [
+            "Every decision in this manifest is already recorded; nothing was written."
+        ]
+    lines = [
+        f"Applied {payload['records']} record(s): {payload['bindings']} binding(s) "
+        f"and {payload['merges']} merge(s).",
+    ]
+    if payload["kept_distinct"]:
+        lines.append(
+            f"{payload['kept_distinct']} pair(s) were reviewed as distinct defects; "
+            "that verdict is not a ledger record and is not stored."
+        )
+    if payload["merges"]:
+        lines.append("Merging is irreversible.")
+    lines.append(f"Ledger: {payload['ledger_path']}")
+    return lines
+
+
+def _reconcile_apply(args: argparse.Namespace) -> int:
+    """Apply one reviewed manifest as a single append, or report why not."""
+    try:
+        manifest = _read_manifest(args)
+    except AssuranceError as error:
+        return _print_error(
+            args,
+            command_name=COMMAND_ASSURANCE_RECONCILE_APPLY,
+            text_label=TEXT_LABEL_RECONCILE,
+            reason=REASON_MANIFEST_READ_FAILED,
+            error=str(error),
+            hint=_RECONCILE_HINTS[REASON_MANIFEST_READ_FAILED],
+        )
+
+    merges = manifest.of_kind(DECISION_MERGE)
+    if merges and not _confirm(
+        args,
+        f"Apply {len(manifest.decisions)} decision(s), including {len(merges)} "
+        "merge(s)? Merging cannot be undone.",
+    ):
+        return _print_error(
+            args,
+            command_name=COMMAND_ASSURANCE_RECONCILE_APPLY,
+            text_label=TEXT_LABEL_RECONCILE,
+            reason=REASON_CANCELLED,
+            error="applying the reconciliation manifest was cancelled",
+        )
+
+    try:
+        result = reconcile.apply_manifest(manifest, state_dir=args.state_dir)
+    except (AssuranceError, OSError) as error:
+        return _report_write_failure(
+            args,
+            error,
+            command_name=COMMAND_ASSURANCE_RECONCILE_APPLY,
+            text_label=TEXT_LABEL_RECONCILE,
+            hints=_RECONCILE_HINTS,
+        )
+
+    payload = responses.success_payload(
+        COMMAND_ASSURANCE_RECONCILE_APPLY,
+        ledger_path=str(ledger.ledger_path(args.state_dir)),
+        manifest_path=str(Path(args.apply).expanduser()),
+        catalog_digest=manifest.catalog_digest,
+        **result.to_dict(),
+    )
+    if args.json:
+        responses.print_json(payload)
+        return 0
+    for line in _reconcile_apply_text_lines(payload):
+        print(line)
+    return 0
+
+
+def assurance_reconcile_from_args(args: argparse.Namespace) -> int:
+    """Preview the inbox's identity repairs, or apply a reviewed manifest.
+
+    Without ``--apply`` this reads and reports and writes nothing at all, not
+    even the manifest it prints: the preview is the input to a human decision,
+    and a command that left a file behind would invite applying one nobody read.
+    """
+    if args.apply is not None:
+        return _reconcile_apply(args)
+
+    inbox = _read_inbox(
+        args,
+        command_name=COMMAND_ASSURANCE_RECONCILE,
+        text_label=TEXT_LABEL_RECONCILE,
+    )
+    if inbox is None:
+        return 1
+
+    warnings = _warning_fields(inbox)
+    preview = reconcile.build_preview(inbox)
+    payload = responses.success_payload(
+        COMMAND_ASSURANCE_RECONCILE,
+        ledger_path=str(ledger.ledger_path(args.state_dir)),
+        **preview.to_dict(),
+        **warnings,
+    )
+    if args.json:
+        responses.print_json(payload)
+        return 0
+    _print_warnings(warnings)
+    for line in _reconcile_preview_text_lines(payload):
         print(line)
     return 0

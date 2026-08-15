@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -304,6 +305,103 @@ class IssueMetricsTests(AssuranceReportTestCase):
         issues = self.metrics()["issues"]
         self.assertEqual(issues["recurrence_after_resolution"], 0)
         self.assertEqual(issues["open_total"], 0)
+
+
+# ---------------------------------------------------------------------------
+# Identity counts
+# ---------------------------------------------------------------------------
+
+
+class IdentityMetricsTests(AssuranceReportTestCase):
+    def observe_unbound(self, **overrides) -> None:
+        """Open an issue the way a guard does, which leaves it unnamed."""
+        ledger.append_issue_observation(
+            models.IssueObservation(
+                run_id=RUN_B, finding=_finding(**overrides), observed_at=T2
+            ),
+            state_dir=self.state_dir,
+            recorded_at=T2,
+        )
+
+    def force_binding(self, issue_id: str, key_of: str) -> None:
+        """Write a binding the ledger writer refuses, to reach the anomaly."""
+        binding = models.IssueIdentityBinding(
+            identity_key=models.identity_key_for_issue(key_of),
+            issue_id=issue_id,
+            source="reconcile",
+            bound_at=T2,
+        )
+        line = json.dumps(
+            {
+                "version": ledger.LEDGER_SCHEMA_VERSION,
+                "kind": ledger.KIND_ISSUE_IDENTITY_BOUND,
+                "recorded_at": T2,
+                "issue_id": None,
+                "payload": binding.to_dict(),
+            }
+        )
+        with self.ledger_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+    def test_an_empty_ledger_counts_no_identities_and_no_anomalies(self) -> None:
+        report = self.metrics()
+        self.assertEqual(report["issues"]["bound_total"], 0)
+        self.assertEqual(report["issues"]["unbound_total"], 0)
+        self.assertEqual(
+            report["integrity"],
+            {
+                "anomalies": 0,
+                "rejected_records": 0,
+                "identity_key_conflicts": 0,
+                "duplicate_identity_bindings": 0,
+            },
+        )
+
+    def test_bound_and_unbound_split_the_whole_backlog(self) -> None:
+        self.publish(_publication())
+        self.observe_unbound(invariant_key="scope.no-escape")
+        self.observe_unbound(invariant_key="commit.guarded")
+
+        issues = self.metrics()["issues"]
+        self.assertEqual(issues["bound_total"], 1)
+        self.assertEqual(issues["unbound_total"], 2)
+
+    def test_a_closed_issue_still_counts_as_bound(self) -> None:
+        self.publish(_publication())
+        projection.record_disposition(
+            "ASI-1", "resolve", state_dir=self.state_dir, recorded_at=T2
+        )
+
+        issues = self.metrics()["issues"]
+        self.assertEqual(issues["open_total"], 0)
+        self.assertEqual(issues["bound_total"], 1)
+        self.assertEqual(issues["unbound_total"], 0)
+
+    def test_a_key_an_issue_absorbed_counts_that_issue_as_bound(self) -> None:
+        self.publish(_publication())
+        self.observe_unbound(invariant_key="scope.no-escape")
+        projection.record_merge(
+            "ASI-1", "ASI-2", state_dir=self.state_dir, recorded_at=T2
+        )
+
+        issues = self.metrics()["issues"]
+        self.assertEqual(issues["bound_total"], 1)
+        self.assertEqual(issues["unbound_total"], 0)
+
+    def test_a_conflict_and_a_duplicate_are_counted_apart(self) -> None:
+        self.publish(
+            _publication(
+                findings=(_finding(), _finding(invariant_key="scope.no-escape"))
+            )
+        )
+        self.force_binding("ASI-2", "ASI-1")
+        self.force_binding("ASI-1", "ASI-1")
+
+        integrity = self.metrics()["integrity"]
+        self.assertEqual(integrity["identity_key_conflicts"], 1)
+        self.assertEqual(integrity["duplicate_identity_bindings"], 1)
+        self.assertEqual(integrity["anomalies"], 2)
+        self.assertEqual(integrity["rejected_records"], 0)
 
 
 # ---------------------------------------------------------------------------

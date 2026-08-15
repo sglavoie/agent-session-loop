@@ -386,6 +386,8 @@ def _empty_metrics(path: Path, error: str | None) -> dict[str, Any]:
             "by_severity": {},
             "by_category": {},
             "open_total": 0,
+            "bound_total": 0,
+            "unbound_total": 0,
             "recurrence_after_resolution": 0,
             "issues_recurring_after_resolution": 0,
             "recurrence_after_resolution_by_category": {},
@@ -409,7 +411,12 @@ def _empty_metrics(path: Path, error: str | None) -> dict[str, Any]:
             "rework_minutes": 0.0,
             "closeouts_reporting_rework": 0,
         },
-        "integrity": {"anomalies": 0, "rejected_records": 0},
+        "integrity": {
+            "anomalies": 0,
+            "rejected_records": 0,
+            "identity_key_conflicts": 0,
+            "duplicate_identity_bindings": 0,
+        },
     }
 
 
@@ -559,6 +566,10 @@ def collect_assurance_metrics(
     recurrences, recurring_issues, recurrence_by_category = (
         _recurrence_after_resolution(view, inbox, since)
     )
+    # Counted over canonical issues rather than over allocated IDs: a key an
+    # issue absorbed through a merge names that issue now, so the question the
+    # backlog asks is how many issues a machine can still only reach by number.
+    bound_issues = sum(1 for issue in inbox.issues if issue.identity_keys)
     report["issues"] = {
         "observations": observations,
         "new": sum(audit.summary.new_issue_count for audit in windowed_runs.values()),
@@ -568,6 +579,8 @@ def collect_assurance_metrics(
         "by_severity": dict(sorted(by_severity.items())),
         "by_category": dict(sorted(by_category.items())),
         "open_total": len(inbox.open_issues),
+        "bound_total": bound_issues,
+        "unbound_total": len(inbox.issues) - bound_issues,
         "recurrence_after_resolution": recurrences,
         "issues_recurring_after_resolution": recurring_issues,
         "recurrence_after_resolution_by_category": recurrence_by_category,
@@ -635,8 +648,19 @@ def collect_assurance_metrics(
         "closeouts_reporting_rework": reporting_rework,
     }
 
+    identity_anomalies = {reason: 0 for reason in projection.IDENTITY_ANOMALY_REASONS}
+    for anomaly in inbox.anomalies:
+        if anomaly.reason in identity_anomalies:
+            identity_anomalies[anomaly.reason] += 1
     report["integrity"] = {
         "anomalies": len(inbox.anomalies),
         "rejected_records": len(inbox.rejected),
+        # Split because they mean different things: a conflict is a stored key
+        # claiming a second issue, while a duplicate only restates a binding
+        # already in force.
+        "identity_key_conflicts": identity_anomalies[projection.IDENTITY_KEY_CONFLICT],
+        "duplicate_identity_bindings": identity_anomalies[
+            projection.DUPLICATE_IDENTITY_BINDING
+        ],
     }
     return report

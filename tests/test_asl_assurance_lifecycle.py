@@ -453,6 +453,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 [
                     assurance_ledger.KIND_AUDIT_UNAVAILABLE,
                     assurance_ledger.KIND_ISSUE_OBSERVED,
+                    assurance_ledger.KIND_ISSUE_IDENTITY_BOUND,
                 ],
                 [
                     record.kind
@@ -492,6 +493,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 [
                     assurance_ledger.KIND_AUDIT_UNAVAILABLE,
                     assurance_ledger.KIND_ISSUE_OBSERVED,
+                    assurance_ledger.KIND_ISSUE_IDENTITY_BOUND,
                 ],
                 [
                     record.kind
@@ -587,6 +589,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 [
                     assurance_ledger.KIND_AUDIT_UNAVAILABLE,
                     assurance_ledger.KIND_ISSUE_OBSERVED,
+                    assurance_ledger.KIND_ISSUE_IDENTITY_BOUND,
                 ],
                 [
                     record.kind
@@ -695,7 +698,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 summary.new_issue_count + summary.recurring_issue_count,
             )
 
-    def test_complete_artifacts_with_a_failed_publication_stay_pending(self) -> None:
+    def test_a_failed_publication_leaves_no_report_behind(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             run_dir = history[3]
@@ -709,11 +712,52 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 summary = self._audit(history, self._auditor(history))
 
             self.assertEqual("pending", summary.state)
+            # The reports never reached their canonical names, so the summary
+            # names the bundle alone: an operator following a locator here would
+            # otherwise be sent to a report this run decided not to publish.
             self.assertEqual(
-                {f"run/{name}" for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS},
+                {f"run/{assurance_models.AUDIT_INPUT_FILENAME}"},
                 {reference.locator for reference in summary.artifacts},
             )
-            self.assertTrue((run_dir / assurance_models.AUDIT_REPORT_FILENAME).exists())
+            self.assertFalse(
+                (run_dir / assurance_models.AUDIT_REPORT_FILENAME).exists()
+            )
+            self.assertFalse(
+                (run_dir / assurance_models.AUDIT_MARKDOWN_FILENAME).exists()
+            )
+            self.assertFalse(
+                (run_dir / supervisor_audit.AUDIT_STAGING_DIR_NAME).exists()
+            )
+
+    def test_a_failed_append_takes_back_the_promoted_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            state_dir, run_dir = history[2], history[3]
+
+            canonical = run_dir / assurance_models.AUDIT_REPORT_FILENAME
+            promoted: list[bool] = []
+
+            def refuse(*args: object, **kwargs: object):
+                promoted.append(canonical.is_file())
+                raise OSError("the ledger could not be extended")
+
+            with mock.patch.object(assurance_ledger, "_append_locked", refuse):
+                summary = self._audit(history, self._auditor(history))
+
+            self.assertEqual("pending", summary.state)
+            self.assertEqual([True], promoted)
+            # Promotion had already run when the append failed, so the canonical
+            # names existed for the length of the transaction and are given back.
+            self.assertFalse(canonical.exists())
+            self.assertFalse(
+                (run_dir / assurance_models.AUDIT_MARKDOWN_FILENAME).exists()
+            )
+            self.assertFalse(
+                (run_dir / supervisor_audit.AUDIT_STAGING_DIR_NAME).exists()
+            )
+            projected = assurance_projection.read_projection(state_dir=state_dir)
+            self.assertEqual([], list(projected.issues))
+            self.assertEqual([], list(projected.runs))
 
     def test_an_unwritable_run_directory_degrades_to_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

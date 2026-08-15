@@ -3397,9 +3397,15 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 )
                 self.assertTrue(Path(commit["result_path"]).exists())
 
+            # The session commits between the harness exiting and the turn
+            # being accepted: a failed commit still refuses the turn, so
+            # `turn_finished` cannot precede it.
             event_records = read_jsonl(Path(payload["events_path"]))
+            turn_1_executed = self.event_index(
+                event_records, events.TURN_EXECUTION_FINISHED_EVENT, session=1
+            )
             turn_1_finished = self.event_index(
-                event_records, "turn_finished", session=1
+                event_records, events.TURN_FINISHED_EVENT, session=1
             )
             commit_1_started = self.event_index(
                 event_records,
@@ -3414,9 +3420,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 scope="session",
             )
             turn_2_started = self.event_index(event_records, "turn_started", session=2)
-            self.assertLess(turn_1_finished, commit_1_started)
+            self.assertLess(turn_1_executed, commit_1_started)
             self.assertLess(commit_1_started, commit_1_finished)
-            self.assertLess(commit_1_finished, turn_2_started)
+            self.assertLess(commit_1_finished, turn_1_finished)
+            self.assertLess(turn_1_finished, turn_2_started)
 
     def test_commit_at_end_commits_once_after_all_sessions_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

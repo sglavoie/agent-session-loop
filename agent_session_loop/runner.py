@@ -26,10 +26,11 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, TextIO
 
 from . import (
@@ -336,6 +337,17 @@ VERIFICATION_FINGERPRINT_PREFIX = "verify-failed"
 MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS = 2
 REVIEW_VERDICT_FINGERPRINT_PREFIX = "review-verdict"
 
+# Post-turn handoff correction control. A completed handoff whose ``Files
+# modified`` line is mechanically malformed — missing, still carrying the
+# pending placeholder, or holding an entry that is not ``Alias:path`` — stops
+# the whole plan from parsing, which used to end the run in a ``malformed-plan``
+# pause even though the defect is one line the worker can rewrite. The runner
+# instead reverts that session to ``pending`` once, names the defect in the
+# Handoff note, and re-runs it. One attempt is the whole budget: a worker that
+# reproduces the same unparsable handoff after being told exactly what is wrong
+# is not converging, and every further turn costs a full harness launch.
+MAX_HANDOFF_CORRECTION_ATTEMPTS = 1
+
 # Review repair/rereview cycle control. After a generated review session
 # completes with structured findings, the runner materializes same-plan repair
 # children (``agent_session_loop.review_repair``), executes them serially, and
@@ -486,11 +498,28 @@ def parse_review_verdict(text: str) -> dict[str, Any]:
     }
 
 
+# Every rejection in the generated review gates leaves through ``fail``, which
+# writes one structured JSON line to stderr before exiting 1. A predicate that
+# exited silently told an operator only that some `python3 -c` script returned
+# 1, which is the whole failure surface these gates used to expose.
+_VALIDATOR_FAIL_HELPER = (
+    "def fail(reason, **detail):",
+    "    detail.update(check=CHECK, reason=reason)",
+    "    sys.stderr.write(json.dumps(detail, sort_keys=True) + '\\n')",
+    "    sys.exit(1)",
+)
+
 _GENERATED_REVIEW_VERIFY_SOURCE = "\n".join(
     [
-        "import pathlib, re, sys",
-        f"text = pathlib.Path({FINAL_REVIEW_FILENAME!r}).read_text(encoding='utf-8')",
-        "if not text.strip(): sys.exit(1)",
+        "import json, pathlib, re, sys",
+        "CHECK = 'final-review-output-evidence-based'",
+        *_VALIDATOR_FAIL_HELPER,
+        f"review_path = pathlib.Path({FINAL_REVIEW_FILENAME!r})",
+        "try:",
+        "    text = review_path.read_text(encoding='utf-8')",
+        "except OSError as error:",
+        "    fail('review-output-unreadable', path=str(review_path), error=str(error))",
+        "if not text.strip(): fail('review-output-empty', path=str(review_path))",
         (
             "heading_re = re.compile("
             "r'(?im)^\\s{0,3}#{1,6}\\s+"
@@ -498,7 +527,7 @@ _GENERATED_REVIEW_VERIFY_SOURCE = "\n".join(
             r"|^\s*(?:Findings?|Risks?|Concerns?|Assessment|Review|Summary)\s*:\s*$'"
             ")"
         ),
-        "if heading_re.search(text) is None: sys.exit(1)",
+        "if heading_re.search(text) is None: fail('missing-required-heading')",
         (
             "path_re = re.compile("
             r"r'(?<![\w./-])(?:[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+)(?::\d+)?"
@@ -512,20 +541,25 @@ _GENERATED_REVIEW_VERIFY_SOURCE = "\n".join(
         "status_lines = [line.strip() for line in text.splitlines() if "
         "line.strip().startswith('Status:')]",
         "if len(status_lines) != 1 or status_lines[0] != nonempty_lines[-1]: "
-        "sys.exit(1)",
+        "fail('status-line-not-final', status_line_count=len(status_lines), "
+        "last_line=nonempty_lines[-1] if nonempty_lines else '')",
         "status = status_lines[0]",
-        f"if status == {REVIEW_STATUS_ALL_CLEAR!r}: sys.exit(0 if len(refs) >= 3 else "
-        f"1)",
+        "def require_evidence():",
+        "    if len(refs) < 3: fail('insufficient-path-evidence', "
+        "path_reference_count=len(refs), required=3)",
+        "    sys.exit(0)",
+        f"if status == {REVIEW_STATUS_ALL_CLEAR!r}: require_evidence()",
         (
             "match = re.fullmatch("
             "r'Status: ([0-9]+) Findings "
             r"\(([0-9]+) high, ([0-9]+) med, ([0-9]+) low\)', "
             "status)"
         ),
-        "if match is None: sys.exit(1)",
+        "if match is None: fail('status-line-malformed', status=status)",
         "total, high, med, low = (int(value) for value in match.groups())",
-        "if total <= 0 or high + med + low != total: sys.exit(1)",
-        "sys.exit(0 if len(refs) >= 3 else 1)",
+        "if total <= 0 or high + med + low != total: "
+        "fail('status-tally-inconsistent', total=total, high=high, med=med, low=low)",
+        "require_evidence()",
     ]
 )
 
@@ -541,50 +575,68 @@ _GENERATED_REVIEW_VERIFY_SOURCE = "\n".join(
 _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE = "\n".join(
     [
         "import json, pathlib, re, sys",
+        "CHECK = 'final-review-artifact-consistent'",
+        *_VALIDATOR_FAIL_HELPER,
         (
             "md = pathlib.Path("
             f"{review.FINAL_REVIEW_FILENAME!r}).read_text(encoding='utf-8')"
         ),
         f"path = pathlib.Path({review.FINAL_REVIEW_ARTIFACT_FILENAME!r})",
-        "if not path.is_file(): sys.exit(1)",
+        "if not path.is_file(): fail('artifact-missing', path=str(path))",
         "try:",
         "    artifact = json.loads(path.read_text(encoding='utf-8'))",
-        "except ValueError:",
-        "    sys.exit(1)",
-        "if not isinstance(artifact, dict): sys.exit(1)",
-        f"if artifact.get('version') != {review.REVIEW_ARTIFACT_VERSION}: sys.exit(1)",
+        "except ValueError as error:",
+        "    fail('artifact-unparsable', path=str(path), error=str(error))",
+        "if not isinstance(artifact, dict): "
+        "fail('artifact-not-object', type=type(artifact).__name__)",
+        f"EXPECTED_VERSION = {review.REVIEW_ARTIFACT_VERSION}",
+        "if artifact.get('version') != EXPECTED_VERSION: "
+        "fail('artifact-version-unsupported', version=artifact.get('version'), "
+        "expected=EXPECTED_VERSION)",
         "outcome = artifact.get('outcome')",
         "findings = artifact.get('findings')",
-        (
-            "if outcome not in ('all-clear', 'findings') "
-            "or not isinstance(findings, list): sys.exit(1)"
-        ),
+        "if outcome not in ('all-clear', 'findings'): "
+        "fail('artifact-outcome-invalid', outcome=outcome)",
+        "if not isinstance(findings, list): "
+        "fail('artifact-findings-not-list', type=type(findings).__name__)",
         (
             "required = ('id', 'severity', 'title', 'evidence', 'explanation',"
             " 'repair_group', 'done_criteria', 'verification_checks')"
         ),
         "tally = {'high': 0, 'med': 0, 'low': 0}",
-        "for finding in findings:",
-        "    if not isinstance(finding, dict): sys.exit(1)",
-        "    if any(not finding.get(key) for key in required): sys.exit(1)",
-        "    if finding['severity'] not in tally: sys.exit(1)",
+        "for index, finding in enumerate(findings):",
+        "    if not isinstance(finding, dict): "
+        "fail('finding-not-object', index=index, type=type(finding).__name__)",
+        "    missing = [key for key in required if not finding.get(key)]",
+        "    if missing: fail('finding-missing-keys', index=index, "
+        "finding_id=finding.get('id'), missing=missing)",
+        "    if finding['severity'] not in tally: "
+        "fail('finding-severity-invalid', index=index, "
+        "finding_id=finding.get('id'), severity=finding['severity'])",
         "    tally[finding['severity']] += 1",
-        "if (outcome == 'findings') != bool(findings): sys.exit(1)",
+        "if (outcome == 'findings') != bool(findings): "
+        "fail('artifact-outcome-findings-mismatch', outcome=outcome, "
+        "finding_count=len(findings))",
         ("nonempty = [line.strip() for line in md.splitlines() if line.strip()]"),
         "status = nonempty[-1] if nonempty else ''",
         f"if status == {review.REVIEW_STATUS_ALL_CLEAR!r}:",
-        "    sys.exit(0 if outcome == 'all-clear' else 1)",
+        "    if outcome != 'all-clear': "
+        "fail('status-outcome-mismatch', status=status, outcome=outcome)",
+        "    sys.exit(0)",
         (
             "match = re.fullmatch(r'Status: ([0-9]+) Findings "
             r"\(([0-9]+) high, ([0-9]+) med, ([0-9]+) low\)', status)"
         ),
-        "if match is None: sys.exit(1)",
+        "if match is None: fail('status-line-malformed', status=status)",
         "total, high, med, low = (int(value) for value in match.groups())",
-        (
-            "sys.exit(0 if (outcome == 'findings' and len(findings) == total "
-            "and tally['high'] == high and tally['med'] == med "
-            "and tally['low'] == low) else 1)"
-        ),
+        "if outcome != 'findings': "
+        "fail('status-outcome-mismatch', status=status, outcome=outcome)",
+        "if len(findings) != total: fail('status-total-mismatch', "
+        "status_total=total, finding_count=len(findings))",
+        "if tally['high'] != high or tally['med'] != med or tally['low'] != low: "
+        "fail('status-tally-mismatch', status_tally={'high': high, 'med': med, "
+        "'low': low}, artifact_tally=tally)",
+        "sys.exit(0)",
     ]
 )
 
@@ -610,27 +662,42 @@ def _generated_review_contract_payload(
     cwd = "."
     if repository_alias is not None:
         artifact_source = artifact_source.replace(
-            f"artifact.get('version') != {review.REVIEW_ARTIFACT_VERSION}",
-            "artifact.get('version') != "
-            f"{review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION}",
+            f"EXPECTED_VERSION = {review.REVIEW_ARTIFACT_VERSION}",
+            f"EXPECTED_VERSION = {review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION}",
             1,
         )
         aliases_literal = repr(tuple(repository_aliases))
+        severity_predicate = (
+            "    if finding['severity'] not in tally: "
+            "fail('finding-severity-invalid', index=index, "
+            "finding_id=finding.get('id'), severity=finding['severity'])"
+        )
         artifact_source = artifact_source.replace(
-            "    if finding['severity'] not in tally: sys.exit(1)",
+            severity_predicate,
             "    aliases = " + aliases_literal + "\n"
-            "    if finding.get('repo') not in aliases: sys.exit(1)\n"
+            "    if finding.get('repo') not in aliases: "
+            "fail('finding-repo-unknown', index=index, "
+            "finding_id=finding.get('id'), repo=finding.get('repo'), "
+            "aliases=list(aliases))\n"
             "    evidence = finding.get('evidence')\n"
             "    checks = finding.get('verification_checks')\n"
-            "    if not isinstance(evidence, list) or not evidence: sys.exit(1)\n"
+            "    if not isinstance(evidence, list) or not evidence: "
+            "fail('finding-evidence-empty', index=index, "
+            "finding_id=finding.get('id'))\n"
             "    if any(not isinstance(item, dict) or not any(\n"
             "        isinstance(item.get('path'), str) and "
             "item['path'].startswith(alias + ':') for alias in aliases\n"
-            "    ) for item in evidence): sys.exit(1)\n"
-            "    if not isinstance(checks, list) or not checks: sys.exit(1)\n"
+            "    ) for item in evidence): fail('finding-evidence-unqualified', "
+            "index=index, finding_id=finding.get('id'), "
+            "aliases=list(aliases))\n"
+            "    if not isinstance(checks, list) or not checks: "
+            "fail('finding-verification-checks-empty', index=index, "
+            "finding_id=finding.get('id'))\n"
             "    if any(not isinstance(item, dict) or item.get('repo') "
-            "not in aliases for item in checks): sys.exit(1)\n"
-            "    if finding['severity'] not in tally: sys.exit(1)",
+            "not in aliases for item in checks): "
+            "fail('finding-verification-check-repo-unknown', index=index, "
+            "finding_id=finding.get('id'), aliases=list(aliases))\n"
+            + severity_predicate,
             1,
         )
 
@@ -4019,8 +4086,203 @@ def _write_turn_artifacts(
     if resolution_source is not None:
         payload["resolution_source"] = resolution_source
     payload.update(runner_signals)
-    _write_json_file(paths["result"], payload)
+    # Events are always fullsynced, so a non-durable result would let the
+    # event stating this turn ended outlive the artifact it points at.
+    _write_json_file(paths["result"], payload, durable=True)
     return payload
+
+
+@dataclass(frozen=True)
+class TurnFinalization:
+    """What the runner knows once the harness process for a turn has exited.
+
+    This owns the execution half of a turn's ending: the raw harness result,
+    the plan re-read that follows it, and the artifacts written from both. It
+    exposes no way to announce accepted completion, because at this point
+    nothing has been accepted — every guard that could still reject the turn
+    runs after the object is built.
+    """
+
+    result: harnesses.HarnessResult
+    after: plans.PlanSnapshot | None
+    plan_error: str | None
+    turn_payload: dict[str, Any]
+
+
+def _finalize_turn_execution(
+    *,
+    event_path: Path,
+    persistence: _RunPersistence,
+    plan_cache: plans.PlanSnapshotCache,
+    result: harnesses.HarnessResult,
+    before: plans.PlanSnapshot,
+    paths: dict[str, Path],
+    run_id: str,
+    turn_index: int,
+    session_id: str,
+    live_turn: dict[str, Any],
+    unredacted_prompt: str | None = None,
+    pending_exception_guard: MutableMapping[str, Any] | None = None,
+) -> TurnFinalization:
+    """Collect a finished harness process into a :class:`TurnFinalization`.
+
+    The plan is re-read here because the harness edits it in place, and a
+    handoff that no longer parses is carried as ``plan_error`` rather than
+    raised: the run loop decides what an unreadable plan means. The
+    ``turn_execution_finished`` event is appended last so it never names
+    artifacts that are not on disk yet.
+    """
+    plan_error: str | None = None
+    after: plans.PlanSnapshot | None
+    try:
+        after = plan_cache.get_fresh(before.plan_dir)
+    except plans.PlanError as error:
+        after = None
+        plan_error = str(error)
+    if pending_exception_guard is not None:
+        pending_exception_guard["after"] = after
+    turn_payload = _write_turn_artifacts(
+        paths=paths,
+        result=result,
+        before=before,
+        after=after,
+        run_id=run_id,
+        turn_index=turn_index,
+        session_id=session_id,
+        live_turn=live_turn,
+        plan_error=plan_error,
+        unredacted_prompt=unredacted_prompt,
+    )
+    if pending_exception_guard is not None:
+        pending_exception_guard["turn_payload"] = turn_payload
+    execution_payload: dict[str, Any] = {
+        "run_id": run_id,
+        "turn_index": turn_index,
+        **_session_identity_payload(session_id),
+        "harness": result.name,
+        "returncode": result.returncode,
+        "timed_out": result.timed_out,
+        "interrupted": result.interrupted,
+        "aborted": result.aborted,
+        "started_at": live_turn["started_at"],
+        "finished_at": live_turn["finished_at"],
+        "duration_seconds": live_turn["duration_seconds"],
+        "artifact_dir": str(paths["artifact_dir"]),
+        "stdout_path": str(paths["stdout"]),
+        "stderr_path": str(paths["stderr"]),
+        "last_message_path": str(paths["last_message"]),
+        "result_path": str(paths["result"]),
+        "plan_readable": after is not None,
+    }
+    if plan_error is not None:
+        execution_payload["plan_error"] = plan_error
+    persistence.append_event(
+        event_path,
+        events.TURN_EXECUTION_FINISHED_EVENT,
+        execution_payload,
+    )
+    return TurnFinalization(
+        result=result,
+        after=after,
+        plan_error=plan_error,
+        turn_payload=turn_payload,
+    )
+
+
+def _replace_turn_record(payload: dict[str, Any], committed: dict[str, Any]) -> None:
+    """Swap a turn's in-flight state record for its committed form."""
+    turns = payload.setdefault("turns", [])
+    turn_index = committed.get("turn_index")
+    for position, record in enumerate(turns):
+        if isinstance(record, Mapping) and record.get("turn_index") == turn_index:
+            turns[position] = committed
+            return
+    turns.append(committed)
+
+
+def _commit_turn(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    progress: _ProgressReporter,
+    turn_payload: dict[str, Any],
+    live_turn: dict[str, Any],
+    accepted: plans.PlanSnapshot,
+    paths: dict[str, Path],
+) -> Mapping[str, Any]:
+    """Publish the single immutable statement that a turn was accepted.
+
+    This is the only place ``turn_finished`` is emitted. Every guard able to
+    reject the turn, and every runner-owned plan mutation the turn's result
+    describes, has already run, so the payload is built once from ``accepted``
+    — the snapshot the guards actually passed — rather than from the snapshot
+    read when the harness exited. ``result.json`` and the run state are written
+    first so the event can never name a result that disagrees with them, and
+    downstream consumers hear about the turn only once that event is durable.
+
+    The returned mapping is read-only: a later phase that tried to amend a
+    published turn would be rewriting a statement operators and audits have
+    already read.
+    """
+    committed = dict(turn_payload)
+    committed["after"] = _snapshot_payload(accepted)
+    committed["committed"] = True
+    with persistence.lock:
+        _write_json_file(paths["result"], committed, durable=True)
+        _replace_turn_record(payload, committed)
+        persistence.write_state(payload)
+        persistence.append_event(event_path, events.TURN_FINISHED_EVENT, committed)
+    progress.turn_finished(committed)
+    _notify_agent_mux_loop_turn_finished(payload, live_turn, persistence)
+    return MappingProxyType(committed)
+
+
+def _record_turn_rejected(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    turn_payload: Mapping[str, Any],
+    session_id: str,
+    guard: str,
+    reason: str,
+    reopened: bool = False,
+    detail: Mapping[str, Any] | None = None,
+) -> None:
+    """Record that a post-execution guard refused an already-executed turn.
+
+    Without this the only trace of a refusal is a pause reason plus a plan that
+    silently disagrees with the last turn record. ``session_reopened`` is
+    appended beside it when the guard also returned the session to pending, so
+    the reverse transition the plan made is replayable from the event stream.
+    """
+    rejection: dict[str, Any] = {
+        "run_id": payload.get("run_id"),
+        "turn_index": turn_payload.get("turn_index"),
+        **_session_identity_payload(session_id),
+        "guard": guard,
+        "reason": reason,
+        "reopened": reopened,
+    }
+    if detail:
+        rejection["detail"] = dict(detail)
+    persistence.append_event(event_path, events.TURN_REJECTED_EVENT, rejection)
+    if not reopened:
+        return
+    persistence.append_event(
+        event_path,
+        events.SESSION_REOPENED_EVENT,
+        {
+            "run_id": payload.get("run_id"),
+            "turn_index": turn_payload.get("turn_index"),
+            **_session_identity_payload(session_id),
+            "from_status": "complete",
+            "to_status": "pending",
+            "guard": guard,
+            "reason": reason,
+        },
+    )
 
 
 def _write_json_file(
@@ -5832,7 +6094,7 @@ def _record_run_control_action(
     payload: dict[str, Any],
     control_payload: dict[str, Any],
     action: run_control.RunControlAction,
-    context: dict[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
     persistence: _RunPersistence | None = None,
     event_action: str | None = None,
     message: str | None = None,
@@ -8311,7 +8573,7 @@ def _record_control_command_observed(
     payload: dict[str, Any],
     control_payload: dict[str, Any],
     command: control_queue.ControlCommand,
-    context: dict[str, Any] | None,
+    context: Mapping[str, Any] | None,
     persistence: _RunPersistence,
 ) -> None:
     """Append the delivery receipt for one accepted external control command.
@@ -8403,7 +8665,7 @@ def _degrade_abort_to_stop_after_current(
     payload: dict[str, Any],
     event_path: Path,
     control_payload: dict[str, Any],
-    context: dict[str, Any] | None,
+    context: Mapping[str, Any] | None,
     persistence: _RunPersistence,
 ) -> None:
     """Turn an abort observed with no turn in flight into a clean early stop.
@@ -8444,7 +8706,7 @@ def _drain_external_control_queue(
     payload: dict[str, Any],
     event_path: Path,
     control_payload: dict[str, Any],
-    context: dict[str, Any] | None,
+    context: Mapping[str, Any] | None,
     persistence: _RunPersistence,
     run_control_lock: threading.Lock,
     wakeup: threading.Event | None = None,
@@ -8664,7 +8926,7 @@ def _record_abort_satisfied_by_worker(
     payload: dict[str, Any],
     event_path: Path,
     control_payload: dict[str, Any],
-    context: dict[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
     persistence: _RunPersistence | None = None,
 ) -> None:
     """Clear a pending abort whose turn ended on its own inside the window."""
@@ -8692,7 +8954,7 @@ def _honor_abort_turn(
     event_path: Path,
     control_payload: dict[str, Any],
     plan_cache: plans.PlanSnapshotCache,
-    context: dict[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
     persistence: _RunPersistence | None = None,
 ) -> None:
     """Record the clean early stop that follows a killed turn.
@@ -8743,7 +9005,7 @@ def _honor_stop_after_current(
     payload: dict[str, Any],
     event_path: Path,
     control_payload: dict[str, Any],
-    context: dict[str, Any] | None = None,
+    context: Mapping[str, Any] | None = None,
     persistence: _RunPersistence | None = None,
 ) -> None:
     """Consume the pending stop request and record the run's clean early exit.
@@ -10123,7 +10385,7 @@ def _advance_review_cycle(
     session_label: str,
     session_details: dict[str, Any],
     snapshot: plans.PlanSnapshot,
-    turn_payload: dict[str, Any],
+    turn_payload: Mapping[str, Any],
     max_review_fix_cycles: int,
     plan_cache: plans.PlanSnapshotCache,
 ) -> tuple[str, plans.PlanSnapshot]:
@@ -10270,6 +10532,11 @@ def _advance_review_cycle(
         }
         for child in repair_result.children
     ]
+    # Materialization writes pending repair sessions into the durable plan
+    # even on the paths that go on to pause, so every projection from here
+    # down is built from the re-read rather than from the snapshot taken
+    # before the runner mutated the plan.
+    materialized = _reinspect_after_plan_mutation(plan_cache, snapshot)
 
     if not repair_result.ok:
         _record_review_cycle(
@@ -10280,7 +10547,7 @@ def _advance_review_cycle(
             disposition=REVIEW_CYCLE_DISPOSITION_MALFORMED,
         )
         with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
+            payload["final_snapshot"] = _snapshot_payload(materialized)
         _pause_run(
             event_path,
             payload,
@@ -10297,7 +10564,7 @@ def _advance_review_cycle(
             },
             persistence=persistence,
         )
-        return "paused", snapshot
+        return "paused", materialized
 
     if repair_result.reason == review_repair.REVIEW_REPAIR_REASON_NO_FINDINGS:
         # The verdict said findings but the artifact re-read reported none;
@@ -10334,7 +10601,7 @@ def _advance_review_cycle(
             },
             persistence=persistence,
         )
-        return "paused", snapshot
+        return "paused", materialized
 
     _record_review_cycle(
         event_path=event_path,
@@ -10347,7 +10614,7 @@ def _advance_review_cycle(
         refreshed = plan_cache.get_fresh(snapshot.plan_dir)
     except plans.PlanError as error:
         with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
+            payload["final_snapshot"] = _snapshot_payload(materialized)
         _pause_run(
             event_path,
             payload,
@@ -10359,7 +10626,7 @@ def _advance_review_cycle(
             details={**session_details, "error": str(error)},
             persistence=persistence,
         )
-        return "paused", snapshot
+        return "paused", materialized
     running_success, running_error = _write_readiness_state(
         refreshed.plan_dir, "running"
     )
@@ -10591,6 +10858,16 @@ def _enforce_mailbox_completion_guard(
         payload["final_snapshot"] = _snapshot_payload(snapshot_after)
         turn_payload["mailbox_completion_guard"] = guard
         _write_json_file(paths["result"], turn_payload)
+    _record_turn_rejected(
+        event_path=event_path,
+        payload=payload,
+        persistence=persistence,
+        turn_payload=turn_payload,
+        session_id=session_id,
+        guard="mailbox-completion-guard",
+        reason="blocked",
+        reopened=reverted is not None,
+    )
     _pause_run(
         event_path,
         payload,
@@ -10713,6 +10990,16 @@ def _enforce_review_mutation_guard(
         payload["final_snapshot"] = _snapshot_payload(snapshot_after)
         turn_payload["review_mutation_guard"] = guard_record
         _write_json_file(paths["result"], turn_payload)
+    _record_turn_rejected(
+        event_path=event_path,
+        payload=payload,
+        persistence=persistence,
+        turn_payload=turn_payload,
+        session_id=session_id,
+        guard="review-mutation-guard",
+        reason=reason,
+        reopened=reverted is not None,
+    )
     _pause_run(
         event_path,
         payload,
@@ -11325,6 +11612,16 @@ def _enforce_workspace_write_guard(
         payload["final_snapshot"] = _snapshot_payload(inspected)
         turn_payload["workspace_write_guard"] = guard_record
         _write_json_file(paths["result"], turn_payload)
+    _record_turn_rejected(
+        event_path=event_path,
+        payload=payload,
+        persistence=persistence,
+        turn_payload=turn_payload,
+        session_id=session_id,
+        guard="workspace-write-guard",
+        reason=reason,
+        reopened=reverted is not None,
+    )
     _pause_run(
         event_path,
         payload,
@@ -11406,6 +11703,16 @@ def _enforce_legacy_implementation_write_guard(
         payload["final_snapshot"] = _snapshot_payload(inspected)
         turn_payload["workspace_write_guard"] = guard_record
         _write_json_file(paths["result"], turn_payload)
+    _record_turn_rejected(
+        event_path=event_path,
+        payload=payload,
+        persistence=persistence,
+        turn_payload=turn_payload,
+        session_id=session_id,
+        guard="legacy-implementation-write-guard",
+        reason=reason,
+        reopened=reverted is not None,
+    )
     _pause_run(
         event_path,
         payload,
@@ -11511,6 +11818,17 @@ def _enforce_review_verdict(
             **repair_payload,
         }
         _write_json_file(paths["result"], turn_payload)
+    _record_turn_rejected(
+        event_path=event_path,
+        payload=payload,
+        persistence=persistence,
+        turn_payload=turn_payload,
+        session_id=session_id,
+        guard="review-verdict",
+        reason="invalid-review-verdict",
+        reopened=reverted is not None,
+        detail={"failure_reason": verdict.get("reason"), "attempt": attempt},
+    )
 
     if not exhausted and not stop_after_current_pending:
         persistence.append_event(
@@ -11593,6 +11911,16 @@ def _enforce_session_verification(
                 "error": str(error),
             }
             _write_json_file(paths["result"], turn_payload)
+        _record_turn_rejected(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            turn_payload=turn_payload,
+            session_id=session_id,
+            guard="session-verification",
+            reason="malformed-contract",
+            reopened=reverted is not None,
+        )
         _pause_run(
             event_path,
             payload,
@@ -11630,6 +11958,16 @@ def _enforce_session_verification(
                 "enforced": True,
             }
             _write_json_file(paths["result"], turn_payload)
+        _record_turn_rejected(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            turn_payload=turn_payload,
+            session_id=session_id,
+            guard="session-verification",
+            reason="no-contract",
+            reopened=reverted is not None,
+        )
         _pause_run(
             event_path,
             payload,
@@ -11742,6 +12080,16 @@ def _enforce_session_verification(
                 "reason": "interrupted",
             }
             _write_json_file(paths["result"], turn_payload)
+        _record_turn_rejected(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            turn_payload=turn_payload,
+            session_id=session_id,
+            guard="session-verification",
+            reason="interrupted",
+            reopened=reverted is not None,
+        )
         _pause_run(
             event_path,
             payload,
@@ -11773,6 +12121,17 @@ def _enforce_session_verification(
                 "error": str(error),
             }
             _write_json_file(paths["result"], turn_payload)
+        _record_turn_rejected(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            turn_payload=turn_payload,
+            session_id=session_id,
+            guard="session-verification",
+            reason="verify-failed",
+            reopened=reverted is not None,
+            detail={"error": str(error)},
+        )
         _pause_run(
             event_path,
             payload,
@@ -11864,6 +12223,17 @@ def _enforce_session_verification(
         payload["final_snapshot"] = _snapshot_payload(snapshot_after)
         turn_payload["verification"].update(repair_payload)
         _write_json_file(paths["result"], turn_payload)
+    _record_turn_rejected(
+        event_path=event_path,
+        payload=payload,
+        persistence=persistence,
+        turn_payload=turn_payload,
+        session_id=session_id,
+        guard="session-verification",
+        reason="verify-failed",
+        reopened=reverted is not None,
+        detail={"summary": summary, "fingerprint": fingerprint},
+    )
     _pause_run(
         event_path,
         payload,
@@ -11883,10 +12253,269 @@ def _reinspect_after_revert(
 ) -> plans.PlanSnapshot:
     if reverted_path is None:
         return fallback
+    return _reinspect_after_plan_mutation(plan_cache, fallback)
+
+
+def _reinspect_after_plan_mutation(
+    plan_cache: plans.PlanSnapshotCache,
+    fallback: plans.PlanSnapshot,
+) -> plans.PlanSnapshot:
+    """Re-read a plan the runner itself just rewrote.
+
+    Reverting a session or materializing repair children changes the durable
+    plan, so a projection still built from the pre-mutation snapshot describes
+    a plan that no longer exists. The pre-mutation snapshot is kept only when
+    the rewritten plan cannot be parsed at all, which is a separate failure the
+    caller already reports.
+    """
     try:
-        return plan_cache.get_fresh(plan_dir)
+        return plan_cache.get_fresh(fallback.plan_dir)
     except plans.PlanError:
         return fallback
+
+
+HANDOFF_DEFECT_MISSING_FILES = "missing-files-modified"
+HANDOFF_DEFECT_PENDING_PLACEHOLDER = "pending-files-modified-placeholder"
+HANDOFF_DEFECT_UNQUALIFIED_ENTRY = "unqualified-files-modified-entry"
+
+
+@dataclass(frozen=True)
+class _HandoffDefect:
+    """A ``Files modified`` defect the worker can repair by rewriting one line."""
+
+    code: str
+    detail: str
+    instruction: str
+
+
+def _classify_mechanical_handoff_defect(
+    snapshot: plans.PlanSnapshot,
+    session_id: str,
+    *,
+    registry_aliases: Sequence[str],
+) -> _HandoffDefect | None:
+    """Name the ``Files modified`` defect that left a completed handoff unparsable.
+
+    Reads the handoff with registry validation switched off, because the defect
+    being classified is exactly what that validation refuses. Only shapes the
+    worker can correct inside its own Handoff block are returned: an entry that
+    parses but names a repository outside the session's Writes is a scope
+    violation rather than a typo, and keeps the pause it earns.
+    """
+    session_status = next(
+        (item for item in snapshot.sessions if item.id == session_id),
+        None,
+    )
+    if session_status is None:
+        return None
+    try:
+        handoff = plans.read_session_handoff(
+            session_status.session, repository_registry=None
+        )
+    except plans.PlanError:
+        return None
+    if handoff.status != "complete":
+        return None
+    aliases = ", ".join(registry_aliases)
+    inline = handoff.files_modified[0].strip() if handoff.files_modified else ""
+    if not inline:
+        return _HandoffDefect(
+            code=HANDOFF_DEFECT_MISSING_FILES,
+            detail="the completed handoff carries no Files modified entry",
+            instruction=(
+                "list every file you changed on the Files modified line as "
+                f"comma-separated Alias:path entries (aliases: {aliases}), or "
+                "write (none) if the session changed no files"
+            ),
+        )
+    if inline == "(none yet)":
+        return _HandoffDefect(
+            code=HANDOFF_DEFECT_PENDING_PLACEHOLDER,
+            detail="the completed handoff still reads (none yet)",
+            instruction=(
+                "replace (none yet) on the Files modified line with the "
+                "Alias:path entries you actually changed "
+                f"(aliases: {aliases}), or with (none)"
+            ),
+        )
+    if inline == "(none)":
+        return None
+    for entry in (part.strip() for part in inline.split(",")):
+        try:
+            plans.parse_qualified_path(entry, registry_aliases)
+        except ValueError as error:
+            return _HandoffDefect(
+                code=HANDOFF_DEFECT_UNQUALIFIED_ENTRY,
+                detail=f"Files modified entry {entry!r} is invalid: {error}",
+                instruction=(
+                    f"rewrite the Files modified entry {entry!r} as "
+                    f"Alias:path using one of the declared aliases ({aliases})"
+                ),
+            )
+    return None
+
+
+def _preserved_review_artifact_evidence(plan_dir: Path) -> dict[str, Any] | None:
+    """Digest the review artifacts a malformed handoff says nothing about.
+
+    ``final-review.md`` and ``final-review.json`` are separate files with their
+    own validator, so a handoff that fails to parse is no reason to discard
+    them. Recording their digests and verdict before the session is re-run
+    makes the correction turn accountable for leaving them intact.
+    """
+    output_path = review.final_review_output_path(plan_dir)
+    artifact_path = review.final_review_artifact_path(plan_dir)
+    if not output_path.is_file() and not artifact_path.is_file():
+        return None
+    evidence: dict[str, Any] = {}
+    if output_path.is_file():
+        evidence["review_output_path"] = str(output_path)
+        with contextlib.suppress(OSError):
+            evidence["review_output_sha256"] = review.final_review_output_sha256(
+                plan_dir
+            )
+    if artifact_path.is_file():
+        evidence["review_artifact_path"] = str(artifact_path)
+        with contextlib.suppress(OSError):
+            evidence["review_artifact_sha256"] = review.final_review_artifact_sha256(
+                plan_dir
+            )
+    verdict = review.load_review_verdict(plan_dir)
+    evidence["review_verdict_ok"] = bool(verdict.get("ok"))
+    if verdict.get("ok"):
+        evidence["review_outcome"] = verdict.get("outcome")
+        evidence["review_total_findings"] = verdict.get("total_findings")
+    else:
+        evidence["review_verdict_reason"] = verdict.get("reason")
+    return evidence
+
+
+def _handoff_correction_attempt(event_path: str | Path, session_id: str) -> int:
+    """Return the 1-indexed attempt number the next correction would be."""
+    try:
+        text = Path(event_path).read_text(encoding="utf-8")
+    except OSError:
+        return 1
+    priors = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("name") != events.TURN_HANDOFF_CORRECTION_EVENT:
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        recorded = payload.get("session_id", payload.get("session"))
+        if str(recorded) != str(session_id):
+            continue
+        priors += 1
+    return priors + 1
+
+
+def _handoff_correction_note(
+    defect: _HandoffDefect, *, preserved_review: Mapping[str, Any] | None
+) -> str:
+    note = (
+        f"handoff correction required: {defect.detail}. The plan could not be "
+        f"inspected with this handoff in place. To fix it, {defect.instruction}. "
+        "Change nothing else: the session's work is already done and its status "
+        "was reverted to pending only so this line can be corrected."
+    )
+    if preserved_review is None:
+        return note
+    return (
+        f"{note} The review artifacts in this plan directory are valid on their "
+        "own terms and were preserved; leave them exactly as they are."
+    )
+
+
+def _correct_malformed_handoff(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    plan_cache: plans.PlanSnapshotCache,
+    before: plans.PlanSnapshot,
+    workspace: workspaces.ResolvedWorkspace | None,
+    run_id: str,
+    turn_index: int,
+    session_id: str,
+    plan_error: str | None,
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+) -> tuple[plans.PlanSnapshot | None, dict[str, Any] | None]:
+    """Give a mechanically malformed handoff one bounded chance to be corrected.
+
+    Returns the re-inspected snapshot when a correction turn was armed, and the
+    evidence describing the defect whenever one was recognized — including the
+    exhausted case, so the pause that follows says what was tried instead of
+    only that the plan would not parse.
+    """
+    if workspace is None:
+        return None, None
+    session_path = _session_path_in_snapshot(before, session_id)
+    if session_path is None or plan_error is None:
+        return None, None
+    if session_path.name not in plan_error:
+        return None, None
+    defect = _classify_mechanical_handoff_defect(
+        before, session_id, registry_aliases=workspace.registry.aliases
+    )
+    if defect is None:
+        return None, None
+    attempt = _handoff_correction_attempt(event_path, session_id)
+    preserved_review = _preserved_review_artifact_evidence(before.plan_dir)
+    evidence: dict[str, Any] = {
+        "run_id": run_id,
+        "turn_index": turn_index,
+        **_session_identity_payload(session_id),
+        "defect": defect.code,
+        "detail": defect.detail,
+        "plan_error": plan_error,
+        "attempt": attempt,
+        "max_attempts": MAX_HANDOFF_CORRECTION_ATTEMPTS,
+        "session_path": str(session_path),
+    }
+    if preserved_review is not None:
+        evidence["preserved_review_artifacts"] = preserved_review
+    if attempt > MAX_HANDOFF_CORRECTION_ATTEMPTS:
+        evidence["exhausted"] = True
+        return None, evidence
+    reverted = _revert_session_status_to_pending(
+        before,
+        session_id,
+        failure_note=_handoff_correction_note(
+            defect, preserved_review=preserved_review
+        ),
+    )
+    if reverted is None:
+        evidence["exhausted"] = True
+        return None, evidence
+    try:
+        corrected = plan_cache.get_fresh(before.plan_dir)
+    except plans.PlanError as error:
+        # The revert did not restore a readable plan, so something other than
+        # this handoff is also broken and no correction turn can be launched.
+        evidence["exhausted"] = True
+        evidence["revert_plan_error"] = str(error)
+        return None, evidence
+    evidence["exhausted"] = False
+    with persistence.lock:
+        turn_payload["handoff_correction"] = evidence
+        _write_json_file(paths["result"], turn_payload)
+        payload["final_snapshot"] = _snapshot_payload(corrected)
+        persistence.append_event(
+            event_path, events.TURN_HANDOFF_CORRECTION_EVENT, evidence
+        )
+        persistence.write_state(payload)
+    return corrected, evidence
 
 
 def _append_handoff_note(
@@ -14410,33 +15039,30 @@ def _run_locked(
                         payload["normalized_review_handoffs"] = [
                             str(path) for path in normalized_review_handoffs
                         ]
-            plan_error = None
-            try:
-                after = plan_cache.get_fresh(before.plan_dir)
-            except plans.PlanError as error:
-                after = None
-                plan_error = str(error)
-            if pending_exception_guard is not None:
-                pending_exception_guard["after"] = after
-            turn_payload = _write_turn_artifacts(
-                paths=paths,
+            finalization = _finalize_turn_execution(
+                event_path=event_path,
+                persistence=persistence,
+                plan_cache=plan_cache,
                 result=result,
                 before=before,
-                after=after,
+                paths=paths,
                 run_id=run_id,
                 turn_index=turn_index,
                 session_id=session_id,
                 live_turn=live_turn_payload,
-                plan_error=plan_error,
                 unredacted_prompt=(
                     prompt if use_reply_prompt or use_resolution_prompt else None
                 ),
+                pending_exception_guard=pending_exception_guard,
             )
-            if pending_exception_guard is not None:
-                pending_exception_guard["turn_payload"] = turn_payload
+            after = finalization.after
+            plan_error = finalization.plan_error
+            turn_payload = finalization.turn_payload
+            # The turn enters run state as executed-but-unaccepted. Every guard
+            # below may still amend or refuse it; `_commit_turn` is what
+            # replaces this record with the published one.
             with persistence.lock:
                 payload["turns"].append(turn_payload)
-                persistence.append_event(event_path, "turn_finished", turn_payload)
                 _append_process_sweep_event(
                     event_path=event_path,
                     persistence=persistence,
@@ -14449,10 +15075,6 @@ def _run_locked(
                     },
                 )
                 persistence.write_state(payload)
-            progress.turn_finished(turn_payload)
-            _notify_agent_mux_loop_turn_finished(
-                payload, live_turn_payload, persistence
-            )
 
             if abort_signal.armed and not result.aborted:
                 # The worker ended the turn inside the grace window, so nothing
@@ -14612,14 +15234,47 @@ def _run_locked(
                     )
                 break
             if after is None:
+                corrected, correction_evidence = _correct_malformed_handoff(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    plan_cache=plan_cache,
+                    before=before,
+                    workspace=workspace,
+                    run_id=run_id,
+                    turn_index=turn_index,
+                    session_id=session_id,
+                    plan_error=plan_error,
+                    turn_payload=turn_payload,
+                    paths=paths,
+                )
+                if corrected is not None:
+                    snapshot = corrected
+                    continue
+                malformed_details: dict[str, Any] = {
+                    "error": plan_error,
+                    **session_details,
+                }
+                if correction_evidence is not None:
+                    malformed_details["handoff_correction"] = correction_evidence
                 with persistence.lock:
                     payload["final_snapshot"] = _snapshot_payload(before)
+                _record_turn_rejected(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    turn_payload=turn_payload,
+                    session_id=session_id,
+                    guard="plan-inspection",
+                    reason="malformed-plan",
+                    detail={"error": plan_error},
+                )
                 _pause_run(
                     event_path,
                     payload,
                     reason="malformed-plan",
                     message="plan could not be inspected after the harness turn",
-                    details={"error": plan_error, **session_details},
+                    details=malformed_details,
                     persistence=persistence,
                 )
                 break
@@ -14629,6 +15284,16 @@ def _run_locked(
                 reason, message, details = invalid_pause
                 with persistence.lock:
                     payload["final_snapshot"] = _snapshot_payload(after)
+                _record_turn_rejected(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    turn_payload=turn_payload,
+                    session_id=session_id,
+                    guard="plan-status-validity",
+                    reason=reason,
+                    detail=details,
+                )
                 _pause_run(
                     event_path,
                     payload,
@@ -15014,6 +15679,19 @@ def _run_locked(
                     payload["expected_status_changes"] = list(expected_change)
                     payload["observed_status_changes"] = []
                     payload["final_snapshot"] = _snapshot_payload(after)
+                _record_turn_rejected(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    turn_payload=turn_payload,
+                    session_id=session_id,
+                    guard="status-change",
+                    reason="no-status-change",
+                    detail={
+                        "expected_status_changes": list(expected_change),
+                        "observed_status_changes": [],
+                    },
+                )
                 _pause_run(
                     event_path,
                     payload,
@@ -15032,6 +15710,19 @@ def _run_locked(
                     payload["expected_status_changes"] = list(expected_change)
                     payload["observed_status_changes"] = list(status_changes)
                     payload["final_snapshot"] = _snapshot_payload(after)
+                _record_turn_rejected(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    turn_payload=turn_payload,
+                    session_id=session_id,
+                    guard="status-change",
+                    reason="multiple-status-changes",
+                    detail={
+                        "expected_status_changes": list(expected_change),
+                        "observed_status_changes": list(status_changes),
+                    },
+                )
                 _pause_run(
                     event_path,
                     payload,
@@ -15051,6 +15742,19 @@ def _run_locked(
                     payload["expected_status_changes"] = list(expected_change)
                     payload["observed_status_changes"] = list(status_changes)
                     payload["final_snapshot"] = _snapshot_payload(after)
+                _record_turn_rejected(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    turn_payload=turn_payload,
+                    session_id=session_id,
+                    guard="status-change",
+                    reason="unexpected-status-change",
+                    detail={
+                        "expected_status_changes": list(expected_change),
+                        "observed_status_changes": list(status_changes),
+                    },
+                )
                 _pause_run(
                     event_path,
                     payload,
@@ -15167,6 +15871,16 @@ def _run_locked(
             except plans.PlanError as error:
                 with persistence.lock:
                     payload["final_snapshot"] = _snapshot_payload(after)
+                _record_turn_rejected(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    turn_payload=turn_payload,
+                    session_id=session_id,
+                    guard="ledger-sync",
+                    reason="malformed-plan",
+                    detail={"error": str(error)},
+                )
                 _pause_run(
                     event_path,
                     payload,
@@ -15185,6 +15899,16 @@ def _run_locked(
                 except plans.PlanError as error:
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(after)
+                    _record_turn_rejected(
+                        event_path=event_path,
+                        payload=payload,
+                        persistence=persistence,
+                        turn_payload=turn_payload,
+                        session_id=session_id,
+                        guard="ledger-sync",
+                        reason="malformed-plan",
+                        detail={"error": str(error)},
+                    )
                     _pause_run(
                         event_path,
                         payload,
@@ -15236,6 +15960,16 @@ def _run_locked(
                 if failed_commit is not None or commit_error is not None:
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(after)
+                    _record_turn_rejected(
+                        event_path=event_path,
+                        payload=payload,
+                        persistence=persistence,
+                        turn_payload=turn_payload,
+                        session_id=session_id,
+                        guard="session-commit",
+                        reason="commit-failed",
+                        detail={"error": commit_error},
+                    )
                     _pause_run(
                         event_path,
                         payload,
@@ -15253,12 +15987,23 @@ def _run_locked(
                     )
                     break
 
+            committed_turn = _commit_turn(
+                event_path=event_path,
+                payload=payload,
+                persistence=persistence,
+                progress=progress,
+                turn_payload=turn_payload,
+                live_turn=live_turn_payload,
+                accepted=after,
+                paths=paths,
+            )
+
             with persistence.lock:
                 payload["completed_sessions"].append(_session_compat_value(session_id))
                 payload.setdefault("completed_session_ids", []).append(session_id)
                 if is_review_session:
                     payload["review_completed"] = True
-                    review_verdict = turn_payload.get("review_verdict")
+                    review_verdict = committed_turn.get("review_verdict")
                     if isinstance(review_verdict, dict):
                         payload["review_verdict"] = {
                             "status_line": review_verdict["status_line"],
@@ -15285,7 +16030,7 @@ def _run_locked(
                     session_label=session_label,
                     session_details=session_details,
                     snapshot=snapshot,
-                    turn_payload=turn_payload,
+                    turn_payload=committed_turn,
                     max_review_fix_cycles=max_review_fix_cycles,
                     plan_cache=plan_cache,
                 )
@@ -15318,7 +16063,7 @@ def _run_locked(
                 payload=payload,
                 event_path=event_path,
                 control_payload=control_payload,
-                context=turn_payload,
+                context=committed_turn,
                 persistence=persistence,
                 run_control_lock=run_control_lock,
                 wakeup=wakeup,
@@ -15338,7 +16083,7 @@ def _run_locked(
                         payload=payload,
                         event_path=event_path,
                         control_payload=control_payload,
-                        context=turn_payload,
+                        context=committed_turn,
                         persistence=persistence,
                     )
             if stop_now:

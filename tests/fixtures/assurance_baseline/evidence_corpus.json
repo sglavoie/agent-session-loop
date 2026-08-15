@@ -1,0 +1,378 @@
+{
+  "schema_version": 1,
+  "description": "Minimum evidence shape required to reproduce each open canonical issue at plan time. Paraphrased from the assurance projection: no private log text, run identifiers, digests, or absolute paths. Artifact and record names are relative run-directory names and event kinds.",
+  "artifact_vocabulary": [
+    "events.jsonl",
+    "final-review.json",
+    "final-review.md",
+    "last-message.txt",
+    "manifest.md",
+    "progress.md",
+    "result.json",
+    "session-N.expand.md",
+    "session-N.md",
+    "state.json",
+    "supervisor-audit-input.json",
+    "supervisor-audit.json"
+  ],
+  "record_vocabulary": [
+    "agent_mux_delivery",
+    "preflight_skipped",
+    "reply_provided",
+    "resolution_consumed",
+    "review_cycle",
+    "review_repair_reopened",
+    "run_paused",
+    "turn_finished",
+    "turn_heartbeat",
+    "turn_started",
+    "verification_check_finished",
+    "verification_check_skipped",
+    "verification_finished",
+    "workspace_write_scope_repair"
+  ],
+  "fixtures": [
+    {
+      "issue_id": "ASI-1",
+      "defect_class": "degraded optional tooling left unrecorded",
+      "artifacts": ["events.jsonl", "state.json"],
+      "required_records": ["turn_started"],
+      "required_fields": ["harness.diagnostics", "readiness_gate"],
+      "observed": "Every turn opens with a repeated transport failure against an optional tool endpoint and no record captures the degradation.",
+      "expected": "A bounded structured diagnostic records the optional-tool degradation without failing an otherwise authorized run."
+    },
+    {
+      "issue_id": "ASI-4",
+      "defect_class": "terminal artifacts missing or out of order",
+      "artifacts": ["events.jsonl", "result.json"],
+      "required_records": ["turn_finished"],
+      "required_fields": ["result.path"],
+      "observed": "A finished turn has no readable result document while the event stream already claims the turn completed.",
+      "expected": "Every finished turn has a readable, ordered terminal artifact set persisted before completion is announced."
+    },
+    {
+      "issue_id": "ASI-6",
+      "defect_class": "review continuation contradicts its own blocker",
+      "artifacts": ["state.json"],
+      "required_records": [],
+      "required_fields": ["review_resume.eligible", "review_resume.blocker", "review_resume.action"],
+      "observed": "A non-bypassable repository-footprint failure paused the run while review continuation reported eligible true with a null blocker.",
+      "expected": "One authoritative evaluation makes eligible true impossible while a repository blocker exists."
+    },
+    {
+      "issue_id": "ASI-10",
+      "defect_class": "evidence no deterministic check classifies",
+      "artifacts": ["events.jsonl", "supervisor-audit.json"],
+      "required_records": ["turn_finished"],
+      "required_fields": ["checks"],
+      "observed": "A finished-turn record reports a failure that no deterministic check accounts for.",
+      "expected": "Every declared evidence family is accounted for by a deterministic check or an explicit recorded omission."
+    },
+    {
+      "issue_id": "ASI-11",
+      "defect_class": "expansion documents collected as malformed session scopes",
+      "artifacts": ["supervisor-audit.json", "session-N.expand.md"],
+      "required_records": [],
+      "required_fields": ["scopes.available", "scopes.reason"],
+      "observed": "Expansion documents are collected as session scopes and reported unavailable with reason malformed.",
+      "expected": "Scope collection covers only real session documents and excludes expansion documents."
+    },
+    {
+      "issue_id": "ASI-12",
+      "defect_class": "repair materialization blocked by a stale progress journal",
+      "artifacts": ["events.jsonl", "progress.md", "state.json"],
+      "required_records": ["review_repair_reopened", "run_paused"],
+      "required_fields": ["pause.reason"],
+      "observed": "A repair session materialized successfully and the run then paused solely because the progress journal was stale.",
+      "expected": "A stale progress journal is mechanically repaired when plan state proves the repair safe."
+    },
+    {
+      "issue_id": "ASI-14",
+      "defect_class": "semantic audit unjudged after workspace mutation",
+      "artifacts": ["supervisor-audit.json"],
+      "required_records": [],
+      "required_fields": ["availability.reason_class"],
+      "observed": "The semantic audit could not be judged because the auditor mutated the workspace.",
+      "expected": "Mutation detection stays fail-closed and retries only in a fresh restricted attempt, never restoring or hiding the mutation."
+    },
+    {
+      "issue_id": "ASI-15",
+      "defect_class": "rejected turn marked non-anomalous",
+      "artifacts": ["result.json"],
+      "required_records": [],
+      "required_fields": ["result.anomalous", "result.status_result", "result.plan_error", "result.after"],
+      "observed": "A turn recording a malformed-plan status with a plan error, no after snapshot, and no completed session is marked anomalous false.",
+      "expected": "Anomaly classification derives from the accepted turn snapshot so a rejected turn cannot be recorded as normal."
+    },
+    {
+      "issue_id": "ASI-16",
+      "defect_class": "completion event digests disagree with the stored result",
+      "artifacts": ["events.jsonl", "result.json"],
+      "required_records": ["turn_finished"],
+      "required_fields": ["turn_finished.after"],
+      "observed": "Persisted completion records carry pre-ledger after digests that disagree with their stored turn results.",
+      "expected": "Completion is emitted only after the result and state are durable, and its digests match the persisted result."
+    },
+    {
+      "issue_id": "ASI-19",
+      "defect_class": "undeclared write outside the registered workspace",
+      "artifacts": ["events.jsonl", "result.json"],
+      "required_records": ["turn_finished", "workspace_write_scope_repair"],
+      "required_fields": ["workspace_write_guard.write_aliases", "workspace_write_guard.passed"],
+      "observed": "A session declaring no writable repository aliases reported changing a home-directory file and installing a binary, and the write guard still passed.",
+      "expected": "Writes declared outside a registered authorized alias are rejected and reported as external-write detection."
+    },
+    {
+      "issue_id": "ASI-23",
+      "defect_class": "success claimed over skipped required checks",
+      "artifacts": ["events.jsonl", "supervisor-audit.json"],
+      "required_records": ["verification_check_skipped", "verification_finished"],
+      "required_fields": ["check.expected"],
+      "observed": "A run reports success while required verification checks recorded themselves as skipped.",
+      "expected": "Only unexpected or required skipped checks count as success contradictions; expected conditional diagnostics stay neutral."
+    },
+    {
+      "issue_id": "ASI-24",
+      "defect_class": "stale action state survives a consumed reply",
+      "artifacts": ["events.jsonl", "state.json"],
+      "required_records": ["reply_provided", "resolution_consumed", "turn_finished"],
+      "required_fields": ["status.action_required"],
+      "observed": "After a reply cleared the mailbox wait and the next turn completed, the unpaused status still projects the earlier action record as current.",
+      "expected": "Action state derives from the current unresolved pause only and clears when its reply is consumed."
+    },
+    {
+      "issue_id": "ASI-27",
+      "defect_class": "owner-dependent pause projected as unrecoverable and unattended",
+      "artifacts": ["events.jsonl", "state.json"],
+      "required_records": ["run_paused"],
+      "required_fields": ["pause_policy.recoverable", "pause_policy.requires_user"],
+      "observed": "A pause whose worker and pause event both say the operator must choose projects recoverable false and requires_user false.",
+      "expected": "One central mapping derives recoverable and requires_user from the pause reason."
+    },
+    {
+      "issue_id": "ASI-30",
+      "defect_class": "session reopened without a recorded transition",
+      "artifacts": ["events.jsonl", "state.json"],
+      "required_records": ["turn_finished"],
+      "required_fields": ["plan.sessions.state", "status.pending"],
+      "observed": "The event stream records a session reaching complete with zero pending while the final plan and status projections restore it to pending with no event recording the reversal.",
+      "expected": "Every reopen of a previously complete session emits its own event so replay matches the final projection."
+    },
+    {
+      "issue_id": "ASI-32",
+      "defect_class": "semantic audit unjudged after malformed output",
+      "artifacts": ["supervisor-audit.json"],
+      "required_records": [],
+      "required_fields": ["availability.reason_class"],
+      "observed": "The semantic audit could not be judged because the auditor returned malformed output.",
+      "expected": "Malformed auditor output triggers a bounded correction carrying the exact schema and validator detail."
+    },
+    {
+      "issue_id": "ASI-33",
+      "defect_class": "semantic audit unjudged after incomplete lane coverage",
+      "artifacts": ["supervisor-audit.json"],
+      "required_records": [],
+      "required_fields": ["availability.reason_class", "lanes"],
+      "observed": "The semantic audit could not be judged because lane coverage was incomplete, without naming what prevented it.",
+      "expected": "Missing lane records are distinguished from legitimately unavailable lanes and the blocking check or evidence omission is reported."
+    },
+    {
+      "issue_id": "ASI-34",
+      "defect_class": "unrecoverable pause on a mechanically malformed handoff",
+      "artifacts": ["events.jsonl", "result.json", "session-N.md"],
+      "required_records": ["turn_finished", "run_paused"],
+      "required_fields": ["handoff.files_modified", "result.after", "result.status_result"],
+      "observed": "A harness exited zero and reported the session complete, but an unqualified files-modified entry made the post-turn snapshot null and paused the run with no correction attempt.",
+      "expected": "A mechanically malformed or incomplete handoff receives one bounded correction attempt before an unrecoverable pause."
+    },
+    {
+      "issue_id": "ASI-35",
+      "defect_class": "reply origin erased by redaction",
+      "artifacts": ["events.jsonl", "state.json"],
+      "required_records": ["reply_provided"],
+      "required_fields": ["reply.origin"],
+      "observed": "A reply keeps its run, session, turn, relative path and length while its origin is emitted as an unparsable placeholder.",
+      "expected": "Reply origin is preserved as an allowlisted enum value such as argv, stdin, or mailbox."
+    },
+    {
+      "issue_id": "ASI-42",
+      "defect_class": "linked worktree mutation unobserved",
+      "artifacts": ["result.json", "session-N.md"],
+      "required_records": ["turn_finished"],
+      "required_fields": ["workspace_write_guard.repositories"],
+      "observed": "A handoff states the turn detached and restored a linked worktree of a registered repository while no guard evidence recorded the mutation.",
+      "expected": "Linked worktrees are discovered from porcelain worktree metadata and their ref and status movement is snapshotted before and after the turn."
+    },
+    {
+      "issue_id": "ASI-43",
+      "defect_class": "valid review verdict discarded with its handoff",
+      "artifacts": ["final-review.json", "final-review.md", "last-message.txt"],
+      "required_records": ["review_cycle"],
+      "required_fields": ["review.verdict"],
+      "observed": "A review turn exited zero and wrote both canonical review artifacts, yet no verdict was recorded because the surrounding handoff metadata was incomplete.",
+      "expected": "A valid canonical review artifact is parsed and preserved even when auxiliary handoff metadata is missing."
+    },
+    {
+      "issue_id": "ASI-53",
+      "defect_class": "progress journal absent from the evidence index",
+      "artifacts": ["progress.md", "supervisor-audit-input.json"],
+      "required_records": [],
+      "required_fields": ["evidence"],
+      "observed": "A turn records the progress journal as appended and both packets instruct the agent to read it, yet it is absent from the audit evidence index.",
+      "expected": "The progress journal is indexed as evidence or an explicit omission is recorded."
+    },
+    {
+      "issue_id": "ASI-69",
+      "defect_class": "whole-tree gate never rerun after later mutations",
+      "artifacts": ["events.jsonl", "result.json"],
+      "required_records": ["verification_check_finished", "verification_finished"],
+      "required_fields": ["verification.checks"],
+      "observed": "The only whole-tree gate executed once, before eight later repair sessions mutated the tree, and no baseline gate ran after the final repair.",
+      "expected": "Baseline verification runs after the final repair mutation and before any all-clear."
+    },
+    {
+      "issue_id": "ASI-72",
+      "defect_class": "CPU progress asserted without a usable delta",
+      "artifacts": ["events.jsonl"],
+      "required_records": ["turn_heartbeat"],
+      "required_fields": ["hang_cpu_progress.cpu_delta_seconds", "hang_cpu_progress.confirm_samples", "hang_cpu_progress.progressing"],
+      "observed": "A heartbeat carrying a null CPU delta and zero confirming samples still reports progressing false.",
+      "expected": "CPU progress is null when no usable delta exists."
+    },
+    {
+      "issue_id": "ASI-78",
+      "defect_class": "final projection frozen before repair materialization",
+      "artifacts": ["events.jsonl", "state.json"],
+      "required_records": ["run_paused", "review_repair_reopened"],
+      "required_fields": ["final_snapshot", "plan.pending"],
+      "observed": "The durable plan contains a pending repair session named by the pause event while the persisted final projection remains the pre-materialization snapshot.",
+      "expected": "A fresh plan snapshot is reparsed after any repair materialization so the projection matches the durable plan."
+    },
+    {
+      "issue_id": "ASI-79",
+      "defect_class": "runner status inferred from a transcript stream",
+      "artifacts": ["last-message.txt", "result.json"],
+      "required_records": [],
+      "required_fields": ["runner_status", "runner_status_source"],
+      "observed": "A turn was recorded complete with its status read from the harness error stream rather than from the agent's final message.",
+      "expected": "Status markers are read only from the final message or a dedicated structured control channel, and missing status is unreported."
+    },
+    {
+      "issue_id": "ASI-80",
+      "defect_class": "observed harness model never projected",
+      "artifacts": ["result.json", "state.json"],
+      "required_records": [],
+      "required_fields": ["model", "model_source"],
+      "observed": "Persisted state and every implementation turn report a default model label with source unresolved while the harness logs identify the executing model.",
+      "expected": "Requested and observed models are recorded separately and the harness-reported observed model is preferred over an unresolved default label."
+    },
+    {
+      "issue_id": "ASI-81",
+      "defect_class": "run authorized by a reused reduced readiness report",
+      "artifacts": ["events.jsonl", "state.json"],
+      "required_records": ["preflight_skipped"],
+      "required_fields": ["readiness_gate.core_skipped"],
+      "observed": "A run was authorized by a reused, reduced readiness report whose turn-budget finding no longer described the changed plan.",
+      "expected": "Core readiness reruns before any newly materialized session launches, and the reuse, repair, or rerun reason is persisted."
+    },
+    {
+      "issue_id": "ASI-82",
+      "defect_class": "exhausted repair group reported as all-complete",
+      "artifacts": ["final-review.json", "state.json"],
+      "required_records": [],
+      "required_fields": ["status.ok", "status.reason"],
+      "observed": "A run terminated with an exhausted repair group and two unresolved high-severity findings while status reported ok true with reason all-complete.",
+      "expected": "All-complete is reserved for a fresh zero-pending plan with successful required verification and no unresolved terminal blocker."
+    },
+    {
+      "issue_id": "ASI-83",
+      "defect_class": "repair gated only by checks the reviewer authored",
+      "artifacts": ["events.jsonl", "session-N.md"],
+      "required_records": ["verification_check_finished"],
+      "required_fields": ["verification.checks"],
+      "observed": "Repair sessions were gated only by verification checks authored by the same review harness that filed the findings.",
+      "expected": "Reviewer-authored checks add diagnostics or focused proof but never replace the plan-owned baseline gates."
+    },
+    {
+      "issue_id": "ASI-85",
+      "defect_class": "finding churn hides review non-convergence",
+      "artifacts": ["final-review.json", "state.json"],
+      "required_records": ["review_cycle"],
+      "required_fields": ["review_cycle.repeated_findings"],
+      "observed": "Every review cycle reports an empty repeated-findings set because each cycle replaced all textual fingerprints.",
+      "expected": "Unresolved findings are tracked by canonical assurance identity and finding churn counts as non-progress."
+    },
+    {
+      "issue_id": "ASI-91",
+      "defect_class": "substring redaction erases an alias list",
+      "artifacts": ["result.json"],
+      "required_records": [],
+      "required_fields": ["workspace_write_guard.authorized_aliases"],
+      "observed": "The authorized alias list is redacted while the sibling read and write alias lists are recorded in full.",
+      "expected": "Redaction matches secret key path segments rather than substrings, so an alias list is not redacted."
+    },
+    {
+      "issue_id": "ASI-94",
+      "defect_class": "review turn rendered an implementation packet",
+      "artifacts": ["last-message.txt", "session-N.md"],
+      "required_records": [],
+      "required_fields": ["packet.role"],
+      "observed": "Turns recorded as review sessions on the review harness received packets instructing the agent to implement the session.",
+      "expected": "Implementation and review packets are separate templates and reviewers receive read-only verdict instructions."
+    },
+    {
+      "issue_id": "ASI-96",
+      "defect_class": "idle accounting absorbs active verification",
+      "artifacts": ["result.json"],
+      "required_records": [],
+      "required_fields": ["idle_seconds_since_previous_turn"],
+      "observed": "Reported idle seconds between turns are almost exactly the duration of the preceding turn's verification checks.",
+      "expected": "Idle time is measured from the end of the preceding turn's active verification and finalization."
+    },
+    {
+      "issue_id": "ASI-105",
+      "defect_class": "failed gate reported without usable diagnostics",
+      "artifacts": ["events.jsonl", "state.json"],
+      "required_records": ["verification_check_finished", "run_paused"],
+      "required_fields": ["check.stdout", "check.stderr", "pause.detail"],
+      "observed": "A review-output gate exited nonzero with zero-byte output streams while the pause reported only a command failure and a truncated validator description.",
+      "expected": "Validator predicate failures return structured diagnostics instead of empty output."
+    },
+    {
+      "issue_id": "ASI-113",
+      "defect_class": "completion announced before its guards ran",
+      "artifacts": ["events.jsonl", "state.json"],
+      "required_records": ["turn_finished", "agent_mux_delivery"],
+      "required_fields": ["mailbox_completion_guard"],
+      "observed": "Completion was emitted and acknowledged for a session before the mailbox completion guard failed and reverted that session.",
+      "expected": "The mailbox completion guard runs before completion so the completion event is emitted only for an accepted turn."
+    },
+    {
+      "issue_id": "ASI-114",
+      "defect_class": "unanswered blocking question projected as unattended",
+      "artifacts": ["events.jsonl", "state.json"],
+      "required_records": ["run_paused"],
+      "required_fields": ["status.action_required", "pause_policy.requires_user"],
+      "observed": "A run paused on an unanswered blocking mailbox question while terminal status reported a null action record and requires_user false.",
+      "expected": "An actionable blocking question projects requires_user true with a matching action record."
+    },
+    {
+      "issue_id": "ASI-119",
+      "defect_class": "turn mutated another session's plan artifact",
+      "artifacts": ["result.json", "session-N.expand.md"],
+      "required_records": ["turn_finished"],
+      "required_fields": ["plan.artifact_digests"],
+      "observed": "A packet fixed one selected session while the harness log records modifying another session's expansion document, and the turn was still accepted.",
+      "expected": "Plan artifacts are hashed before the turn and mutation of another session or expansion document is rejected."
+    },
+    {
+      "issue_id": "ASI-123",
+      "defect_class": "duplicate canonical issue for one model-projection defect",
+      "artifacts": ["state.json"],
+      "required_records": [],
+      "required_fields": ["model", "model_source"],
+      "observed": "A second canonical issue describes the same unresolved model-projection defect already tracked by an earlier canonical issue.",
+      "expected": "Reconciliation binds the duplicate to the earlier canonical issue through an explicitly reviewed manifest, never automatically."
+    }
+  ]
+}

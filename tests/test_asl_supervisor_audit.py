@@ -14,9 +14,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from agent_session_loop import (
+    artifacts,
     assurance_ledger,
+    assurance_projection,
     cli,
     events,
     harnesses,
@@ -28,12 +31,24 @@ from agent_session_loop import (
     supervisor_audit,
 )
 from agent_session_loop.assurance_models import (
+    AUDIT_MARKDOWN_FILENAME,
+    AUDIT_REPORT_FILENAME,
     MAX_AUDIT_ATTEMPTS,
     RUBRIC_LANES,
     AssuranceError,
+    AuditAttempt,
     AuditRole,
     DeterministicResult,
+    EvidenceRef,
+    Finding,
+    IssueObservation,
+    LaneEvidence,
+    SupervisorAudit,
+    audit_artifact_name,
+    canonical_json_bytes,
+    issue_id_number,
 )
+from agent_session_loop.assurance_projection import CatalogEntry, IdentityCatalog
 from tests.support import init_git_repo, write_plan
 
 RUN_ID = "20260810T101112123456Z-4242"
@@ -2209,6 +2224,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             "summary": "The registry named a repository the manifest never declared.",
             "recommendation": "Re-derive the registry from the manifest before a run.",
             "evidence": [locator],
+            "identity": {"decision": "new"},
         }
         finding.update(overrides)
         return finding
@@ -2559,7 +2575,9 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bundle = self._bundle(self._history(Path(tmp)))
 
-            prompt = supervisor_audit.build_audit_prompt(bundle)
+            prompt = supervisor_audit.build_audit_prompt(
+                bundle, catalog=supervisor_audit.EMPTY_AGENT_CATALOG
+            )
 
             self.assertLess(
                 prompt.index("Analyze the operational evidence below first"),
@@ -2599,7 +2617,11 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
                     bundle=bundle,
                     results=results,
                     generated_at=FIXED_CLOCK.isoformat(),
-                    agent=supervisor_audit.parse_agent_audit(reply, declared=declared),
+                    agent=supervisor_audit.parse_agent_audit(
+                        reply,
+                        declared=declared,
+                        catalog=supervisor_audit.EMPTY_AGENT_CATALOG,
+                    ),
                 )
                 report, markdown = supervisor_audit.write_audit_reports(
                     directory, audit, durable=False
@@ -2662,6 +2684,874 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
         covered = {spec.lane for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS}
 
         self.assertEqual(set(RUBRIC_LANES), covered)
+
+
+class AgentIdentityDecisionTests(_RunHistoryFixture, unittest.TestCase):
+    """Every finding states one identity, and only from the supplied catalog."""
+
+    _lanes = AgentAuditEngineTests._lanes
+    _finding = AgentAuditEngineTests._finding
+    _reply = AgentAuditEngineTests._reply
+    _role = AgentAuditEngineTests._role
+    _run = AgentAuditEngineTests._run
+    _self_reviewed = AgentAuditEngineTests._self_reviewed
+
+    def _open_issue(self, state_dir: Path, *, invariant: str) -> str:
+        """Open one canonical issue in the ledger the audit will read."""
+        record = assurance_ledger.append_issue_observation(
+            IssueObservation(
+                run_id=RUN_ID,
+                finding=Finding(
+                    category="identity",
+                    component="workspace-registry",
+                    invariant_key=invariant,
+                    lane="identity-authority",
+                    severity="medium",
+                    summary="The registry disagreed with the manifest.",
+                    recommendation="Re-derive the registry from the manifest.",
+                    evidence=("supervisor-audit-input.json",),
+                ),
+                observed_at="2026-08-01T00:00:00+00:00",
+            ),
+            state_dir=state_dir,
+        )
+        assert record.issue_id is not None
+        return record.issue_id
+
+    def _rejected(
+        self, history: tuple[Path, Path, Path, Path], **identity: object
+    ) -> AuditAttempt:
+        bundle = self._bundle(history)
+        locator = bundle.evidence[0].locator
+        auditor = _ScriptedAuditor(
+            self._reply(
+                self._lanes(locator, {"identity-authority": "fail"}),
+                [self._finding(locator, **identity)],
+            )
+        )
+        outcome = self._run(history, auditor, bundle=bundle)
+        self.assertFalse(outcome.agent_covered)
+        return outcome.attempts[0]
+
+    def test_a_finding_without_an_identity_decision_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            finding = self._finding(locator)
+            del finding["identity"]
+            auditor = _ScriptedAuditor(self._reply(self._lanes(locator), [finding]))
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("malformed-output", outcome.attempts[0].outcome)
+            self.assertIn("exactly one 'identity' object", outcome.attempts[0].detail)
+
+    def test_an_identity_decision_outside_the_two_choices_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = self._rejected(
+                self._history(Path(tmp)), identity={"decision": "merge"}
+            )
+
+            self.assertEqual("malformed-output", attempt.outcome)
+            self.assertIn("existing, new", attempt.detail)
+
+    def test_an_identity_object_with_an_unknown_key_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = self._rejected(
+                self._history(Path(tmp)),
+                identity={"decision": "new", "confidence": 0.9},
+            )
+
+            self.assertEqual("malformed-output", attempt.outcome)
+            self.assertIn("unknown key(s) confidence", attempt.detail)
+
+    def test_a_new_allocation_request_may_not_name_an_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = self._rejected(
+                self._history(Path(tmp)),
+                identity={"decision": "new", "issue_id": "ASI-1"},
+            )
+
+            self.assertEqual("malformed-output", attempt.outcome)
+            self.assertIn("must name no 'issue_id'", attempt.detail)
+
+    def test_a_malformed_issue_id_never_reaches_the_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            attempt = self._rejected(
+                self._history(Path(tmp)),
+                identity={"decision": "existing", "issue_id": "the registry one"},
+            )
+
+            self.assertEqual("malformed-output", attempt.outcome)
+            self.assertIn("must name the 'issue_id'", attempt.detail)
+
+    def test_an_invented_issue_id_is_refused_as_an_invalid_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._open_issue(history[2], invariant="identity.first")
+
+            attempt = self._rejected(
+                history, identity={"decision": "existing", "issue_id": "ASI-4242"}
+            )
+
+            self.assertEqual("invalid-reference", attempt.outcome)
+            self.assertIn("ASI-4242", attempt.detail)
+            self.assertIn("does not list", attempt.detail)
+
+    def test_a_merged_away_issue_id_is_not_selectable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            source = self._open_issue(history[2], invariant="identity.source")
+            target = self._open_issue(history[2], invariant="identity.target")
+            assurance_projection.record_merge(source, target, state_dir=history[2])
+
+            attempt = self._rejected(
+                history, identity={"decision": "existing", "issue_id": source}
+            )
+
+            self.assertEqual("invalid-reference", attempt.outcome)
+            self.assertIn("merged away", attempt.detail)
+
+    def test_a_catalog_selection_is_accepted_and_carried_with_its_finding(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            issue_id = self._open_issue(history[2], invariant="identity.known")
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(locator, {"identity-authority": "fail"}),
+                    [
+                        self._finding(
+                            locator,
+                            identity={"decision": "existing", "issue_id": issue_id},
+                        )
+                    ],
+                )
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertIsNotNone(outcome.agent)
+            assert outcome.agent is not None
+            finding, decision = outcome.agent.decisions[0]
+            self.assertEqual("identity.agent-observed-drift", finding.invariant_key)
+            self.assertEqual("existing", decision.decision)
+            self.assertEqual(issue_id, decision.issue_id)
+            self.assertFalse(decision.is_new)
+
+    def test_a_new_allocation_request_is_carried_without_an_issue_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(locator, {"identity-authority": "fail"}),
+                    [self._finding(locator)],
+                )
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            assert outcome.agent is not None
+            _, decision = outcome.agent.decisions[0]
+            self.assertTrue(decision.is_new)
+            self.assertIsNone(decision.issue_id)
+
+    def test_a_v1_answer_carries_no_identity_and_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            body = json.dumps(
+                {
+                    "schema_version": 1,
+                    "lanes": self._lanes(locator),
+                    "findings": [],
+                }
+            )
+            auditor = _ScriptedAuditor(f"```json\n{body}\n```\n")
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("malformed-output", outcome.attempts[0].outcome)
+            self.assertIn(
+                f"schema_version {supervisor_audit.AGENT_OUTPUT_SCHEMA_VERSION}",
+                outcome.attempts[0].detail,
+            )
+
+    def test_an_identity_rejection_keeps_the_deterministic_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._self_reviewed(history)
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(locator),
+                    [
+                        self._finding(
+                            locator,
+                            identity={"decision": "existing", "issue_id": "ASI-77"},
+                        )
+                    ],
+                )
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("unavailable", outcome.audit.state)
+            self.assertEqual("invalid-reference", outcome.audit.reason)
+            self.assertTrue(outcome.audit.findings)
+            statuses = {lane.lane: lane.status for lane in outcome.audit.lanes}
+            self.assertEqual("fail", statuses["verification-review-independence"])
+
+    def test_the_prompt_supplies_the_catalog_with_its_digest_and_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            issue_id = self._open_issue(history[2], invariant="identity.listed")
+            catalog = supervisor_audit.read_agent_catalog(history[2])
+
+            prompt = supervisor_audit.build_audit_prompt(
+                self._bundle(history), catalog=catalog
+            )
+
+            self.assertIn(catalog.digest, prompt)
+            self.assertIn(f'"issue_id":"{issue_id}"', prompt)
+            self.assertIn('"omitted":0', prompt)
+            self.assertLess(
+                prompt.index("Every finding carries exactly one `identity` object"),
+                prompt.index(catalog.digest),
+            )
+
+    def test_the_retry_repeats_the_catalog_and_the_identity_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            issue_id = self._open_issue(history[2], invariant="identity.listed")
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(locator, {"identity-authority": "fail"}),
+                    [
+                        self._finding(
+                            locator,
+                            identity={"decision": "existing", "issue_id": "ASI-9001"},
+                        )
+                    ],
+                ),
+                self._reply(self._lanes(locator)),
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+            retry = auditor.prompts[1]
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertIn("Your previous answer was rejected", retry)
+            self.assertIn("ASI-9001", retry)
+            self.assertIn(
+                "An ID it does not list cannot be selected no matter where you saw it",
+                retry,
+            )
+            self.assertIn(f'"issue_id":"{issue_id}"', retry)
+            self.assertNotIn("identity.agent-observed-drift", retry)
+
+    def test_an_unreadable_ledger_supplies_the_empty_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            (state_dir / assurance_ledger.LEDGER_FILE_NAME).mkdir(parents=True)
+
+            catalog = supervisor_audit.read_agent_catalog(state_dir)
+
+            self.assertEqual(supervisor_audit.EMPTY_AGENT_CATALOG, catalog)
+            self.assertEqual((), catalog.entries)
+
+    def test_a_missing_ledger_is_an_empty_catalog_rather_than_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = supervisor_audit.read_agent_catalog(Path(tmp) / "absent")
+
+            self.assertEqual((), catalog.entries)
+            self.assertEqual((), catalog.omitted)
+
+
+class FailClosedIdentityTests(_RunHistoryFixture, unittest.TestCase):
+    """A renamed recurrence is asked about once, then refused rather than split."""
+
+    _lanes = AgentAuditEngineTests._lanes
+    _finding = AgentAuditEngineTests._finding
+    _reply = AgentAuditEngineTests._reply
+    _role = AgentAuditEngineTests._role
+    _run = AgentAuditEngineTests._run
+    _self_reviewed = AgentAuditEngineTests._self_reviewed
+
+    #: The summary the agent finding carries, so an issue seeded with it is a
+    #: perfect normalized-summary match and nothing else.
+    SUMMARY = "The registry named a repository the manifest never declared."
+
+    def _seed(self, state_dir: Path, **overrides: object) -> str:
+        payload: dict[str, Any] = {
+            "category": "identity",
+            "component": "workspace-registry",
+            "invariant_key": "identity.registry-drift",
+            "lane": "identity-authority",
+            "severity": "medium",
+            "summary": self.SUMMARY,
+            "recommendation": "Re-derive the registry from the manifest.",
+            "evidence": ("supervisor-audit-input.json",),
+        }
+        payload.update(overrides)
+        record = assurance_ledger.append_issue_observation(
+            IssueObservation(
+                run_id=RUN_ID,
+                finding=Finding(**payload),
+                observed_at="2026-08-01T00:00:00+00:00",
+            ),
+            state_dir=state_dir,
+        )
+        assert record.issue_id is not None
+        return record.issue_id
+
+    def _new_answer(self, locator: str) -> str:
+        return self._reply(
+            self._lanes(locator, {"identity-authority": "fail"}),
+            [self._finding(locator)],
+        )
+
+    def test_an_exact_fingerprint_is_reused_without_spending_a_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            issue_id = self._seed(
+                history[2], invariant_key="identity.agent-observed-drift"
+            )
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(self._new_answer(bundle.evidence[0].locator))
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual(1, len(auditor.prompts))
+            self.assertEqual(["ok"], [item.outcome for item in outcome.attempts])
+            assert outcome.agent is not None
+            _, decision = outcome.agent.decisions[0]
+            self.assertEqual("existing", decision.decision)
+            self.assertEqual(issue_id, decision.issue_id)
+            self.assertEqual("recurrence", decision.source)
+
+    def test_a_renamed_recurrence_is_retried_with_the_candidate_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            issue_id = self._seed(history[2])
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            auditor = _ScriptedAuditor(
+                self._new_answer(locator),
+                self._reply(
+                    self._lanes(locator, {"identity-authority": "fail"}),
+                    [
+                        self._finding(
+                            locator,
+                            identity={"decision": "existing", "issue_id": issue_id},
+                        )
+                    ],
+                ),
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+            retry = auditor.prompts[1]
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual(2, len(auditor.prompts))
+            self.assertEqual(
+                ["invalid-reference", "ok"],
+                [item.outcome for item in outcome.attempts],
+            )
+            self.assertIn("Your previous answer was well-formed", retry)
+            self.assertNotIn("Your previous answer was rejected", retry)
+            self.assertIn(f'{{"issue_id":"{issue_id}","reasons":["summary"]', retry)
+            self.assertIn('"similarity":1.0', retry)
+            assert outcome.agent is not None
+            _, decision = outcome.agent.decisions[0]
+            self.assertEqual(issue_id, decision.issue_id)
+            self.assertEqual("agent", decision.source)
+
+    def test_a_second_new_answer_fails_closed_without_allocating(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._self_reviewed(history)
+            issue_id = self._seed(history[2])
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(self._new_answer(bundle.evidence[0].locator))
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertIsNone(outcome.agent)
+            self.assertEqual(2, len(auditor.prompts))
+            self.assertEqual("unavailable", outcome.audit.state)
+            self.assertEqual(
+                supervisor_audit.REASON_IDENTITY_AMBIGUOUS, outcome.audit.reason
+            )
+            self.assertEqual(
+                ["invalid-reference", "invalid-reference"],
+                [item.outcome for item in outcome.attempts],
+            )
+            self.assertIn(issue_id, outcome.attempts[0].detail)
+            # The reproducible half of the audit is not lost with the agent half.
+            self.assertTrue(outcome.audit.findings)
+            self.assertNotIn(
+                "identity.agent-observed-drift",
+                [finding.invariant_key for finding in outcome.audit.findings],
+            )
+
+    def test_the_candidate_list_is_offered_once_and_never_repeated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._seed(history[2])
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(self._new_answer(bundle.evidence[0].locator))
+
+            self._run(history, auditor, bundle=bundle)
+
+            self.assertEqual(MAX_AUDIT_ATTEMPTS, len(auditor.prompts))
+            self.assertNotIn("Your previous answer was well-formed", auditor.prompts[0])
+            self.assertIn("Your previous answer was well-formed", auditor.prompts[1])
+
+    def test_a_wasted_first_attempt_leaves_no_turn_for_the_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._seed(history[2])
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(
+                "the audit went fine", self._new_answer(bundle.evidence[0].locator)
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual(
+                ["malformed-output", "invalid-reference"],
+                [item.outcome for item in outcome.attempts],
+            )
+            self.assertEqual(
+                supervisor_audit.REASON_IDENTITY_AMBIGUOUS, outcome.audit.reason
+            )
+            self.assertNotIn("Your previous answer was well-formed", auditor.prompts[1])
+            self.assertIn("Your previous answer was rejected", auditor.prompts[1])
+
+    def test_a_distinct_near_neighbour_is_allocated_rather_than_questioned(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._seed(
+                history[2],
+                invariant_key="scope.no-escape",
+                summary="A commit landed outside the declared write scope.",
+            )
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(self._new_answer(bundle.evidence[0].locator))
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual(1, len(auditor.prompts))
+            assert outcome.agent is not None
+            _, decision = outcome.agent.decisions[0]
+            self.assertTrue(decision.is_new)
+            self.assertEqual("agent", decision.source)
+
+    def test_a_selection_the_validator_accepted_is_never_second_guessed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            chosen = self._seed(history[2], invariant_key="identity.chosen")
+            self._seed(history[2])
+            bundle = self._bundle(history)
+            locator = bundle.evidence[0].locator
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(locator, {"identity-authority": "fail"}),
+                    [
+                        self._finding(
+                            locator,
+                            identity={"decision": "existing", "issue_id": chosen},
+                        )
+                    ],
+                )
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual(1, len(auditor.prompts))
+            assert outcome.agent is not None
+            _, decision = outcome.agent.decisions[0]
+            self.assertEqual(chosen, decision.issue_id)
+
+    def test_an_empty_inbox_leaves_a_new_allocation_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(self._new_answer(bundle.evidence[0].locator))
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual(1, len(auditor.prompts))
+            assert outcome.agent is not None
+            self.assertTrue(outcome.agent.decisions[0][1].is_new)
+
+    def test_an_identity_source_outside_the_two_is_refused(self) -> None:
+        with self.assertRaises(supervisor_audit.AgentOutputError) as raised:
+            supervisor_audit.IdentityDecision(decision="new", source="guess")
+
+        self.assertEqual("malformed-output", raised.exception.outcome)
+
+    def test_resolution_names_every_candidate_it_could_not_settle(self) -> None:
+        resolution = supervisor_audit.IdentityResolution(
+            audit=supervisor_audit.AgentAudit(lanes=(), findings=(), identities=()),
+            candidates=(
+                assurance_projection.IdentityCandidate(
+                    issue_id="ASI-3", reasons=("summary",), similarity=0.9
+                ),
+                assurance_projection.IdentityCandidate(
+                    issue_id="ASI-7", reasons=("invariant",)
+                ),
+            ),
+            ambiguous=2,
+        )
+
+        self.assertFalse(resolution.settled)
+        self.assertIn("2 finding(s)", resolution.detail)
+        self.assertIn("ASI-3", resolution.detail)
+        self.assertIn("ASI-7", resolution.detail)
+
+
+def _catalog_entry(number: int, *, last_seen_at: str) -> CatalogEntry:
+    return CatalogEntry(
+        issue_id=f"ASI-{number}",
+        state="open",
+        severity="medium",
+        category="identity",
+        component="workspace-registry",
+        invariant_key=f"identity.invariant-{number:04d}",
+        lane="identity-authority",
+        summary="The registry named a repository the manifest never declared. " * 8,
+        fingerprints=(f"{number:064d}",),
+        identity_keys=(),
+        primary_identity_key=None,
+        localization=(),
+        summary_tokens=(),
+        invariant_tokens=(),
+        occurrence_count=1,
+        first_seen_at="2026-01-01T00:00:00+00:00",
+        last_seen_at=last_seen_at,
+    )
+
+
+class AgentCatalogTests(unittest.TestCase):
+    """The supplied catalog is bounded, ordered, and honest about what it drops."""
+
+    def _catalog(self, count: int) -> IdentityCatalog:
+        return IdentityCatalog(
+            entries=tuple(
+                _catalog_entry(
+                    number, last_seen_at=f"2026-02-{number % 28 + 1:02d}T00:00:00+00:00"
+                )
+                for number in range(1, count + 1)
+            )
+        )
+
+    def test_a_small_catalog_is_supplied_whole(self) -> None:
+        supplied = supervisor_audit.build_agent_catalog(self._catalog(5))
+
+        self.assertEqual(5, len(supplied.entries))
+        self.assertEqual((), supplied.omitted)
+        self.assertEqual(0, supplied.to_dict()["omitted"])
+
+    def test_a_large_catalog_is_bounded_and_reports_what_it_dropped(self) -> None:
+        catalog = self._catalog(1000)
+
+        supplied = supervisor_audit.build_agent_catalog(catalog)
+        rendered = json.dumps(supplied.to_dict(), separators=(",", ":"))
+
+        self.assertLessEqual(
+            len(rendered.encode("utf-8")), supervisor_audit.MAX_AGENT_CATALOG_BYTES
+        )
+        self.assertTrue(supplied.omitted)
+        self.assertEqual(
+            len(catalog.entries), len(supplied.entries) + len(supplied.omitted)
+        )
+        self.assertEqual(len(supplied.omitted), supplied.to_dict()["omitted"])
+        self.assertEqual(set(), supplied.issue_ids.intersection(supplied.omitted))
+
+    def test_the_bound_is_spent_on_the_most_recently_seen_issues(self) -> None:
+        catalog = IdentityCatalog(
+            entries=(
+                _catalog_entry(1, last_seen_at="2026-01-01T00:00:00+00:00"),
+                _catalog_entry(2, last_seen_at="2026-06-01T00:00:00+00:00"),
+                _catalog_entry(3, last_seen_at="2026-03-01T00:00:00+00:00"),
+            )
+        )
+        whole = supervisor_audit.build_agent_catalog(catalog)
+        # Room for the whole listing less one entry and the comma before it.
+        bound = len(canonical_json_bytes(whole.to_dict())) - len(
+            canonical_json_bytes(whole.entries[0].to_dict())
+        )
+
+        with mock.patch.object(supervisor_audit, "MAX_AGENT_CATALOG_BYTES", bound):
+            supplied = supervisor_audit.build_agent_catalog(catalog)
+
+        self.assertEqual(["ASI-2", "ASI-3"], [e.issue_id for e in supplied.entries])
+        self.assertEqual(("ASI-1",), supplied.omitted)
+
+    def test_supplied_entries_are_listed_in_issue_order(self) -> None:
+        supplied = supervisor_audit.build_agent_catalog(self._catalog(30))
+
+        self.assertEqual(
+            [f"ASI-{number}" for number in range(1, 31)],
+            [entry.issue_id for entry in supplied.entries],
+        )
+
+    def test_the_digest_names_the_whole_catalog_not_the_sample(self) -> None:
+        catalog = self._catalog(1000)
+
+        supplied = supervisor_audit.build_agent_catalog(catalog)
+
+        self.assertTrue(supplied.omitted)
+        self.assertEqual(catalog.digest, supplied.digest)
+
+    def test_an_omitted_issue_is_refused_without_being_denied(self) -> None:
+        catalog = self._catalog(1000)
+        supplied = supervisor_audit.build_agent_catalog(catalog)
+        omitted = supplied.omitted[0]
+        reply = json.dumps(
+            {
+                "schema_version": supervisor_audit.AGENT_OUTPUT_SCHEMA_VERSION,
+                "lanes": [
+                    {
+                        "lane": lane,
+                        "status": "pass",
+                        "summary": f"{lane} judged from the recorded evidence",
+                        "evidence": ["run:supervisor-audit-input.json"],
+                    }
+                    for lane in RUBRIC_LANES
+                ],
+                "findings": [
+                    {
+                        "lane": "identity-authority",
+                        "severity": "medium",
+                        "category": "identity",
+                        "component": "workspace-registry",
+                        "invariant_key": "identity.agent-observed-drift",
+                        "summary": "The registry named an undeclared repository.",
+                        "recommendation": "Re-derive the registry.",
+                        "evidence": ["run:supervisor-audit-input.json"],
+                        "identity": {"decision": "existing", "issue_id": omitted},
+                    }
+                ],
+            }
+        )
+
+        with self.assertRaises(supervisor_audit.AgentOutputError) as raised:
+            supervisor_audit.parse_agent_audit(
+                f"```json\n{reply}\n```",
+                declared=["run:supervisor-audit-input.json"],
+                catalog=supplied,
+            )
+
+        self.assertEqual("invalid-reference", raised.exception.outcome)
+        self.assertIn("size bound kept", raised.exception.detail)
+        self.assertNotIn("does not list", raised.exception.detail)
+
+    def test_a_candidate_the_bound_dropped_is_promoted_for_the_retry(self) -> None:
+        catalog = self._catalog(1000)
+        supplied = supervisor_audit.build_agent_catalog(catalog)
+        omitted = supplied.omitted[0]
+
+        widened = supervisor_audit.widen_agent_catalog(supplied, catalog, [omitted])
+
+        self.assertIn(omitted, widened.issue_ids)
+        self.assertNotIn(omitted, widened.omitted)
+        self.assertEqual(len(supplied.entries) + 1, len(widened.entries))
+        self.assertEqual(len(supplied.omitted) - 1, len(widened.omitted))
+        self.assertEqual(
+            sorted(widened.entries, key=lambda entry: issue_id_number(entry.issue_id)),
+            list(widened.entries),
+        )
+
+    def test_widening_restates_the_same_inbox_and_keeps_the_digest(self) -> None:
+        catalog = self._catalog(1000)
+        supplied = supervisor_audit.build_agent_catalog(catalog)
+
+        widened = supervisor_audit.widen_agent_catalog(
+            supplied, catalog, list(supplied.omitted[:3])
+        )
+
+        self.assertEqual(supplied.digest, widened.digest)
+        self.assertEqual(
+            len(catalog.entries), len(widened.entries) + len(widened.omitted)
+        )
+
+    def test_widening_toward_a_listed_or_unknown_issue_changes_nothing(self) -> None:
+        catalog = self._catalog(5)
+        supplied = supervisor_audit.build_agent_catalog(catalog)
+
+        self.assertIs(
+            supplied, supervisor_audit.widen_agent_catalog(supplied, catalog, ["ASI-1"])
+        )
+        self.assertIs(
+            supplied,
+            supervisor_audit.widen_agent_catalog(supplied, catalog, ["ASI-4242"]),
+        )
+
+
+class ReportStagingTests(unittest.TestCase):
+    """Canonical reports appear together, at their canonical names, or not at all."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.run_dir = Path(self._tmp.name)
+        self.audit = SupervisorAudit(
+            run_id=RUN_ID,
+            state="all-clear",
+            input_digest="b" * 64,
+            generated_at="2026-08-10T10:11:12+00:00",
+            evidence=(EvidenceRef(kind="event", locator="events.jsonl"),),
+            lanes=tuple(
+                LaneEvidence(
+                    lane=lane,
+                    status="pass",
+                    summary=f"{lane} judged from the event ledger",
+                    evidence=("events.jsonl",),
+                )
+                for lane in RUBRIC_LANES
+            ),
+        )
+
+    @property
+    def canonical(self) -> tuple[Path, Path]:
+        return (
+            self.run_dir / audit_artifact_name(AUDIT_REPORT_FILENAME),
+            self.run_dir / audit_artifact_name(AUDIT_MARKDOWN_FILENAME),
+        )
+
+    def stage(self) -> supervisor_audit.StagedAuditReports:
+        return supervisor_audit.stage_audit_reports(
+            self.run_dir, self.audit, durable=False
+        )
+
+    def test_staging_writes_both_reports_outside_their_canonical_names(self) -> None:
+        staged = self.stage()
+
+        self.assertEqual(2, len(staged.entries))
+        for path, canonical, digest in staged.entries:
+            self.assertTrue(path.is_file())
+            self.assertFalse(canonical.exists())
+            self.assertEqual(digest, artifacts.sha256_hex(path.read_bytes()))
+        self.assertEqual(
+            ["run/supervisor-audit.json", "run/supervisor-audit.md"],
+            [reference.locator for reference in staged.references],
+        )
+
+    def test_promotion_gives_both_reports_their_canonical_names(self) -> None:
+        staged = self.stage()
+
+        staged.promote()
+
+        report, markdown = self.canonical
+        self.assertTrue(report.is_file())
+        self.assertTrue(markdown.is_file())
+        self.assertEqual(
+            json.loads(report.read_text(encoding="utf-8"))["run_id"], RUN_ID
+        )
+
+    def test_a_taken_canonical_name_refuses_the_whole_promotion(self) -> None:
+        staged = self.stage()
+        report, markdown = self.canonical
+        report.write_text("an earlier publication already claimed this name\n")
+
+        with self.assertRaises(AssuranceError) as caught:
+            staged.promote()
+
+        self.assertIn("could not promote audit report", str(caught.exception))
+        # The markdown is ordered after the report, so nothing was linked before the
+        # refusal; the assertion that matters is that it is not left behind either.
+        self.assertFalse(markdown.exists())
+
+    def test_a_refusal_after_a_partial_promotion_leaves_no_report(self) -> None:
+        staged = self.stage()
+        report, markdown = self.canonical
+        markdown.write_text("an earlier publication already claimed this name\n")
+        original = markdown.read_bytes()
+
+        with self.assertRaises(AssuranceError):
+            staged.promote()
+
+        self.assertFalse(report.exists())
+        self.assertEqual(original, markdown.read_bytes())
+
+    def test_unpromoting_frees_the_canonical_names_for_another_attempt(self) -> None:
+        staged = self.stage()
+        staged.promote()
+
+        staged.unpromote()
+
+        for path in self.canonical:
+            self.assertFalse(path.exists())
+        staged.promote()
+        for path in self.canonical:
+            self.assertTrue(path.is_file())
+
+    def test_discarding_removes_the_staging_directory_but_not_the_reports(self) -> None:
+        staged = self.stage()
+        staged.promote()
+
+        staged.discard()
+
+        self.assertFalse(staged.directory.exists())
+        for path in self.canonical:
+            self.assertTrue(path.is_file())
+
+    def test_staging_clears_scratch_an_earlier_attempt_left_behind(self) -> None:
+        abandoned = self.run_dir / supervisor_audit.AUDIT_STAGING_DIR_NAME
+        abandoned.mkdir()
+        (abandoned / "half-written.json").write_text("{")
+
+        staged = self.stage()
+
+        self.assertFalse((abandoned / "half-written.json").exists())
+        for path, _, _ in staged.entries:
+            self.assertTrue(path.is_file())
+
+    def test_an_unwritable_run_directory_refuses_staging(self) -> None:
+        blocked = self.run_dir / "blocked"
+        blocked.write_text("a file where the run directory should be\n")
+
+        with self.assertRaises(AssuranceError) as caught:
+            supervisor_audit.stage_audit_reports(blocked, self.audit, durable=False)
+
+        self.assertIn("could not create audit staging directory", str(caught.exception))
+
+    def test_writing_reports_twice_refuses_the_second_attempt(self) -> None:
+        supervisor_audit.write_audit_reports(self.run_dir, self.audit, durable=False)
+
+        with self.assertRaises(AssuranceError):
+            supervisor_audit.write_audit_reports(
+                self.run_dir, self.audit, durable=False
+            )
+
+        self.assertFalse(
+            (self.run_dir / supervisor_audit.AUDIT_STAGING_DIR_NAME).exists()
+        )
 
 
 if __name__ == "__main__":

@@ -389,6 +389,104 @@ class AssuranceShowTests(AssuranceCliTestCase):
                 self.assertEqual("invalid-issue-id", payload["reason"])
 
 
+class AssuranceIdentityTests(AssuranceCliTestCase):
+    #: The fields list and show published before issues carried an identity.
+    LIST_ROW_FIELDS = frozenset(
+        {
+            "issue_id",
+            "severity",
+            "state",
+            "occurrence_count",
+            "first_seen_at",
+            "last_seen_at",
+            "component",
+            "summary",
+        }
+    )
+    SHOW_ISSUE_FIELDS = frozenset(
+        {
+            "issue_id",
+            "state",
+            "severity",
+            "reopened_count",
+            "occurrence_count",
+            "first_seen_at",
+            "last_seen_at",
+            "fingerprint",
+            "fingerprints",
+            "schema_version",
+            "category",
+            "component",
+            "invariant_key",
+            "lane",
+            "summary",
+            "recommendation",
+            "evidence",
+            "merged_from",
+            "occurrences",
+            "dispositions",
+            "plans",
+        }
+    )
+
+    def observe_unbound(self, **overrides) -> None:
+        """Open an issue the way a guard does, which leaves it unnamed."""
+        ledger.append_issue_observation(
+            models.IssueObservation(
+                run_id=THIRD_RUN_ID,
+                finding=_finding(**overrides),
+                observed_at=LAST_TIMESTAMP,
+            ),
+            state_dir=self.state_dir,
+            recorded_at=LAST_TIMESTAMP,
+        )
+
+    def test_a_list_row_names_the_identity_or_says_there_is_none(self) -> None:
+        self.publish(_publication())
+        self.observe_unbound(invariant_key="scope.no-escape")
+
+        code, payload, err = self.run_json(["assurance", "list"])
+
+        self.assertEqual(0, code, err)
+        self.assertEqual(
+            {"ASI-1": "issue.asi-1", "ASI-2": None},
+            {row["issue_id"]: row["primary_identity_key"] for row in payload["issues"]},
+        )
+
+    def test_show_reports_the_identity_and_the_keys_it_absorbed(self) -> None:
+        self.open_three_issues()
+        projection.record_merge(
+            "ASI-1", "ASI-2", state_dir=self.state_dir, recorded_at=LAST_TIMESTAMP
+        )
+
+        code, payload, err = self.run_json(["assurance", "show", "ASI-2"])
+
+        self.assertEqual(0, code, err)
+        self.assertEqual("issue.asi-2", payload["issue"]["primary_identity_key"])
+        self.assertEqual(
+            ["issue.asi-1", "issue.asi-2"], payload["issue"]["identity_keys"]
+        )
+        _, out, _ = self.run_cli(["assurance", "show", "ASI-2"])
+        self.assertIn("identity key    issue.asi-2", out)
+        self.assertIn("also named by   issue.asi-1", out)
+
+    def test_show_calls_an_unbound_issue_unbound(self) -> None:
+        self.observe_unbound()
+
+        code, out, err = self.run_cli(["assurance", "show", "ASI-1"])
+
+        self.assertEqual(0, code, err)
+        self.assertIn("identity key    unbound", out)
+        self.assertNotIn("also named by", out)
+
+    def test_the_fields_list_and_show_already_published_are_still_there(self) -> None:
+        self.publish(_publication())
+        _, listed, _ = self.run_json(["assurance", "list"])
+        _, shown, _ = self.run_json(["assurance", "show", "ASI-1"])
+        self.assertLessEqual(self.LIST_ROW_FIELDS, set(listed["issues"][0]))
+        self.assertLessEqual(self.SHOW_ISSUE_FIELDS, set(shown["issue"]))
+
+
 class AssuranceDamagedLedgerTests(AssuranceCliTestCase):
     def corrupt_between_records(self) -> None:
         """Write a line no parser can read, then keep appending valid records."""

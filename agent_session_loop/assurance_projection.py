@@ -11,14 +11,17 @@ this defect now — is answered by replaying those records in order:
   identical issues.
 * **Publication is idempotent under concurrency.** An audit is identified by its
   run ID, its record kind, and the digest of the audit input it judged. The
-  audit record and every observation it opens are written in one transaction
-  under the ledger's exclusive lock, and a publisher that finds its own key
-  already recorded writes nothing at all. Two processes publishing the same
-  audit therefore produce one occurrence, not two.
+  audit record, every observation it opens, and the identity key of every ID it
+  mints are written in one transaction under the ledger's exclusive lock, and a
+  publisher that finds its own key already recorded writes nothing at all. Two
+  processes publishing the same audit therefore produce one occurrence, not two.
 * **Identity is the fingerprint, never the text.** A recurring defect routes to
   the issue its first sighting minted. An audit that could not run deduplicates
   by its stable reason class, so a thousand distinct exception messages of one
-  kind remain one issue with a thousand occurrences.
+  kind remain one issue with a thousand occurrences. A selection an audit made
+  is revalidated against the ledger as it stands under that same lock, so a
+  decision reviewed against identity state that has since moved is refreshed
+  rather than allocated from.
 * **Closing is a claim about the future, not about history.** A recurrence after
   ``resolve`` reopens the issue, because the fix evidently did not hold. A
   recurrence after ``dismiss`` or ``accept-risk`` does not: a human already
@@ -27,6 +30,13 @@ this defect now — is answered by replaying those records in order:
 * **Merge is irreversible and always forward.** A merged issue can never be
   merged again or un-merged, its whole history moves to the target, and later
   observations of either fingerprint land on the final canonical target.
+* **An identity key outlives the issue it was minted for.** Bindings are
+  replayed against the settled merge chain, so a key keeps naming whoever owns
+  that history today without any stored record being reinterpreted. The same
+  replay produces the identity catalog: every canonical issue in every
+  lifecycle state, indexed by fingerprint, key, invariant, normalized
+  localization, and normalized summary token, so a recurrence can be recognized
+  without scanning the inbox.
 * **A hostile ledger is readable.** Records that cannot mean anything — a
   disposition for an issue that was never opened, a merge naming an unknown or
   cyclic target — are reported as anomalies and skipped. The projection never
@@ -36,7 +46,7 @@ this defect now — is answered by replaying those records in order:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as replace_dataclass
 from datetime import UTC, datetime
@@ -45,6 +55,7 @@ from types import MappingProxyType
 from typing import Any
 
 from . import assurance_ledger as ledger
+from .artifacts import sha256_hex
 from .assurance_ledger import (
     KIND_AUDIT_COMPLETED,
     KIND_AUDIT_PENDING,
@@ -53,6 +64,7 @@ from .assurance_ledger import (
     KIND_HUMAN_CLOSEOUT,
     KIND_IMPROVEMENT_PLAN_DRAFTED,
     KIND_ISSUE_DISPOSITION,
+    KIND_ISSUE_IDENTITY_BOUND,
     KIND_ISSUE_MERGED,
     KIND_ISSUE_OBSERVED,
     LedgerRecord,
@@ -78,10 +90,18 @@ from .assurance_models import (
     EvidenceRef,
     Finding,
     ImprovementPlanDraft,
+    IssueIdentityBinding,
     IssueMerge,
     IssueObservation,
     IssueState,
+    canonical_json_bytes,
+    identity_key_for_issue,
+    issue_id_for_identity_key,
     issue_id_number,
+    normalize_invariant_tokens,
+    normalize_localization,
+    normalize_summary_tokens,
+    parse_identity_key,
     parse_issue_id,
 )
 
@@ -115,6 +135,16 @@ UNAVAILABLE_INVARIANT_PREFIX = "audit.availability"
 UNKNOWN_ISSUE = "unknown-issue"
 UNKNOWN_RUN = "unknown-run"
 DUPLICATE_CLOSEOUT = "duplicate-closeout"
+DUPLICATE_IDENTITY_BINDING = "duplicate-identity-binding"
+IDENTITY_KEY_CONFLICT = "identity-key-conflict"
+#: Anomaly reasons a stored identity binding can produce. They are counted
+#: apart from each other because they mean different things: a duplicate
+#: restates a binding already in force, while a conflict claims a key that
+#: already names a different issue.
+IDENTITY_ANOMALY_REASONS: tuple[str, ...] = (
+    DUPLICATE_IDENTITY_BINDING,
+    IDENTITY_KEY_CONFLICT,
+)
 MERGE_SELF = "merge-self"
 MERGE_UNKNOWN_SOURCE = "merge-unknown-source"
 MERGE_UNKNOWN_TARGET = "merge-unknown-target"
@@ -268,6 +298,15 @@ class AuditPublication:
     started_at: str | None = None
     completed_at: str | None = None
     duration_seconds: float | None = None
+    #: The issue an audit selected for a finding, keyed by that finding's
+    #: fingerprint. A finding absent from this map asked for a new allocation,
+    #: which is the only request that can mint an ID. Each selection is a request
+    #: revalidated under the append lock, never an identity taken on trust.
+    identity_selections: Mapping[str, str] = field(default_factory=dict)
+    #: Digest of the identity catalog those selections were decided against, or
+    #: ``None`` when no decision was reviewed against one. It is what makes a
+    #: stale decision recognizable under the append lock.
+    catalog_digest: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "findings", tuple(self.findings))
@@ -309,6 +348,24 @@ class AuditPublication:
                 "an unavailable audit must record the reason class its system "
                 "issue deduplicates by"
             )
+        object.__setattr__(
+            self,
+            "identity_selections",
+            MappingProxyType(
+                {
+                    fingerprint: parse_issue_id(issue_id)
+                    for fingerprint, issue_id in self.identity_selections.items()
+                }
+            ),
+        )
+        for fingerprint in self.identity_selections:
+            if fingerprint not in seen:
+                raise AssuranceError(
+                    f"identity selection {fingerprint} names a finding this "
+                    "publication does not carry; a decision that cannot be "
+                    "attributed to a finding would be applied to whichever "
+                    "defect happened to line up"
+                )
 
     @property
     def audit_input_digest(self) -> str | None:
@@ -382,6 +439,11 @@ class PublicationResult:
     summary: AssuranceSummary
     records: tuple[LedgerRecord, ...] = ()
     created: bool = True
+    #: Whether identity had moved between the decision and the append lock. The
+    #: publication is unaffected — every route is answered from the locked view
+    #: either way — and this only reports that the refreshed state was the one
+    #: that decided.
+    identity_refreshed: bool = False
 
     @property
     def issue_ids(self) -> tuple[str, ...]:
@@ -391,6 +453,14 @@ class PublicationResult:
     def observations(self) -> tuple[LedgerRecord, ...]:
         return tuple(
             record for record in self.records if record.kind == KIND_ISSUE_OBSERVED
+        )
+
+    @property
+    def bindings(self) -> tuple[LedgerRecord, ...]:
+        return tuple(
+            record
+            for record in self.records
+            if record.kind == KIND_ISSUE_IDENTITY_BOUND
         )
 
 
@@ -413,31 +483,65 @@ def _issue_opening_runs(view: LedgerView) -> dict[str, str]:
     return opened
 
 
-class _Allocator:
-    """Issue-ID allocation for one transaction, merges already applied.
+class _IdentityResolver:
+    """Which issue owns each finding, decided from state read under the lock.
 
-    The map starts from the ledger and is updated as findings are allocated, so
-    a publication that opens several new issues numbers them consecutively
-    without re-reading the file between them.
+    The order narrows from facts to requests: a fingerprint ASL derived itself,
+    then an ASL-owned identity key already bound to that fingerprint's issue,
+    then the selection an audit made and this transaction revalidates, and only
+    then a new ID. Anything earlier overrules what follows it, because a defect
+    the ledger already names is not made new by an answer that could not see it.
+
+    The maps start from the ledger and are updated as findings resolve, so a
+    publication that opens several issues numbers them consecutively, and a
+    fingerprint first seen here is already attached to its issue for the next
+    finding in the same audit.
     """
 
-    def __init__(self, view: LedgerView) -> None:
+    def __init__(self, view: LedgerView, selections: Mapping[str, str]) -> None:
         edges = view.merge_edges
+        self._edges = edges
+        self._selections = selections
         self._by_fingerprint = {
             fingerprint: follow_merge_chain(edges, issue_id)
             for fingerprint, issue_id in view.issue_ids_by_fingerprint.items()
         }
+        self._allocated = set(view.allocated_issue_ids)
         self._next = view.next_issue_number
 
-    def allocate(self, fingerprint: str) -> tuple[str, bool]:
-        """Return the issue this fingerprint belongs to and whether it is new."""
-        existing = self._by_fingerprint.get(fingerprint)
+    def resolve(self, finding: Finding) -> tuple[str, bool]:
+        """Return the issue this finding belongs to and whether it was minted."""
+        existing = self._by_fingerprint.get(finding.fingerprint)
         if existing is not None:
             return existing, False
+        selected = self._selections.get(finding.fingerprint)
+        if selected is not None:
+            owner = self._owner(selected)
+            # The new fingerprint attaches to the selected issue by being
+            # observed under it, so the next exact sighting of this defect
+            # recurs there without anyone being asked again.
+            self._by_fingerprint[finding.fingerprint] = owner
+            return owner, False
         issue_id = f"{ISSUE_ID_PREFIX}{self._next}"
         self._next += 1
-        self._by_fingerprint[fingerprint] = issue_id
+        self._allocated.add(issue_id)
+        self._by_fingerprint[finding.fingerprint] = issue_id
         return issue_id, True
+
+    def _owner(self, issue_id: str) -> str:
+        """Return the issue a reviewed selection names in the ledger as it is now.
+
+        A selection aimed at an issue another publisher has since merged away
+        follows the merge rather than being refused, because the merge is the
+        statement that the two were always one defect. A selection naming an
+        issue the ledger never minted is refused outright.
+        """
+        canonical = follow_merge_chain(self._edges, issue_id)
+        if canonical not in self._allocated:
+            raise ProjectionError(
+                UNKNOWN_ISSUE, f"{issue_id} names no issue in the inbox"
+            )
+        return canonical
 
 
 def publish_audit(
@@ -446,12 +550,27 @@ def publish_audit(
     state_dir: str | Path | None = None,
     recorded_at: str | None = None,
     observed_at: str | None = None,
+    promote: Callable[[], None] | None = None,
 ) -> PublicationResult:
     """Record one audit and the issues it opens as a single atomic append.
 
     Republishing an audit already in the ledger writes nothing and returns the
     summary that was stored the first time, so a retry, a resumed run, and two
     concurrent publishers all leave exactly one occurrence behind.
+
+    Identity is decided here rather than accepted from the caller. Every route —
+    the fingerprint index, the identity keys, and the issue an audit selected —
+    is answered from the view taken inside the append lock, so a decision made
+    against identity state another publisher has since moved is refreshed rather
+    than minted from. A newly minted ID is bound to its ``issue.asi-N`` key in
+    the same transaction, because an ID that exists without its key would be an
+    issue nothing durable can name.
+
+    ``promote`` is called once identity has been validated and the records are
+    built, but before anything is appended. It exists so a caller can make its
+    canonical artifacts canonical exactly when the record naming them is about
+    to be written: raising from it aborts the transaction with the ledger
+    untouched.
     """
     stamp = recorded_at or _utc_now()
     kind = publication.record_kind
@@ -459,6 +578,7 @@ def publish_audit(
     report = audit_report_locator(publication.artifacts)
     prior: list[AssuranceSummary] = []
     written: list[AssuranceSummary] = []
+    refreshed: list[bool] = []
 
     def build(view: LedgerView) -> tuple[PendingRecord, ...]:
         key = publication_key(kind, publication.run_id, publication.audit_input_digest)
@@ -466,12 +586,18 @@ def publish_audit(
         if already is not None:
             prior.append(already)
             return ()
-        allocator = _Allocator(view)
+        if (
+            publication.catalog_digest is not None
+            and project(view).catalog.digest != publication.catalog_digest
+        ):
+            refreshed.append(True)
+        resolver = _IdentityResolver(view, publication.identity_selections)
         issue_ids: list[str] = []
         new_ids: set[str] = set()
         observations: list[PendingRecord] = []
+        bindings: list[PendingRecord] = []
         for finding in publication.issue_findings():
-            issue_id, is_new = allocator.allocate(finding.fingerprint)
+            issue_id, is_new = resolver.resolve(finding)
             if issue_id not in issue_ids:
                 issue_ids.append(issue_id)
                 if is_new:
@@ -489,6 +615,19 @@ def publish_audit(
                     recorded_at=stamp,
                 )
             )
+            if is_new:
+                bindings.append(
+                    PendingRecord(
+                        kind=KIND_ISSUE_IDENTITY_BOUND,
+                        payload=IssueIdentityBinding(
+                            identity_key=identity_key_for_issue(issue_id),
+                            issue_id=issue_id,
+                            source="allocation",
+                            bound_at=stamp,
+                        ),
+                        recorded_at=stamp,
+                    )
+                )
         if publication.linked_issue_ids:
             opened_by = _issue_opening_runs(view)
             for linked in publication.linked_issue_ids:
@@ -508,15 +647,26 @@ def publish_audit(
             recurring_issue_count=len(issue_ids) - len(new_ids),
         )
         written.append(summary)
+        if promote is not None:
+            promote()
         return (
             PendingRecord(kind=kind, payload=summary, recorded_at=stamp),
             *observations,
+            # A binding follows the observation that minted its issue: replayed
+            # before it, the key would name an issue nothing had opened yet and
+            # be reported as an anomaly rather than read as a name.
+            *bindings,
         )
 
     records = ledger.append_transaction(build, state_dir=state_dir, recorded_at=stamp)
     if not records:
         return PublicationResult(summary=prior[0], records=(), created=False)
-    return PublicationResult(summary=written[0], records=records, created=True)
+    return PublicationResult(
+        summary=written[0],
+        records=records,
+        created=True,
+        identity_refreshed=bool(refreshed),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +700,28 @@ def _merge_rejection(
     if target in edges:
         return MERGE_TARGET_ALREADY_MERGED
     return None
+
+
+def merge_rejection(
+    *,
+    source: str,
+    target: str,
+    known: frozenset[str] | set[str],
+    edges: Mapping[str, str],
+) -> ProjectionError | None:
+    """Return the error refusing this merge, or ``None`` when it can be applied.
+
+    Callers that build several merges into one transaction advance ``edges`` as
+    they go and ask again, so each merge is judged against the state its
+    siblings already established rather than against the ledger they all started
+    from.
+    """
+    reason = _merge_rejection(source=source, target=target, known=known, edges=edges)
+    if reason is None:
+        return None
+    return ProjectionError(
+        reason, _MERGE_REJECTION_DETAIL[reason].format(source=source, target=target)
+    )
 
 
 def record_disposition(
@@ -596,17 +768,14 @@ def record_merge(
     stamp = recorded_at or _utc_now()
 
     def build(view: LedgerView) -> tuple[PendingRecord, ...]:
-        rejection = _merge_rejection(
+        rejection = merge_rejection(
             source=source,
             target=target,
             known=view.allocated_issue_ids,
             edges=view.merge_edges,
         )
         if rejection is not None:
-            raise ProjectionError(
-                rejection,
-                _MERGE_REJECTION_DETAIL[rejection].format(source=source, target=target),
-            )
+            raise rejection
         return (
             PendingRecord(
                 kind=KIND_ISSUE_MERGED,
@@ -773,11 +942,31 @@ class Issue:
     plans: tuple[ImprovementPlanDraft, ...] = ()
     merged_from: tuple[str, ...] = ()
     reopened_count: int = 0
+    #: Every bound key that resolves here, lowest-numbered first. A merge moves
+    #: the absorbed issue's key onto the issue that owns its history, so this
+    #: holds more than one key exactly when this issue absorbed a named one.
+    identity_keys: tuple[str, ...] = ()
 
     @property
     def fingerprint(self) -> str:
         """The identity this issue was opened under."""
         return self.fingerprints[0]
+
+    @property
+    def primary_identity_key(self) -> str | None:
+        """The one key this issue should be named by, or ``None`` when unbound.
+
+        An issue's own key wins whenever it is bound, because that is the name
+        minted with the issue itself; an issue named only by keys it absorbed
+        falls back to the lowest-numbered of them. Binding is first-write-wins
+        per key, which settles who owns a key but not which of several keys an
+        issue prefers, so the tie-break is decided here and never by write
+        order.
+        """
+        if not self.identity_keys:
+            return None
+        own = identity_key_for_issue(self.issue_id)
+        return own if own in self.identity_keys else self.identity_keys[0]
 
     @property
     def occurrence_count(self) -> int:
@@ -839,9 +1028,20 @@ class AssuranceProjection:
     aliases: Mapping[str, str] = field(default_factory=dict)
     anomalies: tuple[ProjectionAnomaly, ...] = ()
     rejected: tuple[RejectedLedgerRecord, ...] = ()
+    #: Every bound identity key mapped to the issue that owns its history now,
+    #: merges already followed.
+    identity_bindings: Mapping[str, str] = field(default_factory=dict)
+    _catalog: IdentityCatalog | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "aliases", MappingProxyType(dict(self.aliases)))
+        object.__setattr__(
+            self,
+            "identity_bindings",
+            MappingProxyType(dict(self.identity_bindings)),
+        )
 
     def resolve(self, issue_id: str) -> str:
         """Return the issue that owns ``issue_id``'s history today."""
@@ -855,6 +1055,11 @@ class AssuranceProjection:
                 return item
         return None
 
+    def issue_for_identity_key(self, identity_key: str) -> Issue | None:
+        """Return the issue a bound key names today, or ``None`` when unbound."""
+        issue_id = self.identity_bindings.get(parse_identity_key(identity_key))
+        return None if issue_id is None else self.issue(issue_id)
+
     def run(self, run_id: str) -> RunAudit | None:
         for item in self.runs:
             if item.run_id == run_id:
@@ -864,6 +1069,20 @@ class AssuranceProjection:
     @property
     def open_issues(self) -> tuple[Issue, ...]:
         return tuple(item for item in self.issues if item.is_open)
+
+    @property
+    def catalog(self) -> IdentityCatalog:
+        """The one identity catalog for this projection, built on first use.
+
+        Built once and kept, because a projection is immutable: two catalogs of
+        one projection could only ever be equal, and callers that recognize a
+        defect against the catalog do so per finding rather than per audit.
+        """
+        catalog = self._catalog
+        if catalog is None:
+            catalog = build_catalog(self)
+            object.__setattr__(self, "_catalog", catalog)
+        return catalog
 
 
 _OBSERVED = "observed"
@@ -898,7 +1117,11 @@ class _RunNode:
         self.closeouts: list[Closeout] = []
 
 
-def _build_issue(node: _IssueNode) -> Issue:
+def _identity_key_order(identity_key: str) -> int:
+    return issue_id_number(issue_id_for_identity_key(identity_key))
+
+
+def _build_issue(node: _IssueNode, identity_keys: Sequence[str] = ()) -> Issue:
     state: IssueState = "open"
     reopened = 0
     occurrences: list[IssueOccurrence] = []
@@ -935,6 +1158,7 @@ def _build_issue(node: _IssueNode) -> Issue:
         plans=tuple(plans),
         merged_from=tuple(sorted(node.merged_from, key=issue_id_number)),
         reopened_count=reopened,
+        identity_keys=tuple(sorted(identity_keys, key=_identity_key_order)),
     )
 
 
@@ -943,6 +1167,7 @@ def project(view: LedgerView) -> AssuranceProjection:
     nodes: dict[str, _IssueNode] = {}
     runs: dict[str, _RunNode] = {}
     aliases: dict[str, str] = {}
+    bindings: dict[str, str] = {}
     anomalies: list[ProjectionAnomaly] = []
 
     def note(record: LedgerRecord, reason: str, detail: str) -> None:
@@ -1020,6 +1245,29 @@ def project(view: LedgerView) -> AssuranceProjection:
                 continue
             aliases[source] = target
             nodes[target].absorb(nodes.pop(source))
+        elif record.kind == KIND_ISSUE_IDENTITY_BOUND:
+            # A binding names an issue; it never changes one's state. Replaying
+            # it here is what makes a stored binding that cannot mean anything
+            # visible rather than silently authoritative.
+            issue_id = follow_merge_chain(aliases, payload.issue_id)
+            if issue_id not in nodes:
+                note(
+                    record,
+                    UNKNOWN_ISSUE,
+                    f"{payload.issue_id} names no issue observed before this record",
+                )
+                continue
+            bound = bindings.get(payload.identity_key)
+            if bound is not None:
+                note(
+                    record,
+                    DUPLICATE_IDENTITY_BINDING
+                    if follow_merge_chain(aliases, bound) == issue_id
+                    else IDENTITY_KEY_CONFLICT,
+                    f"{payload.identity_key} already names {bound}",
+                )
+                continue
+            bindings[payload.identity_key] = payload.issue_id
         elif record.kind == KIND_HUMAN_CLOSEOUT:
             run = runs.get(payload.run_id)
             if run is None:
@@ -1038,8 +1286,20 @@ def project(view: LedgerView) -> AssuranceProjection:
                 run = runs[payload.run_id] = _RunNode(payload.run_id)
             run.summaries.append(payload)
 
+    # Bindings resolve only now, against the settled merge chain. Storing the
+    # resolved issue during replay would freeze an answer a later merge record
+    # invalidates: a key names whoever owns that history today, and the ledger
+    # is never rewritten to say so.
+    identity_bindings: dict[str, str] = {}
+    keys_by_issue: dict[str, list[str]] = {}
+    for identity_key in sorted(bindings, key=_identity_key_order):
+        canonical = follow_merge_chain(aliases, bindings[identity_key])
+        identity_bindings[identity_key] = canonical
+        keys_by_issue.setdefault(canonical, []).append(identity_key)
+
     issues = tuple(
-        _build_issue(nodes[issue_id]) for issue_id in sorted(nodes, key=issue_id_number)
+        _build_issue(nodes[issue_id], keys_by_issue.get(issue_id, ()))
+        for issue_id in sorted(nodes, key=issue_id_number)
     )
     projected_runs = []
     for run_id in sorted(runs):
@@ -1067,9 +1327,354 @@ def project(view: LedgerView) -> AssuranceProjection:
         aliases=aliases,
         anomalies=tuple(anomalies),
         rejected=view.rejected,
+        identity_bindings=identity_bindings,
     )
 
 
 def read_projection(*, state_dir: str | Path | None = None) -> AssuranceProjection:
     """Read the ledger and return the inbox state it describes."""
     return project(ledger.read_ledger(state_dir=state_dir))
+
+
+# ---------------------------------------------------------------------------
+# Identity catalog
+# ---------------------------------------------------------------------------
+
+#: Version of the material :attr:`IdentityCatalog.digest` is taken over. It is
+#: part of that material, so changing which fields the digest covers changes
+#: every digest rather than silently making two different states collide.
+CATALOG_DIGEST_VERSION = 1
+
+#: Least normalized-summary overlap that makes one issue a recurrence candidate
+#: for a finding. Two sightings of one defect are usually reworded rather than
+#: rewritten, so a majority of shared content words is the signal; below this the
+#: pair shares vocabulary rather than a subject.
+MIN_SUMMARY_SIMILARITY = 0.60
+
+#: Most candidates one finding is offered. A list long enough to read is worth
+#: more than a complete one: a reader that has to weigh thirty near-matches is
+#: being asked to redo the matching rather than to confirm it.
+MAX_IDENTITY_CANDIDATES = 8
+
+#: An identical invariant key under a different category or component. This is
+#: the rename the fingerprint cannot see, since the fingerprint is all three.
+MATCH_INVARIANT = "invariant"
+
+#: The same source file, plus an overlapping invariant-key segment. This is the
+#: rename the exact-invariant index cannot see. A file alone matches every
+#: defect ASL ever localized to `runner.py`, and the segment overlap is what
+#: separates a rewritten key from an unrelated defect in the same module.
+MATCH_LOCALIZATION = "localization"
+
+#: Normalized-summary overlap of at least :data:`MIN_SUMMARY_SIMILARITY`.
+MATCH_SUMMARY = "summary"
+
+
+@dataclass(frozen=True)
+class IdentityCandidate:
+    """One issue that could already own a finding, and why the catalog thinks so.
+
+    A candidate is a question, never an answer. Every reason here is semantic —
+    text an agent wrote, normalized — so acting on one automatically would let
+    rewording a summary merge two unrelated defects. The exact paths, fingerprint
+    and identity key, are deliberately not candidate reasons: they are matches,
+    and a caller reuses them without asking anyone.
+    """
+
+    issue_id: str
+    reasons: tuple[str, ...]
+    #: Normalized-summary Jaccard overlap, or ``0.0`` when the summaries are not
+    #: what matched. It is reported rather than thresholded away because two
+    #: candidates that matched the same way are still not equally close.
+    similarity: float = 0.0
+
+    def merged(self, other: IdentityCandidate) -> IdentityCandidate:
+        """Return one candidate for the same issue matched by two findings."""
+        if other.issue_id != self.issue_id:
+            raise AssuranceError(
+                f"cannot merge candidates for {self.issue_id} and {other.issue_id}"
+            )
+        return IdentityCandidate(
+            issue_id=self.issue_id,
+            reasons=tuple(sorted(set(self.reasons) | set(other.reasons))),
+            similarity=max(self.similarity, other.similarity),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "issue_id": self.issue_id,
+            "reasons": list(self.reasons),
+            "similarity": round(self.similarity, 2),
+        }
+
+
+def candidate_order(candidate: IdentityCandidate) -> tuple[int, float, int]:
+    """Rank the most corroborated candidate first, ties settled by issue number."""
+    return (
+        -len(candidate.reasons),
+        -candidate.similarity,
+        issue_id_number(candidate.issue_id),
+    )
+
+
+def _jaccard(left: Sequence[str], right: Sequence[str]) -> float:
+    first, second = set(left), set(right)
+    union = first | second
+    return 0.0 if not union else len(first & second) / len(union)
+
+
+@dataclass(frozen=True)
+class CatalogEntry:
+    """One canonical issue, in the shape a defect is recognized against.
+
+    The entry carries the finding fields a recurrence can be recognized by and
+    their normalized forms beside them, so a reader compares against the same
+    text the index was built from rather than normalizing again and possibly
+    differently.
+    """
+
+    issue_id: str
+    state: IssueState
+    severity: str
+    category: str
+    component: str
+    invariant_key: str
+    lane: str
+    summary: str
+    fingerprints: tuple[str, ...]
+    identity_keys: tuple[str, ...]
+    primary_identity_key: str | None
+    localization: tuple[str, ...]
+    summary_tokens: tuple[str, ...]
+    invariant_tokens: tuple[str, ...]
+    occurrence_count: int
+    first_seen_at: str
+    last_seen_at: str
+
+    @property
+    def fingerprint(self) -> str:
+        """The identity this issue was opened under."""
+        return self.fingerprints[0]
+
+
+def _catalog_digest(entries: Sequence[CatalogEntry]) -> str:
+    """Return the digest of the identity state ``entries`` describe.
+
+    Only the fields that decide which issue owns a defect participate. An
+    occurrence count and a last-seen timestamp change every time a known defect
+    is seen again, and folding them in would expire a reviewed decision for the
+    one event that proves the decision was right.
+    """
+    return sha256_hex(
+        canonical_json_bytes(
+            {
+                "kind": "assurance-identity-catalog",
+                "version": CATALOG_DIGEST_VERSION,
+                "entries": [
+                    {
+                        "issue_id": entry.issue_id,
+                        "state": entry.state,
+                        "fingerprints": list(entry.fingerprints),
+                        "identity_keys": list(entry.identity_keys),
+                        "primary_identity_key": entry.primary_identity_key,
+                    }
+                    for entry in entries
+                ],
+            }
+        )
+    )
+
+
+@dataclass(frozen=True)
+class IdentityCatalog:
+    """Every canonical issue, indexed by the ways one defect is recognized.
+
+    The catalog covers every lifecycle state rather than the open backlog: a
+    defect that recurs after being resolved, dismissed, or accepted has to route
+    back to the issue that already owns it, and an index of open issues alone
+    would mint a second issue for exactly the recurrences the inbox exists to
+    collapse.
+
+    Lookups are exact and never resolve a merge chain. A merged-away ID names no
+    catalog entry, which is what lets a caller fail closed on a stale reference
+    instead of silently redirecting one.
+    """
+
+    entries: tuple[CatalogEntry, ...] = ()
+    #: SHA-256 of the identity state these entries describe. Occurrence counts
+    #: and timestamps are excluded on purpose: a decision reviewed against this
+    #: catalog stays valid while a known defect merely recurs, and is invalidated
+    #: only when an issue, a fingerprint, a key, or a lifecycle state moves.
+    digest: str = field(default="", init=False, compare=False)
+    by_issue_id: Mapping[str, CatalogEntry] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    by_fingerprint: Mapping[str, str] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    by_identity_key: Mapping[str, str] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    by_invariant: Mapping[str, tuple[str, ...]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    by_localization: Mapping[str, tuple[str, ...]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    by_summary_token: Mapping[str, tuple[str, ...]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        by_issue_id: dict[str, CatalogEntry] = {}
+        by_fingerprint: dict[str, str] = {}
+        by_identity_key: dict[str, str] = {}
+        by_invariant: dict[str, list[str]] = {}
+        by_localization: dict[str, list[str]] = {}
+        by_summary_token: dict[str, list[str]] = {}
+        for entry in self.entries:
+            by_issue_id[entry.issue_id] = entry
+            for fingerprint in entry.fingerprints:
+                by_fingerprint.setdefault(fingerprint, entry.issue_id)
+            for identity_key in entry.identity_keys:
+                by_identity_key.setdefault(identity_key, entry.issue_id)
+            by_invariant.setdefault(entry.invariant_key, []).append(entry.issue_id)
+            for pointer in entry.localization:
+                by_localization.setdefault(pointer, []).append(entry.issue_id)
+            for token in entry.summary_tokens:
+                by_summary_token.setdefault(token, []).append(entry.issue_id)
+        object.__setattr__(self, "digest", _catalog_digest(self.entries))
+        object.__setattr__(self, "by_issue_id", MappingProxyType(by_issue_id))
+        object.__setattr__(self, "by_fingerprint", MappingProxyType(by_fingerprint))
+        object.__setattr__(self, "by_identity_key", MappingProxyType(by_identity_key))
+        for name, index in (
+            ("by_invariant", by_invariant),
+            ("by_localization", by_localization),
+            ("by_summary_token", by_summary_token),
+        ):
+            object.__setattr__(
+                self,
+                name,
+                MappingProxyType(
+                    {key: tuple(issue_ids) for key, issue_ids in index.items()}
+                ),
+            )
+
+    def entry(self, issue_id: str) -> CatalogEntry | None:
+        return self.by_issue_id.get(parse_issue_id(issue_id))
+
+    def issue_for_fingerprint(self, fingerprint: str) -> str | None:
+        return self.by_fingerprint.get(fingerprint)
+
+    def issue_for_identity_key(self, identity_key: str) -> str | None:
+        return self.by_identity_key.get(parse_identity_key(identity_key))
+
+    def issues_with_invariant(self, invariant_key: str) -> tuple[str, ...]:
+        return self.by_invariant.get(invariant_key, ())
+
+    def issues_localized_at(self, pointer: str) -> tuple[str, ...]:
+        """Return every issue localized to the file ``pointer`` names."""
+        return self.by_localization.get(normalize_localization(pointer), ())
+
+    def issues_sharing_summary_tokens(self, tokens: Sequence[str]) -> tuple[str, ...]:
+        """Return every issue whose summary shares a token, in catalog order.
+
+        The inverted index answers which issues are worth comparing at all;
+        scoring the overlap is the caller's, because how much overlap counts as
+        one defect is a matching policy rather than a fact about the inbox.
+        """
+        matched: dict[str, None] = {}
+        for token in tokens:
+            for issue_id in self.by_summary_token.get(token, ()):
+                matched[issue_id] = None
+        return tuple(sorted(matched, key=issue_id_number))
+
+    def candidates(
+        self, finding: Finding, *, limit: int = MAX_IDENTITY_CANDIDATES
+    ) -> tuple[IdentityCandidate, ...]:
+        """Return the issues that could already own ``finding``, strongest first.
+
+        Every issue considered arrives from an index, so the cost is the number
+        of issues that share an invariant, a file, or a word with this finding
+        rather than the size of the inbox. Scanning every pair would put the
+        whole catalog in the publication path of every audit.
+
+        The issue an exact fingerprint already names is excluded: that is a
+        recurrence a caller reuses outright, and listing it as something to
+        deliberate over would invite a reader to decline it.
+        """
+        recurrence = self.issue_for_fingerprint(finding.fingerprint)
+        reasons: dict[str, set[str]] = {}
+        similarity: dict[str, float] = {}
+
+        def note(issue_id: str, reason: str) -> None:
+            if issue_id != recurrence:
+                reasons.setdefault(issue_id, set()).add(reason)
+
+        for issue_id in self.issues_with_invariant(finding.invariant_key):
+            note(issue_id, MATCH_INVARIANT)
+
+        invariant_tokens = set(normalize_invariant_tokens(finding.invariant_key))
+        localized: set[str] = set()
+        for pointer in finding.localization:
+            for issue_id in self.issues_localized_at(pointer):
+                if issue_id in localized:
+                    continue
+                localized.add(issue_id)
+                if invariant_tokens & set(self.by_issue_id[issue_id].invariant_tokens):
+                    note(issue_id, MATCH_LOCALIZATION)
+
+        summary_tokens = normalize_summary_tokens(finding.summary)
+        for issue_id in self.issues_sharing_summary_tokens(summary_tokens):
+            score = _jaccard(summary_tokens, self.by_issue_id[issue_id].summary_tokens)
+            if score >= MIN_SUMMARY_SIMILARITY:
+                note(issue_id, MATCH_SUMMARY)
+                similarity[issue_id] = score
+
+        candidates = sorted(
+            (
+                IdentityCandidate(
+                    issue_id=issue_id,
+                    reasons=tuple(sorted(found)),
+                    similarity=similarity.get(issue_id, 0.0),
+                )
+                for issue_id, found in reasons.items()
+            ),
+            key=candidate_order,
+        )
+        return tuple(candidates[:limit])
+
+
+def _catalog_entry(issue: Issue) -> CatalogEntry:
+    finding = issue.finding
+    localization: list[str] = []
+    for pointer in finding.localization:
+        normalized = normalize_localization(pointer)
+        if normalized not in localization:
+            localization.append(normalized)
+    return CatalogEntry(
+        issue_id=issue.issue_id,
+        state=issue.state,
+        severity=finding.severity,
+        category=finding.category,
+        component=finding.component,
+        invariant_key=finding.invariant_key,
+        lane=finding.lane,
+        summary=finding.summary,
+        fingerprints=issue.fingerprints,
+        identity_keys=issue.identity_keys,
+        primary_identity_key=issue.primary_identity_key,
+        localization=tuple(localization),
+        summary_tokens=normalize_summary_tokens(finding.summary),
+        invariant_tokens=normalize_invariant_tokens(finding.invariant_key),
+        occurrence_count=issue.occurrence_count,
+        first_seen_at=issue.first_seen_at,
+        last_seen_at=issue.last_seen_at,
+    )
+
+
+def build_catalog(inbox: AssuranceProjection) -> IdentityCatalog:
+    """Return the identity catalog of one projection, every state included."""
+    return IdentityCatalog(
+        entries=tuple(_catalog_entry(issue) for issue in inbox.issues)
+    )

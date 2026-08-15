@@ -1221,25 +1221,48 @@ def _is_generated_review_session_text(text: str) -> bool:
     )
 
 
-def _normalize_generated_review_handoff_artifacts_text(text: str) -> str:
+@dataclass(frozen=True)
+class _ReviewArtifactProjection:
+    """A handoff text with its generated review artifacts projected away.
+
+    ``exclusive`` says every ``Files modified`` entry named a review artifact,
+    which is the only shape the persisted normalization rewrites on disk.
+    """
+
+    text: str
+    exclusive: bool
+
+
+def _is_generated_review_artifact_entry(entry: str) -> bool:
+    """Return whether one ``Files modified`` entry names a review artifact."""
+    candidate = entry.strip()
+    if candidate.startswith("./"):
+        candidate = candidate[2:]
+    return candidate in _GENERATED_REVIEW_PLAN_ARTIFACTS
+
+
+def _project_generated_review_handoff_artifacts(
+    text: str,
+) -> _ReviewArtifactProjection:
     """Project generated review artifacts out of a completed handoff.
 
     ``final-review.md`` and ``final-review.json`` live beside session files;
     they are evidence produced by a generated review, never files modified in
     one of the repositories under review.  A review harness can nevertheless
-    record them in its own handoff.  Treat that exact, bounded case as
-    ``(none)`` during inspection so registered-plan path validation remains
-    about repository changes.  Any other entry stays untouched and therefore
-    retains the ordinary fail-closed validation behavior.
+    record them in its own handoff.  Drop those entries during inspection so
+    registered-plan path validation remains about repository changes, and do it
+    per entry: a handoff that also records a real repository change keeps that
+    entry, and its ordinary fail-closed validation, without the review having
+    to rewrite an otherwise valid handoff.  Every other entry stays untouched.
     """
     if not _is_generated_review_session_text(text):
-        return text
+        return _ReviewArtifactProjection(text, False)
 
     lines = text.splitlines(keepends=True)
     plain_lines = [line.rstrip("\r\n") for line in lines]
     handoff_start = _final_handoff_start(plain_lines)
     if handoff_start is None:
-        return text
+        return _ReviewArtifactProjection(text, False)
 
     section_end = len(lines)
     for index in range(handoff_start + 1, len(lines)):
@@ -1257,18 +1280,22 @@ def _normalize_generated_review_handoff_artifacts_text(text: str) -> str:
             files_index = index
 
     if status != "complete" or files_index is None:
-        return text
+        return _ReviewArtifactProjection(text, False)
 
     inline = plain_lines[files_index][len(HANDOFF_FILES_PREFIX) :].strip()
     entries = tuple(part.strip() for part in inline.split(",") if part.strip())
-    if not entries or not set(entries).issubset(_GENERATED_REVIEW_PLAN_ARTIFACTS):
-        return text
+    retained = tuple(
+        entry for entry in entries if not _is_generated_review_artifact_entry(entry)
+    )
+    if not entries or len(retained) == len(entries):
+        return _ReviewArtifactProjection(text, False)
 
     line_ending = "\r\n" if lines[files_index].endswith("\r\n") else "\n"
     if not lines[files_index].endswith(("\n", "\r")):
         line_ending = ""
-    lines[files_index] = f"{HANDOFF_FILES_PREFIX} (none){line_ending}"
-    return "".join(lines)
+    rendered = ", ".join(retained) if retained else "(none)"
+    lines[files_index] = f"{HANDOFF_FILES_PREFIX} {rendered}{line_ending}"
+    return _ReviewArtifactProjection("".join(lines), not retained)
 
 
 def normalize_generated_review_handoff_artifacts(
@@ -1279,7 +1306,10 @@ def normalize_generated_review_handoff_artifacts(
     This is an idempotent recovery for a completed generated review that wrote
     only review-owned plan artifacts into ``Files modified``.  It deliberately
     leaves every other handoff entry alone, including unqualified repository
-    paths, so multi-repository validation continues to fail closed.
+    paths, so multi-repository validation continues to fail closed.  A handoff
+    that mixes review artifacts with other entries is projected during
+    inspection but never rewritten here, so no handoff is edited on disk to buy
+    a validation that reading it already grants.
     """
     recover_pending_plan_transaction(plan_dir)
     canonical_dir = canonicalize_path(plan_dir)
@@ -1289,10 +1319,10 @@ def normalize_generated_review_handoff_artifacts(
             text = session.path.read_text(encoding="utf-8")
         except OSError as error:
             _raise_read_error(session.path, error)
-        normalized = _normalize_generated_review_handoff_artifacts_text(text)
-        if normalized == text:
+        projection = _project_generated_review_handoff_artifacts(text)
+        if not projection.exclusive or projection.text == text:
             continue
-        _atomic_write_text(session.path, normalized)
+        _atomic_write_text(session.path, projection.text)
         changed_paths.append(session.path)
     return tuple(changed_paths)
 
@@ -1327,7 +1357,7 @@ def read_session_handoff(
         text = session.path.read_text(encoding="utf-8")
     except OSError as error:
         _raise_read_error(session.path, error)
-    lines = _normalize_generated_review_handoff_artifacts_text(text).splitlines()
+    lines = _project_generated_review_handoff_artifacts(text).text.splitlines()
 
     registry = (
         read_repository_registry(session.path.parent)

@@ -28,6 +28,7 @@ from agent_session_loop import (
     harnesses,
     plans,
     preflight,
+    review,
     runner,
     session_overview,
     state,
@@ -2679,9 +2680,14 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
             self.assertGreater(hb_index, check_started_index)
             self.assertLess(hb_index, check_finished_index)
 
-        # Documented post-turn event ordering: turn_finished precedes the
-        # four verification phase events, which precede run_finished.
-        turn_finished_index = event_names.index("turn_finished")
+        # Documented post-turn event ordering: the harness exit is announced
+        # before the four verification phase events, turn_finished follows
+        # them because verification is a guard that can still refuse the turn,
+        # and run_finished comes last.
+        execution_finished_index = event_names.index(
+            events.TURN_EXECUTION_FINISHED_EVENT
+        )
+        turn_finished_index = event_names.index(events.TURN_FINISHED_EVENT)
         verification_started_index = event_names.index(
             events.VERIFICATION_STARTED_EVENT
         )
@@ -2689,11 +2695,12 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
             events.VERIFICATION_FINISHED_EVENT
         )
         run_finished_index = event_names.index("run_finished")
-        self.assertLess(turn_finished_index, verification_started_index)
+        self.assertLess(execution_finished_index, verification_started_index)
         self.assertLess(verification_started_index, check_started_index)
         self.assertLess(check_started_index, check_finished_index)
         self.assertLess(check_finished_index, verification_finished_index)
-        self.assertLess(verification_finished_index, run_finished_index)
+        self.assertLess(verification_finished_index, turn_finished_index)
+        self.assertLess(turn_finished_index, run_finished_index)
 
         # Progress journal append happened after verification passed and
         # before run_finished. The append itself is silent on success, so the
@@ -2779,10 +2786,10 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
             [
                 runner.AGENT_MUX_START_EVENT,
                 runner.AGENT_MUX_TURN_START_EVENT,
-                runner.AGENT_MUX_TURN_FINISH_EVENT,
                 runner.AGENT_MUX_VERIFICATION_START_EVENT,
                 runner.AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT,
                 runner.AGENT_MUX_VERIFICATION_FINISH_EVENT,
+                runner.AGENT_MUX_TURN_FINISH_EVENT,
                 runner.AGENT_MUX_FINISH_EVENT,
             ],
             collapsed_events,
@@ -3078,6 +3085,247 @@ class RunProgressJournalIntegrationTests(unittest.TestCase):
         self.assertEqual(1, len(failure_events))
         self.assertEqual("1", failure_events[0]["session"])
         self.assertIn("v999", failure_events[0]["error"])
+
+
+class HandoffCorrectionTests(unittest.TestCase):
+    """A mechanically malformed handoff gets one bounded correction turn."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.workspace_root = self.tmp_path / "workspace"
+        self.repositories = init_multi_repo_workspace(
+            self.workspace_root,
+            DEFAULT_MULTI_REPO_SPECS[:2],
+        )
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        write_multi_repo_plan(
+            self.plan_dir,
+            ("pending",),
+            specs=DEFAULT_MULTI_REPO_SPECS[:2],
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "repo": "SVC", '
+                    '"path": "README.md", "name": "svc-readme"}',
+                    session="1",
+                )
+            },
+        )
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            session_path.read_text(encoding="utf-8").replace(
+                "**Reads repositories**: SVC, OAK\n**Writes repositories**: SVC, OAK",
+                "**Reads repositories**: SVC\n**Writes repositories**: SVC",
+            ),
+            encoding="utf-8",
+        )
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        plans.save_workspace_plan_metadata(
+            self.plan_dir,
+            self.workspace_root,
+            registry.digest,
+        )
+        self.context = verification.VerificationContext.from_plan(
+            self.plan_dir,
+            self.workspace_root,
+        )
+
+    def _args(self) -> argparse.Namespace:
+        return argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.workspace_root),
+            harness="codex",
+            state_dir=str(self.state_dir),
+            json=True,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+
+    def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
+        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        try:
+            return runner._run_locked(
+                args=self._args(),
+                cwd=self.workspace_root,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                lock_info=lock_info,
+                run_id=run_id,
+                verification_context=self.context,
+            )
+        finally:
+            state.release_lock(self.plan_dir, self.state_dir)
+
+    def _records(self) -> list[dict[str, Any]]:
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        return read_jsonl(event_path)
+
+    def _payloads(self, name: str) -> list[dict[str, Any]]:
+        return [
+            record["payload"] for record in self._records() if record["name"] == name
+        ]
+
+    def _complete_with(self, files_modified: str) -> None:
+        """Mark the session complete with an arbitrary Files modified line."""
+        (self.repositories["SVC"] / "README.md").write_text(
+            f"changed by the harness: {files_modified}\n", encoding="utf-8"
+        )
+        session_path = self.plan_dir / "session-1.md"
+        lines = session_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            if line.startswith(plans.STATUS_PREFIX):
+                lines[index] = f"{plans.STATUS_PREFIX} complete\n"
+            elif line.startswith(plans.HANDOFF_FILES_PREFIX):
+                lines[index] = f"{plans.HANDOFF_FILES_PREFIX} {files_modified}\n"
+        session_path.write_text("".join(lines), encoding="utf-8")
+
+    def _harness(self, *files_lines: str):
+        """Return a ``run_harness`` stand-in writing one handoff per turn."""
+        pending = list(files_lines)
+
+        def run(*_args: object, **_kwargs: object) -> harnesses.HarnessResult:
+            self._complete_with(pending.pop(0) if pending else "(none)")
+            return harnesses.HarnessResult(
+                name="codex",
+                argv=["fake"],
+                returncode=0,
+                stdout="ok\n",
+                stderr="",
+            )
+
+        return run
+
+    def test_unqualified_entry_is_corrected_within_one_extra_turn(self) -> None:
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=self._harness("README.md", "SVC:README.md"),
+        ):
+            exit_code, payload = self._invoke("correction-run")
+
+        self.assertEqual(0, exit_code)
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        corrections = self._payloads(events.TURN_HANDOFF_CORRECTION_EVENT)
+        self.assertEqual(1, len(corrections))
+        self.assertEqual(
+            runner.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, corrections[0]["defect"]
+        )
+        self.assertEqual(1, corrections[0]["attempt"])
+        self.assertEqual(
+            runner.MAX_HANDOFF_CORRECTION_ATTEMPTS, corrections[0]["max_attempts"]
+        )
+        self.assertFalse(corrections[0]["exhausted"])
+        self.assertIn("README.md", corrections[0]["detail"])
+        self.assertEqual([], self._payloads(events.RUN_PAUSED_EVENT))
+
+    def test_execution_event_precedes_each_accepted_turn(self) -> None:
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=self._harness("README.md", "SVC:README.md"),
+        ):
+            self._invoke("ordering-run")
+
+        names = [
+            record["name"]
+            for record in self._records()
+            if record["name"]
+            in (events.TURN_EXECUTION_FINISHED_EVENT, events.TURN_FINISHED_EVENT)
+        ]
+        # Both turns ran, but the first one's handoff was malformed and was
+        # sent back for correction, so only the second was ever accepted.
+        self.assertEqual(
+            [
+                events.TURN_EXECUTION_FINISHED_EVENT,
+                events.TURN_EXECUTION_FINISHED_EVENT,
+                events.TURN_FINISHED_EVENT,
+            ],
+            names,
+        )
+        executions = self._payloads(events.TURN_EXECUTION_FINISHED_EVENT)
+        self.assertFalse(executions[0]["plan_readable"])
+        self.assertIn("session-1.md", executions[0]["plan_error"])
+        self.assertTrue(executions[1]["plan_readable"])
+        for execution in executions:
+            self.assertEqual(0, execution["returncode"])
+            self.assertTrue(Path(execution["result_path"]).is_file())
+
+    def test_repeated_defect_exhausts_the_correction_and_pauses(self) -> None:
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=self._harness("README.md", "README.md"),
+        ):
+            exit_code, payload = self._invoke("exhausted-run")
+
+        self.assertNotEqual(0, exit_code)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("malformed-plan", payload["pause_reason"])
+        evidence = payload["pause_details"]["handoff_correction"]
+        self.assertTrue(evidence["exhausted"])
+        self.assertEqual(2, evidence["attempt"])
+        self.assertEqual(runner.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, evidence["defect"])
+        self.assertEqual(1, len(self._payloads(events.TURN_HANDOFF_CORRECTION_EVENT)))
+
+    def test_scope_violation_is_not_treated_as_a_correctable_defect(self) -> None:
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=self._harness("OAK:README.md"),
+        ) as run_harness:
+            exit_code, payload = self._invoke("scope-run")
+
+        self.assertNotEqual(0, exit_code)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("malformed-plan", payload["pause_reason"])
+        self.assertNotIn("handoff_correction", payload["pause_details"])
+        self.assertEqual([], self._payloads(events.TURN_HANDOFF_CORRECTION_EVENT))
+        self.assertEqual(1, run_harness.call_count)
+
+    def test_correction_turn_preserves_review_artifacts(self) -> None:
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+            f"# Final review\n\n{review.REVIEW_STATUS_ALL_CLEAR}\n", encoding="utf-8"
+        )
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps(
+                {
+                    "version": review.REVIEW_ARTIFACT_VERSION,
+                    "outcome": "all-clear",
+                    "findings": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        digest = review.final_review_artifact_sha256(self.plan_dir)
+
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=self._harness("README.md", "SVC:README.md"),
+        ):
+            self._invoke("preserved-run")
+
+        corrections = self._payloads(events.TURN_HANDOFF_CORRECTION_EVENT)
+        preserved = corrections[0]["preserved_review_artifacts"]
+        self.assertEqual(digest, preserved["review_artifact_sha256"])
+        self.assertTrue(preserved["review_verdict_ok"])
+        self.assertEqual("all-clear", preserved["review_outcome"])
+        self.assertEqual(digest, review.final_review_artifact_sha256(self.plan_dir))
 
 
 if __name__ == "__main__":

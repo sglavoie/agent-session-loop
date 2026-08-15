@@ -144,6 +144,17 @@ CloseoutOutcome = Literal["accepted", "reworked", "escaped"]
 #: How a human closed out a run's assurance verdict.
 CLOSEOUT_OUTCOMES: tuple[CloseoutOutcome, ...] = ("accepted", "reworked", "escaped")
 
+IdentityBindingSource = Literal["allocation", "merge", "reconcile"]
+
+#: Why an identity key names the issue it names. ``allocation`` is the key an
+#: issue was minted with, ``merge`` is a key whose history moved to another
+#: issue, and ``reconcile`` is an explicitly reviewed operator decision.
+IDENTITY_BINDING_SOURCES: tuple[IdentityBindingSource, ...] = (
+    "allocation",
+    "merge",
+    "reconcile",
+)
+
 AttemptOutcome = Literal[
     "ok",
     "timeout",
@@ -278,6 +289,12 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 ISSUE_ID_PREFIX = "ASI-"
+
+#: An identity key is the durable, machine-facing name of one canonical issue.
+#: It is minted from an ID the ledger allocated, so the key space is ASL's and
+#: cannot be entered by describing a defect differently.
+IDENTITY_KEY_PREFIX = "issue.asi-"
+_IDENTITY_KEY_RE = re.compile(r"^issue\.asi-([1-9][0-9]*)$")
 
 
 def _require_object(
@@ -482,6 +499,32 @@ def parse_issue_id(value: object) -> str:
 def issue_id_number(value: object) -> int:
     """Return the monotonic integer behind an issue reference."""
     return int(parse_issue_id(value)[len(ISSUE_ID_PREFIX) :])
+
+
+def identity_key_for_issue(value: object) -> str:
+    """Return the identity key minted for issue ``value``.
+
+    The key is a pure function of an ID the ledger allocated. Deriving it from a
+    category, component, invariant key, summary, or severity would let an agent
+    that rewords a finding rename the issue that owns it.
+    """
+    return f"{IDENTITY_KEY_PREFIX}{issue_id_number(value)}"
+
+
+def parse_identity_key(value: object) -> str:
+    """Validate an identity key, failing closed."""
+    text = _require_token(value, label="identity key")
+    if _IDENTITY_KEY_RE.match(text) is None:
+        raise AssuranceError(
+            f"identity key must be {IDENTITY_KEY_PREFIX}N naming an issue ASL "
+            f"minted; got {text!r}"
+        )
+    return text
+
+
+def issue_id_for_identity_key(value: object) -> str:
+    """Return the issue an identity key names, which a merge may have moved."""
+    return f"{ISSUE_ID_PREFIX}{parse_identity_key(value)[len(IDENTITY_KEY_PREFIX) :]}"
 
 
 def parse_reason_token(value: object) -> str:
@@ -744,6 +787,77 @@ def parse_finding(payload: object, *, label: str = "finding") -> Finding:
             f"key ({finding.fingerprint})"
         )
     return finding
+
+
+# ---------------------------------------------------------------------------
+# Normalized finding text
+# ---------------------------------------------------------------------------
+
+#: The trailing line, or line and column, a localization pointer may carry. Two
+#: sightings of one defect almost never name the same line, so the file is the
+#: durable half of the pointer and the position is not.
+_LOCALIZATION_POSITION_RE = re.compile(r":[0-9]+(?::[0-9]+)?$")
+
+#: Split points between words. Punctuation, backticks, and path separators all
+#: vanish, so ``runner.py`` and ``runner`` share a token, and the dots, dashes,
+#: and slashes inside a category or invariant key become segment boundaries.
+_WORD_SPLIT_RE = re.compile(r"[^0-9a-z]+")
+
+_STOPWORD_TEXT = """
+a an and are as at be been being but by can could did do does for from had
+has have if in into is it its may might must of on or our should so than
+that the their them then there these they this those to was were will with
+would you your
+"""
+
+#: Function words carried by nearly every summary. They are dropped before
+#: comparison so similarity measures the defect rather than English. Negations
+#: are deliberately absent: dropping ``not`` would let a summary and its
+#: opposite normalize to the same tokens.
+SUMMARY_STOPWORDS: frozenset[str] = frozenset(_STOPWORD_TEXT.split())
+
+
+def normalize_localization(value: str) -> str:
+    """Return the source file a localization pointer names, without a position.
+
+    Normalization is only ever used to compare or index; the stored pointer
+    keeps its line, because that is what a human opening the file needs.
+    """
+    return _LOCALIZATION_POSITION_RE.sub("", value)
+
+
+def normalize_summary_tokens(value: str) -> tuple[str, ...]:
+    """Return the sorted, deduplicated content words of a summary.
+
+    Sorted and deduplicated because the result is a set used for overlap: word
+    order and repetition say nothing about whether two summaries describe one
+    defect, and a stable order makes the token list itself comparable.
+    """
+    tokens = {
+        token
+        for token in _WORD_SPLIT_RE.split(value.casefold())
+        if len(token) > 1 and token not in SUMMARY_STOPWORDS
+    }
+    return tuple(sorted(tokens))
+
+
+def normalize_invariant_tokens(value: str) -> tuple[str, ...]:
+    """Return the sorted, deduplicated segments of an invariant key.
+
+    An invariant key is a dotted and dashed path, and renaming a defect usually
+    rewrites one of its segments rather than all of them. Splitting the key into
+    segments is what lets ``retry.budget-clamped`` be recognized as a rewording
+    of ``retry.budget-respected`` instead of an unrelated key.
+
+    Only the invariant key is split. A component path is mostly the directories
+    every sibling module shares, and a category is a bucket name, so segments
+    from either would report an overlap for defects that merely live in the same
+    package. No stopword is dropped: these are ASL-shaped tokens, not English.
+    """
+    tokens = {
+        token for token in _WORD_SPLIT_RE.split(value.casefold()) if len(token) > 1
+    }
+    return tuple(sorted(tokens))
 
 
 # ---------------------------------------------------------------------------
@@ -1280,6 +1394,76 @@ def parse_issue_merge(payload: object, *, label: str = "merge") -> IssueMerge:
         recorded_at=_require_timestamp(
             data.get("recorded_at"), label=f"{label} 'recorded_at'"
         ),
+        note=_optional_text(data.get("note"), label=f"{label} 'note'"),
+    )
+
+
+@dataclass(frozen=True)
+class IssueIdentityBinding:
+    """A durable statement that one identity key names one canonical issue.
+
+    Keys and issue IDs are both minted by ASL, so a binding never introduces a
+    new name: it says which allocated issue owns an allocated key today. That is
+    what lets a merged-away key keep resolving without the merge record having to
+    be reinterpreted, and what keeps an agent from selecting an identity by
+    rewording the defect it describes.
+    """
+
+    identity_key: str
+    issue_id: str
+    source: IdentityBindingSource
+    bound_at: str
+    note: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "identity_key", parse_identity_key(self.identity_key))
+        object.__setattr__(self, "issue_id", parse_issue_id(self.issue_id))
+        _require_choice(
+            self.source, label="binding 'source'", choices=IDENTITY_BINDING_SOURCES
+        )
+        _require_timestamp(self.bound_at, label="binding 'bound_at'")
+        if self.note is not None:
+            _require_text(self.note, label="binding 'note'")
+        minted = identity_key_for_issue(self.issue_id)
+        if self.source == "allocation" and self.identity_key != minted:
+            raise AssuranceError(
+                f"binding {self.identity_key!r} claims to be the key allocated "
+                f"with {self.issue_id}, whose key is {minted}"
+            )
+
+    @property
+    def named_issue_id(self) -> str:
+        """The issue the key itself names, which a merge may have moved."""
+        return issue_id_for_identity_key(self.identity_key)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "identity_key": self.identity_key,
+            "issue_id": self.issue_id,
+            "source": self.source,
+            "bound_at": self.bound_at,
+            "note": self.note,
+        }
+
+
+def parse_issue_identity_binding(
+    payload: object, *, label: str = "binding"
+) -> IssueIdentityBinding:
+    """Parse one identity-binding record, failing closed."""
+    data = _require_object(
+        payload,
+        label=label,
+        allowed_keys=("identity_key", "issue_id", "source", "bound_at", "note"),
+    )
+    return IssueIdentityBinding(
+        identity_key=parse_identity_key(data.get("identity_key")),
+        issue_id=parse_issue_id(data.get("issue_id")),
+        source=_require_choice(
+            data.get("source"),
+            label=f"{label} 'source'",
+            choices=IDENTITY_BINDING_SOURCES,
+        ),
+        bound_at=_require_timestamp(data.get("bound_at"), label=f"{label} 'bound_at'"),
         note=_optional_text(data.get("note"), label=f"{label} 'note'"),
     )
 
@@ -1903,6 +2087,376 @@ def parse_assurance_summary(payload: object) -> AssuranceSummary:
                 data.get("duration_seconds"),
                 label=f"{label} 'duration_seconds'",
                 minimum=0.0,
+            )
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation manifest
+# ---------------------------------------------------------------------------
+
+#: A reconciliation manifest is an operator artifact, not a ledger record: a
+#: preview generates it, a human edits it, and one apply replays it. Its version
+#: is therefore its own and moves independently of the ledger schema version.
+RECONCILIATION_MANIFEST_KIND = "assurance-reconciliation-manifest"
+RECONCILIATION_MANIFEST_VERSION = 1
+SUPPORTED_RECONCILIATION_MANIFEST_VERSIONS: frozenset[int] = frozenset({1})
+
+#: Give one canonical issue a durable identity key it does not have yet.
+DECISION_BIND = "bind"
+#: Redirect one issue's history into another, irreversibly.
+DECISION_MERGE = "merge"
+#: Record that a suggested pair was read and is two defects. Writes nothing:
+#: the ledger has no record for "not the same", and inventing one to store a
+#: negative would put a growing table of non-facts in every replay.
+DECISION_KEEP_DISTINCT = "keep-distinct"
+#: A pair the catalog suggested and nobody has ruled on yet. It is a member of
+#: the schema so a preview can be applied without being rewritten first — and
+#: apply refuses any manifest still carrying one, so the refusal names the
+#: unread suggestion instead of a syntax error somewhere in the file.
+DECISION_REVIEW = "review"
+
+RECONCILIATION_DECISIONS: tuple[str, ...] = (
+    DECISION_BIND,
+    DECISION_MERGE,
+    DECISION_KEEP_DISTINCT,
+    DECISION_REVIEW,
+)
+
+#: Decisions one manifest may carry. A reconciliation pass is something a person
+#: reads before running it, and a file past this size is being generated into
+#: rather than reviewed.
+MAX_MANIFEST_DECISIONS = 1000
+
+
+@dataclass(frozen=True)
+class BindDecision:
+    """Bind one identity key to the canonical issue that owns it."""
+
+    issue_id: str
+    identity_key: str
+    note: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "issue_id", parse_issue_id(self.issue_id))
+        object.__setattr__(self, "identity_key", parse_identity_key(self.identity_key))
+        if self.note is not None:
+            _require_text(self.note, label="bind decision 'note'")
+
+    @property
+    def decision(self) -> str:
+        return DECISION_BIND
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision": DECISION_BIND,
+            "issue_id": self.issue_id,
+            "identity_key": self.identity_key,
+            "note": self.note,
+        }
+
+
+@dataclass(frozen=True)
+class MergeDecision:
+    """Redirect one issue's history into another."""
+
+    source_issue_id: str
+    target_issue_id: str
+    note: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "source_issue_id", parse_issue_id(self.source_issue_id)
+        )
+        object.__setattr__(
+            self, "target_issue_id", parse_issue_id(self.target_issue_id)
+        )
+        if self.source_issue_id == self.target_issue_id:
+            raise AssuranceError(
+                f"merge decision cannot merge {self.source_issue_id} into itself"
+            )
+        if self.note is not None:
+            _require_text(self.note, label="merge decision 'note'")
+
+    @property
+    def decision(self) -> str:
+        return DECISION_MERGE
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision": DECISION_MERGE,
+            "source_issue_id": self.source_issue_id,
+            "target_issue_id": self.target_issue_id,
+            "note": self.note,
+        }
+
+
+@dataclass(frozen=True)
+class KeepDistinctDecision:
+    """Record that a suggested pair was read and left as separate defects."""
+
+    issue_ids: tuple[str, ...]
+    note: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "issue_ids", _require_issue_ids(list(self.issue_ids), label="issues")
+        )
+        if len(self.issue_ids) < 2:
+            raise AssuranceError(
+                "keep-distinct decision must name at least two issues; "
+                f"got {len(self.issue_ids)}"
+            )
+        if self.note is not None:
+            _require_text(self.note, label="keep-distinct decision 'note'")
+
+    @property
+    def decision(self) -> str:
+        return DECISION_KEEP_DISTINCT
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision": DECISION_KEEP_DISTINCT,
+            "issue_ids": list(self.issue_ids),
+            "note": self.note,
+        }
+
+
+@dataclass(frozen=True)
+class ReviewDecision:
+    """A pair the catalog suggested, carrying why, awaiting a human verdict."""
+
+    issue_ids: tuple[str, ...]
+    reasons: tuple[str, ...] = ()
+    similarity: float = 0.0
+    note: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "issue_ids", _require_issue_ids(list(self.issue_ids), label="issues")
+        )
+        if len(self.issue_ids) < 2:
+            raise AssuranceError(
+                "review decision must name at least two issues; "
+                f"got {len(self.issue_ids)}"
+            )
+        object.__setattr__(
+            self,
+            "reasons",
+            tuple(
+                _require_token(reason, label="review decision 'reasons' entry")
+                for reason in self.reasons
+            ),
+        )
+        similarity = _require_number(
+            self.similarity, label="review decision 'similarity'", minimum=0.0
+        )
+        if similarity > 1.0:
+            raise AssuranceError(
+                f"review decision 'similarity' must be <= 1.0; got {similarity}"
+            )
+        object.__setattr__(self, "similarity", similarity)
+        if self.note is not None:
+            _require_text(self.note, label="review decision 'note'")
+
+    @property
+    def decision(self) -> str:
+        return DECISION_REVIEW
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision": DECISION_REVIEW,
+            "issue_ids": list(self.issue_ids),
+            "reasons": list(self.reasons),
+            "similarity": round(self.similarity, 2),
+            "note": self.note,
+        }
+
+
+ReconciliationDecision = (
+    BindDecision | MergeDecision | KeepDistinctDecision | ReviewDecision
+)
+
+
+@dataclass(frozen=True)
+class ReconciliationManifest:
+    """Every decision one reconciliation pass applies, and what it was read against.
+
+    ``catalog_digest`` is the identity state the decisions were reviewed against.
+    It is part of the manifest rather than a flag on the command because the
+    review is what the digest qualifies: a file that outlived the catalog it was
+    written from describes issues that may since have moved, and applying it
+    would record a verdict nobody gave about the inbox as it stands.
+    """
+
+    catalog_digest: str
+    decisions: tuple[ReconciliationDecision, ...] = ()
+    generated_at: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_digest(self.catalog_digest, label="manifest 'catalog_digest'")
+        decisions = tuple(self.decisions)
+        if len(decisions) > MAX_MANIFEST_DECISIONS:
+            raise AssuranceError(
+                f"manifest 'decisions' must hold at most {MAX_MANIFEST_DECISIONS} "
+                f"entries; got {len(decisions)}"
+            )
+        object.__setattr__(self, "decisions", decisions)
+        if self.generated_at is not None:
+            _require_timestamp(self.generated_at, label="manifest 'generated_at'")
+        bound_keys = _duplicates(
+            item.identity_key for item in decisions if isinstance(item, BindDecision)
+        )
+        if bound_keys:
+            raise AssuranceError(
+                f"manifest binds identity key(s) {', '.join(bound_keys)} more than "
+                "once; one key names one issue"
+            )
+        merged = _duplicates(
+            item.source_issue_id
+            for item in decisions
+            if isinstance(item, MergeDecision)
+        )
+        if merged:
+            raise AssuranceError(
+                f"manifest merges issue(s) {', '.join(merged)} more than once; a "
+                "merge is irreversible and only the first would take effect"
+            )
+
+    @property
+    def unresolved(self) -> tuple[ReviewDecision, ...]:
+        """Suggestions still awaiting a verdict, which apply refuses to act on."""
+        return tuple(
+            item for item in self.decisions if isinstance(item, ReviewDecision)
+        )
+
+    def of_kind(self, decision: str) -> tuple[ReconciliationDecision, ...]:
+        return tuple(item for item in self.decisions if item.decision == decision)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": RECONCILIATION_MANIFEST_KIND,
+            "version": RECONCILIATION_MANIFEST_VERSION,
+            "catalog_digest": self.catalog_digest,
+            "generated_at": self.generated_at,
+            "decisions": [item.to_dict() for item in self.decisions],
+        }
+
+
+def _parse_decision(payload: object, *, label: str) -> ReconciliationDecision:
+    if not isinstance(payload, Mapping):
+        raise AssuranceError(f"{label} must be a JSON object")
+    kind = _require_choice(
+        payload.get("decision"),
+        label=f"{label} 'decision'",
+        choices=RECONCILIATION_DECISIONS,
+    )
+    if kind == DECISION_BIND:
+        data = _require_object(
+            payload,
+            label=label,
+            allowed_keys=("decision", "issue_id", "identity_key", "note"),
+        )
+        return BindDecision(
+            issue_id=parse_issue_id(data.get("issue_id")),
+            identity_key=parse_identity_key(data.get("identity_key")),
+            note=_optional_text(data.get("note"), label=f"{label} 'note'"),
+        )
+    if kind == DECISION_MERGE:
+        data = _require_object(
+            payload,
+            label=label,
+            allowed_keys=("decision", "source_issue_id", "target_issue_id", "note"),
+        )
+        return MergeDecision(
+            source_issue_id=parse_issue_id(data.get("source_issue_id")),
+            target_issue_id=parse_issue_id(data.get("target_issue_id")),
+            note=_optional_text(data.get("note"), label=f"{label} 'note'"),
+        )
+    if kind == DECISION_KEEP_DISTINCT:
+        data = _require_object(
+            payload, label=label, allowed_keys=("decision", "issue_ids", "note")
+        )
+        return KeepDistinctDecision(
+            issue_ids=_require_issue_ids(
+                data.get("issue_ids"), label=f"{label} 'issue_ids'"
+            ),
+            note=_optional_text(data.get("note"), label=f"{label} 'note'"),
+        )
+    data = _require_object(
+        payload,
+        label=label,
+        allowed_keys=("decision", "issue_ids", "reasons", "similarity", "note"),
+    )
+    reasons = _require_sequence(
+        data.get("reasons", []),
+        label=f"{label} 'reasons'",
+        maximum=MAX_REFERENCES_PER_ITEM,
+    )
+    return ReviewDecision(
+        issue_ids=_require_issue_ids(
+            data.get("issue_ids"), label=f"{label} 'issue_ids'"
+        ),
+        reasons=tuple(
+            _require_token(reason, label=f"{label} 'reasons' entry")
+            for reason in reasons
+        ),
+        similarity=_require_number(
+            data.get("similarity", 0.0), label=f"{label} 'similarity'", minimum=0.0
+        ),
+        note=_optional_text(data.get("note"), label=f"{label} 'note'"),
+    )
+
+
+def parse_reconciliation_manifest(
+    payload: object, *, label: str = "manifest"
+) -> ReconciliationManifest:
+    """Parse one reconciliation manifest, failing closed.
+
+    The ``kind`` and ``version`` fields are checked before anything else, so a
+    file that is some other JSON document is refused as the wrong document
+    rather than as a manifest missing every field it needs.
+    """
+    data = _require_object(
+        payload,
+        label=label,
+        allowed_keys=("kind", "version", "catalog_digest", "generated_at", "decisions"),
+    )
+    kind = _require_text(data.get("kind"), label=f"{label} 'kind'")
+    if kind != RECONCILIATION_MANIFEST_KIND:
+        raise AssuranceError(
+            f"{label} 'kind' must be {RECONCILIATION_MANIFEST_KIND!r}; got {kind!r}"
+        )
+    version = _require_int(
+        data.get("version"), label=f"{label} 'version'", minimum=1, maximum=1_000_000
+    )
+    if version not in SUPPORTED_RECONCILIATION_MANIFEST_VERSIONS:
+        supported = ", ".join(
+            str(item) for item in sorted(SUPPORTED_RECONCILIATION_MANIFEST_VERSIONS)
+        )
+        raise AssuranceError(
+            f"{label} 'version' {version} is unsupported; this build reads "
+            f"version(s) {supported}"
+        )
+    decisions = _require_sequence(
+        data.get("decisions", []),
+        label=f"{label} 'decisions'",
+        maximum=MAX_MANIFEST_DECISIONS,
+    )
+    return ReconciliationManifest(
+        catalog_digest=_require_digest(
+            data.get("catalog_digest"), label=f"{label} 'catalog_digest'"
+        ),
+        decisions=tuple(
+            _parse_decision(item, label=f"{label} decision {position}")
+            for position, item in enumerate(decisions, start=1)
+        ),
+        generated_at=(
+            None
+            if data.get("generated_at") is None
+            else _require_timestamp(
+                data.get("generated_at"), label=f"{label} 'generated_at'"
             )
         ),
     )

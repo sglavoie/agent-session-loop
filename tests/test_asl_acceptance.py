@@ -106,7 +106,7 @@ ACCEPTANCE_MATRIX: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests.test_asl_assurance_lifecycle:"
             "TerminalAuditTests.test_an_agent_that_never_answers_still_publishes_the_checks",
             "tests.test_asl_assurance_lifecycle:"
-            "TerminalAuditTests.test_complete_artifacts_with_a_failed_publication_stay_pending",
+            "TerminalAuditTests.test_a_failed_publication_leaves_no_report_behind",
             "tests.test_asl_supervisor_audit:"
             "AuditPlanTests.test_opting_out_is_persisted_as_skipped_immediately",
         ),

@@ -36,11 +36,14 @@ reads as a gap in the audit rather than as a clean run.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
+import os
 import re
+import shutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -52,6 +55,7 @@ from . import (
     assurance_models,
     assurance_projection,
     assurance_report,
+    durability,
     events,
     harnesses,
     pause_policy,
@@ -102,6 +106,11 @@ MUTATION_ARTIFACT_NAME = "supervisor-audit-mutation.json"
 #: An unavailable audit has to point a reader at something it can open, and a
 #: collection failure has no bundle and no attempt directory to offer.
 UNAVAILABLE_ARTIFACT_NAME = "supervisor-audit-unavailable.json"
+
+#: Run-relative directory the canonical reports are built in before they become
+#: canonical. Nothing durable ever names a path inside it, so its contents are
+#: scratch that only the publication that created them can be interested in.
+AUDIT_STAGING_DIR_NAME = "supervisor-audit-staging"
 
 
 @dataclass(frozen=True)
@@ -1308,6 +1317,23 @@ def _payload_shows_failure(payload: Mapping[str, Any]) -> bool:
     return payload.get("ok") is False
 
 
+def _turn_shows_failure(result: Mapping[str, Any]) -> bool:
+    """Whether a turn result is an anomaly, including at exit code zero.
+
+    A harness can exit cleanly and still leave the turn unusable: the handoff
+    may no longer parse, or the plan may have moved in a way the loop refuses.
+    Both are recorded on the turn result rather than in its exit code, so an
+    audit that only reads the generic failure signals reports the turn as
+    healthy and hides exactly the case an operator opened the audit to find.
+    """
+    if _payload_shows_failure(result):
+        return True
+    if result.get("plan_error"):
+        return True
+    status_result = result.get("status_result")
+    return status_result is not None and status_result != "complete"
+
+
 def _turn_directories(run_dir: Path) -> list[Path]:
     try:
         entries = [
@@ -1531,7 +1557,7 @@ def _turn_section(collector: _Collector, directory: Path) -> dict[str, Any]:
     }
     if isinstance(result, Mapping):
         turn["result"] = collector.redact(result)
-        turn["anomalous"] = _payload_shows_failure(result)
+        turn["anomalous"] = _turn_shows_failure(result)
     else:
         collector.omissions.record("turns", reason or REASON_MALFORMED, str(directory))
         turn["result"] = {"available": False, "reason": reason or REASON_MALFORMED}
@@ -3160,8 +3186,22 @@ def lane_rollup(
 # Independent agent audit
 # ---------------------------------------------------------------------------
 
-#: Version of the JSON contract the auditor answers in.
-AGENT_OUTPUT_SCHEMA_VERSION = 1
+#: Version of the JSON contract the auditor answers in. v2 requires exactly one
+#: identity decision per finding; a v1 answer carried none, so it is rejected
+#: rather than read as an implicit request to mint a new issue.
+AGENT_OUTPUT_SCHEMA_VERSION = 2
+
+#: Largest identity catalog handed to an auditor. The inbox grows without bound
+#: while a prompt does not, so the catalog is a bounded sample of a complete
+#: index and says how much it dropped rather than pretending to be whole.
+MAX_AGENT_CATALOG_BYTES = 64 * 1024
+
+#: Longest summary carried per catalog entry. An auditor needs enough of a
+#: summary to recognize its own defect in it, not the whole record.
+MAX_CATALOG_SUMMARY_CHARS = 240
+
+#: The only two identity statements a finding may make.
+IDENTITY_DECISIONS: tuple[str, ...] = ("existing", "new")
 
 #: Largest agent message parsed. An auditor that answers with more than this is
 #: not answering the contract, and parsing an unbounded reply is how untrusted
@@ -3194,6 +3234,26 @@ REASON_AGENT_UNAVAILABLE = "agent-coverage-unavailable"
 #: Why an audit with agent coverage and no findings is still not all-clear.
 REASON_LANE_COVERAGE = "incomplete-lane-coverage"
 
+#: Why an audit whose every attempt was well-formed is still not usable: a
+#: finding asked ASL to allocate an issue for a defect the catalog already names
+#: a candidate for, and said so again after being shown the candidates. ASL will
+#: not merge on a semantic match and will not allocate past one, so the audit is
+#: unavailable under a reason class that groups every such run into one issue.
+REASON_IDENTITY_AMBIGUOUS = "identity-ambiguous"
+
+#: The attempt outcome an identity-ambiguous answer is recorded under.
+#: :data:`assurance_models.ATTEMPT_OUTCOMES` is a closed vocabulary persisted
+#: inside audit reports, so this reuses the token for an identity that cannot be
+#: resolved against the catalog rather than widening the wire contract; the
+#: audit-level reason carries the distinction, and the detail names the issues.
+IDENTITY_AMBIGUOUS_OUTCOME: AttemptOutcome = "invalid-reference"
+
+#: Most candidates one retry prompt carries, across every finding that asked for
+#: a new allocation. The listing is widened to make each one selectable, so this
+#: also bounds how far a retry's catalog may exceed
+#: :data:`MAX_AGENT_CATALOG_BYTES`.
+MAX_PROMPTED_CANDIDATES = 8
+
 #: Files written under each ``supervisor-audit-attempt-N/`` directory.
 ATTEMPT_PROMPT_FILE = "prompt.txt"
 ATTEMPT_MESSAGE_FILE = "last-message.txt"
@@ -3203,11 +3263,13 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?[ \t]*\n(.*?)```", re.DOTALL)
 
 #: Keys the agent may set on a finding. ``fingerprint``, ``issue_id``, and
 #: ``schema_version`` are absent because ASL computes them; an agent that sends
-#: one is claiming an authority it does not have.
+#: one is claiming an authority it does not have. ``identity`` is the one place
+#: an issue may be named, and only by selecting one ASL already supplied.
 _AGENT_FINDING_KEYS: frozenset[str] = frozenset(
     {
         "category",
         "component",
+        "identity",
         "invariant_key",
         "lane",
         "severity",
@@ -3217,6 +3279,8 @@ _AGENT_FINDING_KEYS: frozenset[str] = frozenset(
         "localization",
     }
 )
+
+_IDENTITY_KEYS: frozenset[str] = frozenset({"decision", "issue_id"})
 
 _AGENT_IDENTITY_KEYS: frozenset[str] = frozenset(
     {"fingerprint", "id", "issue", "issue_id", "issue_ids"}
@@ -3240,7 +3304,9 @@ Prohibited, without exception:
 - Reviewing, grading, or commenting on the application implementation the run
   produced: its code quality, design, tests, or diffs are out of scope.
 - Editing, creating, or deleting any file. You have read access only.
-- Assigning issue IDs, fingerprints, or any identifier. ASL computes those.
+- Assigning issue IDs, fingerprints, or any identifier of your own invention.
+  ASL computes fingerprints and allocates every issue ID. The only identity you
+  ever state is a selection from the catalog ASL supplies below.
 
 Judge these eight rubric lanes, all of them, every time:
 
@@ -3277,6 +3343,27 @@ Rules the answer must satisfy:
   bound execution root is allowed by ASL's compatibility contract. Do not infer
   missing authority merely from the absence of registry and scope projections.
 
+Every finding carries exactly one `identity` object, and there is no default:
+
+- `{{"decision": "existing", "issue_id": "ASI-N"}}` says this defect is the one
+  the catalog below already names under `ASI-N`. Copy that ID from the catalog
+  verbatim; an ID the catalog does not list is rejected, and so is an ID
+  anywhere on a finding other than inside its own `identity` object.
+- `{{"decision": "new"}}` says the catalog names nothing that is this defect,
+  and asks ASL to allocate an issue for it. It names no ID, because you do not
+  have one to name.
+- `omitted` counts the issues the size bound kept out of the listing below. It
+  is not zero when the catalog is a sample: an ID you remember but cannot find
+  listed is still not selectable, so answer `new` rather than naming it.
+
+The catalog is ASL's canonical inbox, every lifecycle state included, so a
+defect that recurs after being resolved, dismissed, or accepted still selects
+the issue that already owns it:
+
+```json
+{catalog}
+```
+
 Operational evidence for run {run_id}:
 
 ```json
@@ -3292,6 +3379,40 @@ Your previous answer was rejected by ASL's validator:
 This is a fresh invocation and your previous answer is gone. Redo the audit
 from the evidence above and return only a corrected JSON object in a single
 fenced ```json block.
+
+If that rejection is about identity, the catalog above is the entire set of
+issues you may select from, and it is the same catalog you were given before.
+An ID it does not list cannot be selected no matter where you saw it: answer
+`{{"decision": "new"}}` for that finding instead.
+"""
+
+AUDIT_CANDIDATE_TEMPLATE = """\
+Your previous answer was well-formed and no validation rule rejected it. It
+asked ASL to allocate a new issue for at least one defect, and ASL's catalog
+already names issues that may be that same defect under another wording:
+
+```json
+{candidates}
+```
+
+`reasons` says what ASL matched on. `{invariant}` is an identical invariant key
+under a different category or component, which is the rename a fingerprint
+cannot see. `{localization}` is the same source file plus an overlapping
+invariant-key segment. `{summary}` is normalized-summary
+overlap of at least {threshold}, reported in `similarity`; that field is 0 when
+the summaries are not what matched.
+
+Every issue listed there is in the catalog above and is selectable, including
+any the size bound had left out. This is a fresh invocation and your previous
+answer is gone, so redo the audit from the evidence and decide each defect's
+identity again. Select the issue that already owns a defect with
+`{{"decision": "existing", "issue_id": "ASI-N"}}`, or answer
+`{{"decision": "new"}}` if none of them is it.
+
+ASL never merges a defect into a candidate on its own, and it will not allocate
+past one either: a defect you report as new a second time leaves the audit
+recorded as identity-ambiguous with no issue opened for it. Answer `new` when
+that is what the evidence shows, not to move past this list.
 """
 
 
@@ -3309,12 +3430,67 @@ class AgentOutputError(Exception):
         self.detail = detail
 
 
+#: Who decided an identity. ``agent`` is a selection from the supplied catalog;
+#: ``recurrence`` is ASL overruling a new-allocation request because the
+#: finding's fingerprint already names an issue, which is a fact rather than a
+#: judgement and therefore needs nobody's agreement.
+IDENTITY_SOURCES: tuple[str, ...] = ("agent", "recurrence")
+
+
+@dataclass(frozen=True)
+class IdentityDecision:
+    """The one identity statement a finding is allowed to make.
+
+    ``existing`` names an issue the supplied catalog listed and nothing else;
+    ``new`` asks ASL to allocate one and therefore names nothing. Both are
+    requests: the decision records what the auditor asked for, and allocation
+    remains ASL's.
+    """
+
+    decision: str
+    issue_id: str | None = None
+    source: str = "agent"
+
+    def __post_init__(self) -> None:
+        if self.source not in IDENTITY_SOURCES:
+            raise AgentOutputError(
+                "malformed-output",
+                f"an identity decision comes from one of "
+                f"{', '.join(IDENTITY_SOURCES)}; got {self.source!r}",
+            )
+
+    @property
+    def is_new(self) -> bool:
+        return self.decision == "new"
+
+
 @dataclass(frozen=True)
 class AgentAudit:
-    """One validated agent answer: lane coverage and the findings it claims."""
+    """One validated agent answer: lanes, findings, and their identities.
+
+    ``identities`` is positional against ``findings`` and the two are refused
+    at different lengths, because an identity decision that cannot be attributed
+    to a specific finding is worse than none: it would be attached to whichever
+    defect happened to line up.
+    """
 
     lanes: tuple[assurance_models.LaneEvidence, ...]
     findings: tuple[Finding, ...]
+    identities: tuple[IdentityDecision, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.identities) != len(self.findings):
+            raise AgentOutputError(
+                "malformed-output",
+                "every finding carries exactly one identity decision; the answer "
+                f"held {len(self.findings)} finding(s) and "
+                f"{len(self.identities)} decision(s)",
+            )
+
+    @property
+    def decisions(self) -> tuple[tuple[Finding, IdentityDecision], ...]:
+        """Each finding paired with the identity decision it arrived with."""
+        return tuple(zip(self.findings, self.identities, strict=True))
 
 
 @dataclass(frozen=True)
@@ -3325,6 +3501,28 @@ class AgentAuditOutcome:
     attempts: tuple[assurance_models.AuditAttempt, ...]
     agent_covered: bool
     mutation_issue_id: str | None = None
+    #: The validated answer behind ``audit``, kept because the canonical audit
+    #: carries no identity: allocation reads the decisions from here.
+    agent: AgentAudit | None = None
+    #: The catalog those decisions were made against, whose digest names the
+    #: identity state they are valid for.
+    catalog: AgentCatalog | None = None
+    #: The issue each selecting finding named, keyed by fingerprint, in the form
+    #: the publication revalidates. Empty for an audit that selected nothing.
+    identity_selections: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def catalog_digest(self) -> str | None:
+        """The identity state this audit's decisions were reviewed against.
+
+        ``None`` when no agent answer stands behind the audit: a digest is only
+        worth revalidating beside a decision it could invalidate, and supplying
+        one for an audit that decided nothing would ask the publisher to check
+        an answer that does not exist.
+        """
+        if self.agent is None or self.catalog is None:
+            return None
+        return self.catalog.digest
 
     @property
     def linked_issue_ids(self) -> tuple[str, ...]:
@@ -3342,6 +3540,193 @@ def _inline(text: str, *, limit: int = assurance_models.MAX_TEXT_CHARS) -> str:
     """Collapse validated text to one line so it can be rendered into a cell."""
     collapsed = " ".join(_CONTROL_CHAR_RE.sub(" ", str(text)).split())
     return collapsed[:limit]
+
+
+@dataclass(frozen=True)
+class AgentCatalogEntry:
+    """One canonical issue as an auditor sees it.
+
+    Normalized localization and summary tokens are deliberately absent: they
+    exist so ASL can recognize a recurrence, and an auditor picking an ID by
+    reading the record has no use for them but would pay for them out of the
+    size bound.
+    """
+
+    issue_id: str
+    state: str
+    severity: str
+    category: str
+    component: str
+    invariant_key: str
+    lane: str
+    summary: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "issue_id": self.issue_id,
+            "state": self.state,
+            "severity": self.severity,
+            "category": self.category,
+            "component": self.component,
+            "invariant_key": self.invariant_key,
+            "lane": self.lane,
+            "summary": self.summary,
+        }
+
+
+@dataclass(frozen=True)
+class AgentCatalog:
+    """The bounded catalog supplied with a prompt, and what it left out.
+
+    ``omitted`` names the issues the size bound dropped, which is not the same
+    fact as an issue not existing. Answering "no such issue" to a selection the
+    listing merely could not fit is what would teach an auditor to invent IDs,
+    so the two are kept apart here and rejected with different explanations.
+    """
+
+    digest: str
+    entries: tuple[AgentCatalogEntry, ...] = ()
+    omitted: tuple[str, ...] = ()
+    issue_ids: frozenset[str] = field(
+        default_factory=frozenset, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "issue_ids", frozenset(entry.issue_id for entry in self.entries)
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "digest": self.digest,
+            "omitted": len(self.omitted),
+            "issues": [entry.to_dict() for entry in self.entries],
+        }
+
+
+def _agent_catalog_entry(
+    entry: assurance_projection.CatalogEntry,
+) -> AgentCatalogEntry:
+    return AgentCatalogEntry(
+        issue_id=entry.issue_id,
+        state=entry.state,
+        severity=entry.severity,
+        category=entry.category,
+        component=entry.component,
+        invariant_key=entry.invariant_key,
+        lane=entry.lane,
+        summary=_inline(entry.summary, limit=MAX_CATALOG_SUMMARY_CHARS),
+    )
+
+
+def build_agent_catalog(catalog: assurance_projection.IdentityCatalog) -> AgentCatalog:
+    """Return the agent-facing form of ``catalog``, bounded and self-describing.
+
+    The bound is spent on the most recently seen issues, because a defect sighted
+    lately is the one an auditor is most likely to be looking at again, and the
+    survivors are listed in issue order so the listing reads as a catalog rather
+    than as a ranking. The digest covers the whole catalog, not the sample: it
+    names the identity state a decision was made against, which is what a later
+    publisher revalidates, and a sample cannot answer that question.
+    """
+    number = assurance_models.issue_id_number
+    ranked = sorted(
+        catalog.entries,
+        key=lambda entry: (entry.last_seen_at, number(entry.issue_id)),
+        reverse=True,
+    )
+    envelope = len(
+        assurance_models.canonical_json_bytes(
+            {"digest": catalog.digest, "omitted": len(ranked), "issues": []}
+        )
+    )
+    budget = MAX_AGENT_CATALOG_BYTES - envelope
+    kept: list[AgentCatalogEntry] = []
+    omitted: list[str] = []
+    used = 0
+    for entry in ranked:
+        supplied = _agent_catalog_entry(entry)
+        body = len(assurance_models.canonical_json_bytes(supplied.to_dict())) - 1
+        # Every entry after the first also pays for the comma that precedes it.
+        cost = body + (1 if kept else 0)
+        if omitted or used + cost > budget:
+            omitted.append(entry.issue_id)
+            continue
+        used += cost
+        kept.append(supplied)
+    return AgentCatalog(
+        digest=catalog.digest,
+        entries=tuple(sorted(kept, key=lambda entry: number(entry.issue_id))),
+        omitted=tuple(sorted(omitted, key=number)),
+    )
+
+
+#: What an auditor is given when the ledger holds no issue, or holds issues
+#: nobody can read. Every finding then has to request a new allocation, which is
+#: the honest answer when no existing issue can be shown.
+EMPTY_AGENT_CATALOG = build_agent_catalog(assurance_projection.IdentityCatalog())
+
+
+def widen_agent_catalog(
+    supplied: AgentCatalog,
+    catalog: assurance_projection.IdentityCatalog,
+    issue_ids: Sequence[str],
+) -> AgentCatalog:
+    """Return ``supplied`` with ``issue_ids`` promoted into the listing.
+
+    A candidate the size bound had dropped is worth more to a retry than the
+    entry recency ranking kept in its place: proposing an ID the validator would
+    then refuse as unselectable would burn the attempt and teach nothing. The
+    digest is unchanged because it names the whole inbox rather than the sample,
+    so widening what is listed does not restate what the decision is valid for.
+    """
+    promoted = []
+    for issue_id in issue_ids:
+        if issue_id in supplied.issue_ids:
+            continue
+        entry = catalog.entry(issue_id)
+        if entry is not None:
+            promoted.append(_agent_catalog_entry(entry))
+    if not promoted:
+        return supplied
+    number = assurance_models.issue_id_number
+    added = frozenset(entry.issue_id for entry in promoted)
+    return AgentCatalog(
+        digest=supplied.digest,
+        entries=tuple(
+            sorted(
+                (*supplied.entries, *promoted), key=lambda entry: number(entry.issue_id)
+            )
+        ),
+        omitted=tuple(item for item in supplied.omitted if item not in added),
+    )
+
+
+def read_identity_catalog(
+    state_dir: Path | str | None,
+) -> assurance_projection.IdentityCatalog:
+    """Return the inbox's identity catalog, or an empty one.
+
+    An unreadable ledger costs the auditor its ability to recognize a recurrence,
+    and costs ASL its ability to recognize one on the auditor's behalf. It must
+    not also cost the run its audit, so this degrades to the empty catalog: the
+    audit still runs, and every finding it reports asks for a new issue instead
+    of selecting one nobody could show it.
+    """
+    try:
+        projection = assurance_projection.read_projection(state_dir=state_dir)
+    except (
+        OSError,
+        assurance_ledger.LedgerError,
+        assurance_models.AssuranceError,
+    ):
+        return assurance_projection.IdentityCatalog()
+    return projection.catalog
+
+
+def read_agent_catalog(state_dir: Path | str | None) -> AgentCatalog:
+    """Return the agent-facing catalog to supply for one audit."""
+    return build_agent_catalog(read_identity_catalog(state_dir))
 
 
 def _agent_schema_block() -> str:
@@ -3367,6 +3752,10 @@ def _agent_schema_block() -> str:
                     "recommendation": "what a maintainer should change",
                     "evidence": ["<locator from the evidence index>"],
                     "localization": ["<source pointer>"],
+                    "identity": {
+                        "decision": "existing|new",
+                        "issue_id": "<catalog issue_id, only when existing>",
+                    },
                 }
             ],
         },
@@ -3376,7 +3765,11 @@ def _agent_schema_block() -> str:
 
 
 def build_audit_prompt(
-    bundle: AuditInput | Mapping[str, Any], *, correction: str | None = None
+    bundle: AuditInput | Mapping[str, Any],
+    *,
+    catalog: AgentCatalog,
+    correction: str | None = None,
+    candidates: Sequence[assurance_projection.IdentityCandidate] = (),
 ) -> str:
     """Render the prompt for one audit attempt.
 
@@ -3384,7 +3777,16 @@ def build_audit_prompt(
     nothing else: the rejected answer itself is deliberately withheld, so the
     retry re-derives its verdict from the evidence rather than being handed its
     own earlier output to launder into a better-formed version of the same
-    mistake.
+    mistake. The catalog is repeated verbatim on that retry, since a correction
+    that told an auditor to select from a catalog it no longer had in front of
+    it would be asking it to remember an ID instead of reading one.
+
+    ``candidates`` is the other reason a retry happens and is a separate channel
+    on purpose. Nothing was rejected: the answer was well-formed and ASL merely
+    recognized issues that may already own what it reported. Sending that
+    through the correction string would tell an auditor its valid answer broke a
+    validation rule, which is the one thing it did not do. The candidates are
+    ASL's own catalog records rather than any part of the previous answer.
     """
     payload = bundle.payload if isinstance(bundle, AuditInput) else dict(bundle)
     prompt = AUDIT_PROMPT_TEMPLATE.format(
@@ -3392,12 +3794,31 @@ def build_audit_prompt(
         skills_root=EVIDENCE_ROOT_SKILLS,
         lane_list="\n".join(f"- {lane}" for lane in assurance_models.RUBRIC_LANES),
         schema=_agent_schema_block(),
+        catalog=assurance_models.canonical_json_bytes(catalog.to_dict()).decode(
+            "utf-8"
+        ),
         run_id=payload.get("run_id", "unknown"),
         bundle=assurance_models.canonical_json_bytes(payload).decode("utf-8"),
     )
+    if candidates:
+        prompt = f"{prompt}\n{_candidate_section(candidates)}"
     if correction is None:
         return prompt
     return f"{prompt}\n{AUDIT_CORRECTION_TEMPLATE.format(detail=_inline(correction))}"
+
+
+def _candidate_section(
+    candidates: Sequence[assurance_projection.IdentityCandidate],
+) -> str:
+    return AUDIT_CANDIDATE_TEMPLATE.format(
+        candidates=assurance_models.canonical_json_bytes(
+            [candidate.to_dict() for candidate in candidates]
+        ).decode("utf-8"),
+        invariant=assurance_projection.MATCH_INVARIANT,
+        localization=assurance_projection.MATCH_LOCALIZATION,
+        summary=assurance_projection.MATCH_SUMMARY,
+        threshold=f"{assurance_projection.MIN_SUMMARY_SIMILARITY:.2f}",
+    )
 
 
 def _agent_payload(text: str) -> dict[str, Any]:
@@ -3466,7 +3887,76 @@ def _agent_lanes(
     return tuple(lanes)
 
 
-def _agent_findings(payload: Mapping[str, Any]) -> tuple[Finding, ...]:
+def _identity_decision(
+    entry: Mapping[str, Any], *, label: str, catalog: AgentCatalog
+) -> IdentityDecision:
+    """Validate one finding's identity statement against the supplied catalog.
+
+    The two rejections a caller must be able to tell apart are both here: an ID
+    the catalog does not list at all — invented, malformed, or merged away — and
+    an ID that exists but did not fit the listing. Only the first is evidence
+    the auditor made something up, and answering both with "no such issue" is
+    what would teach it to guess.
+    """
+    payload = entry.get("identity")
+    if not isinstance(payload, Mapping):
+        raise AgentOutputError(
+            "malformed-output",
+            f"{label} must carry exactly one 'identity' object, either selecting "
+            "an issue the supplied catalog lists or requesting a new allocation",
+        )
+    unknown = sorted(str(key) for key in payload if key not in _IDENTITY_KEYS)
+    if unknown:
+        raise AgentOutputError(
+            "malformed-output",
+            f"{label} 'identity' has unknown key(s) {', '.join(unknown)}; only "
+            f"{_names(sorted(_IDENTITY_KEYS))} are read",
+        )
+    decision = payload.get("decision")
+    if decision not in IDENTITY_DECISIONS:
+        raise AgentOutputError(
+            "malformed-output",
+            f"{label} 'identity' must set 'decision' to one of "
+            f"{', '.join(IDENTITY_DECISIONS)}; got "
+            f"{_inline(str(decision), limit=assurance_models.MAX_TOKEN_CHARS)!r}",
+        )
+    declared = payload.get("issue_id")
+    if decision == "new":
+        if declared is not None:
+            raise AgentOutputError(
+                "malformed-output",
+                f"{label} 'identity' requests a new allocation and must name no "
+                "'issue_id'; ASL allocates the ID for it",
+            )
+        return IdentityDecision(decision="new")
+    try:
+        issue_id = assurance_models.parse_issue_id(declared)
+    except assurance_models.AssuranceError as error:
+        raise AgentOutputError(
+            "malformed-output",
+            f"{label} 'identity' selects an existing issue and must name the "
+            f"'issue_id' the catalog lists for it: {error}",
+        ) from error
+    if issue_id in catalog.issue_ids:
+        return IdentityDecision(decision="existing", issue_id=issue_id)
+    if issue_id in catalog.omitted:
+        raise AgentOutputError(
+            "invalid-reference",
+            f"{label} 'identity' selects {issue_id}, which the size bound kept "
+            f"out of the {len(catalog.entries)} issues the catalog listed; select "
+            "one it did list or request a new allocation instead",
+        )
+    raise AgentOutputError(
+        "invalid-reference",
+        f"{label} 'identity' selects {issue_id}, which the supplied catalog does "
+        "not list; an ID ASL never allocated, and one that has been merged away, "
+        "are both unselectable, so request a new allocation instead",
+    )
+
+
+def _agent_findings(
+    payload: Mapping[str, Any], *, catalog: AgentCatalog
+) -> tuple[tuple[Finding, ...], tuple[IdentityDecision, ...]]:
     entries = payload.get("findings", [])
     if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
         raise AgentOutputError(
@@ -3479,6 +3969,7 @@ def _agent_findings(payload: Mapping[str, Any]) -> tuple[Finding, ...]:
             f"findings; got {len(entries)}",
         )
     findings = []
+    identities = []
     for index, entry in enumerate(entries):
         label = f"finding #{index + 1}"
         if not isinstance(entry, Mapping):
@@ -3488,7 +3979,8 @@ def _agent_findings(payload: Mapping[str, Any]) -> tuple[Finding, ...]:
             raise AgentOutputError(
                 "malformed-output",
                 f"{label} sets {', '.join(sorted(claimed))}; the audit agent never "
-                "assigns issue IDs or fingerprints, ASL computes them",
+                "assigns issue IDs or fingerprints of its own, ASL computes them "
+                "and an existing issue is named only inside 'identity'",
             )
         unknown = sorted(str(key) for key in entry if key not in _AGENT_FINDING_KEYS)
         if unknown:
@@ -3496,11 +3988,16 @@ def _agent_findings(payload: Mapping[str, Any]) -> tuple[Finding, ...]:
                 "malformed-output",
                 f"{label} has unknown key(s) {', '.join(unknown)}",
             )
+        identities.append(_identity_decision(entry, label=label, catalog=catalog))
         try:
             findings.append(
                 assurance_models.parse_finding(
                     {
-                        **{str(key): value for key, value in entry.items()},
+                        **{
+                            str(key): value
+                            for key, value in entry.items()
+                            if key != "identity"
+                        },
                         "schema_version": assurance_models.ASSURANCE_SCHEMA_VERSION,
                     },
                     label=label,
@@ -3508,7 +4005,7 @@ def _agent_findings(payload: Mapping[str, Any]) -> tuple[Finding, ...]:
             )
         except assurance_models.AssuranceError as error:
             raise AgentOutputError("malformed-output", str(error)) from error
-    return tuple(findings)
+    return tuple(findings), tuple(identities)
 
 
 def _validate_agent_references(
@@ -3542,18 +4039,101 @@ def _validate_agent_references(
         )
 
 
-def parse_agent_audit(text: str, *, declared: Iterable[str]) -> AgentAudit:
+def parse_agent_audit(
+    text: str, *, declared: Iterable[str], catalog: AgentCatalog
+) -> AgentAudit:
     """Validate one agent answer strictly, or raise :class:`AgentOutputError`.
 
     Nothing the agent writes is trusted as output: the Markdown it may have
-    produced is never rendered, its findings carry no identity it assigned, and
-    every locator it names must already appear in the evidence index ASL built.
+    produced is never rendered, every locator it names must already appear in the
+    evidence index ASL built, and the only identity it may state is a selection
+    from ``catalog`` — which is the catalog it was actually shown, not the
+    current one, so an answer is judged against what it could read.
     """
     payload = _agent_payload(text)
     lanes = _agent_lanes(payload)
-    findings = _agent_findings(payload)
+    findings, identities = _agent_findings(payload, catalog=catalog)
     _validate_agent_references(lanes, findings, declared=declared)
-    return AgentAudit(lanes=lanes, findings=findings)
+    return AgentAudit(lanes=lanes, findings=findings, identities=identities)
+
+
+@dataclass(frozen=True)
+class IdentityResolution:
+    """What ASL made of one answer's identity decisions.
+
+    ``audit`` is the answer with every decision ASL could settle already settled,
+    so a caller downstream reads one list rather than re-deriving recurrences.
+    ``candidates`` is non-empty exactly when at least one finding asked for an
+    allocation the catalog can argue with, and the audit is unusable until that
+    is answered — semantic similarity identifies a candidate and never merges
+    one, so there is no third option where ASL decides for itself.
+    """
+
+    audit: AgentAudit
+    candidates: tuple[assurance_projection.IdentityCandidate, ...] = ()
+    ambiguous: int = 0
+
+    @property
+    def settled(self) -> bool:
+        return self.ambiguous == 0
+
+    @property
+    def detail(self) -> str:
+        return (
+            f"{self.ambiguous} finding(s) requested a new allocation for a defect "
+            f"the catalog already names a candidate for: "
+            f"{_names(candidate.issue_id for candidate in self.candidates)}"
+        )
+
+
+def resolve_identities(
+    audit: AgentAudit, *, catalog: assurance_projection.IdentityCatalog
+) -> IdentityResolution:
+    """Settle each finding's identity against the catalog, or report ambiguity.
+
+    Two decisions need nobody: a selection the validator already checked against
+    the supplied catalog, and a new-allocation request whose fingerprint the
+    catalog already names an issue for. The second overrules the answer, because
+    a fingerprint is derived by ASL from the finding's own category, component,
+    and invariant key — an auditor that reworded a summary did not make the
+    defect new, and allocating a second issue for it is exactly the split the
+    inbox exists to prevent.
+
+    Everything else the catalog recognizes is a candidate, and a candidate is
+    never applied. It goes back as a question, and if the answer is still ``new``
+    the audit fails closed rather than either merging or allocating.
+    """
+    resolved: list[IdentityDecision] = []
+    candidates: dict[str, assurance_projection.IdentityCandidate] = {}
+    ambiguous = 0
+    for finding, decision in audit.decisions:
+        if not decision.is_new:
+            resolved.append(decision)
+            continue
+        recurrence = catalog.issue_for_fingerprint(finding.fingerprint)
+        if recurrence is not None:
+            resolved.append(
+                IdentityDecision(
+                    decision="existing", issue_id=recurrence, source="recurrence"
+                )
+            )
+            continue
+        matched = catalog.candidates(finding)
+        resolved.append(decision)
+        if not matched:
+            continue
+        ambiguous += 1
+        for candidate in matched:
+            known = candidates.get(candidate.issue_id)
+            candidates[candidate.issue_id] = (
+                candidate if known is None else known.merged(candidate)
+            )
+    ranked = sorted(candidates.values(), key=assurance_projection.candidate_order)
+    return IdentityResolution(
+        audit=replace(audit, identities=tuple(resolved)),
+        candidates=tuple(ranked[:MAX_PROMPTED_CANDIDATES]),
+        ambiguous=ambiguous,
+    )
 
 
 def _worst(*statuses: str) -> str:
@@ -3627,6 +4207,27 @@ def _merged_findings(
     for finding in (*deterministic, *agent):
         merged.setdefault(finding.fingerprint, finding)
     return tuple(merged.values())[: assurance_models.MAX_FINDINGS]
+
+
+def _identity_selections(
+    agent: AgentAudit, findings: Sequence[Finding]
+) -> dict[str, str]:
+    """Restate the agent's selections in the form the publication revalidates.
+
+    Keyed by fingerprint because that is how a decision is attributed to a
+    finding under the append lock, and restricted to the findings the canonical
+    audit actually carries: merging and the finding cap can drop an agent
+    finding, and a selection naming one the publication never sees is refused.
+    The first decision for a fingerprint wins, which is the decision belonging to
+    the finding :func:`_merged_findings` kept.
+    """
+    carried = {finding.fingerprint for finding in findings}
+    selections: dict[str, str] = {}
+    for finding, decision in agent.decisions:
+        if decision.issue_id is None or finding.fingerprint not in carried:
+            continue
+        selections.setdefault(finding.fingerprint, decision.issue_id)
+    return selections
 
 
 def render_supervisor_audit(
@@ -3750,6 +4351,144 @@ def render_audit_markdown(audit: assurance_models.SupervisorAudit) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+@dataclass(frozen=True)
+class StagedAuditReports:
+    """Both canonical reports, written in full but not yet canonical.
+
+    The reports have to be readable before the ledger record that makes them
+    true exists, because the record names them by digest. Staging separates the
+    two facts: the bytes are final and hashed here, while the canonical names
+    appear only once identity has been validated under the append lock. A
+    publication that never gets that far therefore leaves no report for a reader
+    to find, which is the difference between an audit that did not publish and a
+    summary nobody wrote.
+    """
+
+    run_dir: Path
+    directory: Path
+    #: Each report as its staged path, the canonical name it is promoted to, and
+    #: the digest of the bytes that were written.
+    entries: tuple[tuple[Path, Path, str], ...]
+    durable: bool = True
+    #: Canonical names this staging has taken, so a publication that promoted
+    #: and then failed can give them back.
+    promoted: list[Path] = field(default_factory=list, repr=False, compare=False)
+
+    @property
+    def references(self) -> tuple[assurance_models.EvidenceRef, ...]:
+        """Evidence naming the canonical paths, not the staged ones."""
+        return tuple(
+            _artifact_reference(canonical, self.run_dir, digest)
+            for _, canonical, digest in self.entries
+        )
+
+    def promote(self) -> None:
+        """Give both reports their canonical names, or neither of them.
+
+        Each link is refused by the filesystem if the canonical name is already
+        taken, which is the same rule :func:`assurance_models.write_new_bytes`
+        enforces and for the same reason: two reports under one name would mean
+        two audits disagree about one run. A failure part-way unlinks whatever
+        was already promoted, so the caller can abort with the run directory
+        holding no half-published audit.
+        """
+        for staged, canonical, _ in self.entries:
+            try:
+                os.link(staged, canonical)
+            except OSError as error:
+                self.unpromote()
+                raise assurance_models.AssuranceError(
+                    f"could not promote audit report {canonical}: {error}"
+                ) from error
+            self.promoted.append(canonical)
+        if not self.durable:
+            return
+        try:
+            descriptor = os.open(self.run_dir, os.O_RDONLY)
+            try:
+                durability.fullsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as error:
+            self.unpromote()
+            raise assurance_models.AssuranceError(
+                f"could not sync audit report directory {self.run_dir}: {error}"
+            ) from error
+
+    def unpromote(self) -> None:
+        """Release the canonical names again.
+
+        Promotion happens before the ledger record is durable, so an append that
+        fails afterwards would otherwise leave reports no summary names and a
+        canonical name a later attempt could never take. Giving the names back
+        keeps a transient failure retryable instead of permanent.
+        """
+        for path in self.promoted:
+            with contextlib.suppress(OSError):
+                path.unlink()
+        self.promoted.clear()
+
+    def discard(self) -> None:
+        """Remove the staging directory, promoted or not.
+
+        Best effort: the promoted reports are separate directory entries for the
+        same data, so losing the staging copies costs nothing, and failing to
+        remove them must not fail a publication that already succeeded.
+        """
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+
+def stage_audit_reports(
+    run_dir: Path | str,
+    audit: assurance_models.SupervisorAudit,
+    *,
+    durable: bool = True,
+) -> StagedAuditReports:
+    """Write both canonical reports into this run's staging directory.
+
+    A staging directory left behind by an earlier attempt is cleared rather than
+    refused. Nothing durable ever names a path inside it, so its contents are
+    unreferenced scratch, and treating them as state to protect would make one
+    crashed publication permanently unable to publish this run.
+    """
+    root = Path(run_dir)
+    directory = root / AUDIT_STAGING_DIR_NAME
+    shutil.rmtree(directory, ignore_errors=True)
+    try:
+        directory.mkdir(parents=True)
+    except OSError as error:
+        raise assurance_models.AssuranceError(
+            f"could not create audit staging directory {directory}: {error}"
+        ) from error
+    entries: list[tuple[Path, Path, str]] = []
+    for name, data in (
+        (
+            assurance_models.AUDIT_REPORT_FILENAME,
+            assurance_models.canonical_json_bytes(audit.to_dict()),
+        ),
+        (
+            assurance_models.AUDIT_MARKDOWN_FILENAME,
+            render_audit_markdown(audit).encode("utf-8"),
+        ),
+    ):
+        staged = assurance_models.write_audit_artifact(
+            directory, name, data, durable=durable
+        )
+        entries.append(
+            (
+                staged,
+                root / assurance_models.audit_artifact_name(name),
+                artifacts.sha256_hex(data),
+            )
+        )
+    return StagedAuditReports(
+        run_dir=root,
+        directory=directory,
+        entries=tuple(entries),
+        durable=durable,
+    )
+
+
 def write_audit_reports(
     run_dir: Path | str,
     audit: assurance_models.SupervisorAudit,
@@ -3757,18 +4496,12 @@ def write_audit_reports(
     durable: bool = True,
 ) -> tuple[Path, Path]:
     """Write both canonical reports, each exactly once."""
-    report = assurance_models.write_audit_json(
-        run_dir,
-        assurance_models.AUDIT_REPORT_FILENAME,
-        audit.to_dict(),
-        durable=durable,
-    )
-    markdown = assurance_models.write_audit_artifact(
-        run_dir,
-        assurance_models.AUDIT_MARKDOWN_FILENAME,
-        render_audit_markdown(audit).encode("utf-8"),
-        durable=durable,
-    )
+    staged = stage_audit_reports(run_dir, audit, durable=durable)
+    try:
+        staged.promote()
+    finally:
+        staged.discard()
+    (_, report, _), (_, markdown, _) = staged.entries
     return report, markdown
 
 
@@ -3865,6 +4598,13 @@ def run_agent_audit(
     the deterministic lanes, results, and findings, because losing reproducible
     evidence because an agent misbehaved would be a second failure, not a
     consequence of the first.
+
+    A candidate retry comes out of that same budget rather than adding to it. An
+    answer that is malformed once and then identity-ambiguous therefore never
+    sees the candidate list, and the audit lands ``unavailable`` under
+    :data:`REASON_IDENTITY_AMBIGUOUS`. That is the safe end of the trade: the
+    cost of not asking is one unpublished audit, while a third turn per audit is
+    a cost every run pays. Nothing is merged and nothing is allocated either way.
     """
     run_dir = Path(run_dir)
     clock = datetime.now(UTC) if now is None else now()
@@ -3872,13 +4612,22 @@ def run_agent_audit(
         tuple(results) if results is not None else run_deterministic_checks(bundle)
     )
     declared = [entry.locator for entry in bundle.evidence]
+    # Read once, before the first attempt: both attempts must be judged against
+    # the catalog they were shown, and re-reading between them could reject a
+    # selection for naming an issue a concurrent publisher had just moved.
+    inbox = read_identity_catalog(state_dir)
+    catalog = build_agent_catalog(inbox)
     attempts: list[assurance_models.AuditAttempt] = []
     mutation_issue_id: str | None = None
     correction: str | None = None
+    candidates: tuple[assurance_projection.IdentityCandidate, ...] = ()
+    candidates_offered = False
     unavailable_reason = REASON_AGENT_UNAVAILABLE
 
     for number in range(1, assurance_models.MAX_AUDIT_ATTEMPTS + 1):
-        prompt = build_audit_prompt(bundle, correction=correction)
+        prompt = build_audit_prompt(
+            bundle, catalog=catalog, correction=correction, candidates=candidates
+        )
         attempt = run_restricted_audit(
             role,
             run_dir=run_dir,
@@ -3895,14 +4644,32 @@ def run_agent_audit(
         )
         mutation_issue_id = attempt.issue_id or mutation_issue_id
         agent: AgentAudit | None = None
+        matched: tuple[assurance_projection.IdentityCandidate, ...] = ()
+        outcome: AttemptOutcome
+        detail: str | None
         if attempt.outcome == "ok":
             try:
-                agent = parse_agent_audit(attempt.last_message, declared=declared)
-                outcome: AttemptOutcome = "ok"
-                detail = None
+                answer = parse_agent_audit(
+                    attempt.last_message, declared=declared, catalog=catalog
+                )
             except AgentOutputError as error:
                 outcome, detail = error.outcome, error.detail
                 unavailable_reason = error.outcome
+            else:
+                resolution = resolve_identities(answer, catalog=inbox)
+                outcome = "ok"
+                detail = None
+                if resolution.settled:
+                    agent = resolution.audit
+                else:
+                    outcome = IDENTITY_AMBIGUOUS_OUTCOME
+                    detail = resolution.detail
+                    unavailable_reason = REASON_IDENTITY_AMBIGUOUS
+                    # The candidate list is offered once. Answering `new` again
+                    # after seeing it is the auditor's decision, not a failure to
+                    # understand the question, so repeating it would only spend
+                    # another turn arriving at the same fail-closed verdict.
+                    matched = () if candidates_offered else resolution.candidates
         else:
             outcome, detail = attempt.outcome, attempt.reason
             unavailable_reason = _reason_token(attempt.reason, attempt.outcome)
@@ -3923,21 +4690,36 @@ def run_agent_audit(
             )
         )
         if agent is not None:
+            rendered = render_supervisor_audit(
+                run_id=run_id,
+                bundle=bundle,
+                results=verdicts,
+                generated_at=clock.isoformat(),
+                agent=agent,
+            )
             return AgentAuditOutcome(
-                audit=render_supervisor_audit(
-                    run_id=run_id,
-                    bundle=bundle,
-                    results=verdicts,
-                    generated_at=clock.isoformat(),
-                    agent=agent,
-                ),
+                audit=rendered,
                 attempts=tuple(attempts),
                 agent_covered=True,
                 mutation_issue_id=mutation_issue_id,
+                agent=agent,
+                catalog=catalog,
+                identity_selections=_identity_selections(agent, rendered.findings),
             )
+        if unavailable_reason == REASON_IDENTITY_AMBIGUOUS and not matched:
+            break
         if outcome not in RETRYABLE_ATTEMPT_OUTCOMES:
             break
-        correction = detail
+        if matched:
+            correction = None
+            candidates = matched
+            candidates_offered = True
+            catalog = widen_agent_catalog(
+                catalog, inbox, [candidate.issue_id for candidate in matched]
+            )
+        else:
+            correction = detail
+            candidates = ()
 
     return AgentAuditOutcome(
         audit=render_supervisor_audit(
@@ -3950,6 +4732,7 @@ def run_agent_audit(
         attempts=tuple(attempts),
         agent_covered=False,
         mutation_issue_id=mutation_issue_id,
+        catalog=catalog,
     )
 
 
@@ -4144,20 +4927,9 @@ def audit_terminal_run(
                 _run_harness_fn=_run_harness_fn,
             )
         )
-        report_path, markdown_path = write_audit_reports(
-            run_dir, outcome.audit, durable=durable
-        )
-        report_bytes = report_path.read_bytes()
-        markdown_bytes = markdown_path.read_bytes()
-        audit_artifacts = (
-            _artifact_reference(input_path, run_dir, bundle.sha256),
-            _artifact_reference(
-                report_path, run_dir, artifacts.sha256_hex(report_bytes)
-            ),
-            _artifact_reference(
-                markdown_path, run_dir, artifacts.sha256_hex(markdown_bytes)
-            ),
-        )
+        staged = stage_audit_reports(run_dir, outcome.audit, durable=durable)
+        input_reference = _artifact_reference(input_path, run_dir, bundle.sha256)
+        audit_artifacts = (input_reference, *staged.references)
     except OSError, assurance_models.AssuranceError:
         return pending()
 
@@ -4177,11 +4949,21 @@ def audit_terminal_run(
                 started_at=started.isoformat(),
                 completed_at=completed.isoformat(),
                 duration_seconds=max(0.0, (completed - started).total_seconds()),
+                identity_selections=outcome.identity_selections,
+                catalog_digest=outcome.catalog_digest,
             ),
             state_dir=ledger_state_dir,
+            promote=staged.promote,
         )
     except OSError, assurance_models.AssuranceError:
-        return pending(audit_artifacts)
+        # Promotion runs inside the append lock, so a failure after it leaves
+        # canonical reports no record names. Releasing them keeps the pending
+        # summary honest, since it names only the evidence bundle, and leaves the
+        # canonical names free for the attempt that does publish.
+        staged.unpromote()
+        return pending((input_reference,))
+    finally:
+        staged.discard()
     return result.summary
 
 

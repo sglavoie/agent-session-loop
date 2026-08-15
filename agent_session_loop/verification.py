@@ -674,6 +674,32 @@ def _command_stream_fields(
     }
 
 
+_COMMAND_DIAGNOSTIC_LIMIT = 500
+
+
+def _command_failure_detail(
+    check: CommandCheck,
+    returncode: int,
+    stream_fields: Mapping[str, Any],
+) -> str:
+    """Render a failed command's detail with the diagnostic its streams carry.
+
+    A validator that reports which predicate rejected the artifact says far
+    more than its own rendered argv, so the last diagnostic line travels with
+    the detail into the pause record instead of staying buried in the streams.
+    """
+    rendered = f"command exited {returncode}: {' '.join(check.argv)}"
+    for stream in ("stderr", "stdout"):
+        lines = [
+            line.strip()
+            for line in str(stream_fields.get(stream) or "").splitlines()
+            if line.strip()
+        ]
+        if lines:
+            return f"{rendered}; {lines[-1][:_COMMAND_DIAGNOSTIC_LIMIT]}"
+    return rendered
+
+
 def _run_command_check(
     check: CommandCheck,
     *,
@@ -863,7 +889,7 @@ def _run_command_check(
         kind=check.kind,
         status="fail",
         failure_reason="command-failed",
-        detail=(f"command exited {process.returncode}: {' '.join(check.argv)}"),
+        detail=_command_failure_detail(check, process.returncode, stream_fields),
         returncode=process.returncode,
         duration_seconds=duration,
         sweep=sweep,

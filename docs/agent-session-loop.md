@@ -324,7 +324,11 @@ hard pause. The JSON body carries a stable `reason` field
 `invalid-session`), executed `checks`, `skipped_checks`, and separate
 `diagnostic_failures`, plus per-check rows with `failure_reason` enums
 (`command-failed`, `command-timeout`, `command-not-found`, `command-error`,
-`file-missing`, `file-error`, `regex-not-matched`). On verification failure,
+`file-missing`, `file-error`, `regex-not-matched`). A failed command check's
+`detail` appends the last non-empty diagnostic line the check wrote — stderr
+preferred over stdout — so a validator that names the predicate it rejected
+travels into the pause record instead of leaving only a rendered argv. On
+verification failure,
 the skill reverts the session handoff back to `pending` and the runner pauses
 with `reason: verify-failed`.
 
@@ -444,6 +448,7 @@ asl assurance resolve ISSUE [--note TEXT] [--state-dir DIR] [--json]
 asl assurance dismiss ISSUE [--note TEXT] [--state-dir DIR] [--json]
 asl assurance accept-risk ISSUE [--note TEXT] [--state-dir DIR] [--json]
 asl assurance merge ISSUE TARGET [--note TEXT] [--yes] [--state-dir DIR] [--json]
+asl assurance reconcile [--apply MANIFEST [--yes]] [--state-dir DIR] [--json]
 asl assurance closeout RUN_ID --outcome accepted|reworked|escaped [--rework-minutes N] [--issue ISSUE ...] [--note TEXT] [--plan PLAN_DIR_OR_ID] [--replace] [--state-dir DIR] [--json]
 asl assurance process-pending [--limit RUNS] [--run-id RUN_ID] [--plan PLAN_DIR_OR_ID] [--audit-harness NAME] [--audit-harness-model MODEL] [--audit-effort LEVEL] [--audit-timeout SECONDS] [--state-dir DIR] [--json]
 asl assurance plan ISSUE --harness NAME --output PATH [--harness-model MODEL] [--effort LEVEL] [--timeout SECONDS] [--state-dir DIR] [--json]
@@ -1170,7 +1175,12 @@ Pre-existing v1 review sessions (base
 marker only) remain Markdown-only compatible — no `final-review.json` is
 required for them. The grammar, artifact schema, and shared verdict payload
 live in `agent_session_loop.review`; the runner and the `asl` skill's
-autopilot helper both read verdicts through it. Other review execution
+autopilot helper both read verdicts through it. The two generated review gates
+(`final-review-output-evidence-based` and `final-review-artifact-consistent`)
+report every rejection as one JSON line on stderr carrying the `check`, a
+stable `reason` such as `status-line-not-final` or `finding-missing-keys`, and
+the values that failed the predicate, so a failed gate names the defect instead
+of only its exit status. Other review execution
 failures (nonzero exit, timeout, verification failure on missing or empty
 `final-review.md`) or repo mutations outside the plan directory also fail
 the run.
@@ -1333,6 +1343,58 @@ cannot enforce the read-only profile, or catches its auditor mutating the
 workspace still publishes whatever the deterministic checks proved, under an
 `unavailable` verdict for the semantic half that went missing.
 
+The semantic auditor answers in a versioned JSON contract, and its second
+version replaced implicit identity with explicit selection. Every finding
+carries exactly one `identity` object with no default: `{"decision":
+"existing", "issue_id": "ASI-N"}` says the defect is the issue the supplied
+catalog already names, and `{"decision": "new"}` names no id and asks ASL to
+allocate one. An answer at the older version carries no identity object and is
+rejected rather than read as a request to mint an issue for every finding. A
+missing or malformed decision, an unknown key beside it, an unparseable id, or
+an id on a `new` request fails the attempt as `malformed-output`; an id the
+supplied catalog does not list fails it as `invalid-reference`. Fingerprints
+stay ASL's to compute from the finding itself, so a wrong selection misfiles one
+finding instead of corrupting deduplication elsewhere.
+
+The catalog handed to the auditor is the projection's identity catalog rendered
+as JSON inside the prompt, covering every lifecycle state so a defect that
+recurs after being resolved, dismissed, or accepted still selects the issue that
+owns it. It is bounded to 64 KiB: when the inbox is larger, the listing keeps
+the most recently seen issues, lists them in issue order, and reports how many
+the bound left out. An omitted id is refused as unselectable rather than as
+nonexistent, because telling an auditor that an issue does not exist when it
+merely did not fit is what would teach it to invent ids. The digest names the
+whole inbox rather than the listed sample. An unreadable or missing ledger
+supplies the empty catalog instead of failing the audit, which honestly leaves a
+new allocation as the only available answer. The single retry repeats that same
+catalog, restates the identity rule, and still withholds the rejected answer.
+
+Selecting from that catalog leaves one answer ASL cannot check against a
+listing, so a request for a new allocation is matched against the inbox before
+it is accepted. Matching queries the catalog's indexes rather than scanning
+every pair, so it costs the number of issues that share an invariant, a file, or
+a word with the finding. An exact fingerprint and an exact ASL-owned identity
+key are matches and are reused outright, because a fingerprint is ASL's own
+derivation from the finding's category, component, and invariant key and a
+reworded summary does not make the defect new. Everything weaker is a candidate:
+an identical invariant key under a different category or component, the same
+source file plus an overlapping invariant-key segment, or normalized-summary
+Jaccard overlap of at least 0.60. A shared file alone is not a candidate, and
+neither the component path nor the category is split into segments for that
+test, because every sibling module shares its directories and a category is a
+bucket name.
+
+A candidate is never applied. It goes back in the one retry as JSON naming what
+was matched on, with the listing widened so a candidate the 64 KiB bound had
+dropped is selectable and the digest unchanged, since it names the whole inbox
+rather than the sample. If the corrected answer still declares the finding new,
+the audit is `unavailable` with reason `identity-ambiguous`, no issue is minted,
+and the deterministic findings are published as usual. The attempt is recorded
+as `invalid-reference` rather than under a new token, because that vocabulary is
+a closed enum persisted inside audit reports. The candidate retry comes out of
+the two-attempt budget rather than adding to it, so an answer that is malformed
+once and ambiguous next never sees the list.
+
 A caught mutation opens its critical issue while the attempt is still running,
 so the terminal publication names that issue ID in the run summary rather than
 recording the same mutation a second time. It counts as new when this run opened
@@ -1343,6 +1405,31 @@ the inbox. A named ID must be one the ledger actually allocated: publication
 resolves it through the merge chain under the lock and refuses the whole append
 when it owns no issue, so a summary never claims an issue the inbox cannot
 show.
+
+Publishing that audit is one transaction, and the auditor's selections are
+requests it revalidates rather than identities it accepts. Under the append
+lock, each finding is resolved in one order: an exact fingerprint, then the
+ASL-owned identity key already bound to that fingerprint's issue, then the
+selection the audit made, and only then a new ID. Anything earlier overrules
+what follows it, so a defect the ledger already names is not made new by an
+answer that could not see it. A selection is checked against the issues the
+ledger actually allocated; one naming an issue another publisher has since
+merged away follows the merge, since the merge says the two were always one
+defect, while one naming no issue refuses the whole publication. A fingerprint
+first seen under a selected issue is attached to it by being observed there, so
+the next exact sighting recurs without anyone being asked again. The summary,
+every observation, and the `issue.asi-N` binding of every ID the transaction
+minted are a single write, with each binding after the observation that opened
+its issue, so an ID never exists without the key that names it. Because every
+route reads state taken inside the lock, a decision made against a catalog that
+has since moved cannot mint from what it saw; the digest it was reviewed against
+is compared there and a publication that outran it is reported as refreshed
+rather than refused. The two canonical reports are staged under
+`supervisor-audit-staging/` in the run directory and hard-linked to their
+canonical names only once that resolution succeeds — both or neither, with the
+filesystem refusing a name already taken. A failure afterwards gives the names
+back, so a run that could not publish leaves no report, no phantom summary, no
+orphan ID, and no duplicate observation, and stays retryable.
 
 Interrupting an audit turn cancels the audit rather than retrying it. The first
 Ctrl+C ends the attempt, the verdict is `unavailable` with reason `interrupted`,
@@ -2517,8 +2604,9 @@ ledger, and `asl assurance ...` never reads or writes a mailbox.
 
 `list` answers the default triage question — what is still open — by printing
 the 50 most recently observed open issues, newest sighting first, with the
-issue id, severity, state, occurrence count, last-seen timestamp, component, and
-a one-line summary preview per row. `--limit ROWS` widens or narrows the cap and
+issue id, severity, state, occurrence count, last-seen timestamp, component,
+the identity key naming the issue (`null` in JSON when no key does), and a
+one-line summary preview per row. `--limit ROWS` widens or narrows the cap and
 `--state`/`--severity` re-aim the filters; `--all` is the negation of the whole
 default, meaning every state with no row cap, and is refused in combination with
 `--limit` or `--state` rather than silently picking a winner. When the cap hides
@@ -2527,14 +2615,45 @@ values exit `1` with `reason: input-error` before the ledger is opened.
 
 `show ISSUE` prints everything the ledger records about one issue: current
 state, the fingerprint metadata it deduplicates by (category, component,
-invariant key, lane, schema version), the full summary and recommendation,
-observation history with the run and audit artifact behind each sighting,
-recorded dispositions, absorbed ids, reopen count, improvement plan drafts, and
-the affected runs with their artifact references and closeouts. Occurrence
+invariant key, lane, schema version), the identity key the issue is named by
+and any key it absorbed, the full summary and recommendation, observation
+history with the run and audit artifact behind each sighting, recorded
+dispositions, absorbed ids, reopen count, improvement plan drafts, and the
+affected runs with their artifact references and closeouts. Occurrence
 history is capped the same way rows are, with the newest kept and the remainder
 counted. Because a merge redirects an id rather than deleting it, showing a
 merged-away id succeeds and reports both the id asked for and the id it landed
 on. An id that names nothing exits `1` with `reason: unknown-issue`.
+
+Both surfaces name an issue the way the projection does. An identity key is
+resolved at replay rather than at write time: the stored binding keeps naming
+the issue it was written against, and the projection follows the settled merge
+chain, so a key keeps naming whoever owns that history today without any record
+being reinterpreted. An issue carries every key that resolves to it, which is
+more than one exactly when it absorbed a named issue, and one deterministic
+primary identity: its own key when that key is bound, and otherwise the
+lowest-numbered key it absorbed. An issue no key names prints as `unbound`
+rather than being left out. That same replay builds one identity catalog per
+projection, covering every lifecycle state rather than the open backlog and
+indexed by fingerprint, identity key, invariant key, normalized localization,
+and normalized summary token, because a defect that recurs after being
+resolved, dismissed, or accepted has to route back to the issue that already
+owns it. Localization normalizes to the file a pointer names and a summary to
+its sorted content words, with negations deliberately never treated as
+stopwords; neither normalization changes a fingerprint or the text a human
+reads. Catalog lookups are exact and never follow a merge chain, so a stale id
+resolves to nothing instead of being silently redirected. The catalog also
+carries a digest of the identity state it describes, covering each entry's
+issue id, lifecycle state, fingerprints, and identity keys and deliberately not
+its occurrence count or last-seen timestamp: a decision reviewed against a
+catalog stays valid while a known defect merely recurs, and is invalidated only
+when an issue, a fingerprint, a key, or a state actually moves. Each entry also
+carries its invariant key split into segments, which is what tells a rewritten
+key from an unrelated defect in the same file. Those indexes are what a
+candidate query reads: it returns the issues that could already own a finding,
+ranked by how many ways they matched, with the reason and the summary
+similarity on each. Candidates are proposals, so nothing in the projection acts
+on one.
 
 Both commands accept the canonical `ASI-42` and the documented bare `42`
 shorthand, and both always emit the canonical form, so any id printed by `run`,
@@ -2566,6 +2685,69 @@ as a deliberate one and is never prompted. Declining exits `1` with
 `reason: cancelled` and writes nothing. Every refusal reports the projection's
 own reason — `merge-self`, `merge-unknown-source`, `merge-unknown-target`,
 `merge-source-already-merged`, `merge-target-already-merged`, or `merge-cycle`.
+
+`asl assurance reconcile` is how an inbox written before identity keys existed
+is repaired, and it is deliberately two commands in one: a preview nobody has to
+trust, and an apply of a decision somebody made. Run without `--apply` it reads
+the projection under a shared lock and writes nothing at all — not even the
+manifest it prints — because a command that left a file behind would invite
+applying one nobody read. It reports how many canonical issues exist and how
+many already carry an identity key, the catalog digest it read them at, the safe
+bindings it can add, the bindings it cannot, and the pairs of issues that look
+like one defect. A safe binding is only ever an issue's own minted
+`issue.asi-N`; nothing is derived from a category, component, invariant key, or
+summary, so rewording a defect can never rename the issue that owns it. A key
+some other issue already owns is reported as blocked with the projection's own
+`identity-key-conflict` reason rather than quietly skipped. Pairs come from the
+catalog's semantic candidates — shared invariant key, shared localization, or
+summaries at least `0.60` similar — and each pair is asked about once rather
+than from both sides. At most 200 pairs are offered at a time; weaker ones are
+counted in `truncated_pairs` and shown by reconciling again after the first
+manifest lands, so a large backlog is worked through in reviewable batches
+instead of arriving as one unreadable document.
+
+The preview's `manifest` key is that document: schema
+`assurance-reconciliation-manifest` version 1, carrying the catalog digest it
+was generated at, when it was generated, and up to 1000 decisions. A decision is
+exactly one of `bind` (name an issue with an identity key), `merge` (fold one
+issue into another), `keep-distinct` (these are two defects), or `review` (the
+preview's own suggestion, which is a question rather than an answer). The
+preview emits `bind` for every safe binding and `review` for every candidate
+pair, and never emits `merge`: semantic similarity identifies candidates and a
+human decides them. Extracting the manifest with
+`asl assurance reconcile --json | jq .manifest > manifest.json`, rewriting each
+`review` as `merge` or `keep-distinct`, and running
+`asl assurance reconcile --apply manifest.json --yes` is the whole protocol.
+
+`--apply` writes every decision as one append under one exclusive lock, or
+writes nothing. A manifest still carrying a `review` decision exits `1` with
+`reason: unresolved-decision` before the ledger is opened, which is what makes
+"the tool never merges on a guess" structural rather than a convention. Inside
+the transaction the checks run in a fixed order, and that order is what lets
+apply be both stale-safe and idempotent: decisions the ledger already records
+are dropped first, so a manifest that is fully applied is a no-op reporting
+`applied: false` and zero records; only then is the manifest's catalog digest
+compared against the digest of the inbox as it stands, and a mismatch exits `1`
+with `reason: stale-catalog-digest`, because a verdict reviewed against a
+catalog that has since moved was reached about issues that may no longer be the
+ones named; only then is each remaining decision validated. The cost of that
+order is worth naming: a manifest whose decisions were applied halfway by some
+other route is refused as stale rather than completed, and reconciling again is
+the way forward. Bindings are written ahead of merges within the single write,
+since a binding's issue must still be canonical when its record replays, which
+is precisely what lets one manifest bind `issue.asi-123` to ASI-123 and merge
+ASI-123 into ASI-80 — the key keeps resolving to ASI-80 through the merge chain
+afterwards. Decisions are also checked against each other rather than against a
+frozen snapshot, so a manifest binding one key twice or merging one issue into
+two targets is refused instead of having its last decision silently win. A
+refused decision takes the whole manifest with it: nothing partial is ever
+appended. `keep-distinct` writes no record at all, because "these are two
+defects" is the absence of a merge and the ledger has no kind for it; a manifest
+of nothing but `keep-distinct` therefore succeeds having written nothing. A
+manifest containing merges asks for confirmation when a person is watching,
+takes `--yes` for scripts, and is never prompted under `--json`; declining exits
+`1` with `reason: cancelled`. A manifest that cannot be read or parsed exits `1`
+with `reason: manifest-read-failed` before the ledger is touched.
 
 `asl assurance closeout RUN_ID --outcome accepted|reworked|escaped` records what
 one audited run's findings were worth, with optional `--rework-minutes N`,
@@ -2680,7 +2862,14 @@ recurrence after resolution — replayed over the window, because a reopen from 
 year ago says nothing about the last seven days, and reported as corpus-wide
 totals beside a `recurrence_after_resolution_by_category` map, because a
 planner seeding a premortem needs which class of defect came back rather than
-only that one did. `dispositions` reports the
+only that one did. It also reports how much of the backlog a machine can name:
+`bound_total` counts the canonical issues carrying an identity key and
+`unbound_total` those still reachable only by number, taken over issues rather
+than over allocated ids, because a key an issue absorbed through a merge names
+that issue now. `integrity` counts the anomalies and rejected lines replay
+found, with `identity_key_conflicts` — a stored key claiming a second issue —
+counted apart from `duplicate_identity_bindings`, since only the first is a
+contradiction. `dispositions` reports the
 counts by kind, the dismissal and accepted-risk rates, and the time from an
 issue's first sighting to its disposition. `closeouts` reports the outcomes,
 escaped issues, and rework minutes, counted per run through the projection so a
@@ -2930,6 +3119,11 @@ Runtime files include:
 - `runs/<run_id>/supervisor-audit.md`: the operator-readable audit report.
 - `runs/<run_id>/supervisor-audit-attempt-N/`: per-attempt prompt, returned
   message, and outcome.
+- `runs/<run_id>/supervisor-audit-staging/`: where both reports are written
+  before they are promoted to the two names above. It is removed once the
+  publication settles either way, and anything an interrupted attempt left in it
+  is cleared by the next one, since no durable record ever names a path inside
+  it.
 - `runs/<run_id>/assurance-pending.json`: the audit debt an abandoned run left
   for `asl assurance process-pending`.
 - `runs/<run_id>/commit-0001-end/...`: equivalent artifacts for
@@ -2938,7 +3132,12 @@ Runtime files include:
 Three assurance files sit one level up, directly under the state root rather
 than inside any plan's directory, because the inbox spans the whole corpus:
 
-- `assurance-inbox.jsonl`: the append-only assurance ledger.
+- `assurance-inbox.jsonl`: the append-only assurance ledger. New records are
+  written at schema v2, which adds the identity-binding kind and changes nothing
+  else, so every v1 line already on disk still means exactly what it meant when
+  it was written. Both versions are read; a line claiming a version this build
+  does not know, or a kind its own version predates, is preserved in place as
+  rejected history rather than guessed at.
 - `assurance-inbox.lock`: the exclusive-append lock; writers never lock the
   data file itself.
 - `assurance-index.json`: a disposable cache, rebuilt whenever it is missing,
@@ -2997,7 +3196,9 @@ woke from a system suspend — and a reader rolls it forward from
 terminal instant. Waits persisted before the ceiling began rolling carry a
 static `hard_deadline` instead of those two keys, and every reader still renders
 that key for them. `events.jsonl` records
-`turn_started`, `turn_heartbeat`, `action_required`, `turn_finished`,
+`turn_started`, `turn_heartbeat`, `action_required`,
+`turn_execution_finished`, `turn_handoff_correction`, `turn_rejected`,
+`session_reopened`, `turn_finished`,
 `verification_started`, `verification_check_started`, `verification_heartbeat`,
 `verification_check_finished`, `verification_check_skipped`,
 `verification_finished`, `commit_started`,
@@ -3008,7 +3209,47 @@ that key for them. `events.jsonl` records
 `run_paused`, and
 `run_finished` events as they happen. `process_sweep` is conditional: it is
 appended only when a post-turn or post-check sweep actually signalled a
-surviving process (see **Process sweep** above). The `mailbox` name uses
+surviving process (see **Process sweep** above).
+`turn_execution_finished` states that the harness process ended and nothing
+more: exit code, the timed-out/interrupted/aborted flags, the turn's timings
+and artifact paths, and `plan_readable` for whether the plan still parsed
+afterwards. It is appended after `result.json` has been written and fsynced,
+so the durable record of a turn ending can never name artifacts that are not
+on disk, and it stays separate from `turn_finished`, which additionally means
+the turn was accepted.
+`turn_finished` is emitted from exactly one function, `runner._commit_turn`,
+and only after every post-execution guard has passed: the workspace and review
+mutation guards, the mailbox completion guard, session verification, the
+progress journal append, the derived status ledger sync, and any per-session
+commit. The committed payload is built once from the plan snapshot those guards
+actually accepted, and `result.json` and `state.json` are both written before
+the event names them, so a reader that has the event always has the artifacts
+it points at. Progress output and the AgentMux `turn-finish` notification
+follow the durable event rather than preceding it, which is why an AgentMux
+stream shows `turn-finish` after `verification-finish` — verification is a
+guard that can still refuse the turn. The committed payload is returned as a
+read-only mapping and is never rewritten afterwards.
+`turn_rejected` is the terminal statement about a turn a post-execution guard
+refused; such a turn never receives `turn_finished`. Its payload names the
+`guard`, the `reason` (the same token the run pauses with), whether the session
+was `reopened`, and any guard-specific `detail`. When the guard also returned a
+session the worker had marked complete back to `pending`, a `session_reopened`
+event follows it with `from_status` / `to_status`, so the reverse transition is
+replayable from the event stream instead of being visible only by comparing the
+final plan against the last turn record.
+`turn_handoff_correction` is appended when a completed handoff was
+mechanically malformed — no `Files modified` line, the `(none yet)`
+placeholder left in place, or an entry that is not `Alias:path` — and the
+runner spent one bounded correction turn on it instead of pausing. The
+session is reverted to `pending` with the defect named in its Handoff
+`- **Notes**`, then re-run once. A repeat of the same failure, a defect the
+worker cannot fix in its own handoff (an entry naming a repository outside the
+session's `Writes`), or a plan that still will not parse after the revert all
+fall through to the `malformed-plan` pause, whose details then carry the same
+`handoff_correction` evidence under an `exhausted` flag. Review artifacts are
+independent of the handoff, so `final-review.md` and `final-review.json` are
+digested and classified into that evidence before the correction turn starts
+and are never rewritten by it. The `mailbox` name uses
 `guidance-observed`, `notice-published`, `wait-preparation-failed`,
 `wait-started`, and `wait-cleared` action variants; mailbox activity does not
 create a separate event name per record kind. Verification heartbeats

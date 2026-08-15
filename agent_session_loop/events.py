@@ -28,6 +28,26 @@ RUN_FINISHED_EVENT = "run_finished"
 # every terminal-event consumer (tail, compaction, autopilot) working unchanged.
 RUN_OUTCOME_ABANDONED = "abandoned"
 TURN_HEARTBEAT_EVENT = "turn_heartbeat"
+# Appended when the harness process for a turn has exited. It states execution
+# only — exit code, timing, and where the raw artifacts landed. Whether the turn
+# is accepted is a separate statement carried by ``turn_finished``.
+TURN_EXECUTION_FINISHED_EVENT = "turn_execution_finished"
+# Appended once a turn has passed every required post-execution guard. Its
+# payload is the committed turn result, already written to ``result.json`` and
+# stored in the run state before this event names either, and nothing rewrites
+# them afterwards.
+TURN_FINISHED_EVENT = "turn_finished"
+# Appended when a post-execution guard refused a turn that had already
+# executed. A refused turn never receives ``turn_finished``, so this is the
+# terminal statement about it.
+TURN_REJECTED_EVENT = "turn_rejected"
+# Appended when a guard returned a session the worker had marked complete back
+# to pending, so the reverse transition is in the event stream instead of being
+# visible only by comparing the final plan against the last turn record.
+SESSION_REOPENED_EVENT = "session_reopened"
+# Appended when a mechanically malformed post-turn handoff was returned to the
+# worker for one bounded correction instead of pausing the run outright.
+TURN_HANDOFF_CORRECTION_EVENT = "turn_handoff_correction"
 TURN_HANG_SUSPECTED_EVENT = "turn_hang_suspected"
 TURN_HANG_CLEARED_EVENT = "turn_hang_cleared"
 ACTION_REQUIRED_EVENT = "action_required"
