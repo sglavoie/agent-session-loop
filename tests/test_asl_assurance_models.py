@@ -84,7 +84,7 @@ class VocabularyTests(unittest.TestCase):
 
     def test_audit_states_match_the_persisted_vocabulary(self) -> None:
         self.assertEqual(
-            ("all-clear", "findings", "unavailable", "skipped", "pending"),
+            ("all-clear", "findings", "partial", "unavailable", "skipped", "pending"),
             models.AUDIT_STATES,
         )
 
@@ -750,9 +750,13 @@ class SummaryInvariantTests(unittest.TestCase):
                 attempts=(models.AuditAttempt(number=2, outcome="timeout"),),
             )
 
-    def test_more_than_two_attempts_are_rejected(self) -> None:
-        with self.assertRaisesRegex(AssuranceError, "between 1 and 2"):
-            models.AuditAttempt(number=3, outcome="ok")
+    def test_attempts_past_both_budgets_are_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            AssuranceError, f"between 1 and {models.MAX_AUDIT_ATTEMPT_RECORDS}"
+        ):
+            models.AuditAttempt(
+                number=models.MAX_AUDIT_ATTEMPT_RECORDS + 1, outcome="ok"
+            )
 
 
 class AuditRoleTests(unittest.TestCase):

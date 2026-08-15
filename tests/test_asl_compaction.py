@@ -14,6 +14,7 @@ from agent_session_loop import (
     artifacts,
     compact_state,
     events,
+    harness_failures,
     harnesses,
     plans,
     runner,
@@ -559,6 +560,11 @@ class HarnessFailureClassificationTests(unittest.TestCase):
             "invalid model: gpt-9",
             "Error: model not found",
             "unknown model 'sonnet-99'",
+            (
+                "There's an issue with the selected model (gpt-9). It may not "
+                "exist or you may not have access to it. Run --model to pick a "
+                "different model."
+            ),
         ):
             with self.subTest(text=text):
                 classification = runner.classify_harness_failure(
@@ -568,6 +574,35 @@ class HarnessFailureClassificationTests(unittest.TestCase):
                     events.PAUSE_REASON_INVALID_MODEL, classification.reason
                 )
                 self.assertFalse(classification.retryable)
+
+    def test_capacity_failures_are_transport_retryable(self) -> None:
+        for text in (
+            '"message": "Selected model is at capacity. Please try a different model."',
+            '"codex_error_info": "server_overloaded"',
+            "overloaded_error: the model is currently busy",
+            "stream error: Overloaded",
+        ):
+            with self.subTest(text=text):
+                classification = runner.classify_harness_failure(
+                    self._result(stderr=text)
+                )
+                self.assertEqual(
+                    events.PAUSE_REASON_TRANSPORT_FAILED,
+                    classification.reason,
+                )
+                self.assertTrue(classification.retryable)
+                self.assertEqual(
+                    harness_failures.MODEL_CAPACITY_MARKER, classification.marker
+                )
+
+    def test_invalid_model_outranks_capacity(self) -> None:
+        # A typo'd model name must still fail fast even when the same output
+        # suggests trying a different model.
+        classification = runner.classify_harness_failure(
+            self._result(stderr="model not found; please try a different model")
+        )
+        self.assertEqual(events.PAUSE_REASON_INVALID_MODEL, classification.reason)
+        self.assertFalse(classification.retryable)
 
     def test_transport_failures_are_retryable(self) -> None:
         for text in (
@@ -654,6 +689,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
                 "evidence",
                 "returncode",
                 "retry_at",
+                "marker",
             },
             set(payload),
         )

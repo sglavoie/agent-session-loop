@@ -19,10 +19,13 @@ from unittest import mock
 from agent_session_loop import (
     artifacts,
     assurance_ledger,
+    assurance_models,
     assurance_projection,
     cli,
     events,
+    harness_failures,
     harnesses,
+    model_availability,
     plans,
     repository_evidence,
     run_flags,
@@ -33,7 +36,9 @@ from agent_session_loop import (
 from agent_session_loop.assurance_models import (
     AUDIT_MARKDOWN_FILENAME,
     AUDIT_REPORT_FILENAME,
+    MAX_AUDIT_ATTEMPT_RECORDS,
     MAX_AUDIT_ATTEMPTS,
+    MAX_AUDIT_DELIVERY_ATTEMPTS,
     RUBRIC_LANES,
     AssuranceError,
     AuditAttempt,
@@ -269,9 +274,19 @@ class AuditRoleResolutionTests(unittest.TestCase):
 
         self.assertEqual(900.0, role.timeout_seconds)
         self.assertEqual(
-            (900.0,) * MAX_AUDIT_ATTEMPTS, supervisor_audit.attempt_timeouts(role)
+            (900.0,) * MAX_AUDIT_ATTEMPT_RECORDS,
+            supervisor_audit.attempt_timeouts(role),
         )
+
+    def test_answer_and_delivery_budgets_are_separate(self) -> None:
+        # A bad answer is the agent's doing and stays cheap; an undelivered
+        # request is the provider's and gets its own, longer budget.
         self.assertEqual(2, MAX_AUDIT_ATTEMPTS)
+        self.assertEqual(4, MAX_AUDIT_DELIVERY_ATTEMPTS)
+        self.assertEqual(
+            MAX_AUDIT_ATTEMPTS + MAX_AUDIT_DELIVERY_ATTEMPTS,
+            MAX_AUDIT_ATTEMPT_RECORDS,
+        )
 
 
 class AuditPlanTests(unittest.TestCase):
@@ -625,7 +640,9 @@ class AuditRunOutputTests(unittest.TestCase):
             self.assertEqual("pending", audit["state"])
             self.assertEqual("claude", audit["role"]["harness"])
             self.assertEqual("review", audit["role"]["source"])
-            self.assertEqual([600.0, 600.0], audit["attempt_timeouts"])
+            self.assertEqual(
+                [600.0] * MAX_AUDIT_ATTEMPT_RECORDS, audit["attempt_timeouts"]
+            )
 
     def test_dry_run_json_reports_an_unavailable_role(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -784,6 +801,69 @@ class AuditStateProjectionTests(unittest.TestCase):
             self.assertIn("Assurance inbox: 0 open; `asl assurance list`", output)
             self.assertIn("Assurance report: ", output)
 
+    def _partial_status(self, tmp: str) -> dict:
+        plan_dir = Path(tmp) / "plan"
+        state_dir = Path(tmp) / "state"
+        write_plan(plan_dir, ("pending",))
+        plan_state = state.plan_state_dir(plan_dir, state_dir)
+        run_dir = plan_state / "runs" / RUN_ID
+        run_dir.mkdir(parents=True, exist_ok=True)
+        unjudged = ("resources-stalls", "unknown-anomalies")
+        (run_dir / AUDIT_REPORT_FILENAME).write_text(
+            json.dumps(
+                {
+                    "lanes": [
+                        {
+                            "lane": lane,
+                            "status": "unavailable" if lane in unjudged else "pass",
+                        }
+                        for lane in RUBRIC_LANES
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (plan_state / events.STATE_FILE_NAME).write_text(
+            json.dumps(
+                {
+                    "run_id": RUN_ID,
+                    "harness": "codex",
+                    "assurance": {
+                        "run_id": RUN_ID,
+                        "state": "partial",
+                        "eligible": True,
+                        "reason": supervisor_audit.REASON_LANE_EVIDENCE_ABSENT,
+                        "artifacts": [
+                            {"kind": "artifact", "locator": "run/supervisor-audit.json"}
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+    def test_a_partial_audit_reports_which_lanes_had_no_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._partial_status(tmp)
+
+            report = payload["assurance_report"]
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+
+            self.assertEqual(6, report["lanes_judged"])
+            self.assertEqual(8, report["lanes_total"])
+            self.assertEqual(
+                ["resources-stalls", "unknown-anomalies"],
+                report["lanes_without_evidence"],
+            )
+            self.assertIn(
+                "Supervisor audit: partial (6/8 lanes judged; no evidence: "
+                "resources-stalls, unknown-anomalies)",
+                buffer.getvalue(),
+            )
+
     def test_status_without_an_audit_prints_no_assurance_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
@@ -827,10 +907,14 @@ class _RecordingHarness:
         writes: Path | None = None,
         action: Callable[[], None] | None = None,
         returncode: int = 0,
+        stdout: str = "",
+        stderr: str = "",
     ) -> None:
         self.writes = writes
         self.action = action
         self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
         self.calls: list[dict[str, Any]] = []
 
     def __call__(self, name: str, **kwargs: object) -> harnesses.HarnessResult:
@@ -851,8 +935,8 @@ class _RecordingHarness:
         return harnesses.HarnessResult(
             argv=argv,
             returncode=self.returncode,
-            stdout="",
-            stderr="",
+            stdout=self.stdout,
+            stderr=self.stderr,
             last_message="audit done",
             name=name,
         )
@@ -947,6 +1031,42 @@ class RestrictedAuditTests(unittest.TestCase):
                     supervisor_audit.REASON_WORKSPACE_MUTATED, result.reason
                 )
                 self.assertIn("app", (result.mutation or {})["changed"])
+
+    def test_a_failed_launch_carries_its_classification_and_redacted_streams(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            fake = _RecordingHarness(
+                returncode=1,
+                stdout="chatter\n" * 4000,
+                stderr=(
+                    "cloning https://user:hunter2@example.com/app\n"
+                    '{"error": {"message": "Selected model is at capacity.", '
+                    '"codex_error_info": "server_overloaded"}}'
+                ),
+            )
+
+            result = self._run(
+                "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
+            )
+
+            self.assertEqual("transport-error", result.outcome)
+            assert result.classification is not None
+            self.assertEqual(
+                harness_failures.MODEL_CAPACITY_MARKER, result.classification.marker
+            )
+            self.assertTrue(result.classification.retryable)
+            self.assertIn("at capacity", result.classification.evidence)
+            # The provider's own words survive, the credential does not.
+            self.assertIn("server_overloaded", result.stderr_tail)
+            self.assertNotIn("hunter2", result.stderr_tail)
+            self.assertLessEqual(
+                len(result.stdout_tail.encode("utf-8")),
+                supervisor_audit.MAX_HARNESS_TAIL_BYTES,
+            )
+            # The tail is the end of the stream, where the error is.
+            self.assertTrue(result.stderr_tail.endswith('"server_overloaded"}}'))
 
     def test_a_write_to_an_unregistered_sibling_leaves_the_audit_available(
         self,
@@ -1701,8 +1821,28 @@ class _RunHistoryFixture:
             "\n".join(lines) + "\n", encoding="utf-8"
         )
 
+    def _make_legacy_plan(self, history: tuple[Path, Path, Path, Path]) -> Path:
+        """Rewrite the run as a registry-free legacy plan; return its repository."""
+        workspace, plan_dir, state_dir, _ = history
+        repository = workspace / "app"
+        (plan_dir / "manifest.md").write_text("# Manifest\n", encoding="utf-8")
+        (plan_dir / "session-01.md").write_text("# Session 1\n", encoding="utf-8")
+        (plan_dir / plans.PLAN_METADATA_FILE_NAME).write_text(
+            json.dumps({"version": 1, "cwd": str(repository)}), encoding="utf-8"
+        )
+        payload = self._read_state(state_dir)
+        payload.pop("repositories")
+        payload.pop("workspace_root")
+        payload["commit_mode"] = None
+        payload["run_config"]["cwd"] = str(repository)
+        self._write_state(state_dir, payload)
+        return repository
+
     def _bundle(
-        self, history: tuple[Path, Path, Path, Path]
+        self,
+        history: tuple[Path, Path, Path, Path],
+        *,
+        workspace_root: Path | None = None,
     ) -> supervisor_audit.AuditInput:
         workspace, plan_dir, state_dir, run_dir = history
         return supervisor_audit.collect_audit_input(
@@ -1710,7 +1850,7 @@ class _RunHistoryFixture:
             run_dir=run_dir,
             state_dir=state_dir,
             plan_dir=plan_dir,
-            workspace_root=workspace,
+            workspace_root=workspace if workspace_root is None else workspace_root,
         )
 
 
@@ -2133,10 +2273,12 @@ class _ScriptedAuditor:
     def __init__(self, *replies: object) -> None:
         self.replies = list(replies)
         self.prompts: list[str] = []
+        self.names: list[str] = []
 
     def __call__(self, name: str, **kwargs: object) -> harnesses.HarnessResult:
         prompt = str(kwargs["prompt"])
         self.prompts.append(prompt)
+        self.names.append(name)
         access = kwargs["access"]
         assert isinstance(access, harnesses.AccessProfile)
         argv = harnesses.get_adapter(name).build_argv(
@@ -2152,8 +2294,8 @@ class _ScriptedAuditor:
         return harnesses.HarnessResult(
             argv=argv,
             returncode=int(spec.get("returncode", 0)),
-            stdout="",
-            stderr="",
+            stdout=str(spec.get("stdout", "")),
+            stderr=str(spec.get("stderr", "")),
             last_message=str(spec.get("message", "")),
             name=name,
             timed_out=bool(spec.get("timed_out", False)),
@@ -2178,6 +2320,9 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
         auditor: _ScriptedAuditor,
         *,
         bundle: supervisor_audit.AuditInput | None = None,
+        sleeps: list[float] | None = None,
+        workspace_root: Path | None = None,
+        repositories: tuple[str, ...] = ("app",),
     ) -> supervisor_audit.AgentAuditOutcome:
         workspace, plan_dir, state_dir, run_dir = history
         return supervisor_audit.run_agent_audit(
@@ -2185,13 +2330,14 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             bundle=self._bundle(history) if bundle is None else bundle,
             run_id=RUN_ID,
             run_dir=run_dir,
-            workspace_root=workspace,
+            workspace_root=workspace if workspace_root is None else workspace_root,
             plan_dir=plan_dir,
-            repositories=("app",),
+            repositories=repositories,
             state_dir=state_dir,
             durable=False,
             now=lambda: FIXED_CLOCK,
             _run_harness_fn=auditor,
+            _sleep_fn=(sleeps if sleeps is not None else []).append,
         )
 
     def _self_reviewed(self, history: tuple[Path, Path, Path, Path]) -> None:
@@ -2359,29 +2505,37 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             statuses = {lane.lane: lane.status for lane in outcome.audit.lanes}
             self.assertEqual("fail", statuses["verification-review-independence"])
 
-    def test_a_timeout_is_retried_once_and_then_reported_unavailable(self) -> None:
+    def test_a_timeout_spends_the_delivery_budget_before_going_unavailable(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             auditor = _ScriptedAuditor({"message": "", "timed_out": True})
+            sleeps: list[float] = []
 
-            outcome = self._run(history, auditor)
+            outcome = self._run(history, auditor, sleeps=sleeps)
 
             self.assertFalse(outcome.agent_covered)
             self.assertEqual("unavailable", outcome.audit.state)
             self.assertEqual(supervisor_audit.REASON_TIMEOUT, outcome.audit.reason)
             self.assertEqual(
-                ["timeout", "timeout"], [item.outcome for item in outcome.attempts]
+                ["timeout"] * MAX_AUDIT_DELIVERY_ATTEMPTS,
+                [item.outcome for item in outcome.attempts],
             )
-            self.assertEqual(MAX_AUDIT_ATTEMPTS, len(auditor.prompts))
+            self.assertEqual(MAX_AUDIT_DELIVERY_ATTEMPTS, len(auditor.prompts))
+            self.assertEqual(
+                list(supervisor_audit.AUDIT_TRANSPORT_RETRY_DELAYS_SECONDS), sleeps
+            )
 
-    def test_a_transport_failure_is_retried_once_and_then_reported_unavailable(
-        self,
-    ) -> None:
+    def test_a_transport_failure_backs_off_and_reuses_the_same_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
-            auditor = _ScriptedAuditor({"message": "", "returncode": 1})
+            auditor = _ScriptedAuditor(
+                {"message": "", "returncode": 1, "stderr": "connection reset by peer"}
+            )
+            sleeps: list[float] = []
 
-            outcome = self._run(history, auditor)
+            outcome = self._run(history, auditor, sleeps=sleeps)
 
             self.assertFalse(outcome.agent_covered)
             self.assertEqual("unavailable", outcome.audit.state)
@@ -2389,7 +2543,143 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
                 supervisor_audit.REASON_HARNESS_FAILED, outcome.audit.reason
             )
             self.assertEqual(
-                ["transport-error", "transport-error"],
+                ["transport-error"] * MAX_AUDIT_DELIVERY_ATTEMPTS,
+                [item.outcome for item in outcome.attempts],
+            )
+            self.assertEqual([15.0, 60.0, 120.0], sleeps)
+            # The agent never saw the prompt, so nothing about it is corrected:
+            # every relaunch repeats it verbatim.
+            self.assertEqual({auditor.prompts[0]}, set(auditor.prompts))
+            self.assertNotIn("Your previous answer was rejected", auditor.prompts[-1])
+
+    def test_a_capacity_outage_that_clears_still_earns_a_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            capacity = {
+                "message": "",
+                "returncode": 1,
+                "stderr": (
+                    '{"error": {"message": "Selected model is at capacity. '
+                    'Please try a different model.", '
+                    '"codex_error_info": "server_overloaded"}}'
+                ),
+            }
+            auditor = _ScriptedAuditor(
+                capacity,
+                capacity,
+                self._reply(self._lanes(bundle.evidence[0].locator)),
+            )
+            sleeps: list[float] = []
+
+            outcome = self._run(history, auditor, bundle=bundle, sleeps=sleeps)
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual("all-clear", outcome.audit.state)
+            self.assertEqual(
+                ["transport-error", "transport-error", "ok"],
+                [item.outcome for item in outcome.attempts],
+            )
+            self.assertEqual([15.0, 60.0], sleeps)
+
+            attempt_dir = history[3] / assurance_models.attempt_dir_name(1)
+            recorded = json.loads(
+                (attempt_dir / supervisor_audit.ATTEMPT_OUTCOME_FILE).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                harness_failures.MODEL_CAPACITY_MARKER,
+                recorded["classification"]["marker"],
+            )
+            self.assertIn("at capacity", recorded["classification"]["evidence"])
+            self.assertIn(
+                "server_overloaded",
+                (attempt_dir / supervisor_audit.ATTEMPT_STDERR_FILE).read_text(
+                    encoding="utf-8"
+                ),
+            )
+            # An attempt that produced no stdout leaves no empty file behind.
+            self.assertFalse(
+                (attempt_dir / supervisor_audit.ATTEMPT_STDOUT_FILE).exists()
+            )
+
+    def test_a_capacity_outage_is_recorded_without_swapping_the_auditor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            role = AuditRole(
+                harness="claude",
+                implementation_harness="codex",
+                source="explicit",
+                timeout_seconds=30.0,
+                model="claude-opus-4",
+            )
+            auditor = _ScriptedAuditor(
+                {
+                    "message": "",
+                    "returncode": 1,
+                    "stderr": '{"codex_error_info": "server_overloaded"}',
+                }
+            )
+
+            supervisor_audit.run_agent_audit(
+                role,
+                bundle=self._bundle((workspace, plan_dir, state_dir, run_dir)),
+                run_id=RUN_ID,
+                run_dir=run_dir,
+                workspace_root=workspace,
+                plan_dir=plan_dir,
+                repositories=("app",),
+                state_dir=state_dir,
+                durable=False,
+                now=lambda: FIXED_CLOCK,
+                _run_harness_fn=auditor,
+                _sleep_fn=lambda _seconds: None,
+            )
+
+            recorded = model_availability.availability(
+                state.state_root(state_dir), "claude-opus-4"
+            )
+            self.assertFalse(recorded.available)
+            self.assertEqual(harness_failures.MODEL_CAPACITY_MARKER, recorded.reason)
+            # The outage is recorded, never routed around: every relaunch used
+            # the auditor the role named.
+            self.assertEqual({"claude"}, set(auditor.names))
+
+    def test_a_failure_that_can_never_succeed_is_not_waited_out(self) -> None:
+        """The shared classifier, not the outcome slug, decides what is transient."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            auditor = _ScriptedAuditor(
+                {"message": "", "returncode": 7, "stderr": "fake harness failure"}
+            )
+            sleeps: list[float] = []
+
+            outcome = self._run(history, auditor, sleeps=sleeps)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("unavailable", outcome.audit.state)
+            self.assertEqual(
+                ["transport-error"], [item.outcome for item in outcome.attempts]
+            )
+            self.assertEqual([], sleeps)
+
+    def test_delivery_failures_do_not_spend_the_answer_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(
+                {"message": "", "returncode": 1, "stderr": "socket hang up"},
+                "{not json",
+                self._reply(self._lanes(bundle.evidence[0].locator)),
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle, sleeps=[])
+
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual("all-clear", outcome.audit.state)
+            self.assertEqual(
+                ["transport-error", "malformed-output", "ok"],
                 [item.outcome for item in outcome.attempts],
             )
 
@@ -2531,11 +2821,64 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
 
             outcome = self._run(history, auditor, bundle=bundle)
 
+            statuses = {lane.lane: lane.status for lane in outcome.audit.lanes}
             self.assertTrue(outcome.agent_covered)
+            self.assertEqual("partial", outcome.audit.state)
+            self.assertEqual(
+                supervisor_audit.REASON_LANE_EVIDENCE_ABSENT, outcome.audit.reason
+            )
+            self.assertEqual("unavailable", statuses["resources-stalls"])
+            self.assertEqual((), outcome.audit.findings)
+
+    def test_a_lane_the_agent_failed_is_reported_as_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(
+                self._reply(
+                    self._lanes(
+                        bundle.evidence[0].locator, {"resources-stalls": "fail"}
+                    )
+                )
+            )
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            # A failing lane with no finding to explain it is not a verdict the
+            # audit can stand behind, so it degrades rather than reading partial.
             self.assertEqual("unavailable", outcome.audit.state)
             self.assertEqual(
                 supervisor_audit.REASON_LANE_COVERAGE, outcome.audit.reason
             )
+
+    def test_a_legacy_plan_without_a_registry_binding_can_be_all_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            repository = self._make_legacy_plan(history)
+            bundle = self._bundle(history, workspace_root=repository)
+            auditor = _ScriptedAuditor(
+                self._reply(self._lanes(bundle.evidence[0].locator))
+            )
+
+            outcome = self._run(
+                history,
+                auditor,
+                bundle=bundle,
+                workspace_root=repository,
+                repositories=(),
+            )
+            checks = {
+                result.check: result.status for result in outcome.audit.deterministic
+            }
+            statuses = {lane.lane: lane.status for lane in outcome.audit.lanes}
+
+            # The incident this pins: a check that could not read its evidence
+            # used to drag a lane the agent had judged down to `unavailable`,
+            # so no legacy plan could ever earn a clean audit.
+            self.assertEqual("unavailable", checks["root-registry-agreement"])
+            self.assertEqual("pass", statuses["identity-authority"])
+            self.assertEqual("all-clear", outcome.audit.state)
+            self.assertIsNone(outcome.audit.reason)
 
     def test_an_agent_pass_never_overrules_a_deterministic_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3123,6 +3466,31 @@ class FailClosedIdentityTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual(MAX_AUDIT_ATTEMPTS, len(auditor.prompts))
             self.assertNotIn("Your previous answer was well-formed", auditor.prompts[0])
             self.assertIn("Your previous answer was well-formed", auditor.prompts[1])
+
+    def test_an_undelivered_turn_does_not_consume_the_candidate_offer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._seed(history[2])
+            bundle = self._bundle(history)
+            answer = self._new_answer(bundle.evidence[0].locator)
+            auditor = _ScriptedAuditor(
+                answer,
+                {"message": "", "returncode": 1, "stderr": "socket hang up"},
+                answer,
+            )
+            sleeps: list[float] = []
+
+            outcome = self._run(history, auditor, bundle=bundle, sleeps=sleeps)
+
+            self.assertEqual(
+                ["invalid-reference", "transport-error", "invalid-reference"],
+                [item.outcome for item in outcome.attempts],
+            )
+            self.assertEqual([15.0], sleeps)
+            # The relaunch after the outage carries the candidate list the
+            # undelivered turn was meant to show.
+            self.assertIn("Your previous answer was well-formed", auditor.prompts[1])
+            self.assertEqual(auditor.prompts[1], auditor.prompts[2])
 
     def test_a_wasted_first_attempt_leaves_no_turn_for_the_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

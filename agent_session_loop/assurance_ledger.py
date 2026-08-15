@@ -49,8 +49,8 @@ from typing import Any, Literal
 from . import durability, state
 from .artifacts import sha256_hex
 from .assurance_models import (
+    COMPLETED_AUDIT_STATES,
     ISSUE_ID_PREFIX,
-    TERMINAL_AUDIT_STATES,
     AssuranceError,
     AssuranceSummary,
     Closeout,
@@ -170,7 +170,7 @@ ENVELOPE_KEYS: tuple[str, ...] = (
 #: Storing them without checking would let the ledger contradict itself.
 _AUDIT_KIND_STATES: Mapping[str, frozenset[str]] = {
     KIND_AUDIT_PENDING: frozenset({"pending"}),
-    KIND_AUDIT_COMPLETED: TERMINAL_AUDIT_STATES,
+    KIND_AUDIT_COMPLETED: COMPLETED_AUDIT_STATES,
     KIND_AUDIT_SKIPPED: frozenset({"skipped"}),
     KIND_AUDIT_UNAVAILABLE: frozenset({"unavailable"}),
 }

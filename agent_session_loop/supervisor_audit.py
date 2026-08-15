@@ -42,6 +42,7 @@ import json
 import os
 import re
 import shutil
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -57,7 +58,9 @@ from . import (
     assurance_report,
     durability,
     events,
+    harness_failures,
     harnesses,
+    model_availability,
     pause_policy,
     plans,
     preflight,
@@ -66,7 +69,7 @@ from . import (
     workspaces,
 )
 from .assurance_models import (
-    MAX_AUDIT_ATTEMPTS,
+    MAX_AUDIT_ATTEMPT_RECORDS,
     AssuranceSummary,
     AttemptOutcome,
     AuditRole,
@@ -77,6 +80,13 @@ from .assurance_models import (
 
 #: Seconds granted to each agent attempt, not to the audit as a whole.
 DEFAULT_AUDIT_TIMEOUT_SECONDS = 600
+
+#: Backoff before each delivery retry, indexed by how many delivery failures
+#: have already been seen; the last entry repeats once the tuple is exhausted.
+#: Deliberately not ``pause_policy.TRANSPORT_RETRY_DELAYS_SECONDS``: that
+#: schedule is a published contract of the run loop, and an audit that waits
+#: out a provider outage must be tunable without moving it.
+AUDIT_TRANSPORT_RETRY_DELAYS_SECONDS: tuple[float, ...] = (15.0, 60.0, 120.0)
 
 #: Why an audit is not pending. Token-shaped so they survive
 #: ``AssuranceSummary`` validation unchanged.
@@ -194,10 +204,10 @@ def attempt_timeouts(role: AuditRole) -> tuple[float, ...]:
     """Return the per-attempt timeout budget.
 
     The timeout is not a total budget: every one of the at most
-    ``MAX_AUDIT_ATTEMPTS`` attempts gets the full value, so a first attempt that
-    burns its timeout does not shorten the retry.
+    ``MAX_AUDIT_ATTEMPT_RECORDS`` attempts gets the full value, so a first
+    attempt that burns its timeout does not shorten the retry.
     """
-    return tuple(role.timeout_seconds for _ in range(MAX_AUDIT_ATTEMPTS))
+    return tuple(role.timeout_seconds for _ in range(MAX_AUDIT_ATTEMPT_RECORDS))
 
 
 @dataclass(frozen=True)
@@ -347,6 +357,9 @@ class AuditAttemptResult:
     last_message: str = ""
     mutation: dict[str, Any] | None = None
     issue_id: str | None = None
+    classification: harness_failures.FailureClassification | None = None
+    stdout_tail: str = ""
+    stderr_tail: str = ""
 
 
 def _mutation_comparison(comparison: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -661,6 +674,9 @@ def run_restricted_audit(
             last_message=result.last_message,
         )
     if result.returncode != 0:
+        # A bare "harness-failed" is unreadable a week later, so the launch is
+        # classified with the same rules the session loop uses and the streams
+        # that carried the provider's own words are kept alongside it.
         return AuditAttemptResult(
             outcome="transport-error",
             state="unavailable",
@@ -668,6 +684,9 @@ def run_restricted_audit(
             argv=argv,
             returncode=result.returncode,
             last_message=result.last_message,
+            classification=_redacted_classification(result),
+            stdout_tail=_harness_tail(result.stdout),
+            stderr_tail=_harness_tail(result.stderr),
         )
     return AuditAttemptResult(
         outcome="ok",
@@ -877,6 +896,29 @@ def _truncate_utf8(text: str, max_bytes: int) -> str:
     if len(encoded) <= max_bytes:
         return text
     return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _redacted_classification(
+    result: harnesses.HarnessResult,
+) -> harness_failures.FailureClassification:
+    """Classify a failed launch, with credentials stripped from its evidence."""
+    classification = harness_failures.classify_harness_failure(result)
+    return replace(classification, evidence=_redact_secrets(classification.evidence))
+
+
+def _harness_tail(text: str) -> str:
+    """Return the redacted end of a failing harness stream.
+
+    The end, not the head: a harness prints its banner first and its error last,
+    so a head-truncated capture of a chatty run keeps everything except the one
+    line explaining why it died.
+    """
+    if not text:
+        return ""
+    encoded = _redact_secrets(text).encode("utf-8")
+    if len(encoded) <= MAX_HARNESS_TAIL_BYTES:
+        return encoded.decode("utf-8", errors="ignore")
+    return encoded[-MAX_HARNESS_TAIL_BYTES:].decode("utf-8", errors="ignore")
 
 
 @dataclass(frozen=True)
@@ -2067,7 +2109,9 @@ def _check_root_registry_agreement(context: _CheckContext) -> _Verdict:
         return _Verdict(
             "unavailable",
             "neither the plan metadata nor the run registry recorded a workspace "
-            "binding to compare against the run's root",
+            "binding to compare against the run's root, which is what a plan "
+            "that predates workspace registration looks like rather than "
+            "evidence of a disagreement",
             evidence,
         )
 
@@ -3213,26 +3257,46 @@ MAX_AGENT_OUTPUT_BYTES = 256 * 1024
 #: else describes something the auditor could not have read.
 LOCALIZATION_ROOTS: tuple[str, ...] = (EVIDENCE_ROOT_PACKAGE, EVIDENCE_ROOT_SKILLS)
 
-#: Attempt outcomes that earn the single retry. A detected mutation, an
-#: unenforceable profile, and an interrupt are absent on purpose: none is a
-#: transient failure of the agent, and retrying would either run a second turn
-#: under a boundary already known to be broken or answer the operator's Ctrl+C
-#: with more of what they interrupted.
-RETRYABLE_ATTEMPT_OUTCOMES: frozenset[str] = frozenset(
+#: Retryable outcomes where the request never reached the agent. They are
+#: charged to the delivery budget and retried with the same prompt after a
+#: backoff, because there is no answer to correct.
+RETRYABLE_DELIVERY_OUTCOMES: frozenset[str] = frozenset(
     {
         "timeout",
         "transport-error",
+    }
+)
+
+#: Retryable outcomes where the agent answered and the answer was unusable.
+#: They are charged to the answer budget and retried with a correction.
+RETRYABLE_ANSWER_OUTCOMES: frozenset[str] = frozenset(
+    {
         "malformed-output",
         "missing-lanes",
         "invalid-reference",
     }
 )
 
+#: Attempt outcomes that earn a retry at all. A detected mutation, an
+#: unenforceable profile, and an interrupt are absent on purpose: none is a
+#: transient failure, and retrying would either run a second turn under a
+#: boundary already known to be broken or answer the operator's Ctrl+C with more
+#: of what they interrupted.
+RETRYABLE_ATTEMPT_OUTCOMES: frozenset[str] = (
+    RETRYABLE_DELIVERY_OUTCOMES | RETRYABLE_ANSWER_OUTCOMES
+)
+
 #: Why a launched audit reports no agent coverage.
 REASON_AGENT_UNAVAILABLE = "agent-coverage-unavailable"
 
-#: Why an audit with agent coverage and no findings is still not all-clear.
+#: Why an audit with agent coverage and no findings was once recorded as
+#: unavailable. No new audit is written under it; it stays so the records that
+#: already carry it keep parsing.
 REASON_LANE_COVERAGE = "incomplete-lane-coverage"
+
+#: Why an audit that ran, found nothing, and could not judge every lane is
+#: ``partial``: some lane had neither a reproducible verdict nor an agent claim.
+REASON_LANE_EVIDENCE_ABSENT = "lane-evidence-absent"
 
 #: Why an audit whose every attempt was well-formed is still not usable: a
 #: finding asked ASL to allocate an issue for a defect the catalog already names
@@ -3254,10 +3318,19 @@ IDENTITY_AMBIGUOUS_OUTCOME: AttemptOutcome = "invalid-reference"
 #: :data:`MAX_AGENT_CATALOG_BYTES`.
 MAX_PROMPTED_CANDIDATES = 8
 
-#: Files written under each ``supervisor-audit-attempt-N/`` directory.
+#: Files written under each ``supervisor-audit-attempt-N/`` directory. The
+#: harness streams appear only for an attempt whose launch failed, where they
+#: are the only record of what the provider actually said.
 ATTEMPT_PROMPT_FILE = "prompt.txt"
 ATTEMPT_MESSAGE_FILE = "last-message.txt"
 ATTEMPT_OUTCOME_FILE = "outcome.json"
+ATTEMPT_STDOUT_FILE = "harness-stdout.txt"
+ATTEMPT_STDERR_FILE = "harness-stderr.txt"
+
+#: Per-stream cap on a captured harness tail. Large enough for a stack trace or
+#: a JSON error envelope, small enough that a runaway log cannot fill the run
+#: directory.
+MAX_HARNESS_TAIL_BYTES = 16 * 1024
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?[ \t]*\n(.*?)```", re.DOTALL)
 
@@ -4155,6 +4228,23 @@ def _anchor(declared: Sequence[str]) -> tuple[str, ...]:
     return (declared[0],) if declared else ()
 
 
+def _deterministic_signal(
+    results: Sequence[assurance_models.DeterministicResult],
+) -> str | None:
+    """Return what the checks on one lane prove, or ``None`` when they prove nothing.
+
+    A failure is the strongest signal and wins outright; otherwise a single pass
+    is a real, reproducible verdict. Checks that all answered ``unavailable``
+    prove neither, so they contribute nothing rather than a pessimistic verdict.
+    """
+    statuses = {result.status for result in results}
+    if "fail" in statuses:
+        return "fail"
+    if "pass" in statuses:
+        return "pass"
+    return None
+
+
 def _merged_lanes(
     results: Sequence[assurance_models.DeterministicResult],
     agent: AgentAudit | None,
@@ -4163,17 +4253,23 @@ def _merged_lanes(
 ) -> tuple[assurance_models.LaneEvidence, ...]:
     """Reduce deterministic results and agent lanes to one record per lane.
 
-    The worse of the two statuses wins. An agent that reports ``pass`` on a lane
-    a deterministic check disproved does not get to overrule the check, and a
-    lane the agent never covered is ``unavailable`` rather than absent.
+    Where both sides carry a signal the worse one wins: an agent that reports
+    ``pass`` on a lane a deterministic check disproved does not get to overrule
+    the check. A check that answered ``unavailable`` is not a signal, though — it
+    says the check could not read its evidence, which is a statement about the
+    check and not about the run. Letting it drag the lane down would mean a
+    legacy plan with no registry binding could never produce a clean audit no
+    matter what the auditor found, so an all-``unavailable`` lane defers to the
+    agent's claim, and a lane with neither signal stays ``unavailable``.
     """
-    rollup = lane_rollup(results)
     reported = {lane.lane: lane for lane in (agent.lanes if agent else ())}
     lanes = []
     for name in assurance_models.RUBRIC_LANES:
         lane_results = [result for result in results if result.lane == name]
         claim = reported.get(name)
-        status = _worst(rollup[name], claim.status if claim else "unavailable")
+        claimed = claim.status if claim else "unavailable"
+        deterministic = _deterministic_signal(lane_results)
+        status = claimed if deterministic is None else _worst(deterministic, claimed)
         evidence = list(
             dict.fromkeys(
                 [
@@ -4258,8 +4354,14 @@ def render_supervisor_audit(
         state, state_reason = "findings", None
     elif all(lane.status == "pass" for lane in lanes):
         state, state_reason = "all-clear", None
-    else:
+    elif any(lane.status == "fail" for lane in lanes):
+        # Unreachable while every failing lane mints a finding. Kept so a future
+        # lane that can fail without one is held back rather than falling
+        # through to ``partial``, which would read a disproved lane as merely
+        # unjudged.
         state, state_reason = "unavailable", REASON_LANE_COVERAGE
+    else:
+        state, state_reason = "partial", REASON_LANE_EVIDENCE_ABSENT
     return assurance_models.SupervisorAudit(
         run_id=run_id,
         state=state,
@@ -4553,6 +4655,14 @@ def _write_attempt_artifacts(
             ),
             durable=durable,
         )
+        for name, stream in (
+            (ATTEMPT_STDOUT_FILE, attempt.stdout_tail),
+            (ATTEMPT_STDERR_FILE, attempt.stderr_tail),
+        ):
+            if stream:
+                assurance_models.write_new_bytes(
+                    directory / name, stream.encode("utf-8"), durable=durable
+                )
         assurance_models.write_new_bytes(
             directory / ATTEMPT_OUTCOME_FILE,
             assurance_models.canonical_json_bytes(
@@ -4563,6 +4673,11 @@ def _write_attempt_artifacts(
                     "reason": attempt.reason,
                     "returncode": attempt.returncode,
                     "argv": _bounded_argv(attempt.argv, prompt=prompt),
+                    "classification": (
+                        None
+                        if attempt.classification is None
+                        else attempt.classification.to_dict()
+                    ),
                 }
             ),
             durable=durable,
@@ -4570,6 +4685,52 @@ def _write_attempt_artifacts(
     except OSError, assurance_models.AssuranceError:
         return None
     return assurance_models.attempt_dir_name(number)
+
+
+def _delivery_is_retryable(attempt: AuditAttemptResult) -> bool:
+    """Say whether relaunching this failed attempt could plausibly succeed.
+
+    A timeout carries no classification and is retried on its own terms. Every
+    other delivery failure defers to the shared classifier, which recognises
+    only genuine transport faults as transient: authentication, quota, and
+    unrecognised exits are permanent, so waiting out the backoff would just
+    stall the run before reaching the same verdict.
+    """
+    classification = attempt.classification
+    return classification is None or classification.retryable
+
+
+def _record_capacity_outage(
+    attempt: AuditAttemptResult,
+    *,
+    role: AuditRole,
+    state_dir: Path | str | None,
+    run_id: str,
+    delay: float,
+) -> None:
+    """Note a provider capacity outage in the shared availability ledger.
+
+    Recording it is all that happens: the auditor is never swapped for a model
+    that happens to be up, because its identity is a structural property of the
+    audit rather than a performance knob. The ledger entry is durable evidence
+    that the outage was the provider's, and it expires on its own once the
+    backoff this audit is about to wait has passed.
+    """
+    classification = attempt.classification
+    if (
+        classification is None
+        or classification.marker != harness_failures.MODEL_CAPACITY_MARKER
+        or role.model is None
+    ):
+        return
+    with contextlib.suppress(OSError):
+        model_availability.suppress_until(
+            state.state_root(state_dir),
+            role.model,
+            reason=harness_failures.MODEL_CAPACITY_MARKER,
+            retry_hint=classification.retry_at or str(int(delay)),
+            run_id=run_id,
+        )
 
 
 def run_agent_audit(
@@ -4588,18 +4749,25 @@ def run_agent_audit(
     durable: bool = True,
     now: Callable[[], datetime] | None = None,
     _run_harness_fn: Callable[..., harnesses.HarnessResult] | None = None,
+    _sleep_fn: Callable[[float], None] = time.sleep,
 ) -> AgentAuditOutcome:
     """Run the semantic audit and return the audit its attempts earned.
 
-    The agent gets at most :data:`assurance_models.MAX_AUDIT_ATTEMPTS` attempts,
-    each a fresh invocation with its own archived directory, and the second one
-    is told only which validation rule the first one broke. When neither attempt
-    produces a valid answer the audit is ``unavailable`` — but it still carries
-    the deterministic lanes, results, and findings, because losing reproducible
+    Two budgets are spent, not one, because a bad answer and an undelivered
+    request are different failures. The agent may produce at most
+    :data:`assurance_models.MAX_AUDIT_ATTEMPTS` unusable *answers*, each retry a
+    fresh invocation told only which validation rule the previous one broke. A
+    launch that never reached the agent — a timeout or a transport/capacity
+    failure — is charged instead to
+    :data:`assurance_models.MAX_AUDIT_DELIVERY_ATTEMPTS` and retried after a
+    backoff with the identical prompt, since there is no answer to correct and
+    the outage is the provider's doing. When either budget runs out the audit is
+    ``unavailable`` under the reason that exhausted it — but it still carries the
+    deterministic lanes, results, and findings, because losing reproducible
     evidence because an agent misbehaved would be a second failure, not a
     consequence of the first.
 
-    A candidate retry comes out of that same budget rather than adding to it. An
+    A candidate retry comes out of the answer budget rather than adding to it. An
     answer that is malformed once and then identity-ambiguous therefore never
     sees the candidate list, and the audit lands ``unavailable`` under
     :data:`REASON_IDENTITY_AMBIGUOUS`. That is the safe end of the trade: the
@@ -4623,8 +4791,11 @@ def run_agent_audit(
     candidates: tuple[assurance_projection.IdentityCandidate, ...] = ()
     candidates_offered = False
     unavailable_reason = REASON_AGENT_UNAVAILABLE
+    answers_spent = 0
+    deliveries_spent = 0
 
-    for number in range(1, assurance_models.MAX_AUDIT_ATTEMPTS + 1):
+    while True:
+        number = len(attempts) + 1
         prompt = build_audit_prompt(
             bundle, catalog=catalog, correction=correction, candidates=candidates
         )
@@ -4706,9 +4877,27 @@ def run_agent_audit(
                 catalog=catalog,
                 identity_selections=_identity_selections(agent, rendered.findings),
             )
+        if outcome in RETRYABLE_DELIVERY_OUTCOMES and _delivery_is_retryable(attempt):
+            # The agent never saw this prompt, so nothing about it is corrected
+            # and no candidate offer is consumed: the next launch repeats it
+            # verbatim once the provider has had time to recover.
+            deliveries_spent += 1
+            if deliveries_spent >= assurance_models.MAX_AUDIT_DELIVERY_ATTEMPTS:
+                break
+            delay = AUDIT_TRANSPORT_RETRY_DELAYS_SECONDS[
+                min(deliveries_spent - 1, len(AUDIT_TRANSPORT_RETRY_DELAYS_SECONDS) - 1)
+            ]
+            _record_capacity_outage(
+                attempt, role=role, state_dir=state_dir, run_id=run_id, delay=delay
+            )
+            _sleep_fn(delay)
+            continue
         if unavailable_reason == REASON_IDENTITY_AMBIGUOUS and not matched:
             break
-        if outcome not in RETRYABLE_ATTEMPT_OUTCOMES:
+        if outcome not in RETRYABLE_ANSWER_OUTCOMES:
+            break
+        answers_spent += 1
+        if answers_spent >= assurance_models.MAX_AUDIT_ATTEMPTS:
             break
         if matched:
             correction = None
@@ -4967,10 +5156,14 @@ def audit_terminal_run(
     return result.summary
 
 
-def status_line(assurance: Mapping[str, Any] | None) -> str | None:
+def status_line(
+    assurance: Mapping[str, Any] | None,
+    *,
+    report: Mapping[str, Any] | None = None,
+) -> str | None:
     """Render the one-line operator summary of a run's assurance object.
 
     Delegated so that ``asl status`` — which must never be able to launch an
     audit — renders the identical line without importing this module.
     """
-    return assurance_report.status_line(assurance)
+    return assurance_report.status_line(assurance, report=report)

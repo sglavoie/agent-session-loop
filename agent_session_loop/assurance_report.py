@@ -24,6 +24,7 @@ deliberately unable to do anything else:
 
 from __future__ import annotations
 
+import json
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -73,15 +74,27 @@ def _format_timeout(value: Any) -> str:
     return f"{value}s"
 
 
-def status_line(assurance: Mapping[str, Any] | None) -> str | None:
-    """Render the one-line operator summary of a run's assurance object."""
+def status_line(
+    assurance: Mapping[str, Any] | None,
+    *,
+    report: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Render the one-line operator summary of a run's assurance object.
+
+    ``report`` is the block :func:`build_run_report` produced for the same run.
+    When it names how much of the rubric was judged, that replaces the bare
+    reason token: "partial" alone says less than which lanes had no evidence.
+    """
     if not isinstance(assurance, Mapping):
         return None
     audit_state = assurance.get("state")
     if not audit_state:
         return None
     role = assurance.get("role")
-    if isinstance(role, Mapping) and role.get("harness"):
+    coverage = _coverage_detail(report)
+    if coverage is not None:
+        detail = f" ({coverage})"
+    elif isinstance(role, Mapping) and role.get("harness"):
         detail = (
             f" ({role.get('harness')} via {role.get('source')} role, "
             f"{_format_timeout(role.get('timeout_seconds'))} per attempt)"
@@ -91,6 +104,24 @@ def status_line(assurance: Mapping[str, Any] | None) -> str | None:
     else:
         detail = ""
     return f"Supervisor audit: {audit_state}{detail}"
+
+
+def _coverage_detail(report: Mapping[str, Any] | None) -> str | None:
+    """Phrase a run report's lane coverage, or ``None`` when it is complete."""
+    if not isinstance(report, Mapping):
+        return None
+    judged = report.get("lanes_judged")
+    total = report.get("lanes_total")
+    if not isinstance(judged, int) or not isinstance(total, int) or judged >= total:
+        return None
+    unjudged = report.get("lanes_without_evidence")
+    listed = (
+        ", ".join(str(item) for item in unjudged)
+        if isinstance(unjudged, Sequence) and not isinstance(unjudged, (str, bytes))
+        else ""
+    )
+    summary = f"{judged}/{total} lanes judged"
+    return f"{summary}; no evidence: {listed}" if listed else summary
 
 
 def _issue_ids(assurance: Mapping[str, Any]) -> tuple[str, ...]:
@@ -134,6 +165,32 @@ def resolve_report_path(
     return str(Path(run_dir) / locator[len(_RUN_ANCHOR_PREFIX) :])
 
 
+def _lane_coverage(
+    report_path: str | None,
+) -> tuple[int | None, int | None, tuple[str, ...]]:
+    """Count the rubric lanes the stored audit judged on its own evidence.
+
+    Derived on read rather than stored on the run's assurance object: the audit
+    report is already the authoritative record of lane status, so recomputing
+    here keeps the persisted assurance schema untouched.
+    """
+    if not report_path or not Path(report_path).is_absolute():
+        return None, None, ()
+    try:
+        payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    except OSError, ValueError:
+        return None, None, ()
+    lanes = payload.get("lanes") if isinstance(payload, Mapping) else None
+    if not isinstance(lanes, Sequence) or isinstance(lanes, (str, bytes)) or not lanes:
+        return None, None, ()
+    absent = tuple(
+        str(lane.get("lane"))
+        for lane in lanes
+        if isinstance(lane, Mapping) and lane.get("status") == "unavailable"
+    )
+    return len(lanes) - len(absent), len(lanes), absent
+
+
 def _is_partial(assurance: Mapping[str, Any], issue_ids: Sequence[str]) -> bool:
     """Say whether these issue IDs are a partial verdict rather than a whole one.
 
@@ -160,6 +217,9 @@ class RunAssuranceReport:
     report_path: str | None
     open_issue_count: int | None
     open_issue_error: str | None
+    lanes_judged: int | None = None
+    lanes_total: int | None = None
+    lanes_without_evidence: tuple[str, ...] = ()
     list_command: str = LIST_COMMAND
 
     def to_dict(self) -> dict[str, Any]:
@@ -173,6 +233,9 @@ class RunAssuranceReport:
             "new_issue_count": self.new_issue_count,
             "recurring_issue_count": self.recurring_issue_count,
             "partial": self.partial,
+            "lanes_judged": self.lanes_judged,
+            "lanes_total": self.lanes_total,
+            "lanes_without_evidence": list(self.lanes_without_evidence),
             "report_path": self.report_path,
             "open_issue_count": self.open_issue_count,
             "open_issue_error": self.open_issue_error,
@@ -207,6 +270,8 @@ def build_run_report(
         open_count, open_error = _open_issue_count(state_dir)
     else:
         open_count, open_error = None, None
+    report_path = resolve_report_path(assurance, run_dir)
+    lanes_judged, lanes_total, lanes_without_evidence = _lane_coverage(report_path)
     return RunAssuranceReport(
         run_id=(
             str(assurance.get("run_id"))
@@ -224,9 +289,12 @@ def build_run_report(
         new_issue_count=_count(assurance, "new_issue_count"),
         recurring_issue_count=_count(assurance, "recurring_issue_count"),
         partial=_is_partial(assurance, issue_ids),
-        report_path=resolve_report_path(assurance, run_dir),
+        report_path=report_path,
         open_issue_count=open_count,
         open_issue_error=open_error,
+        lanes_judged=lanes_judged,
+        lanes_total=lanes_total,
+        lanes_without_evidence=lanes_without_evidence,
     ).to_dict()
 
 
@@ -539,7 +607,7 @@ def collect_assurance_metrics(
         )
         if audit.summary.eligible:
             eligible += 1
-            if audit.state in models.TERMINAL_AUDIT_STATES:
+            if audit.state in models.COMPLETED_AUDIT_STATES:
                 audited += 1
         else:
             ineligible += 1

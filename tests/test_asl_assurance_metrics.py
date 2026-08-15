@@ -22,6 +22,7 @@ RUN_B = "20260810T110000000000Z-4242"
 RUN_C = "20260810T120000000000Z-4243"
 RUN_D = "20260810T130000000000Z-4244"
 RUN_E = "20260810T140000000000Z-4245"
+RUN_F = "20260810T150000000000Z-4246"
 
 OLD = "2026-08-01T10:00:00+00:00"
 T0 = "2026-08-10T10:00:00+00:00"
@@ -158,16 +159,27 @@ class CoverageMetricsTests(AssuranceReportTestCase):
             )
         )
         self.publish(AuditPublication(run_id=RUN_E, state="pending", eligible=True))
+        # A partial audit reached a verdict on the lanes it could judge, so it
+        # counts as audited: the gap it reports is coverage of the rubric, not
+        # of the run.
+        self.publish(
+            _publication(
+                run_id=RUN_F,
+                state="partial",
+                findings=(),
+                reason="lane-evidence-absent",
+            )
+        )
 
         report = self.metrics()
-        self.assertEqual(report["runs_recorded"], 5)
+        self.assertEqual(report["runs_recorded"], 6)
         self.assertEqual(
             report["coverage"],
             {
-                "eligible_runs": 4,
+                "eligible_runs": 5,
                 "ineligible_runs": 1,
-                "audited_runs": 2,
-                "coverage_rate": 0.5,
+                "audited_runs": 3,
+                "coverage_rate": 0.6,
             },
         )
         self.assertEqual(
@@ -175,6 +187,7 @@ class CoverageMetricsTests(AssuranceReportTestCase):
             {
                 "all-clear": 1,
                 "findings": 1,
+                "partial": 1,
                 "unavailable": 1,
                 "skipped": 1,
                 "pending": 1,

@@ -297,14 +297,14 @@ class _ScriptedAuditor:
         )
 
 
-def _all_clear_reply(locator: str) -> str:
+def _all_clear_reply(locator: str, *, unjudged: tuple[str, ...] = ()) -> str:
     body = json.dumps(
         {
             "schema_version": supervisor_audit.AGENT_OUTPUT_SCHEMA_VERSION,
             "lanes": [
                 {
                     "lane": lane,
-                    "status": "pass",
+                    "status": "unavailable" if lane in unjudged else "pass",
                     "summary": f"{lane} judged from the recorded evidence",
                     "evidence": [locator],
                 }
@@ -421,6 +421,32 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             self.assertEqual((), summary.issue_ids)
             self.assertEqual(FIXED_CLOCK.isoformat(), summary.started_at)
 
+    def test_a_partial_audit_is_published_as_a_completed_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            root = history[2].parent
+            bundle = self._bundle(history, terminal_pending=True)
+            auditor = _ScriptedAuditor(
+                _all_clear_reply(
+                    bundle.evidence[0].locator,
+                    unjudged=("resources-stalls", "unknown-anomalies"),
+                )
+            )
+
+            summary = self._audit(history, auditor)
+
+            view = assurance_ledger.read_ledger(state_dir=root)
+            self.assertEqual("partial", summary.state, summary.reason)
+            self.assertEqual(
+                supervisor_audit.REASON_LANE_EVIDENCE_ABSENT, summary.reason
+            )
+            self.assertEqual(
+                [assurance_ledger.KIND_AUDIT_COMPLETED],
+                [record.kind for record in view.records],
+            )
+            self.assertEqual((), summary.issue_ids)
+            self.assertEqual((), assurance_projection.project(view).open_issues)
+
     def test_republishing_the_same_audit_leaves_one_occurrence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
@@ -440,21 +466,25 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp), turns=0)
             root = history[2].parent
+            bundle = self._bundle(history, terminal_pending=True)
+            auditor = _ScriptedAuditor(
+                _all_clear_reply(
+                    bundle.evidence[0].locator, unjudged=("mutation-commit-guards",)
+                )
+            )
 
-            summary = self._audit(history, self._auditor(history))
+            summary = self._audit(history, auditor)
 
-            # Two lanes are genuinely unjudgeable without a turn, so the audit
-            # ran, reached ``unavailable`` on coverage, and said so in the
-            # ledger rather than skipping.
-            self.assertEqual("unavailable", summary.state)
-            self.assertEqual(supervisor_audit.REASON_LANE_COVERAGE, summary.reason)
+            # The write guards are genuinely unjudgeable without a turn, so the
+            # audit ran, reported the lane it could not judge, and published
+            # what it did judge rather than skipping.
+            self.assertEqual("partial", summary.state)
+            self.assertEqual(
+                supervisor_audit.REASON_LANE_EVIDENCE_ABSENT, summary.reason
+            )
             self.assertTrue(summary.artifacts)
             self.assertEqual(
-                [
-                    assurance_ledger.KIND_AUDIT_UNAVAILABLE,
-                    assurance_ledger.KIND_ISSUE_OBSERVED,
-                    assurance_ledger.KIND_ISSUE_IDENTITY_BOUND,
-                ],
+                [assurance_ledger.KIND_AUDIT_COMPLETED],
                 [
                     record.kind
                     for record in assurance_ledger.read_ledger(state_dir=root).records

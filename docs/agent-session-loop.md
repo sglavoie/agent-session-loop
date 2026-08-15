@@ -1330,8 +1330,7 @@ The supervisor audit that grades ASL's own control plane is configured by
 `--supervisor-audit`/`--no-supervisor-audit`, `--audit-harness`,
 `--audit-harness-model`, `--audit-effort`, and `--audit-timeout`. Audits are
 enabled by default and `--audit-timeout` defaults to `600` seconds, applied
-independently to each of the at most two agent attempts rather than as one
-shared budget. `--audit-harness` must differ from `--harness`, since a harness
+independently to each agent attempt rather than as one shared budget. `--audit-harness` must differ from `--harness`, since a harness
 cannot grade its own turns; the run exits with `reason: input-error` when it
 does not. It may equal `--review-harness`, which was already independent of the
 implementation. Without an explicit `--audit-harness`, the audit role is
@@ -1351,10 +1350,39 @@ still reporting the role, timeout, and attempt budget a real run would have used
 under `planned.audit`. Text runs print a `Supervisor audit: STATE` summary line.
 
 Opting out is the only way to run no checks at all. A run that stays enabled but
-resolves no independent role, loses both agent attempts, draws a harness that
+resolves no independent role, spends either attempt budget, draws a harness that
 cannot enforce the read-only profile, or catches its auditor mutating the
 workspace still publishes whatever the deterministic checks proved, under an
 `unavailable` verdict for the semantic half that went missing.
+
+Two budgets are spent, not one, because a bad answer and an undelivered request
+are different failures. At most two *answers* may be unusable: each retry is a
+fresh invocation told only which validation rule the previous one broke. A
+launch that never reached the agent — a timeout, a transport failure, or a
+provider at capacity — is charged instead to a separate budget of four
+*deliveries* and retried with the identical prompt after 15, 60, and 120
+seconds, since there is no answer to correct and the outage is not the auditor's
+doing. A delivery retry consumes no answer attempt and never advances a
+candidate offer. A failed launch archives its classification and the redacted
+tails of the harness's own streams in `harness-stdout.txt` and
+`harness-stderr.txt` beside that attempt's `outcome.json`, and a launch that
+failed because the model was at capacity records the outage in the model
+availability ledger under the marker `model-capacity`. The audit never falls
+back to a different model: an audit by a model nobody chose is not the audit
+that was configured.
+
+A verdict says how much of the rubric was judged. `all-clear` requires all eight
+lanes to have passed on their own evidence and `findings` carries at least one
+defect; an audit that ran, found nothing wrong, and could not judge every lane
+is `partial` with reason `lane-evidence-absent`. It is a completed audit: it
+opens no issue, is filed in the ledger as a completed record, and counts as an
+audited run, because calling it `all-clear` would overstate it and calling it
+`unavailable` would throw away the lanes it did judge. A deterministic check
+that answered `unavailable` is a statement about the check rather than about the
+run, so it contributes no signal to its lane: where every check on a lane could
+not read its evidence, the lane takes the auditor's judgement, and where any
+check did answer, the worse of the two verdicts wins. That is what lets a legacy
+plan with no registry binding still earn a clean audit.
 
 The semantic auditor answers in a versioned JSON contract, and its second
 version replaced implicit identity with explicit selection. Every finding
@@ -1405,7 +1433,7 @@ the audit is `unavailable` with reason `identity-ambiguous`, no issue is minted,
 and the deterministic findings are published as usual. The attempt is recorded
 as `invalid-reference` rather than under a new token, because that vocabulary is
 a closed enum persisted inside audit reports. The candidate retry comes out of
-the two-attempt budget rather than adding to it, so an answer that is malformed
+the two-answer budget rather than adding to it, so an answer that is malformed
 once and ambiguous next never sees the list.
 
 A caught mutation opens its critical issue while the attempt is still running,
@@ -1465,8 +1493,16 @@ eligibility and adds the copyable issue IDs, the new and recurring counts, the
 absolute path of `supervisor-audit.json` in the run directory, the corpus-wide
 open issue count, and `list_command` (`asl assurance list`). Findings carried by
 an `unavailable` verdict are flagged `partial: true`, because those are the
-problems the audit managed to see rather than all of them. Text output renders
-the same three lines:
+problems the audit managed to see rather than all of them. When the stored
+report shows a lane it could not judge, the block also carries `lanes_judged`,
+`lanes_total`, and `lanes_without_evidence`, derived by reading that report
+rather than stored in the run's assurance object, and the audit line names them:
+
+```text
+Supervisor audit: partial (6/8 lanes judged; no evidence: resources-stalls, unknown-anomalies)
+```
+
+Text output renders the same three lines:
 
 ```text
 Assurance issues: 1 new, 1 recurring; ASI-1, ASI-2

@@ -66,21 +66,32 @@ SUPPORTED_ASSURANCE_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 # Vocabulary
 # ---------------------------------------------------------------------------
 
-AuditState = Literal["all-clear", "findings", "unavailable", "skipped", "pending"]
+AuditState = Literal[
+    "all-clear", "findings", "partial", "unavailable", "skipped", "pending"
+]
 
 #: Every state a run's assurance object can hold, in reporting order.
+#: ``partial`` is the honest middle: the audit ran, found nothing wrong, and
+#: could not judge every lane. Calling that ``all-clear`` overstates it and
+#: calling it ``unavailable`` throws away the lanes that were judged.
 AUDIT_STATES: tuple[AuditState, ...] = (
     "all-clear",
     "findings",
+    "partial",
     "unavailable",
     "skipped",
     "pending",
 )
 
 #: States that assert a complete audit and therefore require full lane
-#: coverage. ``unavailable`` may carry partial deterministic findings,
-#: ``skipped`` carries none, and ``pending`` has not run yet.
+#: coverage. ``partial`` and ``unavailable`` may carry partial deterministic
+#: findings, ``skipped`` carries none, and ``pending`` has not run yet.
 TERMINAL_AUDIT_STATES: frozenset[str] = frozenset({"all-clear", "findings"})
+
+#: States the ledger files as a completed audit. ``partial`` belongs here and
+#: not above: the audit ran to a verdict, so it completed, but it never claims
+#: the full lane coverage the terminal states assert.
+COMPLETED_AUDIT_STATES: frozenset[str] = TERMINAL_AUDIT_STATES | {"partial"}
 
 RubricLane = Literal[
     "identity-authority",
@@ -236,8 +247,20 @@ CANONICAL_AUDIT_ARTIFACTS: tuple[str, ...] = (
     AUDIT_MARKDOWN_FILENAME,
 )
 
-#: The audit agent gets one retry in a fresh invocation and no more.
+#: Budget for attempts the agent *answered*: one retry in a fresh invocation
+#: after a malformed or incomplete answer, and no more. A bad answer is the
+#: agent's own doing, so the budget stays tight.
 MAX_AUDIT_ATTEMPTS = 2
+
+#: Budget for attempts that never reached the agent at all — a timeout or a
+#: transport/capacity failure. Delivery is the provider's doing, not the
+#: agent's, so it gets its own, more forgiving budget: a provider outage
+#: lasting minutes must not consume the answer retries or fail the audit.
+MAX_AUDIT_DELIVERY_ATTEMPTS = 4
+
+#: Upper bound on recorded attempts: both budgets can be spent in full within
+#: one audit, and every attempt is recorded.
+MAX_AUDIT_ATTEMPT_RECORDS = MAX_AUDIT_ATTEMPTS + MAX_AUDIT_DELIVERY_ATTEMPTS
 
 
 # ---------------------------------------------------------------------------
@@ -1085,7 +1108,7 @@ class SupervisorAudit:
     def _validate_state(self) -> None:
         terminal = self.state in TERMINAL_AUDIT_STATES
         validate_lane_coverage(self.lanes, require_complete=terminal)
-        if self.state in {"skipped", "unavailable"}:
+        if self.state in {"skipped", "unavailable", "partial"}:
             if self.reason is None:
                 raise AssuranceError(
                     f"an audit in state {self.state!r} must record why"
@@ -1094,6 +1117,10 @@ class SupervisorAudit:
         elif self.reason is not None:
             raise AssuranceError(
                 f"an audit in state {self.state!r} must not record a reason"
+            )
+        if self.state == "partial" and self.findings:
+            raise AssuranceError(
+                "a partial audit cannot carry findings; its state is 'findings'"
             )
         if self.state == "all-clear":
             if self.findings:
@@ -1772,7 +1799,10 @@ class AuditAttempt:
 
     def __post_init__(self) -> None:
         _require_int(
-            self.number, label="attempt 'number'", minimum=1, maximum=MAX_AUDIT_ATTEMPTS
+            self.number,
+            label="attempt 'number'",
+            minimum=1,
+            maximum=MAX_AUDIT_ATTEMPT_RECORDS,
         )
         _require_choice(
             self.outcome, label="attempt 'outcome'", choices=ATTEMPT_OUTCOMES
@@ -1820,7 +1850,7 @@ def parse_audit_attempt(payload: object, *, label: str = "attempt") -> AuditAtte
             data.get("number"),
             label=f"{label} 'number'",
             minimum=1,
-            maximum=MAX_AUDIT_ATTEMPTS,
+            maximum=MAX_AUDIT_ATTEMPT_RECORDS,
         ),
         outcome=_require_choice(
             data.get("outcome"), label=f"{label} 'outcome'", choices=ATTEMPT_OUTCOMES
@@ -1890,10 +1920,10 @@ class AssuranceSummary:
             minimum=0,
             maximum=MAX_ISSUE_REFERENCES,
         )
-        if len(self.attempts) > MAX_AUDIT_ATTEMPTS:
+        if len(self.attempts) > MAX_AUDIT_ATTEMPT_RECORDS:
             raise AssuranceError(
-                f"assurance 'attempts' must hold at most {MAX_AUDIT_ATTEMPTS} "
-                f"entries; got {len(self.attempts)}"
+                f"assurance 'attempts' must hold at most "
+                f"{MAX_AUDIT_ATTEMPT_RECORDS} entries; got {len(self.attempts)}"
             )
         numbers = [attempt.number for attempt in self.attempts]
         if numbers != list(range(1, len(numbers) + 1)):
@@ -1938,7 +1968,7 @@ class AssuranceSummary:
         self._validate_state()
 
     def _validate_state(self) -> None:
-        if self.state in {"skipped", "unavailable"}:
+        if self.state in {"skipped", "unavailable", "partial"}:
             if self.reason is None:
                 raise AssuranceError(f"assurance state {self.state!r} must record why")
             _require_token(self.reason, label="assurance 'reason'")
@@ -1950,9 +1980,10 @@ class AssuranceSummary:
             raise AssuranceError(
                 f"an ineligible run can only be 'skipped'; got {self.state!r}"
             )
-        if self.state == "all-clear" and self.issue_ids:
+        if self.state in {"all-clear", "partial"} and self.issue_ids:
             raise AssuranceError(
-                f"an all-clear run creates no issues; got {', '.join(self.issue_ids)}"
+                f"a run in state {self.state!r} creates no issues; "
+                f"got {', '.join(self.issue_ids)}"
             )
         if self.state == "skipped" and self.issue_ids:
             raise AssuranceError(
@@ -2016,7 +2047,7 @@ def parse_assurance_summary(payload: object) -> AssuranceSummary:
             _require_sequence(
                 data.get("attempts", []),
                 label=f"{label} 'attempts'",
-                maximum=MAX_AUDIT_ATTEMPTS,
+                maximum=MAX_AUDIT_ATTEMPT_RECORDS,
             )
         )
     )
@@ -2487,7 +2518,9 @@ def audit_artifact_name(name: str) -> str:
 
 def attempt_dir_name(number: int) -> str:
     """Return the canonical directory name for audit attempt ``number``."""
-    _require_int(number, label="attempt number", minimum=1, maximum=MAX_AUDIT_ATTEMPTS)
+    _require_int(
+        number, label="attempt number", minimum=1, maximum=MAX_AUDIT_ATTEMPT_RECORDS
+    )
     return f"{_ATTEMPT_DIR_PREFIX}{number}"
 
 

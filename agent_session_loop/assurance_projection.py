@@ -111,6 +111,10 @@ AUDIT_KIND_FOR_STATE: Mapping[str, str] = {
     "pending": KIND_AUDIT_PENDING,
     "all-clear": KIND_AUDIT_COMPLETED,
     "findings": KIND_AUDIT_COMPLETED,
+    # A partial audit completed: it ran, judged what it could see, and found
+    # nothing wrong. Its incomplete coverage is reported, not treated as an
+    # outage of the audit itself.
+    "partial": KIND_AUDIT_COMPLETED,
     "skipped": KIND_AUDIT_SKIPPED,
     "unavailable": KIND_AUDIT_UNAVAILABLE,
 }
@@ -120,7 +124,9 @@ AUDIT_RECORD_KINDS: frozenset[str] = frozenset(AUDIT_KIND_FOR_STATE.values())
 #: States that assert no analysis produced a finding. ``unavailable`` is absent
 #: on purpose: it opens exactly one system issue for its reason class, and may
 #: additionally carry whatever deterministic findings were reached first.
-NO_FINDING_STATES: frozenset[str] = frozenset({"all-clear", "skipped", "pending"})
+NO_FINDING_STATES: frozenset[str] = frozenset(
+    {"all-clear", "partial", "skipped", "pending"}
+)
 
 #: Identity of the system issue an unavailable audit opens. The reason class is
 #: the only varying part, which is what keeps a million distinct exception

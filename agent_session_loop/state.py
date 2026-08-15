@@ -1961,7 +1961,8 @@ def _print_text_status(payload: dict[str, Any]) -> None:
     from . import assurance_report
 
     audit_line = assurance_report.status_line(
-        payload.get("runner_state", {}).get("assurance")
+        payload.get("runner_state", {}).get("assurance"),
+        report=payload.get("assurance_report"),
     )
     if audit_line:
         print(audit_line)
