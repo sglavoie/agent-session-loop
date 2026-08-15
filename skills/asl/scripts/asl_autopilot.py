@@ -122,9 +122,12 @@ STOP_KIND_AFTER_CURRENT = "stop-after-current"
 # completeness only: a worker that ends its turn inside the grace window leaves
 # its own pause or completion in charge, so that outcome normally surfaces as a
 # pause or as a run that kept going rather than as `reason: "stopped"`.
+# `finalization-abort-honored` is the abort that arrived after the last turn had
+# already ended, cancelling the terminal audit instead of a turn.
 ABORT_STOP_ACTIONS = (
     "abort-turn-honored",
     "abort-turn-satisfied-by-worker",
+    "finalization-abort-honored",
 )
 
 # Stage tag for the safe command parser. Callers
@@ -1369,8 +1372,8 @@ def _status_snapshot(status: object) -> dict:
     """Distill an ``asl status --json`` payload into a heartbeat snapshot.
 
     Returns a small dict describing what the supervised run is doing right now:
-    its ``state`` (``running``/``verifying``/``waiting_for_reply``/
-    ``paused``/``unknown``), the live
+    its ``state`` (``running``/``verifying``/``finalizing``/
+    ``waiting_for_reply``/``paused``/``unknown``), the live
     ``session_id``/``session_number``/``total_sessions`` labels, and the
     ``idle_seconds``/``elapsed_seconds`` health signals.  A readable mailbox
     projection also contributes ``pending_outbox`` from its unanswered-question
@@ -1474,6 +1477,18 @@ def _status_snapshot(status: object) -> dict:
     )
     if isinstance(active_verification, dict) and active_verification:
         return {"state": "verifying", **common}
+
+    active_finalization = runner_state.get("active_finalization") or status.get(
+        "active_finalization"
+    )
+    if isinstance(active_finalization, dict) and active_finalization:
+        return {
+            "state": "finalizing",
+            "phase": active_finalization.get("phase"),
+            "elapsed_seconds": active_finalization.get("elapsed_seconds"),
+            "cancellable": active_finalization.get("cancellable"),
+            **common,
+        }
 
     return {"state": "unknown", **common}
 
@@ -1723,6 +1738,8 @@ def _heartbeat_detail(
       fresh; ``(True, "no new events for <n>s+ (no output)")`` when the events
       tailer reports the verification stream went silent past the threshold (the
       heartbeat carries no ``idle_seconds``, so event silence is the only signal).
+    - ``finalizing`` (terminal audit): ``(False, "finalizing (<phase>) | <n>s
+      elapsed")`` under the same event-silence rule as ``verifying``.
     - ``waiting_for_reply``: healthy when the authoritative
       ``waiting_for_reply_status`` is ``live`` and its valid unsupervised
       ceiling remains in the future. That ceiling rolls forward with the last
@@ -1797,6 +1814,20 @@ def _heartbeat_detail(
                 f"no new events for {int(stall_threshold)}s+ (no output)"
             )
         return False, with_outbox("verifying")
+    if state == "finalizing":
+        # Same signal as ``verifying``: the phase publishes its own heartbeat
+        # every 30s and carries no ``idle_seconds``, so only a silent stream
+        # can say the runner stopped rather than that the audit is slow.
+        if events_stale:
+            return True, with_outbox(
+                f"no new events for {int(stall_threshold)}s+ (no output)"
+            )
+        phase = snapshot.get("phase")
+        detail = "finalizing" if not phase else f"finalizing ({phase})"
+        elapsed = snapshot.get("elapsed_seconds")
+        if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+            detail += f" | {int(elapsed)}s elapsed"
+        return False, with_outbox(detail)
     if state == "waiting_for_reply":
         session_id = snapshot.get("session_id")
         detail = "waiting for reply"
@@ -2783,6 +2814,38 @@ def _attached_stop_honored(
     )
 
 
+def _lost_launch_stop_honored(status: dict, launched_at: str | None) -> bool:
+    """Did a chunk whose child died report a stop the operator asked for?
+
+    A supervisor that kills a runner it believes is hung leaves no launch
+    payload behind, so the only account of how the run ended is the state the
+    runner persisted before it died. Two shapes count as a requested stop:
+    ``reason: "stopped"`` (the runner finished the stop and released the lock)
+    and ``reason: "abandoned"`` whose ``abandoned.prior_reason`` is ``stopped``
+    (the runner had already recorded the stop and was finalizing when it was
+    killed, and a later reclaim rewrote the reason).
+
+    Attribution reuses :func:`_attached_run_wrote_state` with the wall-clock
+    instant of this chunk's launch standing in for a lock creation time: the
+    runner persists ``run_started_at`` only after we invoked it, so an earlier
+    run's leftover ``stopped`` state cannot be adopted as this chunk's outcome.
+    """
+    runner_state = _runner_state(status)
+    if not runner_state.get("present") or runner_state.get("error"):
+        return False
+    if not _attached_run_wrote_state(status, None, launched_at):
+        return False
+    reason = runner_state.get("reason")
+    if reason == "stopped":
+        return True
+    if reason != "abandoned":
+        return False
+    abandoned = runner_state.get("abandoned")
+    if not isinstance(abandoned, dict):
+        return False
+    return abandoned.get("prior_reason") == "stopped"
+
+
 def _stop_kind(payload: dict | None) -> str:
     """Classify a clean ``stopped`` outcome from the payload's control block.
 
@@ -2792,7 +2855,9 @@ def _stop_kind(payload: dict | None) -> str:
     expired and the harness process group was killed) or
     `abort-turn-satisfied-by-worker` (the worker wound the turn down itself,
     which leaves the ordinary pause or completion path in charge and so rarely
-    reaches a `stopped` run at all); anything else — including a plain
+    reaches a `stopped` run at all) or `finalization-abort-honored` (the abort
+    landed after the last turn, cancelling the terminal audit); anything else —
+    including a plain
     `stop-after-current-consumed` and a
     control block that is missing, unreadable, or from an older runner — is the
     session-boundary stop, which is the safe reading because it is the outcome
@@ -3632,8 +3697,25 @@ def supervise_run(
                     )
             else:
                 mailbox_watcher.prepare_for_launch(now=launch_now)
+        launched_at = _utc_now().isoformat()
         run_payload = run_invoker(launch_parsed, chunks)
         if not isinstance(run_payload, dict) or run_payload.get("_invoke_error"):
+            # A lost launch says nothing about why the run ended, so ask the
+            # plan before calling it an error: a runner killed while it was
+            # finalizing an operator's stop had already recorded that stop, and
+            # reporting it as `run-error` would blame the operator's own
+            # request. Only an unexplained death keeps the error.
+            final_status = status_invoker(parsed)
+            if isinstance(final_status, dict) and final_status.get("ok"):
+                if _lost_launch_stop_honored(final_status, launched_at):
+                    return run_result(
+                        True,
+                        "stopped",
+                        status=final_status,
+                        chunks=chunks,
+                        stop_kind=_stop_kind(_runner_state(final_status)),
+                    )
+                status = final_status
             return run_result(
                 False,
                 "run-error",

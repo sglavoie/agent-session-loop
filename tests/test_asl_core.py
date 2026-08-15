@@ -4380,6 +4380,46 @@ class ParserAndStateTests(unittest.TestCase):
             )
             self.assertIsNone(without_review["review_harness"])
 
+    def test_runner_state_payload_exposes_finalization_and_control(self) -> None:
+        # A supervisor reading a run that holds the lock with no turn in flight
+        # needs both: the phase says the run is working, and `control` is the
+        # only record of the request that ended it.
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / events.STATE_FILE_NAME
+            finalization = {
+                "run_id": "run-1",
+                "phase": "assurance-audit",
+                "elapsed_seconds": 42.0,
+                "cancellable": True,
+            }
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "harness": "codex",
+                        "active_finalization": finalization,
+                        "control": {"last_action": "finalization-abort-honored"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = state._runner_state_payload(
+                state_path, lock_info=self._active_lock()
+            )
+
+            self.assertEqual(finalization, payload["active_finalization"])
+            self.assertEqual(
+                "finalization-abort-honored", payload["control"]["last_action"]
+            )
+
+            state_path.write_text(json.dumps({"run_id": "run-1"}), encoding="utf-8")
+            without = state._runner_state_payload(
+                state_path, lock_info=self._active_lock()
+            )
+            self.assertIsNone(without["active_finalization"])
+            self.assertIsNone(without["control"])
+
     def _active_lock(self) -> state.LockInfo:
         return state.LockInfo(
             path=Path("/tmp/plan-lock.json"),
@@ -5454,6 +5494,28 @@ class MarkRunAbandonedTests(unittest.TestCase):
             )
         )
         self.assertEqual(1, len(read_jsonl(self.events_path)))
+
+    def test_abandonment_records_the_reason_it_overwrote(self) -> None:
+        # A runner killed while it finalized an operator's stop had already
+        # recorded that stop; without keeping it, reclaiming the run erases the
+        # only evidence that the ending was asked for.
+        self.write_unfinished_state()
+        persisted = self.persisted_state()
+        persisted["reason"] = "stopped"
+        persisted["active_finalization"] = {"phase": "assurance-audit"}
+        self.state_path.write_text(json.dumps(persisted), encoding="utf-8")
+        self.write_lock(pid=self.dead_pid(), hostname=socket.gethostname())
+
+        self.assertTrue(
+            state.mark_run_abandoned(
+                self.plan_state, lock_info=self.read_lock_info(), trigger="test"
+            )
+        )
+
+        reclaimed = self.persisted_state()
+        self.assertEqual(state.ABANDONED_REASON, reclaimed["reason"])
+        self.assertEqual("stopped", reclaimed["abandoned"]["prior_reason"])
+        self.assertIsNone(reclaimed["active_finalization"])
 
     def test_concurrent_abandonment_appends_exactly_one_terminal_event(self) -> None:
         self.write_unfinished_state()

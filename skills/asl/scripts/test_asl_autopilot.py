@@ -2278,6 +2278,75 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "run-error")
 
+    def _launch_before(self, moment: str) -> None:
+        """Pin the launch instant so scripted runs start after this chunk did."""
+        original = autopilot._utc_now
+        autopilot._utc_now = lambda: datetime.fromisoformat(moment)
+        self.addCleanup(setattr, autopilot, "_utc_now", original)
+
+    def test_a_killed_child_that_stopped_on_request_is_not_an_error(self) -> None:
+        # The runner was killed while it finalized an abort the operator asked
+        # for, so the launch reports nothing. The state it persisted before
+        # dying says the run ended on that request, which is a clean stop.
+        self._launch_before(LOCK_CREATED_AT)
+        status = _StatusScript(
+            [
+                _status_payload(1),
+                _finished_run_status(
+                    1, reason="stopped", last_action="finalization-abort-honored"
+                ),
+            ]
+        )
+        run = _RunScript([{"_invoke_error": True, "error": "no JSON"}])
+
+        result = self._supervise(status, run)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "stopped")
+        self.assertEqual(result["stop_kind"], "abort")
+
+    def test_a_killed_child_reclaimed_as_abandoned_reports_its_prior_stop(self) -> None:
+        # The kill left the state unfinished, so a later probe reclaimed it as
+        # `abandoned`; the reason it overwrote is the one that explains the run.
+        self._launch_before(LOCK_CREATED_AT)
+        reclaimed = _finished_run_status(
+            1, reason="abandoned", finished=False, last_action="abort-turn-honored"
+        )
+        reclaimed["runner_state"]["abandoned"] = {
+            "prior_reason": "stopped",
+            "reason": "process-gone",
+        }
+        status = _StatusScript([_status_payload(1), reclaimed])
+        run = _RunScript([{"_invoke_error": True, "error": "no JSON"}])
+
+        result = self._supervise(status, run)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["reason"], "stopped")
+        self.assertEqual(result["stop_kind"], "abort")
+
+    def test_a_killed_child_with_an_older_stopped_state_stays_an_error(self) -> None:
+        # The `stopped` on disk was written before this chunk launched, so it
+        # belongs to an earlier run and explains nothing about this death.
+        self._launch_before(RUN_STARTED_AT)
+        status = _StatusScript(
+            [
+                _status_payload(1),
+                _finished_run_status(
+                    1,
+                    reason="stopped",
+                    run_started_at=OLDER_RUN_STARTED_AT,
+                    last_action="abort-turn-honored",
+                ),
+            ]
+        )
+        run = _RunScript([{"_invoke_error": True, "error": "no JSON"}])
+
+        result = self._supervise(status, run)
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason"], "run-error")
+
     def test_recoverable_pause_retries_then_completes(self) -> None:
         # First chunk hits a recoverable verify-failed pause; the supervisor
         # relaunches the same session and the retry completes the plan.
@@ -3415,6 +3484,37 @@ class SuperviseRunAttachHeartbeatTest(unittest.TestCase):
             now=datetime(2026, 7, 24, 19, 0, tzinfo=UTC),
         )
         self.assertIn("WARN possibly stalled", heartbeat)
+
+    def test_a_finalizing_run_is_named_and_never_escalated_as_idle(self) -> None:
+        # Between the last turn and `run_finished` the run holds the lock with
+        # no turn and no verification in flight. The phase is what keeps that
+        # from reading as an unexplained silence.
+        finalizing = _status_payload(1, lock=_active_lock())
+        finalizing["runner_state"] = {
+            "present": True,
+            "paused": False,
+            "active_turn": None,
+            "active_verification": None,
+            "active_finalization": {
+                "phase": "assurance-audit",
+                "elapsed_seconds": 240.0,
+                "cancellable": True,
+            },
+        }
+
+        snapshot = autopilot._status_snapshot(finalizing)
+
+        self.assertEqual(snapshot["state"], "finalizing")
+        self.assertEqual(snapshot["phase"], "assurance-audit")
+        self.assertTrue(snapshot["cancellable"])
+        # No idle reading, so the hang bars have nothing to count against.
+        self.assertIsNone(autopilot._snapshot_idle_seconds(snapshot, None))
+        is_stall, detail = autopilot._heartbeat_detail(
+            snapshot, 90.0, events_stale=False
+        )
+        self.assertFalse(is_stall)
+        self.assertIn("finalizing (assurance-audit)", detail)
+        self.assertIn("240s elapsed", detail)
 
     def test_terminal_pause_takes_precedence_over_stale_wait_record(self) -> None:
         paused = _attach_waiting_status()

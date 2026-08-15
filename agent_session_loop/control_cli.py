@@ -57,6 +57,9 @@ STOP_BEFORE_REVIEW_NOTE = (
 STOP_NOOP_NOTE = "current session is the last; stop is a no-op"
 ABORT_WILL_APPLY_NOTE = "a turn is active; abort will end it"
 ABORT_DEGRADES_NOTE = "no turn active; abort degrades to stop-after-current"
+ABORT_CANCELS_FINALIZATION_NOTE = (
+    "no turn active; the run is finalizing, so abort cancels its terminal audit"
+)
 MODEL_APPLIES_TO = "next-implementation-turn"
 
 # A wakeup usually makes the runner drain within milliseconds, so the receipt
@@ -69,6 +72,12 @@ _EVENTS_TOKEN_UNSEEN = object()
 _EVENTS_TOKEN_UNAVAILABLE = object()
 
 
+FINALIZING_NOTE = (
+    "the turn ended, but the run is still finalizing its terminal audit and "
+    "holds the plan lock; repeat `asl control abort` to cancel the audit"
+)
+
+
 @dataclass(frozen=True)
 class _ReceiptWait:
     """Outcome of one bounded wait for a queued command's receipt."""
@@ -78,14 +87,21 @@ class _ReceiptWait:
     satisfied: bool
     timeout_seconds: float
     elapsed_seconds: float
+    run_finished: bool = False
+    finalizing: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "observed": self.observed,
             "terminal_action": self.terminal_action,
             "timeout_seconds": self.timeout_seconds,
             "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "run_finished": self.run_finished,
         }
+        if not self.run_finished and self.terminal_action is not None:
+            payload["finalizing"] = self.finalizing
+            payload["note"] = FINALIZING_NOTE
+        return payload
 
 
 def _events_change_token(events_path: Path) -> object:
@@ -106,8 +122,16 @@ def _events_change_token(events_path: Path) -> object:
     )
 
 
-def _read_run_control_records(events_path: Path) -> list[dict[str, Any]]:
-    """Read the run-control records of an event log, tolerating a torn tail."""
+_WAIT_RECORD_NAMES = frozenset({events.RUN_CONTROL_EVENT, events.RUN_FINISHED_EVENT})
+
+
+def _read_wait_records(events_path: Path) -> list[dict[str, Any]]:
+    """Read the records a receipt wait reads, tolerating a torn tail.
+
+    Both names matter: the run-control records carry the receipt and the
+    turn-level outcome, and ``run_finished`` is the only proof that the run
+    those records belong to has actually released the lock.
+    """
     try:
         text = events_path.read_text(encoding="utf-8")
     except OSError:
@@ -121,9 +145,18 @@ def _read_run_control_records(events_path: Path) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             # A line being appended right now is read whole on the next poll.
             continue
-        if isinstance(record, dict) and record.get("name") == events.RUN_CONTROL_EVENT:
+        if isinstance(record, dict) and record.get("name") in _WAIT_RECORD_NAMES:
             records.append(record)
     return records
+
+
+@dataclass(frozen=True)
+class _ReceiptScan:
+    """What one pass over the event log found after the command's receipt."""
+
+    observed: bool = False
+    terminal_action: str | None = None
+    run_finished: bool = False
 
 
 def _scan_for_receipt(
@@ -131,12 +164,20 @@ def _scan_for_receipt(
     *,
     command_id: str,
     terminal_actions: tuple[str, ...],
-) -> tuple[bool, str | None]:
+) -> _ReceiptScan:
     observed = False
     terminal_action: str | None = None
-    for record in _read_run_control_records(events_path):
+    for record in _read_wait_records(events_path):
         payload = record.get("payload")
         if not isinstance(payload, dict):
+            continue
+        if record.get("name") == events.RUN_FINISHED_EVENT:
+            if observed:
+                return _ReceiptScan(
+                    observed=True,
+                    terminal_action=terminal_action,
+                    run_finished=True,
+                )
             continue
         action = payload.get("action")
         if not observed:
@@ -147,11 +188,26 @@ def _scan_for_receipt(
                 observed = True
             continue
         # A terminal action carries no command ID, so only one recorded after
-        # this command's receipt can be its outcome.
-        if action in terminal_actions:
+        # this command's receipt can be its outcome. The scan continues past it
+        # because the turn ending is not the run ending.
+        if terminal_action is None and action in terminal_actions:
             terminal_action = action
-            break
-    return observed, terminal_action
+    return _ReceiptScan(observed=observed, terminal_action=terminal_action)
+
+
+def _active_finalization(
+    plan_dir: Path, state_dir: str | None
+) -> dict[str, Any] | None:
+    """Read the finalization phase a run is publishing, if it is in one."""
+    state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+    except OSError, json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    active = raw.get("active_finalization")
+    return active if isinstance(active, dict) else None
 
 
 def _wait_for_receipt(
@@ -166,14 +222,16 @@ def _wait_for_receipt(
 
     ``terminal_actions`` extends the wait past delivery: for an abort the
     supervisor wants the real outcome, so the wait continues until the runner
-    records one of them after the receipt.
+    records one of them after the receipt — and then past that, until the run
+    itself finishes. The turn-level action only proves the turn ended; the run
+    goes on to audit itself and keeps the plan lock while it does, so reporting
+    the abort as done there is how a finalizing run gets mistaken for a hang.
     """
     started = time.monotonic()
     deadline = started + timeout
     events_path = state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
     last_read_token: object = _EVENTS_TOKEN_UNSEEN
-    observed = False
-    terminal_action: str | None = None
+    scan = _ReceiptScan()
     while True:
         current_token = _events_change_token(events_path)
         if (
@@ -181,29 +239,39 @@ def _wait_for_receipt(
             or current_token is _EVENTS_TOKEN_UNAVAILABLE
             or current_token != last_read_token
         ):
-            observed, terminal_action = _scan_for_receipt(
+            scan = _scan_for_receipt(
                 events_path,
                 command_id=command_id,
                 terminal_actions=terminal_actions,
             )
             last_read_token = current_token
-            if observed and (not terminal_actions or terminal_action is not None):
+            if scan.observed and (
+                not terminal_actions
+                or (scan.terminal_action is not None and scan.run_finished)
+            ):
                 return _ReceiptWait(
                     observed=True,
-                    terminal_action=terminal_action,
+                    terminal_action=scan.terminal_action,
                     satisfied=True,
                     timeout_seconds=timeout,
                     elapsed_seconds=time.monotonic() - started,
+                    run_finished=scan.run_finished,
                 )
 
         now = time.monotonic()
         if now >= deadline:
             return _ReceiptWait(
-                observed=observed,
-                terminal_action=terminal_action,
+                observed=scan.observed,
+                terminal_action=scan.terminal_action,
                 satisfied=False,
                 timeout_seconds=timeout,
                 elapsed_seconds=now - started,
+                run_finished=scan.run_finished,
+                finalizing=(
+                    _active_finalization(plan_dir, state_dir)
+                    if scan.terminal_action is not None
+                    else None
+                ),
             )
         time.sleep(min(CONTROL_WAIT_POLL_INTERVAL_SECONDS, deadline - now))
 
@@ -272,8 +340,10 @@ def _report_wait_timeout(
     """Explain a receipt wait that ran out, distinguishing why.
 
     The command is durable either way, so the failure is about observation: no
-    runner was listening, a listening runner did not drain in time, or it
-    drained but the abort it started has not resolved yet.
+    runner was listening, a listening runner did not drain in time, it drained
+    but the abort it started has not resolved yet, or the abort ended the turn
+    and the run is still finalizing. Only the last of those describes a run
+    that is doing bounded work rather than one that may be stuck.
     """
     details = {
         "queue_path": str(queue_path),
@@ -313,17 +383,31 @@ def _report_wait_timeout(
             hint="the command stays queued; retry with a longer --timeout",
         )
         return
+    if wait.terminal_action is None:
+        cli_common.print_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="abort-timeout",
+            error=(
+                f"the runner observed command {command_id} but recorded no abort "
+                f"outcome within {window}"
+            ),
+            details=details,
+            hint="the grace window may outlast --timeout; the abort is still armed",
+        )
+        return
     cli_common.print_error(
         args,
         command_name=command_name,
         text_label=text_label,
-        reason="abort-timeout",
+        reason="finalization-timeout",
         error=(
-            f"the runner observed command {command_id} but recorded no abort "
-            f"outcome within {window}"
+            f"the runner recorded {wait.terminal_action} for command "
+            f"{command_id} but the run did not finish within {window}"
         ),
         details=details,
-        hint="the grace window may outlast --timeout; the abort is still armed",
+        hint=FINALIZING_NOTE,
     )
 
 
@@ -334,6 +418,13 @@ def _run_active(status: dict[str, Any]) -> bool:
 
 def _turn_active(status: dict[str, Any]) -> bool:
     return status.get("active_turn") is not None
+
+
+def _status_finalizing(status: dict[str, Any]) -> bool:
+    runner_state = status.get("runner_state")
+    if not isinstance(runner_state, dict):
+        return False
+    return isinstance(runner_state.get("active_finalization"), dict)
 
 
 def _pending_after_current(status: dict[str, Any]) -> int:
@@ -601,6 +692,8 @@ def control_abort_from_args(args: argparse.Namespace) -> int:
             note = NO_ACTIVE_RUN_NOTE
         elif turn_active:
             note = ABORT_WILL_APPLY_NOTE
+        elif _status_finalizing(status):
+            note = ABORT_CANCELS_FINALIZATION_NOTE
         else:
             note = ABORT_DEGRADES_NOTE
         fields = {
@@ -623,6 +716,9 @@ def control_abort_from_args(args: argparse.Namespace) -> int:
         terminal_actions=(
             events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
             events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
+            # An abort sent while the run is already finalizing has no turn to
+            # end, so this is the only outcome its `--wait` can be answered by.
+            events.RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED,
         ),
         report=report,
     )

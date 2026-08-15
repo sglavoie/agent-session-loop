@@ -91,6 +91,8 @@ HANG_REASON_RESULT_RECEIVED = "result_received_process_alive"
 HANG_REASON_ZERO_CPU = "zero_cpu_idle"
 LIVE_CONTROL_POLL_INTERVAL_SECONDS = 5.0
 VERIFICATION_HEARTBEAT_INTERVAL_SECONDS = 30.0
+FINALIZATION_HEARTBEAT_INTERVAL_SECONDS = 30.0
+FINALIZATION_PHASE_ASSURANCE_AUDIT = "assurance-audit"
 COMMIT_MODE_PER_SESSION = "per-session"
 COMMIT_MODE_END = "end"
 COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
@@ -7790,6 +7792,161 @@ class _LiveVerification:
         return heartbeat
 
 
+class _LiveFinalization:
+    """Thread-safe live state and heartbeat manager for a run's terminal work.
+
+    Mirrors :class:`_LiveVerification` for the phase between the last turn and
+    ``run_finished``. The terminal supervisor audit is a harness turn with its
+    own answer and delivery budgets, so a run can legitimately spend many
+    minutes here holding the plan lock with no turn and no verification in
+    flight — a state indistinguishable from a hang until this phase publishes
+    itself. ``poll`` is the same control-queue drain the turn loop ticks, which
+    is what keeps a second abort observable once the loop has exited.
+    """
+
+    def __init__(
+        self,
+        *,
+        event_path: Path,
+        payload: dict[str, Any],
+        persistence: _RunPersistence,
+        run_id: str | None,
+        phase: str,
+        cancellable: bool,
+        poll: Callable[[], None] | None = None,
+        heartbeat_interval: float = FINALIZATION_HEARTBEAT_INTERVAL_SECONDS,
+        poll_interval: float = LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._event_path = event_path
+        self._payload = payload
+        self._persistence = persistence
+        self._run_id = run_id
+        self._phase = phase
+        self._cancellable = cancellable
+        self._poll = poll
+        self._heartbeat_interval = heartbeat_interval
+        self._poll_interval = poll_interval
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._finished = False
+        self._thread: threading.Thread | None = None
+        self._started_at: datetime | None = None
+        self._heartbeat_count = 0
+        self._last_heartbeat_at: datetime | None = None
+
+    def _state_payload(self, *, now: datetime | None = None) -> dict[str, Any]:
+        moment = _utc_now() if now is None else now
+        return {
+            "run_id": self._run_id,
+            "phase": self._phase,
+            "started_at": (
+                _isoformat(self._started_at) if self._started_at is not None else None
+            ),
+            "elapsed_seconds": (
+                _duration_seconds(self._started_at, moment)
+                if self._started_at is not None
+                else 0.0
+            ),
+            "heartbeat_count": self._heartbeat_count,
+            "last_heartbeat_at": (
+                _isoformat(self._last_heartbeat_at)
+                if self._last_heartbeat_at is not None
+                else None
+            ),
+            "cancellable": self._cancellable,
+        }
+
+    def start(self) -> None:
+        started_at = _utc_now()
+        with self._lock:
+            self._started_at = started_at
+            state_payload = self._state_payload(now=started_at)
+            with self._persistence.lock:
+                self._payload["active_finalization"] = state_payload
+                self._persistence.append_event(
+                    self._event_path,
+                    events.FINALIZATION_STARTED_EVENT,
+                    {
+                        "run_id": self._run_id,
+                        "phase": self._phase,
+                        "started_at": _isoformat(started_at),
+                        "cancellable": self._cancellable,
+                    },
+                )
+                self._persistence.write_state(self._payload)
+        self._thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._thread.start()
+
+    def finish(self, *, cancelled: bool = False) -> None:
+        with self._lock:
+            if self._finished:
+                return
+            self._finished = True
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=1)
+        moment = _utc_now()
+        with self._lock:
+            event_payload = {
+                "run_id": self._run_id,
+                "phase": self._phase,
+                "cancelled": cancelled,
+                "heartbeat_count": self._heartbeat_count,
+                "duration_seconds": (
+                    _duration_seconds(self._started_at, moment)
+                    if self._started_at is not None
+                    else 0.0
+                ),
+                "finished_at": _isoformat(moment),
+            }
+            with self._persistence.lock:
+                self._payload["active_finalization"] = None
+                self._persistence.append_event(
+                    self._event_path,
+                    events.FINALIZATION_FINISHED_EVENT,
+                    event_payload,
+                )
+                self._persistence.write_state(self._payload)
+
+    def _heartbeat_loop(self) -> None:
+        started = self._monotonic()
+        next_heartbeat = started + self._heartbeat_interval
+        next_poll = started + self._poll_interval if self._poll is not None else None
+        while True:
+            deadline = (
+                next_heartbeat if next_poll is None else min(next_heartbeat, next_poll)
+            )
+            if self._stop.wait(max(0.0, deadline - self._monotonic())):
+                return
+            now = self._monotonic()
+            if now >= next_heartbeat:
+                next_heartbeat = now + self._heartbeat_interval
+                self._record_heartbeat()
+            if next_poll is not None and now >= next_poll:
+                next_poll = now + self._poll_interval
+                assert self._poll is not None
+                self._poll()
+
+    def _record_heartbeat(self) -> None:
+        moment = _utc_now()
+        with self._lock:
+            if self._finished or self._started_at is None:
+                return
+            self._heartbeat_count += 1
+            self._last_heartbeat_at = moment
+            state_payload = self._state_payload(now=moment)
+            with self._persistence.lock:
+                self._payload["active_finalization"] = state_payload
+                self._persistence.append_event(
+                    self._event_path,
+                    events.FINALIZATION_HEARTBEAT_EVENT,
+                    state_payload | {"created_at": _isoformat(moment)},
+                )
+                self._persistence.write_state(self._payload)
+
+
 def _upsert_commit_group(payload: dict[str, Any], group: Mapping[str, Any]) -> None:
     groups = payload.setdefault("commit_groups", [])
     group_id = group.get("group_id")
@@ -8180,21 +8337,25 @@ def _attach_terminal_assurance(
     payload: dict[str, Any],
     context: _TerminalAuditContext,
     persistence: _RunPersistence,
-) -> None:
+    abort: harnesses.AbortSignal | None = None,
+) -> bool:
     """Audit the run, publish the verdict, and attach the bounded summary.
 
     A run that resolved no independent role starts ``unavailable`` and is still
     audited, because the deterministic half needs no agent and the reason the
     run could not be graded belongs in the shared inbox rather than only in its
     own state.
+
+    Returns whether the audit was cancelled rather than completed.
     """
     assurance = payload.get("assurance")
     if not isinstance(assurance, Mapping) or not assurance.get("eligible"):
-        return
+        return False
     if assurance.get("state") not in _AUDITABLE_ASSURANCE_STATES:
-        return
+        return False
     with persistence.lock:
         state_payload = _compact_state_payload(payload)
+    cancelled = False
     try:
         summary = supervisor_audit.audit_terminal_run(
             context.plan,
@@ -8207,16 +8368,19 @@ def _attach_terminal_assurance(
             state_payload=state_payload,
             repositories=context.repositories,
             registry_declared=context.registry_declared,
+            abort=abort,
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt, supervisor_audit.AuditCancelled:
         # Cancelling an advisory audit cancels the audit alone: the outcome and
         # the exit code were decided before this ran, and the terminal record
         # they belong to has still not been written.
         summary = supervisor_audit.cancelled_summary(
             context.plan, run_id=str(payload.get("run_id"))
         )
+        cancelled = True
     with persistence.lock:
         payload["assurance"] = summary.to_dict()
+    return cancelled
 
 
 def _attach_assurance_report(
@@ -8254,6 +8418,8 @@ def _terminalize_run(
     progress: _ProgressReporter | None = None,
     persistence: _RunPersistence | None = None,
     audit_context: _TerminalAuditContext | None = None,
+    cancel: harnesses.AbortSignal | None = None,
+    poll: Callable[[], None] | None = None,
 ) -> int:
     """Close one run: audit it, then finalize it. Returns ``exit_code`` as given.
 
@@ -8263,11 +8429,36 @@ def _terminalize_run(
     first so its artifacts and ledger records exist before ``run_finished``
     carries the summary that names them; readiness, the terminal event, the
     state projection, AgentMux, and the final output all follow unchanged.
+
+    ``cancel`` and ``poll`` come from the run loop's exit, the one path that
+    still has a live control queue to drain: together they make the audit
+    cancellable by repeating ``asl control abort``. The early exits that
+    terminalize before the loop starts pass neither, so their finalization is
+    visible but not cancellable.
     """
     if audit_context is not None and outcome not in _UNAUDITED_TERMINAL_OUTCOMES:
         resolved_persistence = _run_persistence(persistence)
-        _attach_terminal_assurance(payload, audit_context, resolved_persistence)
-        _attach_assurance_report(payload, audit_context, resolved_persistence)
+        finalization = _LiveFinalization(
+            event_path=event_path,
+            payload=payload,
+            persistence=resolved_persistence,
+            run_id=payload.get("run_id"),
+            phase=FINALIZATION_PHASE_ASSURANCE_AUDIT,
+            cancellable=cancel is not None,
+            poll=poll,
+        )
+        finalization.start()
+        cancelled = False
+        try:
+            cancelled = _attach_terminal_assurance(
+                payload,
+                audit_context,
+                resolved_persistence,
+                abort=cancel,
+            )
+            _attach_assurance_report(payload, audit_context, resolved_persistence)
+        finally:
+            finalization.finish(cancelled=cancelled)
     _finish_run(event_path, payload, progress, persistence=persistence)
     return exit_code
 
@@ -8438,24 +8629,35 @@ def _arm_requested_abort(
     state_dir_arg: str | None,
     control_payload: dict[str, Any],
     mailbox_enabled: bool,
+    finalization: bool = False,
 ) -> None:
     """Start the grace window for an observed abort and warn the worker.
 
-    Called from the poll thread while the turn it aborts is still running.
-    ``abort`` is the only state shared with the turn's wait loop, which owns
-    expiry from here; the guidance record is what lets a compliant worker end
-    the turn itself before the kill lands.
+    Called from the poll thread while the harness turn it aborts is still
+    running. ``abort`` is the only state shared with that turn's wait loop,
+    which owns expiry from here; the guidance record is what lets a compliant
+    worker end the turn itself before the kill lands.
+
+    ``finalization`` arms the kill immediately and warns nobody. The grace
+    window exists so a worker can wind its own turn down and leave usable work
+    behind; the terminal audit is advisory and read-only, there is no session
+    to preserve, and the run is holding the plan lock while it waits — so the
+    window would only delay the cancellation the supervisor just asked for.
     """
     grace_seconds = (
-        control_queue.DEFAULT_ABORT_GRACE_SECONDS
-        if action.abort_grace_seconds is None
-        else action.abort_grace_seconds
+        0
+        if finalization
+        else (
+            control_queue.DEFAULT_ABORT_GRACE_SECONDS
+            if action.abort_grace_seconds is None
+            else action.abort_grace_seconds
+        )
     )
     reason = action.abort_reason or ABORT_TURN_DEFAULT_REASON
     deadline = _isoformat(_utc_now() + timedelta(seconds=grace_seconds))
     abort.arm(reason, grace_seconds=float(grace_seconds))
     control_payload["abort_deadline"] = deadline
-    if not mailbox_enabled:
+    if finalization or not mailbox_enabled:
         return
     # The kill is already armed; failing to warn the worker must not
     # terminate the turn or lose the abort.
@@ -8525,6 +8727,7 @@ def _drain_external_control_queue(
     wakeup: threading.Event | None = None,
     abort: harnesses.AbortSignal | None = None,
     mailbox_enabled: bool = False,
+    finalization: bool = False,
 ) -> control_queue.DrainResult:
     """Drain queued external control commands and record any state changes.
 
@@ -8549,6 +8752,12 @@ def _drain_external_control_queue(
     that runs alongside a turn. Its presence is what tells an observed abort
     command there is something to kill: without it the request degrades to
     stop-after-current instead of dying quietly.
+
+    ``finalization`` says the signal belongs to the run's terminal work rather
+    than to a turn. What changes is that the kill is armed without a grace
+    window and warns nobody — there is no turn in flight to wind down — and the
+    action is recorded as a finalization abort so a supervisor can tell the two
+    apart.
     """
     if wakeup is not None:
         wakeup.clear()
@@ -8577,7 +8786,9 @@ def _drain_external_control_queue(
             action = _apply_external_control_command(command, control_state)
             if action is None:
                 continue
-            if action.action == "abort-requested" and abort is not None:
+            aborting = action.action == "abort-requested"
+            finalization_abort = aborting and finalization and abort is not None
+            if aborting and abort is not None:
                 # Armed before the action is recorded so the requested event and
                 # the `control` payload already carry the deadline the turn is
                 # counting down to.
@@ -8588,6 +8799,7 @@ def _drain_external_control_queue(
                     state_dir_arg=state_dir_arg,
                     control_payload=control_payload,
                     mailbox_enabled=mailbox_enabled,
+                    finalization=finalization,
                 )
             _record_run_control_action(
                 event_path=event_path,
@@ -8596,8 +8808,18 @@ def _drain_external_control_queue(
                 action=action,
                 context=context,
                 persistence=persistence,
+                event_action=(
+                    events.RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED
+                    if finalization_abort
+                    else None
+                ),
+                message=(
+                    "abort observed while finalizing: cancelling the terminal audit"
+                    if finalization_abort
+                    else None
+                ),
             )
-            if action.action == "abort-requested" and abort is None:
+            if aborting and abort is None:
                 _degrade_abort_to_stop_after_current(
                     action,
                     control_state=control_state,
@@ -8641,6 +8863,7 @@ class _MailboxPoll:
         self._wakeup = wakeup
         self._context: dict[str, Any] | None = None
         self._abort: harnesses.AbortSignal | None = None
+        self._finalization = False
         self._evented_guidance_ids: set[str] = set()
         self._mailbox_path = mailbox.mailbox_path_for_plan(
             plan_dir,
@@ -8652,14 +8875,21 @@ class _MailboxPoll:
         """Set the active turn metadata attached to subsequent poll events."""
         self._context = None if context is None else dict(context)
 
-    def set_abort(self, abort: harnesses.AbortSignal | None) -> None:
+    def set_abort(
+        self,
+        abort: harnesses.AbortSignal | None,
+        *,
+        finalization: bool = False,
+    ) -> None:
         """Attach the signal an observed abort should arm, or detach it.
 
         Set while a turn is in flight and cleared once it has finished, so an
         abort observed between turns (during a mailbox reply wait, for example)
-        cannot arm a signal no running turn is watching.
+        cannot arm a signal no running turn is watching. ``finalization`` marks
+        the signal as belonging to the run's terminal work instead of a turn.
         """
         self._abort = abort
+        self._finalization = finalization
 
     def __call__(self) -> None:
         """Drain controls, then emit once-only metadata for pending guidance."""
@@ -8677,6 +8907,7 @@ class _MailboxPoll:
             wakeup=self._wakeup,
             abort=self._abort,
             mailbox_enabled=self._enabled,
+            finalization=self._finalization,
         )
 
         if not self._enabled:
@@ -12850,12 +13081,19 @@ def _run_locked(
         output=output,
     )
 
-    def terminalize(exit_code: int) -> tuple[int, dict[str, Any]]:
+    def terminalize(
+        exit_code: int,
+        *,
+        cancel: harnesses.AbortSignal | None = None,
+        poll: Callable[[], None] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
         """Close this run through the one coordinator every ending shares.
 
         The refusals above the loop end runs as truly as the loop's own exits
         do, so they terminalize here rather than finalizing on their own; the
-        exit code each one already decided passes through untouched.
+        exit code each one already decided passes through untouched. Those
+        refusals run before the control queue has a poller, so only the loop's
+        own exit supplies ``cancel`` and ``poll``.
         """
         with persistence.lock:
             outcome = _terminal_outcome(payload)
@@ -12868,6 +13106,8 @@ def _run_locked(
                 progress=progress,
                 persistence=persistence,
                 audit_context=audit_context,
+                cancel=cancel,
+                poll=poll,
             ),
             payload,
         )
@@ -16029,14 +16269,21 @@ def _run_locked(
             elif payload["reason"] not in ("", "all-complete"):
                 payload["review_skipped_reason"] = payload["reason"]
 
-    run_controls.stop()
     with persistence.lock:
         exit_code = 0 if payload["ok"] else 1
         if payload.get("pause_reason") == "interrupted":
             exit_code = INTERRUPTED_EXIT
+    # The controls outlive the loop so a supervisor can still reach a run that
+    # is finalizing: the terminal audit is a harness turn of its own, and an
+    # abort arriving during it has to find a live listener and a live drain.
+    finalization_abort = harnesses.AbortSignal()
+    mailbox_poll.set_context(None)
+    mailbox_poll.set_abort(finalization_abort, finalization=True)
     try:
-        return terminalize(exit_code)
+        return terminalize(exit_code, cancel=finalization_abort, poll=mailbox_poll)
     finally:
+        mailbox_poll.set_abort(None)
+        run_controls.stop()
         inline_tail.stop()
 
 

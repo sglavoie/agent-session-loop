@@ -123,6 +123,16 @@ UNAVAILABLE_ARTIFACT_NAME = "supervisor-audit-unavailable.json"
 AUDIT_STAGING_DIR_NAME = "supervisor-audit-staging"
 
 
+class AuditCancelled(Exception):
+    """A supervisor cancelled the audit while it was in flight.
+
+    Raised instead of returning an attempt outcome so the cancel unwinds the
+    whole audit at once: an operator asking a second time for the run to stop
+    must not be answered by the next answer attempt or the next delivery
+    retry.
+    """
+
+
 @dataclass(frozen=True)
 class AuditConfig:
     """The effective audit settings a run persists in its ``run_config``."""
@@ -524,6 +534,7 @@ def run_restricted_audit(
     state_dir: Path | str | None = None,
     timeout: int | None = None,
     stream_callback: harnesses.StreamCallback | None = None,
+    abort: harnesses.AbortSignal | None = None,
     now: Callable[[], datetime] | None = None,
     _run_harness_fn: Callable[..., harnesses.HarnessResult] | None = None,
 ) -> AuditAttemptResult:
@@ -548,6 +559,10 @@ def run_restricted_audit(
     therefore carries permanently unavailable evidence; passing ``False`` keeps
     that compatibility case auditable without extending the same tolerance to a
     repository a plan really registered.
+
+    ``abort`` lets a supervisor cancel the attempt mid-turn; the cancel is
+    raised as :class:`AuditCancelled` rather than returned, so no caller can
+    mistake it for a failed attempt worth another try.
     """
     run_dir = Path(run_dir)
     unavailable = harnesses.audit_read_only_unavailable_reason(role.harness)
@@ -600,6 +615,7 @@ def run_restricted_audit(
             model=role.model,
             effort=role.effort,
             access=harnesses.audit_read_only_access(audit_read_roots(run_dir)),
+            abort=abort,
         )
     except harnesses.HarnessError as error:
         return AuditAttemptResult(
@@ -652,6 +668,11 @@ def run_restricted_audit(
             last_message=result.last_message,
         )
 
+    if result.aborted:
+        # After the boundary check, so a cancelled auditor that wrote to a
+        # registered repository is still reported; before every failure branch,
+        # so the kill is never read as a transport error worth retrying.
+        raise AuditCancelled(REASON_INTERRUPTED)
     if result.interrupted:
         # Ahead of the exit code, because the harness reports an interrupt as a
         # nonzero return: reading it as a transport failure would answer the
@@ -4746,6 +4767,7 @@ def run_agent_audit(
     state_dir: Path | str | None = None,
     results: Sequence[assurance_models.DeterministicResult] | None = None,
     stream_callback: harnesses.StreamCallback | None = None,
+    abort: harnesses.AbortSignal | None = None,
     durable: bool = True,
     now: Callable[[], datetime] | None = None,
     _run_harness_fn: Callable[..., harnesses.HarnessResult] | None = None,
@@ -4773,6 +4795,10 @@ def run_agent_audit(
     :data:`REASON_IDENTITY_AMBIGUOUS`. That is the safe end of the trade: the
     cost of not asking is one unpublished audit, while a third turn per audit is
     a cost every run pays. Nothing is merged and nothing is allocated either way.
+
+    ``abort`` cancels the whole audit rather than one attempt: it is checked
+    before each launch, so a cancel that arrives during a transport backoff is
+    honored at the end of that wait instead of buying another launch.
     """
     run_dir = Path(run_dir)
     clock = datetime.now(UTC) if now is None else now()
@@ -4795,6 +4821,8 @@ def run_agent_audit(
     deliveries_spent = 0
 
     while True:
+        if abort is not None and abort.armed:
+            raise AuditCancelled(REASON_INTERRUPTED)
         number = len(attempts) + 1
         prompt = build_audit_prompt(
             bundle, catalog=catalog, correction=correction, candidates=candidates
@@ -4810,6 +4838,7 @@ def run_agent_audit(
             registry_declared=registry_declared,
             state_dir=state_dir,
             stream_callback=stream_callback,
+            abort=abort,
             now=now,
             _run_harness_fn=_run_harness_fn,
         )
@@ -5022,14 +5051,16 @@ def audit_terminal_run(
     state_payload: Mapping[str, Any] | None = None,
     workspace_snapshot: Mapping[str, Any] | None = None,
     stream_callback: harnesses.StreamCallback | None = None,
+    abort: harnesses.AbortSignal | None = None,
     durable: bool = True,
     now: Callable[[], datetime] | None = None,
     _run_harness_fn: Callable[..., harnesses.HarnessResult] | None = None,
 ) -> AssuranceSummary:
     """Audit one terminating run and publish the verdict, returning its summary.
 
-    This never raises: an audit is advisory, so a failure to produce or record
-    one degrades the run's assurance rather than its outcome. A run whose
+    The only failure this raises is :class:`AuditCancelled`, and only when the
+    caller armed ``abort``: an audit is advisory, so a failure to produce or
+    record one degrades the run's assurance rather than its outcome. A run whose
     artifacts exist but whose ledger publication failed comes back ``pending``,
     because the artifacts alone are not the durable record an operator reads —
     claiming otherwise would report an all-clear nobody can look up.
@@ -5111,6 +5142,7 @@ def audit_terminal_run(
                 registry_declared=registry_declared,
                 state_dir=ledger_state_dir,
                 stream_callback=stream_callback,
+                abort=abort,
                 durable=durable,
                 now=now,
                 _run_harness_fn=_run_harness_fn,

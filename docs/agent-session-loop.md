@@ -1872,8 +1872,10 @@ mutated — the runner alone owns `state.json`.
   request to end the in-flight turn after a bounded grace window (default
   `120` seconds). Its payload reports `enqueued`, `command_id`, `run_active`,
   `turn_active`, `grace_seconds`, `reason`, and a `note`: `a turn is active;
-  abort will end it`, `no turn active; abort degrades to stop-after-current`, or
-  `no active run; command applies when a runner next drains the queue`. A grace
+  abort will end it`, `no turn active; the run is finalizing, so abort cancels
+  its terminal audit`, `no turn active; abort degrades to stop-after-current`,
+  or `no active run; command applies when a runner next drains the queue`. The
+  grace window is ignored by a finalizing run, which arms at once. A grace
   outside 1–86400 seconds fails with `reason: invalid-grace` and an empty
   `--reason` fails with `reason: invalid-reason`, both before anything is
   enqueued — an out-of-range window is rejected, never clamped.
@@ -1899,9 +1901,10 @@ root — fails with `reason: os-error` and a `details.queue_path`, still as exac
 one JSON object under `--json` (a single stderr line otherwise), never a
 traceback. Any other command rejected by the durable queue fails with
 `reason: invalid-command`. The control-handler reason vocabulary is
-`abort-timeout`, `invalid-command`, `invalid-grace`, `invalid-harness`,
-`invalid-reason`, `invalid-timeout`, `missing-model-control-operation`,
-`no-runner`, `os-error`, and `receipt-timeout`.
+`abort-timeout`, `finalization-timeout`, `invalid-command`, `invalid-grace`,
+`invalid-harness`, `invalid-reason`, `invalid-timeout`,
+`missing-model-control-operation`, `no-runner`, `os-error`, and
+`receipt-timeout`.
 
 Every producer that appends to the queue — the `asl control` subcommands and
 the Workbench control endpoints alike — then sends a best-effort wakeup so the
@@ -1960,20 +1963,28 @@ run-control record carrying the `command_id` it just enqueued. The runner
 appends that receipt for *every* command it accepts, including one that changes
 no state, so a duplicate or already-applied command is distinguishable from a
 lost one. On success the payload gains a `wait` object reporting `observed`,
-`terminal_action`, `timeout_seconds`, and `elapsed_seconds`. `asl control abort
---wait` additionally waits past the receipt for the real outcome — the
-`abort-turn-honored` or `abort-turn-satisfied-by-worker` action recorded after
-it — and reports it as `wait.terminal_action`. Only `abort-turn-honored` means
-the run is stopping; `abort-turn-satisfied-by-worker` reports that the turn
-ended by itself inside the window, which leaves the run paused or still running,
-so read the run's own terminal state before calling it stopped.
+`terminal_action`, `run_finished`, `timeout_seconds`, and `elapsed_seconds`.
+`asl control abort --wait` additionally waits past the receipt for the real
+outcome — the `abort-turn-honored` or `abort-turn-satisfied-by-worker` action
+recorded after it, reported as `wait.terminal_action` — and then past that
+outcome for the `run-finished` record, reported as `wait.run_finished`. Only
+`abort-turn-honored` means the run is stopping; `abort-turn-satisfied-by-worker`
+reports that the turn ended by itself inside the window, which leaves the run
+paused or still running, so read the run's own terminal state before calling it
+stopped. A successful `abort --wait` therefore means the run is over and the
+plan lock is released, not merely that the turn was killed.
 
 A wait that runs out exits 1 and names which observation failed, with the
 `command_id`, `queue_path`, `signal`, and `wait` evidence under `details`: no
 runner is listening (no active lock, or the wakeup reported `no-runner`) fails
 with `reason: no-runner`; a runner that holds the lock but did not drain in time
-fails with `reason: receipt-timeout`; and an abort whose receipt landed but
-whose outcome has not been recorded yet fails with `reason: abort-timeout`. The
+fails with `reason: receipt-timeout`; an abort whose receipt landed but whose
+outcome has not been recorded yet fails with `reason: abort-timeout`; and an
+abort whose outcome landed while the run is still finalizing fails with
+`reason: finalization-timeout`, carrying `wait.finalizing` (the `phase`,
+`elapsed_seconds`, and `cancellable` fields of the run's `active_finalization`)
+and a `hint` naming the second abort that cancels it. That last reason is not a
+hang: it says the turn is gone and the terminal audit is still running. The
 command remains durably queued in every case — the timeout is about the
 receipt, never the append. `--timeout` requires `--wait` and must be between 0
 and 1800 seconds; otherwise the command fails with `reason: invalid-timeout`
@@ -2008,6 +2019,26 @@ distinct outcomes, and only the first of them stops the run:
 
 An abort observed between turns has nothing to kill and degrades to
 stop-after-current instead.
+
+Killing the turn is not the end of the run. Once the last turn is over the
+runner still owes the plan its terminal supervisor audit, which is an ordinary
+harness turn with its own answer and delivery budgets and can legitimately take
+tens of minutes. That work is published as a phase rather than left to look like
+a stall: `runner_state.active_finalization` names the `phase`
+(`assurance-audit`), when it started, how long it has been running, and whether
+it is `cancellable`, `asl status` prints the same as a `Run state: finalizing`
+line, and `finalization_started` / `finalization_heartbeat` /
+`finalization_finished` events carry it into `events.jsonl` on a `30`-second
+heartbeat. The run still holds the plan lock throughout, and it still drains the
+control queue.
+
+Repeating the request cancels it. An abort observed while the run is finalizing
+arms immediately with no grace window — there is no session to wind down and no
+worker to warn, only an advisory read-only audit — so the audit's harness is
+killed, `finalization-abort-honored` is recorded, and the run finishes within
+seconds. Cancelling the audit costs the audit and nothing else: assurance is
+recorded as `unavailable` with `reason: interrupted`, and the run's own outcome,
+reason, and exit code are whatever the stop already made them.
 
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, lock state, and any active harness turn.
@@ -3255,6 +3286,7 @@ that key for them. `events.jsonl` records
 `review_session_created`, `review_cycle`,
 `review_repair_reopened`, `mailbox`, `reply_provided`,
 `resolution_consumed`, `process_sweep`,
+`finalization_started`, `finalization_heartbeat`, `finalization_finished`,
 `run_paused`, and
 `run_finished` events as they happen. `process_sweep` is conditional: it is
 appended only when a post-turn or post-check sweep actually signalled a
@@ -3351,7 +3383,8 @@ scope, session ID for per-session commits, argv, cwd, artifact paths, status
 result, duration, and commit SHA when one was created. `run_control` events
 record `stop-after-current-requested`, `stop-after-current-canceled`,
 `stop-after-current-consumed`, `abort-turn-requested`, `abort-turn-honored`,
-`abort-turn-satisfied-by-worker`, `control-command-observed`, `tail-enabled`,
+`abort-turn-satisfied-by-worker`, `finalization-abort-honored`,
+`control-command-observed`, `tail-enabled`,
 `tail-disabled`, and
 `harness-selected`, and `implementation-model-updated` actions with
 `stop_after_current`, `tail_enabled`,
@@ -3360,8 +3393,21 @@ events also include `current_harness` and `selected_harness`. Abort events also
 include `abort_requested`, `abort_grace_seconds`, `abort_reason`, and — on
 `abort-turn-requested` alone — the `abort_deadline` the terminal actions clear.
 `control-command-observed` is the receipt `asl control --wait` polls for and
-carries the `command_id` and `queue_command` it acknowledges. `tail` renders
+carries the `command_id` and `queue_command` it acknowledges.
+`finalization-abort-honored` is the abort that arrived after the last turn had
+already ended: it cancels the terminal supervisor audit instead of a turn, arms
+with no grace window, and leaves the run's own outcome untouched. `tail` renders
 these as `run control:` lines.
+
+`finalization_started`, `finalization_heartbeat`, and `finalization_finished`
+bracket the post-turn work the run does while it still holds the plan lock —
+today the terminal supervisor audit. The started event names the `run_id`,
+`phase`, `started_at`, and `cancellable`; the heartbeat repeats every `30`
+seconds with the whole `active_finalization` projection — adding
+`elapsed_seconds`, `heartbeat_count`, and `last_heartbeat_at`; and the finished
+event reports `heartbeat_count`, `duration_seconds`, `finished_at`, and
+`cancelled` for a phase an abort cut short. Their purpose is to keep a
+legitimately long finalization distinguishable from a hang.
 
 For normal text runs, live progress is printed to stderr with local compact
 timestamps, for example `[2026-06-04 14:32:10] session 2/3 started`, so stdout

@@ -2357,6 +2357,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         wakeup: threading.Event | None = None,
         abort: harnesses.AbortSignal | None = None,
         mailbox_enabled: bool = False,
+        finalization: bool = False,
     ) -> tuple[control_queue.DrainResult, set[str]]:
         seen = set() if seen_ids is None else seen_ids
         result = runner._drain_external_control_queue(
@@ -2373,6 +2374,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
             wakeup=wakeup,
             abort=abort,
             mailbox_enabled=mailbox_enabled,
+            finalization=finalization,
         )
         return result, seen
 
@@ -2685,6 +2687,32 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
             [
                 events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
                 events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+            ],
+            self.run_control_actions(),
+        )
+
+    def test_abort_while_finalizing_arms_at_once_and_names_itself(self) -> None:
+        # The grace window buys a worker time to leave usable work behind. The
+        # terminal audit is advisory and read-only, and the run holds the plan
+        # lock while it waits, so the cancellation lands immediately.
+        self.queue_abort(grace_seconds=120)
+        abort = harnesses.AbortSignal()
+
+        before = time.monotonic()
+        self.drain(
+            run_control.RunControlState(current_harness="codex"),
+            abort=abort,
+            finalization=True,
+        )
+
+        self.assertTrue(abort.armed)
+        expiry = abort.expires_at(before)
+        assert expiry is not None
+        self.assertLessEqual(expiry, time.monotonic())
+        self.assertEqual(
+            [
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED,
             ],
             self.run_control_actions(),
         )
@@ -5790,6 +5818,49 @@ class ControlCliTests(unittest.TestCase):
             payload["note"],
         )
 
+    def test_abort_while_finalizing_says_it_cancels_the_audit(self) -> None:
+        write_plan(self.plan_dir, ("pending", "pending"))
+        self.mark_run_active_between_turns()
+        _write_state_payload(
+            self.plan_dir,
+            self.state_dir,
+            {
+                "ok": True,
+                "paused": False,
+                "run_id": "20260724T100000Z-1",
+                "harness": "codex",
+                "run_config": {"review_harness": None},
+                "reason": "stopped",
+                "run_started_at": "2026-07-24T10:00:00+00:00",
+                "run_finished_at": None,
+                "duration_seconds": None,
+                "active_turn": None,
+                "active_verification": None,
+                "active_finalization": {
+                    "run_id": "20260724T100000Z-1",
+                    "phase": "assurance-audit",
+                    "started_at": "2026-07-24T10:05:00+00:00",
+                    "elapsed_seconds": 120.0,
+                    "heartbeat_count": 4,
+                    "last_heartbeat_at": "2026-07-24T10:07:00+00:00",
+                    "cancellable": True,
+                },
+            },
+        )
+
+        _, payload = self.payload_from(
+            control_cli.control_abort_from_args,
+            self.args(),
+        )
+
+        self.assertTrue(payload["run_active"])
+        self.assertFalse(payload["turn_active"])
+        self.assertEqual(
+            "no turn active; the run is finalizing, so abort cancels its "
+            "terminal audit",
+            payload["note"],
+        )
+
     def test_abort_without_active_run_still_enqueues(self) -> None:
         write_plan(self.plan_dir, ("pending", "pending"))
 
@@ -6352,6 +6423,24 @@ class ControlCliWaitTests(unittest.TestCase):
             },
         )
 
+    def mark_run_finalizing(self) -> None:
+        """The last turn ended; the run is auditing itself and holds the lock."""
+        state_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir) / events.STATE_FILE_NAME
+        )
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        payload["active_turn"] = None
+        payload["active_finalization"] = {
+            "run_id": "20260724T100000Z-1",
+            "phase": "assurance-audit",
+            "started_at": "2026-07-24T10:05:00+00:00",
+            "elapsed_seconds": 92.0,
+            "heartbeat_count": 3,
+            "last_heartbeat_at": "2026-07-24T10:06:30+00:00",
+            "cancellable": True,
+        }
+        state_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
     def payload_from(self, handler, args) -> tuple[int, dict]:
         buffer = io.StringIO()
         with redirect_stdout(buffer):
@@ -6372,6 +6461,16 @@ class ControlCliWaitTests(unittest.TestCase):
             for record in read_jsonl(self.event_path)
             if record["name"] == events.RUN_CONTROL_EVENT
         ]
+
+    def append_run_finished(self) -> None:
+        """Stand in for the runner releasing the lock after its terminal work."""
+        events.append_event(
+            self.event_path,
+            events.Event(
+                events.RUN_FINISHED_EVENT,
+                {"run_id": "20260724T100000Z-1", "reason": "stopped", "ok": True},
+            ),
+        )
 
     @contextmanager
     def background_runner(
@@ -6530,10 +6629,12 @@ class ControlCliWaitTests(unittest.TestCase):
 
     def test_abort_wait_blocks_until_the_turn_is_honored(self) -> None:
         # No abort signal is armed, so the drain degrades the abort and honors
-        # it immediately — the terminal action the CLI is waiting for.
+        # it immediately — the terminal action the CLI is waiting for. The wait
+        # ends on the run finishing, not on that action: the turn ending leaves
+        # the run finalizing, still holding the lock.
         self.mark_run_active()
 
-        with self.background_runner():
+        with self.background_runner(after_drain=self.append_run_finished):
             exit_code, payload = self.payload_from(
                 control_cli.control_abort_from_args,
                 self.args(
@@ -6546,6 +6647,7 @@ class ControlCliWaitTests(unittest.TestCase):
 
         self.assertEqual(0, exit_code, payload)
         self.assertTrue(payload["wait"]["observed"])
+        self.assertTrue(payload["wait"]["run_finished"])
         self.assertEqual(
             events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
             payload["wait"]["terminal_action"],
@@ -6571,6 +6673,7 @@ class ControlCliWaitTests(unittest.TestCase):
                     },
                 ),
             )
+            self.append_run_finished()
 
         with self.background_runner(abort=abort, after_drain=satisfied_by_worker):
             exit_code, payload = self.payload_from(
@@ -6584,6 +6687,7 @@ class ControlCliWaitTests(unittest.TestCase):
             )
 
         self.assertEqual(0, exit_code, payload)
+        self.assertTrue(payload["wait"]["run_finished"])
         self.assertEqual(
             events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
             payload["wait"]["terminal_action"],
@@ -6628,6 +6732,58 @@ class ControlCliWaitTests(unittest.TestCase):
         self.assertEqual("abort-timeout", payload["reason"])
         self.assertTrue(payload["details"]["wait"]["observed"])
         self.assertIsNone(payload["details"]["wait"]["terminal_action"])
+
+    def test_abort_wait_timeout_while_finalizing_says_the_run_is_finalizing(
+        self,
+    ) -> None:
+        # The turn ended and the abort was honored, but the run is still
+        # auditing itself and holds the lock: reporting success here is what
+        # taught a supervisor to read a finalizing run as a hang.
+        self.mark_run_active()
+        self.mark_run_finalizing()
+        real_wait = control_cli._wait_for_receipt
+
+        def receipt_then_honored(plan_dir, **kwargs):
+            for action in (
+                events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
+                events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+            ):
+                events.append_event(
+                    self.event_path,
+                    events.Event(
+                        events.RUN_CONTROL_EVENT,
+                        {
+                            "run_id": "20260724T100000Z-1",
+                            "action": action,
+                            "command_id": kwargs["command_id"],
+                            "message": "abort turn honored",
+                        },
+                    ),
+                )
+            return real_wait(plan_dir, **kwargs)
+
+        with mock.patch.object(control_cli, "_wait_for_receipt", receipt_then_honored):
+            exit_code, payload = self.payload_from(
+                control_cli.control_abort_from_args,
+                self.args(
+                    wait=True,
+                    wait_timeout=0.0,
+                    grace_seconds=None,
+                    reason=None,
+                ),
+            )
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("finalization-timeout", payload["reason"])
+        wait = payload["details"]["wait"]
+        self.assertTrue(wait["observed"])
+        self.assertEqual(
+            events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED, wait["terminal_action"]
+        )
+        self.assertFalse(wait["run_finished"])
+        self.assertEqual("assurance-audit", wait["finalizing"]["phase"])
+        self.assertTrue(wait["finalizing"]["cancellable"])
+        self.assertIn("repeat `asl control abort`", wait["note"])
 
     def test_default_enqueue_neither_waits_nor_reports_a_wait(self) -> None:
         for handler, extra in (

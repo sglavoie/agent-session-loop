@@ -1019,6 +1019,7 @@ def _runner_state_payload(
             "error": None,
             "active_turn": None,
             "active_verification": None,
+            "active_finalization": None,
             "waiting_for_reply": None,
             "waiting_for_reply_status": None,
             "abandoned": None,
@@ -1036,6 +1037,7 @@ def _runner_state_payload(
             "error": None,
             "active_turn": None,
             "active_verification": None,
+            "active_finalization": None,
             "waiting_for_reply": None,
             "waiting_for_reply_status": None,
             "abandoned": None,
@@ -1047,6 +1049,7 @@ def _runner_state_payload(
             "error": str(error),
             "active_turn": None,
             "active_verification": None,
+            "active_finalization": None,
             "waiting_for_reply": None,
             "waiting_for_reply_status": None,
             "abandoned": None,
@@ -1059,6 +1062,7 @@ def _runner_state_payload(
             "error": "state file did not contain a JSON object",
             "active_turn": None,
             "active_verification": None,
+            "active_finalization": None,
             "waiting_for_reply": None,
             "waiting_for_reply_status": None,
             "abandoned": None,
@@ -1071,6 +1075,14 @@ def _runner_state_payload(
     active_verification = raw.get("active_verification")
     if not isinstance(active_verification, dict):
         active_verification = None
+
+    active_finalization = raw.get("active_finalization")
+    if not isinstance(active_finalization, dict):
+        active_finalization = None
+
+    control = raw.get("control")
+    if not isinstance(control, dict):
+        control = None
 
     abandoned = raw.get("abandoned")
     if not isinstance(abandoned, dict):
@@ -1130,6 +1142,11 @@ def _runner_state_payload(
         "duration_seconds": raw.get("duration_seconds"),
         "active_turn": active_turn,
         "active_verification": active_verification,
+        "active_finalization": active_finalization,
+        # Projected so a supervisor can tell an operator-requested stop from an
+        # unexplained one: ``control.last_action`` is the only place the run
+        # records that an abort, rather than the plan running out, ended it.
+        "control": control,
         "waiting_for_reply": waiting_for_reply,
         "waiting_for_reply_status": waiting_status,
         "abandoned": abandoned,
@@ -1596,17 +1613,19 @@ def mark_run_abandoned(
 
             detected_at = datetime.now(UTC).isoformat()
             payload = dict(current)
+            prior_reason = current.get("reason")
             payload.update(
                 {
                     "ok": False,
                     "reason": ABANDONED_REASON,
                     "run_finished_at": detected_at,
-                    # The same two fields ``runner._finish_run`` clears. A wait
+                    # The same fields ``runner._finish_run`` clears. A wait
                     # record is deliberately left behind: it is the only
                     # evidence of what the run died holding, and it already
                     # reads as expired once no active lock backs it.
                     "active_turn": None,
                     "active_verification": None,
+                    "active_finalization": None,
                     "abandoned": {
                         "detected_at": detected_at,
                         "trigger": trigger,
@@ -1614,6 +1633,11 @@ def mark_run_abandoned(
                             lock_info.reason if lock_info is not None else None
                         ),
                         "detected_by_pid": os.getpid(),
+                        # Overwriting ``reason`` loses the only record that the
+                        # run had already stopped cleanly before it was killed,
+                        # which is what separates a supervisor-requested stop
+                        # from a death nobody asked for.
+                        "prior_reason": prior_reason,
                     },
                 }
             )
@@ -1954,6 +1978,25 @@ def _print_text_status(payload: dict[str, Any]) -> None:
             print(
                 f"Run state: abandoned (detected {detected_at} "
                 f"by {trigger}: {lock_reason})"
+            )
+            prior_reason = abandoned.get("prior_reason")
+            if prior_reason:
+                print(f"Run state: reason before abandonment was {prior_reason}")
+        active_finalization = runner_state.get("active_finalization")
+        if isinstance(active_finalization, dict):
+            phase = active_finalization.get("phase") or "unknown"
+            elapsed = active_finalization.get("elapsed_seconds")
+            elapsed_text = (
+                f"{float(elapsed):.0f}s" if isinstance(elapsed, int | float) else "?"
+            )
+            hint = (
+                "; repeat `asl control abort` to cancel it"
+                if active_finalization.get("cancellable")
+                else ""
+            )
+            print(
+                f"Run state: finalizing ({phase}, {elapsed_text} elapsed, "
+                f"still holds the lock){hint}"
             )
 
     # Reported, never produced: this prints what the last run's audit already

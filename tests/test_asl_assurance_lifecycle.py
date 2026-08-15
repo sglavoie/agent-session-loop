@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import io
 import json
 import tempfile
+import threading
+import time
 import unittest
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +27,7 @@ from agent_session_loop import (
     events,
     harnesses,
     plans,
+    run_control,
     runner,
     state,
     supervisor_audit,
@@ -295,6 +300,43 @@ class _ScriptedAuditor:
             name=name,
             interrupted=self.interrupted,
         )
+
+
+class _AuditorAbortedMidTurn(_ScriptedAuditor):
+    """An auditor an operator aborts while its turn is in flight.
+
+    ``enqueue`` stands in for the second ``asl control abort``: it appends the
+    command the finalization drain reads, so the kill this returns is the one
+    the runner's own poll armed rather than one the test staged directly.
+    """
+
+    def __init__(self, enqueue: Callable[[], None], *replies: str) -> None:
+        super().__init__(*replies)
+        self._enqueue = enqueue
+
+    def __call__(self, name: str, **kwargs: object) -> harnesses.HarnessResult:
+        signal = kwargs["abort"]
+        assert isinstance(signal, harnesses.AbortSignal)
+        self._enqueue()
+        deadline = time.monotonic() + 10.0
+        while not signal.armed:
+            if time.monotonic() > deadline:
+                raise AssertionError("the finalization drain never armed the abort")
+            time.sleep(0.01)
+        return dataclasses.replace(
+            super().__call__(name, **kwargs), returncode=137, aborted=True
+        )
+
+
+def _fast_finalization() -> Callable[..., runner._LiveFinalization]:
+    """``_LiveFinalization`` whose control drain ticks at test speed."""
+    live = runner._LiveFinalization
+
+    def build(**kwargs: object) -> runner._LiveFinalization:
+        kwargs.setdefault("poll_interval", 0.01)
+        return live(**kwargs)  # type: ignore[arg-type]
+
+    return build
 
 
 def _all_clear_reply(locator: str, *, unjudged: tuple[str, ...] = ()) -> str:
@@ -1032,9 +1074,13 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                     audit_context=self._context(payload),
                 )
 
-            self.assertEqual([[]], seen)
+            self.assertEqual([[events.FINALIZATION_STARTED_EVENT]], seen)
             self.assertEqual(
-                [events.RUN_FINISHED_EVENT],
+                [
+                    events.FINALIZATION_STARTED_EVENT,
+                    events.FINALIZATION_FINISHED_EVENT,
+                    events.RUN_FINISHED_EVENT,
+                ],
                 [item["name"] for item in read_jsonl(event_path)],
             )
 
@@ -1139,6 +1185,136 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             )
             record = read_jsonl(Path(str(payload["events_path"])))[-1]
             self.assertEqual(events.RUN_FINISHED_EVENT, record["name"])
+
+    def test_the_finalization_phase_is_published_while_the_audit_runs(self) -> None:
+        """Otherwise a run holding the lock for an audit looks like a hang."""
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._payload(Path(tmp), ["--audit-harness", "claude"])
+            event_path = Path(str(payload["events_path"]))
+            state_path = Path(str(payload["state_path"]))
+            live: list[dict[str, object]] = []
+
+            def record(plan: object, **kwargs: object):
+                persisted = json.loads(state_path.read_text(encoding="utf-8"))
+                live.append(
+                    {
+                        "finalization": persisted["active_finalization"],
+                        "events": [item["name"] for item in read_jsonl(event_path)],
+                    }
+                )
+                return _summary()
+
+            with mock.patch.object(
+                runner.supervisor_audit, "audit_terminal_run", record
+            ):
+                runner._terminalize_run(
+                    outcome="stopped",
+                    exit_code=0,
+                    event_path=event_path,
+                    payload=payload,
+                    audit_context=self._context(payload),
+                )
+
+            self.assertEqual([events.FINALIZATION_STARTED_EVENT], live[0]["events"])
+            published = live[0]["finalization"]
+            assert isinstance(published, dict)
+            self.assertEqual(RUN_ID, published["run_id"])
+            self.assertEqual(
+                runner.FINALIZATION_PHASE_ASSURANCE_AUDIT, published["phase"]
+            )
+            # No cancel signal was supplied, so this phase advertises itself as
+            # visible but not cancellable.
+            self.assertFalse(published["cancellable"])
+
+            records = read_jsonl(event_path)
+            self.assertEqual(
+                [
+                    events.FINALIZATION_STARTED_EVENT,
+                    events.FINALIZATION_FINISHED_EVENT,
+                    events.RUN_FINISHED_EVENT,
+                ],
+                [item["name"] for item in records],
+            )
+            self.assertFalse(records[1]["payload"]["cancelled"])
+            self.assertIsNone(payload["active_finalization"])
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertIsNone(persisted["active_finalization"])
+
+    def test_an_abort_while_finalizing_cancels_the_audit_and_nothing_else(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            payload = self._payload(tmp_dir, ["--audit-harness", "claude"])
+            payload["reason"] = "stopped"
+            event_path = Path(str(payload["events_path"]))
+            plan_dir = Path(str(payload["plan_dir"]))
+            context = self._context(payload)
+            abort = harnesses.AbortSignal()
+            persistence = runner._RunPersistence()
+            mailbox_poll = runner._MailboxPoll(
+                plan_dir=plan_dir,
+                state_dir_arg=str(tmp_dir / "state"),
+                control_state=run_control.RunControlState(current_harness="codex"),
+                seen_control_ids=set(),
+                payload=payload,
+                event_path=event_path,
+                control_payload=dict(payload["control"]),
+                persistence=persistence,
+                run_control_lock=threading.Lock(),
+                enabled=False,
+            )
+            mailbox_poll.set_abort(abort, finalization=True)
+
+            def enqueue_abort() -> None:
+                control_queue.append_command(
+                    plan_dir,
+                    control_queue.COMMAND_REQUEST_ABORT_TURN,
+                    state_dir=tmp_dir / "state",
+                    command_id="abort-during-finalization",
+                )
+
+            auditor = _AuditorAbortedMidTurn(enqueue_abort, "never read")
+            with (
+                mock.patch.object(harnesses, "run_harness", auditor),
+                mock.patch.object(runner, "_LiveFinalization", _fast_finalization()),
+            ):
+                code = runner._terminalize_run(
+                    outcome="stopped",
+                    exit_code=0,
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    audit_context=context,
+                    cancel=abort,
+                    poll=mailbox_poll,
+                )
+
+            self.assertEqual(0, code)
+            self.assertEqual(1, len(auditor.prompts))
+            actions = [
+                item["payload"]["action"]
+                for item in read_jsonl(event_path)
+                if item["name"] == events.RUN_CONTROL_EVENT
+            ]
+            self.assertIn(events.RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED, actions)
+            # Cancelling the audit cancels only the audit.
+            assurance = payload["assurance"]
+            self.assertEqual("unavailable", assurance["state"])
+            self.assertEqual(supervisor_audit.REASON_INTERRUPTED, assurance["reason"])
+            self.assertEqual([], assurance["attempts"])
+            ledger = assurance_ledger.read_ledger(state_dir=context.ledger_state_dir)
+            self.assertEqual((), ledger.records)
+            self.assertEqual("stopped", payload["reason"])
+            self.assertTrue(payload["run_finished_at"])
+            self.assertIsNone(payload["active_finalization"])
+            finished = [
+                item
+                for item in read_jsonl(event_path)
+                if item["name"] == events.FINALIZATION_FINISHED_EVENT
+            ]
+            self.assertTrue(finished[0]["payload"]["cancelled"])
+            self.assertEqual(
+                events.RUN_FINISHED_EVENT, read_jsonl(event_path)[-1]["name"]
+            )
 
     def test_the_ledger_root_is_kept_apart_from_the_plan_state_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
