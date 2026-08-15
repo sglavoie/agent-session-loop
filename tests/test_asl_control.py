@@ -47,6 +47,7 @@ from agent_session_loop import (
     run_control,
     runner,
     state,
+    supervision_liveness,
 )
 from tests.support import (
     REPO_ROOT,
@@ -9929,6 +9930,222 @@ class MailboxCliTests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertFalse(payload["ok"])
         self.assertEqual("invalid-supervision-id", payload["reason"])
+
+    def write_liveness_record(self, supervision_id: str) -> None:
+        supervision_liveness.write_record(
+            self.plan_dir,
+            supervision_id,
+            pid=4242,
+            state_dir=self.state_dir,
+            run_command=lambda *args, **kwargs: subprocess.CompletedProcess(
+                list(process_tree.PS_BIRTH_COMMAND),
+                0,
+                stdout="Sun Jul 26 17:57:01 2026\n",
+                stderr="",
+            ),
+        )
+
+    def age_grace_anchor(self, supervision_id: str, seconds: float) -> None:
+        """Backdate this launch's grace anchor as an earlier poll would have."""
+        mailbox.write_supervision_cursor(
+            self.plan_dir,
+            supervision_id,
+            0,
+            state_dir=self.state_dir,
+            first_seen_at=datetime.now(UTC) - timedelta(seconds=seconds),
+        )
+
+    def test_supervision_cursor_preserves_its_first_seen_anchor(self) -> None:
+        launch = mailbox.new_supervision_id()
+        anchor = datetime.now(UTC) - timedelta(seconds=300)
+        mailbox.write_supervision_cursor(
+            self.plan_dir,
+            launch,
+            1,
+            state_dir=self.state_dir,
+            first_seen_at=anchor,
+        )
+
+        mailbox.write_supervision_cursor(
+            self.plan_dir,
+            launch,
+            2,
+            state_dir=self.state_dir,
+        )
+
+        self.assertEqual(
+            anchor,
+            mailbox.read_supervision_first_seen_at(
+                self.plan_dir,
+                launch,
+                state_dir=self.state_dir,
+            ),
+        )
+        self.assertEqual(2, self.cursor_on_disk(launch))
+
+    def test_outbox_supervise_reports_a_dead_helper_as_lost(self) -> None:
+        launch = mailbox.new_supervision_id()
+        self.write_liveness_record(launch)
+
+        with mock.patch.object(
+            supervision_liveness,
+            "probe",
+            return_value=supervision_liveness.DEAD,
+        ):
+            code, lines = self.supervise_lines(supervision_id=launch)
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            f"LOST reason={mailbox_cli.SUPERVISE_LOST_HELPER_EXITED}",
+            lines[0],
+        )
+        self.assertIn("that process is gone", lines[1])
+        self.assertIn("Run evidence: lock not active, run_id none, ", lines[2])
+        self.assertIn("sessions 0/1 complete.", lines[2])
+        self.assertEqual(
+            f"Next step: read `asl status {self.plan_dir.resolve()} --json`.",
+            lines[-1],
+        )
+
+    def test_outbox_supervise_lost_payload_carries_run_evidence(self) -> None:
+        launch = mailbox.new_supervision_id()
+        self.write_liveness_record(launch)
+        self.write_active_turn(run_id="run-live", session_id="1", turn_index=2)
+
+        with mock.patch.object(
+            supervision_liveness,
+            "probe",
+            return_value=supervision_liveness.DEAD,
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.outbox_supervise_from_args,
+                self.args(timeout=0, supervision_id=launch),
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(mailbox_cli.SUPERVISE_TOKEN_LOST, payload["state"])
+        self.assertEqual(
+            mailbox_cli.SUPERVISE_LOST_HELPER_EXITED,
+            payload["lost_reason"],
+        )
+        self.assertFalse(payload["timed_out"])
+        self.assertFalse(payload["supervision_ended"])
+        evidence = payload["run_evidence"]
+        self.assertTrue(evidence["lock_active"])
+        self.assertEqual(os.getpid(), evidence["lock_pid"])
+        self.assertEqual("run-live", evidence["run_id"])
+        self.assertEqual("1", evidence["active_turn"]["session_id"])
+        self.assertEqual(0, evidence["sessions_complete"])
+        self.assertEqual(1, evidence["sessions_total"])
+
+    def test_outbox_supervise_reports_a_helper_that_never_started(self) -> None:
+        launch = mailbox.new_supervision_id()
+        self.age_grace_anchor(
+            launch,
+            mailbox_cli.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
+        )
+
+        code, lines = self.supervise_lines(supervision_id=launch)
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            f"LOST reason={mailbox_cli.SUPERVISE_LOST_HELPER_NEVER_STARTED}",
+            lines[0],
+        )
+        self.assertIn("Active turn: none.", lines)
+
+    def test_outbox_supervise_stays_idle_inside_the_liveness_grace(self) -> None:
+        launch = mailbox.new_supervision_id()
+
+        code, lines = self.supervise_lines(supervision_id=launch)
+
+        self.assertEqual(0, code)
+        self.assertEqual(["IDLE"], lines)
+        # The first poll anchors the grace window so a later one can expire it.
+        self.assertIsNotNone(
+            mailbox.read_supervision_first_seen_at(
+                self.plan_dir,
+                launch,
+                state_dir=self.state_dir,
+            )
+        )
+
+    def test_outbox_supervise_stays_idle_when_a_live_run_holds_the_lock(self) -> None:
+        launch = mailbox.new_supervision_id()
+        self.write_active_turn(run_id="run-live", session_id="1", turn_index=2)
+        self.age_grace_anchor(
+            launch,
+            mailbox_cli.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
+        )
+
+        code, lines = self.supervise_lines(supervision_id=launch)
+
+        self.assertEqual(0, code)
+        self.assertEqual(["IDLE"], lines)
+
+    def test_outbox_supervise_stays_idle_when_the_probe_is_unverified(self) -> None:
+        launch = mailbox.new_supervision_id()
+        self.write_liveness_record(launch)
+        self.age_grace_anchor(
+            launch,
+            mailbox_cli.SUPERVISE_LIVENESS_GRACE_SECONDS + 60,
+        )
+
+        with mock.patch.object(
+            supervision_liveness,
+            "probe",
+            return_value=supervision_liveness.UNVERIFIED,
+        ):
+            code, lines = self.supervise_lines(supervision_id=launch)
+
+        self.assertEqual(0, code)
+        self.assertEqual(["IDLE"], lines)
+
+    def test_outbox_supervise_prefers_its_terminal_record_over_a_dead_probe(
+        self,
+    ) -> None:
+        launch = mailbox.new_supervision_id()
+        self.write_liveness_record(launch)
+        own = mailbox.append_supervision_end(
+            self.plan_dir,
+            "helper exited: complete",
+            outcome=mailbox.SUPERVISION_OUTCOME_COMPLETE,
+            state_dir=self.state_dir,
+            supervision_id=launch,
+        )
+
+        with mock.patch.object(
+            supervision_liveness,
+            "probe",
+            return_value=supervision_liveness.DEAD,
+        ):
+            code, lines = self.supervise_lines(supervision_id=launch)
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            f"DONE outcome={mailbox.SUPERVISION_OUTCOME_COMPLETE} seq={own.seq}",
+            lines[0],
+        )
+
+    def test_outbox_supervise_prefers_an_open_question_over_a_dead_probe(self) -> None:
+        launch = mailbox.new_supervision_id()
+        self.write_liveness_record(launch)
+        mailbox.append_question(
+            self.plan_dir,
+            "Which shape?",
+            state_dir=self.state_dir,
+            run_id="run-live",
+        )
+
+        with mock.patch.object(
+            supervision_liveness,
+            "probe",
+            return_value=supervision_liveness.DEAD,
+        ):
+            code, lines = self.supervise_lines(supervision_id=launch)
+
+        self.assertEqual(0, code)
+        self.assertEqual("ACTION questions=1", lines[0])
 
     def test_outbox_wait_all_wakes_on_a_supervision_end_mid_wait(self) -> None:
         mailbox_path = mailbox.mailbox_path_for_plan(self.plan_dir, self.state_dir)

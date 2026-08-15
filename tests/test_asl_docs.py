@@ -1033,7 +1033,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             "and no `--since` is ever threaded by hand",
             "The cursor starts at 0, so questions that were already open "
             "before the launch stay visible",
-            "Exactly one of three tokens is printed, always with exit code 0",
+            "Exactly one of four tokens is printed, always with exit code 0",
             "`IDLE` means nothing actionable happened: print nothing and "
             "reissue the identical command",
             "`ACTION questions=<n>` carries `<n>` question records that no "
@@ -1064,6 +1064,120 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
                 marker,
                 normalized,
                 msg=f"asl skill omits supervision-end marker: {marker!r}",
+            )
+
+    def test_asl_skill_launches_the_helper_detached(self) -> None:
+        skill = self._read("skills/asl/SKILL.md")
+        normalized = " ".join(skill.split())
+
+        for marker in (
+            "--supervision-id <launch-identity> --json --detach",
+            "`--detach` returns immediately.",
+            "It prints one JSON launch handshake — `ok`, `supervision_id`, "
+            "`pid`, `plan_dir`, `result_path`, `stderr_path` — and its exit "
+            "code reports the **launch**, never the run",
+            "The run's own verdict is only ever in the `result.json` at `result_path`",
+            "reparented to init, so it outlives the tool call, the agent "
+            "turn, and the harness session",
+            "Never append `&`. Never rely on the harness backgrounding the "
+            "command. Never invent a redirect target or a `mktemp` directory",
+            "A foreground launch cannot work in this harness: a run lasts "
+            "hours and a tool call is capped at 600 seconds",
+            "a helper parented by a harness shell dies whenever that shell "
+            "is reaped, at turn end, at session end, or at a harness restart",
+            "**The first `asl outbox supervise` call is the proof of launch.**",
+            "If it answers `LOST reason=helper-never-started`, the launch "
+            "failed: report that to the user and do not re-enter the loop",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"asl skill omits detached-launch marker: {marker!r}",
+            )
+        self.assertNotIn(
+            "--supervision-id <launch-identity> --json\n```",
+            skill,
+            msg="asl skill still prescribes a foreground helper launch",
+        )
+
+    def test_asl_skill_documents_the_lost_token(self) -> None:
+        skill = self._read("skills/asl/SKILL.md")
+        normalized = " ".join(skill.split())
+
+        for marker in (
+            "Exactly one of four tokens is printed, always with exit code 0",
+            "`LOST reason=<reason>` means this launch's supervising helper "
+            "is gone without a terminal record. Stop the loop, run `asl "
+            "status <plan-dir> --json`, and surface to the user what died "
+            "and whether the run itself is still alive. **Never "
+            "auto-relaunch**",
+            "`helper-exited-without-record` means the helper recorded a "
+            "process identity and that process is now gone",
+            "`helper-never-started` is reported only when no run is holding "
+            "the plan at all, so nothing is running and the launch itself "
+            "failed",
+            "It waits out a 120-second grace window first, so a slow start "
+            "is never called dead",
+            "`LOST` never preempts `DONE` or `ACTION`",
+            "A run started as a plain `asl run` with no helper writes no "
+            "process identity and stays `IDLE`",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"asl skill omits LOST marker: {marker!r}",
+            )
+        for token in (
+            mailbox_cli.SUPERVISE_TOKEN_LOST,
+            mailbox_cli.SUPERVISE_LOST_HELPER_EXITED,
+            mailbox_cli.SUPERVISE_LOST_HELPER_NEVER_STARTED,
+        ):
+            self.assertIn(
+                token,
+                normalized,
+                msg=f"asl skill omits supervise constant: {token!r}",
+            )
+        self.assertIn(
+            f"{int(mailbox_cli.SUPERVISE_LIVENESS_GRACE_SECONDS)}-second grace",
+            normalized,
+        )
+
+    def test_asl_skill_requires_evidence_for_every_health_claim(self) -> None:
+        skill = self._read("skills/asl/SKILL.md")
+        normalized = " ".join(skill.split())
+
+        self.assertIn(
+            "**absence of evidence**, the rule that a missing `DONE` record "
+            "is not proof the helper is alive. Its operating rule: any claim "
+            'about run health — including answering "is it still working?" '
+            "— must cite a fresh `asl outbox supervise` token or a fresh "
+            "`asl status <plan-dir> --json`, never the absence of output",
+            normalized,
+            msg="asl skill omits the health-claim rule under absence of evidence",
+        )
+
+    def test_readme_documents_the_lost_supervision_contract(self) -> None:
+        readme = self._read("agent_session_loop/README.md")
+        normalized = " ".join(readme.split())
+
+        for marker in (
+            "`DONE outcome=<outcome> seq=<n>`, or `LOST reason=<reason>` at "
+            "exit code 0",
+            "the helper records its `(pid, process birth time)` identity "
+            "before starting the child",
+            "`helper-exited-without-record` reports a helper whose process is gone",
+            "`helper-never-started` reports one that never wrote an identity "
+            "while no run holds the plan",
+            "neither ever preempting `DONE` or `ACTION`",
+            "exposed under `--json` as `lost_reason` and `run_evidence`",
+            "Supervision is launched detached (`asl-autopilot.py --detach`)",
+            "prints one JSON launch handshake carrying `pid`, `result_path`, "
+            "and `stderr_path`",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"asl README omits supervision-liveness marker: {marker!r}",
             )
 
     def test_asl_skill_binds_a_silent_supervision_output_contract(self) -> None:

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import json
 import os
 import re
@@ -32,8 +33,9 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -47,6 +49,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    artifacts as _artifacts,
+)
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     assurance_report as _assurance_report,
 )
@@ -79,6 +84,9 @@ from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     state as _state,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    supervision_liveness as _supervision_liveness,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     tail as _tail,
@@ -123,6 +131,17 @@ ABORT_STOP_ACTIONS = (
 # key off `stage` to distinguish a parse-time failure from a later start/poll
 # failure, and off `reason` for the specific parse verdict.
 PARSE_STAGE = "parse"
+
+# Stage tag for the `--detach` launch handshake. The parent process reports only
+# whether the supervising grandchild was launched; the supervision verdict
+# itself lands in `result.json` under the launch's log directory.
+LAUNCH_STAGE = "launch"
+
+# Layout of a detached launch's log directory:
+# `<plan state dir>/supervision/<supervision id>/`.
+SUPERVISION_LOG_DIR_NAME = "supervision"
+DETACH_RESULT_FILE_NAME = "result.json"
+DETACH_STDERR_FILE_NAME = "stderr.log"
 
 # Agent harnesses recognized by `asl run`, re-exported from the ASL package so
 # the helper and the runner share one list by construction.
@@ -3794,6 +3813,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
       of stopping ``user_required``.
     - ``--supervision-id`` carries the launching agent's correlation identity
       onto the terminal ``supervision-end`` record.
+    - ``--detach`` launches the supervision into its own session and returns,
+      so the run does not die with the shell that started it.
+    - ``--supervision-log-dir`` overrides where a detached launch writes its
+      result and stderr.
     """
     parser = argparse.ArgumentParser(
         prog=HELPER_NAME,
@@ -3833,6 +3856,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "On a quota-exhausted pause carrying a parsed reset time, sleep "
             "until that reset (plus a buffer) and relaunch instead of stopping "
             "for a human."
+        ),
+    )
+    parser.add_argument(
+        "--detach",
+        action="store_true",
+        help=(
+            "Run the supervision in its own session and return immediately, "
+            "printing a JSON launch handshake. The supervision outcome lands in "
+            "`result.json` under the log directory instead of on this stdout."
+        ),
+    )
+    parser.add_argument(
+        "--supervision-log-dir",
+        metavar="DIR",
+        help=(
+            "Where a `--detach` launch writes `result.json` and `stderr.log` "
+            "(default: <plan state dir>/supervision/<supervision-id>/). Ignored "
+            "without --detach."
         ),
     )
     return parser
@@ -3891,6 +3932,39 @@ def _attach_review_context(result: dict, parsed: dict, reader) -> dict:
     return result
 
 
+def _write_liveness_record(args: argparse.Namespace, parsed: dict) -> dict:
+    """Stamp this helper's process identity beside the plan's state.
+
+    Written before the first status probe or ``asl run`` launch, so a helper
+    killed during startup still leaves evidence a supervisor can probe instead
+    of being byte-identical to one that is running fine. The parsed
+    ``--no-mailbox`` opt-out does not suppress it: this is process identity,
+    not mailbox content. A failed write is reported, never raised — losing the
+    safety net must not cost the run it was watching.
+    """
+    supervision_id = getattr(args, "supervision_id", None) or (
+        _mailbox.new_supervision_id()
+    )
+    plan_dir = parsed["plan_dir"]
+    state_dir = parsed.get("state_dir")
+    try:
+        record_path = _supervision_liveness.write_record(
+            plan_dir,
+            supervision_id,
+            command=parsed,
+            argv=list(sys.argv),
+            state_dir=state_dir,
+        )
+    except (OSError, _artifacts.ArtifactError) as exc:
+        return {"written": False, "error": f"{type(exc).__name__}: {exc}"}
+    _supervision_liveness.prune_records(plan_dir, state_dir=state_dir)
+    return {
+        "written": True,
+        "supervision_id": supervision_id,
+        "path": str(record_path),
+    }
+
+
 def run_autopilot(
     args: argparse.Namespace,
     *,
@@ -3902,7 +3976,11 @@ def run_autopilot(
     """Parse the requested command, then supervise the ``asl run`` it names.
 
     Command parsing runs first: an unparseable or unsupported command returns
-    the structured parse-failure payload immediately. When the command parses
+    the structured parse-failure payload immediately. A parsed command then
+    yields a supervision liveness record — this process's ``(pid, birth)``
+    identity, written before anything is probed or launched and reported back
+    under ``supervision_liveness`` — so a helper that dies at launch is
+    distinguishable from one that is running quietly. When the command parses
     cleanly, the supervisor starts/attaches/polls the run and drives it until the
     plan completes, the ``--max-sessions`` global budget is spent, an
     ``asl control stop-after-current`` or ``asl control abort`` request is
@@ -3942,6 +4020,8 @@ def run_autopilot(
     if not parsed.get("ok"):
         return parsed
 
+    liveness = _write_liveness_record(args, parsed)
+
     reply_text: str | None = None
     if getattr(args, "reply_stdin", False):
         source = sys.stdin if stdin is None else stdin
@@ -3967,6 +4047,7 @@ def run_autopilot(
     if not isinstance(result, dict):
         return result
     result.setdefault("command", parsed)
+    result["supervision_liveness"] = liveness
 
     if result.get("reason") == "paused":
         _attach_question_context(result, parsed, questioner)
@@ -4239,8 +4320,176 @@ def _termination_detail(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry point for the autopilot helper.
+def _redirect_detached_streams(stdout_path: Path, stderr_path: Path) -> None:
+    """Point this process's three standard streams at the detached log files.
+
+    Both halves matter: ``dup2`` moves the file descriptors so anything the
+    supervised child inherits lands in the same files, and rebinding
+    ``sys.std*`` on top of them makes the helper's own writes follow even when
+    the launching process had replaced those objects with in-memory buffers.
+    """
+    devnull_fd = os.open(os.devnull, os.O_RDONLY)
+    try:
+        os.dup2(devnull_fd, 0)
+    finally:
+        os.close(devnull_fd)
+    for path, fileno in ((stdout_path, 1), (stderr_path, 2)):
+        opened_fd = os.open(
+            os.fspath(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+        )
+        try:
+            os.dup2(opened_fd, fileno)
+        finally:
+            os.close(opened_fd)
+    # Deliberately never closed: these are the interpreter's streams for the
+    # rest of the process. Line buffering keeps `stderr.log` readable while the
+    # supervision is still running.
+    sys.stdin = open(0, closefd=False)  # noqa: SIM115
+    sys.stdout = open(1, "w", buffering=1, closefd=False)  # noqa: SIM115
+    sys.stderr = open(2, "w", buffering=1, closefd=False)  # noqa: SIM115
+
+
+def _launch_detached(
+    child: Callable[[], int],
+    *,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> int:
+    """Run ``child`` in a new session's grandchild and return its pid.
+
+    ``fork`` -> ``setsid`` -> ``fork`` is what makes the supervision outlive the
+    shell that launched it: the middle child leaves the launcher's process group
+    and session, and the second fork leaves the grandchild with no controlling
+    terminal to be signalled through. The grandchild's pid travels back over a
+    pipe because the parent only ever waits for (and reaps) the middle child,
+    which exits immediately.
+
+    Both children leave through ``os._exit`` so a forked copy of the launcher's
+    interpreter can never run its ``atexit`` handlers or unwind its stack twice.
+    """
+    read_fd, write_fd = os.pipe()
+    # Anything still buffered would be inherited by the fork and written twice.
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    middle_pid = os.fork()
+    if middle_pid == 0:
+        os.close(read_fd)
+        try:
+            os.setsid()
+            grandchild_pid = os.fork()
+        except BaseException:
+            # The parent sees EOF with no pid and reports a failed launch.
+            os._exit(1)
+        if grandchild_pid != 0:
+            try:
+                os.write(write_fd, str(grandchild_pid).encode("ascii"))
+            finally:
+                os._exit(0)
+        exit_code = 1
+        try:
+            # Closed first: while this copy is open the parent's read blocks,
+            # which would make the launch handshake last as long as the run.
+            os.close(write_fd)
+            _redirect_detached_streams(stdout_path, stderr_path)
+            exit_code = child()
+        except BaseException:
+            traceback.print_exc()
+        finally:
+            with contextlib.suppress(BaseException):
+                sys.stdout.flush()
+                sys.stderr.flush()
+            os._exit(exit_code if isinstance(exit_code, int) else 1)
+
+    os.close(write_fd)
+    try:
+        reported = b""
+        while chunk := os.read(read_fd, 32):
+            reported += chunk
+    finally:
+        os.close(read_fd)
+    os.waitpid(middle_pid, 0)
+    if not reported.strip():
+        raise OSError("the detached supervision reported no pid before exiting")
+    return int(reported)
+
+
+def _supervision_log_dir(
+    args: argparse.Namespace, parsed: dict, supervision_id: str
+) -> Path:
+    """Return the directory a detached launch writes its result and stderr to."""
+    override = getattr(args, "supervision_log_dir", None)
+    if override:
+        # Absolute, because the handshake's paths are read by processes that do
+        # not share the launcher's working directory.
+        return Path(_expand_user_only(override)).resolve()
+    return (
+        _state.plan_state_dir(parsed["plan_dir"], parsed.get("state_dir"))
+        / SUPERVISION_LOG_DIR_NAME
+        / supervision_id
+    )
+
+
+def _launch_detached_supervision(
+    args: argparse.Namespace,
+    parsed: dict,
+    *,
+    supervision_id: str,
+    reply_text: str | None,
+    launcher: Callable[..., int],
+) -> dict:
+    """Fork the supervision away and return the parent's launch handshake.
+
+    The grandchild runs the same supervision path this process would have run
+    inline — liveness record, ``_termination_handlers``, ``supervision-end``
+    emitter and all — so nothing about the run's evidence depends on how it was
+    launched. Only two things are forced: output is JSON, because the result
+    lands in a file named ``result.json``, and the reply text is handed over in
+    memory, because the grandchild's stdin is ``/dev/null``.
+    """
+    log_dir = _supervision_log_dir(args, parsed, supervision_id)
+    result_path = log_dir / DETACH_RESULT_FILE_NAME
+    stderr_path = log_dir / DETACH_STDERR_FILE_NAME
+
+    child_args = argparse.Namespace(**vars(args))
+    child_args.detach = False
+    child_args.json = True
+    child_kwargs: dict[str, Any] = {}
+    if reply_text is not None:
+        child_kwargs["stdin"] = io.StringIO(reply_text)
+
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        pid = launcher(
+            lambda: _supervise_and_report(
+                child_args, supervision_id=supervision_id, **child_kwargs
+            ),
+            stdout_path=result_path,
+            stderr_path=stderr_path,
+        )
+    except OSError as exc:
+        return {
+            "ok": False,
+            "stage": LAUNCH_STAGE,
+            "reason": "detach-failed",
+            "error": f"{type(exc).__name__}: {exc}",
+            "supervision_id": supervision_id,
+            "plan_dir": parsed["plan_dir"],
+        }
+    return {
+        "ok": True,
+        "supervision_id": supervision_id,
+        "pid": pid,
+        "plan_dir": parsed["plan_dir"],
+        "result_path": str(result_path),
+        "stderr_path": str(stderr_path),
+    }
+
+
+def _supervise_and_report(
+    args: argparse.Namespace, *, supervision_id: str, **kwargs: Any
+) -> int:
+    """Supervise the requested run, write its result, and mark the end.
 
     Every exit path appends exactly one ``supervision-end`` mailbox record, so
     an agent blocked on ``asl outbox wait`` wakes when this process is done
@@ -4260,18 +4509,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     supervising a plan that an older helper is still exiting cannot mistake
     that helper's record for this one.
     """
-    parser = build_arg_parser()
-    args = parser.parse_args(argv)
-
-    # Every launch carries an identity even when the agent supplied none, so a
-    # terminal record without a matching id is always someone else's.
-    supervision_id = getattr(args, "supervision_id", None) or (
-        _mailbox.new_supervision_id()
-    )
     emitter = _SupervisionEndEmitter(supervision_id=supervision_id)
     try:
         with _termination_handlers():
-            result = run_autopilot(args)
+            result = run_autopilot(args, **kwargs)
             if isinstance(result, dict):
                 result["supervision_id"] = supervision_id
 
@@ -4306,6 +4547,72 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise
 
     return 0 if result.get("ok") else 1
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    launcher: Callable[..., int] = _launch_detached,
+    stdin=None,
+) -> int:
+    """CLI entry point for the autopilot helper.
+
+    Without ``--detach`` this supervises the run inline and returns its exit
+    code, which is what every caller before the detached launch form saw.
+
+    ``--detach`` keeps two steps in the foreground before forking, because both
+    are cheaper to get wrong later than to answer now: the command is parsed, so
+    an unusable command still fails synchronously with today's parse payload
+    and a nonzero exit rather than in a file nobody has read yet; and a
+    ``--reply-stdin`` reply is read to the end, because the grandchild's stdin
+    is ``/dev/null`` and a reply left unread would be lost with the launching
+    shell. An empty reply is likewise reported synchronously — it is a caller
+    error, not a run outcome. Once both hold, the supervision is forked away and
+    this process prints one JSON launch handshake and exits 0: the run's own
+    success or failure is reported only in ``result.json``, since there is
+    nothing left here to judge it by.
+
+    ``launcher`` and ``stdin`` are injectable so the suite can exercise the
+    launch contract without forking or a real stdin.
+    """
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    # Every launch carries an identity even when the agent supplied none, so a
+    # terminal record without a matching id is always someone else's.
+    supervision_id = getattr(args, "supervision_id", None) or (
+        _mailbox.new_supervision_id()
+    )
+    # The liveness record and the terminal record must name the same launch, so
+    # a generated id is put back on the namespace before supervision reads it.
+    args.supervision_id = supervision_id
+
+    supervise_kwargs: dict[str, Any] = {}
+    if getattr(args, "detach", False):
+        parsed = parse_command(args.command)
+        reply_text: str | None = None
+        if parsed.get("ok") and getattr(args, "reply_stdin", False):
+            source = sys.stdin if stdin is None else stdin
+            reply_text = source.read() if source is not None else ""
+        if parsed.get("ok") and (reply_text is None or reply_text.strip()):
+            handshake = _launch_detached_supervision(
+                args,
+                parsed,
+                supervision_id=supervision_id,
+                reply_text=reply_text,
+                launcher=launcher,
+            )
+            sys.stdout.write(f"{json.dumps(handshake)}\n")
+            sys.stdout.flush()
+            return 0 if handshake["ok"] else 1
+        if reply_text is not None:
+            # Already consumed, so the inline path below has to be handed the
+            # same text rather than a stdin that is now at EOF.
+            supervise_kwargs["stdin"] = io.StringIO(reply_text)
+
+    return _supervise_and_report(
+        args, supervision_id=supervision_id, **supervise_kwargs
+    )
 
 
 if __name__ == "__main__":

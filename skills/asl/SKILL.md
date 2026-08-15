@@ -101,11 +101,34 @@ already-active matching run, so two helper lifetimes can overlap and a mailbox
 sequence captured at launch cannot tell a still-alive older helper's later exit
 from this one's.
 
-Then run the helper with the user's exact command, passing the identity:
+Then launch the helper **detached**, with the user's exact command and that
+identity:
 
 ```text
-<skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --supervision-id <launch-identity> --json
+<skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --supervision-id <launch-identity> --json --detach
 ```
+
+`--detach` returns immediately. It prints one JSON launch handshake — `ok`,
+`supervision_id`, `pid`, `plan_dir`, `result_path`, `stderr_path` — and its exit
+code reports the **launch**, never the run: `0` once the fork succeeded, `1`
+with `stage: "launch"` and `reason: "detach-failed"` when it did not. The run's
+own verdict is only ever in the `result.json` at `result_path`, read in Step 4.
+The supervision it forked is reparented to init, so it outlives the tool call,
+the agent turn, and the harness session.
+
+Never append `&`. Never rely on the harness backgrounding the command. Never
+invent a redirect target or a `mktemp` directory — the helper owns where its
+output lands, and `--supervision-log-dir DIR` is the only way to move it. A
+foreground launch cannot work in this harness: a run lasts hours and a tool call
+is capped at 600 seconds. Backgrounding it yourself is worse than useless — a
+helper parented by a harness shell dies whenever that shell is reaped, at turn
+end, at session end, or at a harness restart, and it dies leaving stdout empty,
+which is indistinguishable from a healthy silent run.
+
+The handshake proves only that the fork returned. **The first
+`asl outbox supervise` call is the proof of launch.** If it answers
+`LOST reason=helper-never-started`, the launch failed: report that to the user
+and do not re-enter the loop.
 
 #### Output contract (binding)
 
@@ -144,7 +167,7 @@ asl outbox supervise <plan-dir> --supervision-id <launch-identity> [--state-dir 
   to this launch and keys the persisted cursor, so the command is reissued
   verbatim and no `--since` is ever threaded by hand. The cursor starts at 0, so
   questions that were already open before the launch stay visible.
-- Exactly one of three tokens is printed, always with exit code 0.
+- Exactly one of four tokens is printed, always with exit code 0.
 - `IDLE` means nothing actionable happened: print nothing and reissue the
   identical command.
 - `ACTION questions=<n>` carries `<n>` question records that no closure has
@@ -173,6 +196,29 @@ asl outbox supervise <plan-dir> --supervision-id <launch-identity> [--state-dir 
 - The terminal record is durable log content read through a sequence cursor, not
   a live notification, so a helper that already exited before the first call
   returns `DONE` on that call instead of after the full timeout.
+- `LOST reason=<reason>` means this launch's supervising helper is gone without
+  a terminal record. Stop the loop, run `asl status <plan-dir> --json`, and
+  surface to the user what died and whether the run itself is still alive.
+  **Never auto-relaunch** — neither the helper nor the run. Below the token sit
+  a one-sentence cause, a `Run evidence: lock ..., run_id ..., runner state
+  ..., sessions <complete>/<total> complete.` line, an `Active turn: ...` line,
+  and a `Next step:` line naming `asl status <plan-dir> --json`. Under `--json`
+  the same arrives as `state: "LOST"` plus `lost_reason` and a `run_evidence`
+  object (`lock_active`, `lock_pid`, `run_id`, `runner_state_fresh`,
+  `active_turn`, `sessions_complete`, `sessions_total`); both keys are `null`
+  under every other token.
+- The two reasons call for different things. `helper-exited-without-record`
+  means the helper recorded a process identity and that process is now gone; if
+  the evidence shows an active lock, the `asl run` child is still working and
+  only supervision died. `helper-never-started` is reported only when no run is
+  holding the plan at all, so nothing is running and the launch itself failed —
+  it is what `&`, a reaped harness shell, or an unwritable log directory looks
+  like from here. It waits out a 120-second grace window first, so a slow start
+  is never called dead.
+- `LOST` never preempts `DONE` or `ACTION`: a wake carrying either outranks it,
+  so a helper that finished is always reported as finished. A run started as a
+  plain `asl run` with no helper writes no process identity and stays `IDLE`,
+  because its lock proves it is alive.
 - Absence of `DONE` is **not** proof that the helper is alive: `--no-mailbox`,
   SIGKILL, and a machine crash leave nothing behind. Keep both fallbacks — the
   bounded stdout tail below, and the loop itself as the backstop.
@@ -196,6 +242,8 @@ between two observations. Tailing the helper's background output is the fallback
 for when the mailbox is unavailable, or when no terminal record can ever arrive
 (`--no-mailbox`, SIGKILL, machine crash) — not the primary path; when relying on
 it, poll at least every 30 seconds until the helper reaches a terminal result.
+Under the detached launch that output is the handshake's `stderr_path` file, so
+tail that path rather than a backgrounded job.
 
 `outbox supervise` filters its batch to questions no closure has answered, but a
 question can still finish between the wake and the reply. Before replying to any
@@ -440,8 +488,11 @@ on stdin. The helper launches `asl run --reply-stdin`; the reply never appears
 in argv:
 
 ```text
-printf '%s' '<reply text>' | <skill-dir>/scripts/asl-autopilot.py --command '<same exact command>' --supervision-id <new-launch-identity> --json --reply-stdin
+printf '%s' '<reply text>' | <skill-dir>/scripts/asl-autopilot.py --command '<same exact command>' --supervision-id <new-launch-identity> --json --reply-stdin --detach
 ```
+
+The detached parent reads that reply to the end before forking, so it reaches
+the run even though the forked supervision's own stdin is `/dev/null`.
 
 Every helper launch is its own supervision: mint a fresh launch identity for it
 and use that identity in the wait loop that follows, so the previous launch's
@@ -481,7 +532,7 @@ A `quota-exhausted` pause is fail-closed by default — the helper stops
 provider's reset instead:
 
 ```text
-<skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --supervision-id <launch-identity> --json --wait-quota-reset
+<skill-dir>/scripts/asl-autopilot.py --command '<exact asl run command>' --supervision-id <launch-identity> --json --detach --wait-quota-reset
 ```
 
 It waits only when every guard passes: the pause is `quota-exhausted`, the
@@ -570,6 +621,12 @@ repository or treat a mutation from the read-only review harness as a finding.
 
 ### Step 4: Report
 
+The detached helper's structured result is the `result.json` at the handshake's
+`result_path`, not this turn's stdout; `stderr_path` holds the progress
+heartbeats. Read `result_path` once `DONE` ends the loop, and fall back to
+`asl status <plan-dir> --json` when the outcome was `error` and that file may be
+truncated or absent.
+
 Summarize the outcome: which run was supervised, whether it completed or paused,
 and any blocker that needs the user's attention.
 
@@ -647,10 +704,15 @@ could be configured, launched, retried, or disposed of.
   combined review, and recovery: use the bound workspace root, retain ordered
   repository aliases and qualified paths, never rebind automatically, and
   preserve partial commit SHAs.
-- `asl outbox supervise` is the supervision loop and the only thing polled;
-  tailing the helper's background output is the fallback for when the mailbox is
-  unavailable. `asl outbox wait` remains the general-purpose reader, including
-  for notices after the fact.
+- The helper is always launched with `--detach`, so its lifetime never depends
+  on the harness shell that started it, and its result is a file rather than
+  this turn's stdout.
+- `asl outbox supervise` is the supervision loop and the only thing polled; it
+  prints one of four tokens, and `LOST` ends the loop the way `DONE` does —
+  reported to the user with `asl status <plan-dir> --json` evidence, never
+  auto-relaunched. Tailing the helper's background output is the fallback for
+  when the mailbox is unavailable. `asl outbox wait` remains the
+  general-purpose reader, including for notices after the fact.
 - Keep the mailbox discipline on both axes of Step 2's closure rule, which is
   the single statement of it: continue only plainly nonblocking messages, reply
   only from clearly defensible plan/repository/artifact facts *and* only when
@@ -662,7 +724,10 @@ could be configured, launched, retried, or disposed of.
   assigned models are **reversibility (type-1 / type-2 doors)** and **circle of
   competence** — the two axes of the closure rule above — plus **absence of
   evidence**, the rule that a missing `DONE` record is not proof the helper is
-  alive.
+  alive. Its operating rule: any claim about run health — including answering
+  "is it still working?" — must cite a fresh `asl outbox supervise` token or a
+  fresh `asl status <plan-dir> --json`, never the absence of output. Silence is
+  what a healthy run and a run that never started look like alike.
 - Mailbox failure is fail-open for supervision: continue owning the child and
   let the runner use the ordinary pause/resume flow. Never invent a mailbox
   reply, truncate the append-only log, delete a lease, or add Workbench

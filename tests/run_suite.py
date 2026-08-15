@@ -70,6 +70,7 @@ FAST_MODULES = (
     "tests.test_asl_run_contention",
     "tests.test_asl_state_migration",
     "tests.test_asl_process_tree",
+    "tests.test_asl_supervision_liveness",
     "tests.test_asl_retention",
     "tests.test_skill_sync",
 )

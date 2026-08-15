@@ -24,7 +24,10 @@ from . import (
     events,
     mailbox,
     mailbox_rendering,
+    plans,
     responses,
+    state,
+    supervision_liveness,
 )
 
 COMMAND_INBOX_GUIDANCE = "inbox-guidance"
@@ -51,6 +54,14 @@ OUTBOX_INCLUDE_SUPERVISION = "supervision"
 SUPERVISE_TOKEN_IDLE = "IDLE"
 SUPERVISE_TOKEN_ACTION = "ACTION"
 SUPERVISE_TOKEN_DONE = "DONE"
+SUPERVISE_TOKEN_LOST = "LOST"
+
+SUPERVISE_LOST_HELPER_EXITED = "helper-exited-without-record"
+SUPERVISE_LOST_HELPER_NEVER_STARTED = "helper-never-started"
+# Only the launch race: a helper stamps its liveness record about a second in,
+# so this is the window in which a missing record is not yet evidence of
+# anything. A probe-confirmed death never waits it out.
+SUPERVISE_LIVENESS_GRACE_SECONDS = 120.0
 
 DEFAULT_ASK_WAIT_TIMEOUT_SECONDS = 90.0
 DEFAULT_OUTBOX_WAIT_TIMEOUT_SECONDS = 300.0
@@ -94,6 +105,7 @@ class _OutboxWaitResult:
     timed_out: bool
     lease_supervision: _LeaseSupervision
     mailbox_view: mailbox.MailboxView | None = None
+    lost_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -446,6 +458,149 @@ def _outbox_supervision_end_text_lines(
         max_bytes=mailbox_rendering.MAX_RENDERED_NOTICE_BYTES,
     )
     return list(bounded.lines)
+
+
+def _supervision_run_evidence(
+    plan_dir: str | Path,
+    state_dir: str | Path | None,
+) -> dict[str, Any] | None:
+    """Return what the plan's own state says about a live run, or None.
+
+    None means the question could not be answered, never that no run exists:
+    a status read that fails must not be allowed to manufacture a death.
+    """
+    try:
+        status = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+    except Exception:  # noqa: BLE001 - unreadable status is unprovable, not dead
+        return None
+    lock = status.get("lock")
+    lock = lock if isinstance(lock, dict) else {}
+    runner_state = status.get("runner_state")
+    runner_state = runner_state if isinstance(runner_state, dict) else {}
+    counts = status.get("counts")
+    counts = counts if isinstance(counts, dict) else {}
+    active_turn = status.get("active_turn")
+    return {
+        "lock_active": bool(lock.get("active")),
+        "lock_pid": lock.get("pid"),
+        "run_id": runner_state.get("run_id"),
+        "runner_state_fresh": bool(
+            runner_state.get("present")
+            and not runner_state.get("error")
+            and not runner_state.get("run_finished_at")
+            and not runner_state.get("stale_unfinished")
+        ),
+        "active_turn": (
+            {
+                "session_id": active_turn.get("session_id"),
+                "idle_seconds": active_turn.get("idle_seconds"),
+            }
+            if isinstance(active_turn, dict)
+            else None
+        ),
+        "sessions_complete": counts.get("complete", 0),
+        "sessions_total": sum(
+            value for value in counts.values() if isinstance(value, int)
+        ),
+    }
+
+
+def _run_evidence_is_live(evidence: dict[str, Any] | None) -> bool:
+    if evidence is None:
+        return True
+    return bool(evidence["lock_active"] or evidence["runner_state_fresh"])
+
+
+def _outbox_lost_text_lines(
+    plan_dir: str | Path,
+    reason: str,
+    evidence: dict[str, Any] | None,
+) -> list[str]:
+    """Render a dead supervision with the run evidence that decides what to do.
+
+    A helper killed under a live run needs a relaunched supervision; a helper
+    that never started under no run needs the whole launch redone. The lock and
+    session counts are what separate the two.
+    """
+    lines = [
+        {
+            SUPERVISE_LOST_HELPER_EXITED: (
+                "The supervising helper for this launch recorded its process "
+                "identity and that process is gone; it never wrote a "
+                "supervision end record."
+            ),
+            SUPERVISE_LOST_HELPER_NEVER_STARTED: (
+                "The supervising helper for this launch never recorded a "
+                "process identity, and no run is holding this plan."
+            ),
+        }[reason]
+    ]
+    if evidence is None:
+        lines.append("Run evidence: unavailable; the plan status could not be read.")
+    else:
+        active_turn = evidence["active_turn"]
+        lock = (
+            f"active (pid {evidence['lock_pid']})"
+            if evidence["lock_active"]
+            else "not active"
+        )
+        runner_state = (
+            "fresh" if evidence["runner_state_fresh"] else "absent or finished"
+        )
+        lines.extend(
+            (
+                f"Run evidence: lock {lock}, "
+                f"run_id {evidence['run_id'] or 'none'}, "
+                f"runner state {runner_state}, "
+                f"sessions {evidence['sessions_complete']}/"
+                f"{evidence['sessions_total']} complete.",
+                "Active turn: none."
+                if active_turn is None
+                else (
+                    f"Active turn: session {active_turn['session_id']}, "
+                    f"idle {active_turn['idle_seconds']}s."
+                ),
+            )
+        )
+    lines.append(f"Next step: read `asl status {plan_dir} --json`.")
+    return lines
+
+
+def _supervision_liveness_probe(
+    plan_dir: str | Path,
+    state_dir: str | Path | None,
+    supervision_id: str,
+    *,
+    first_seen_at: datetime,
+) -> Callable[[], str | None]:
+    """Build the check that decides whether this launch's helper is gone.
+
+    Two questions, in the only order that is safe. A record that exists is
+    authoritative the moment ``ps`` disowns its process, so that verdict never
+    waits out the grace window. A record that does not exist proves nothing on
+    its own — a plain ``asl run`` supervised without the helper writes none —
+    so it becomes a death only once the grace window has passed and the plan's
+    own state shows no run holding it either.
+    """
+
+    def probe() -> str | None:
+        record = supervision_liveness.read_record(
+            plan_dir,
+            supervision_id,
+            state_dir=state_dir,
+        )
+        if record is not None:
+            if supervision_liveness.probe(record) == supervision_liveness.DEAD:
+                return SUPERVISE_LOST_HELPER_EXITED
+            return None
+        elapsed = (datetime.now(UTC) - first_seen_at).total_seconds()
+        if elapsed < SUPERVISE_LIVENESS_GRACE_SECONDS:
+            return None
+        if _run_evidence_is_live(_supervision_run_evidence(plan_dir, state_dir)):
+            return None
+        return SUPERVISE_LOST_HELPER_NEVER_STARTED
+
+    return probe
 
 
 def _mailbox_error_details(error: mailbox.MailboxError) -> dict[str, Any]:
@@ -2082,10 +2237,15 @@ def _wait_for_questions(
     timeout: float,
     supervisor_id: str,
     include: str = OUTBOX_INCLUDE_QUESTIONS,
+    liveness_probe: Callable[[], str | None] | None = None,
 ) -> _OutboxWaitResult:
     started = time.monotonic()
     deadline = started + timeout
     next_lease_at = started + LEASE_RENEW_INTERVAL_SECONDS
+    # The probe forks `ps`, so it rides the lease-renewal interval rather than
+    # the mailbox poll. It starts due, because a short wait that never reaches
+    # the first renewal must still be able to report a helper that is gone.
+    next_probe_at = started
     mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
     last_successful_view: mailbox.MailboxView | None = None
     last_read_error: mailbox.MailboxError | None = None
@@ -2166,6 +2326,34 @@ def _wait_for_questions(
                     )
 
         now = time.monotonic()
+        # After the mailbox read, so a woken record always outranks a lost
+        # helper: the reader above has already returned anything selected.
+        if liveness_probe is not None and now >= next_probe_at:
+            lost_reason = liveness_probe()
+            next_probe_at = now + LEASE_RENEW_INTERVAL_SECONDS
+            if lost_reason is not None:
+                return _OutboxWaitResult(
+                    questions=(),
+                    notices=(),
+                    supervision_ends=(),
+                    include=include,
+                    supervisor_id=landed_supervisor_id,
+                    next_since=max(
+                        since,
+                        0
+                        if last_successful_view is None
+                        else last_successful_view.last_seq,
+                    ),
+                    timed_out=False,
+                    lease_supervision=_LeaseSupervision(
+                        degraded=lease_degraded,
+                        renewal_failures=lease_renewal_failures,
+                        renewal_recoveries=lease_renewal_recoveries,
+                    ),
+                    mailbox_view=last_successful_view,
+                    lost_reason=lost_reason,
+                )
+
         if now >= deadline:
             if last_successful_view is None and last_read_error is not None:
                 raise last_read_error
@@ -2416,7 +2604,30 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
         supervision_id,
         state_dir=args.state_dir,
     )
+    first_seen_at = mailbox.read_supervision_first_seen_at(
+        plan_dir,
+        supervision_id,
+        state_dir=args.state_dir,
+    )
+    if first_seen_at is None:
+        # Anchor the grace window before the first wait rather than after it:
+        # a poll that dies mid-wait would otherwise restart the window and let
+        # a mis-launch stay invisible for as long as polling continues.
+        first_seen_at = datetime.now(UTC)
+        mailbox.write_supervision_cursor(
+            plan_dir,
+            supervision_id,
+            since,
+            state_dir=args.state_dir,
+            first_seen_at=first_seen_at,
+        )
     supervisor_id = str(uuid.uuid4())
+    liveness_probe = _supervision_liveness_probe(
+        plan_dir,
+        args.state_dir,
+        supervision_id,
+        first_seen_at=first_seen_at,
+    )
     cursor = since
     deadline = time.monotonic() + timeout
     renewal_failures = 0
@@ -2431,6 +2642,7 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
                 timeout=max(0.0, deadline - time.monotonic()),
                 supervisor_id=supervisor_id,
                 include=OUTBOX_INCLUDE_SUPERVISION,
+                liveness_probe=liveness_probe,
             )
         except mailbox.MailboxError as error:
             _print_mailbox_error(
@@ -2449,6 +2661,7 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
             supervision_id,
             cursor,
             state_dir=args.state_dir,
+            first_seen_at=first_seen_at,
         )
         _notify_agent_mux_mailbox_question(
             context,
@@ -2462,9 +2675,12 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
         open_questions = _open_questions_in(wait_result)
         if own_supervision_ends or open_questions:
             break
+        if wait_result.lost_reason is not None:
+            break
         if time.monotonic() >= deadline:
             break
 
+    run_evidence: dict[str, Any] | None = None
     if own_supervision_ends:
         terminal = own_supervision_ends[-1]
         state_token = SUPERVISE_TOKEN_DONE
@@ -2477,6 +2693,15 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
         state_token = SUPERVISE_TOKEN_ACTION
         token = f"{SUPERVISE_TOKEN_ACTION} questions={len(open_questions)}"
         text_lines = _outbox_question_text_lines(open_questions)
+    elif wait_result.lost_reason is not None:
+        state_token = SUPERVISE_TOKEN_LOST
+        token = f"{SUPERVISE_TOKEN_LOST} reason={wait_result.lost_reason}"
+        run_evidence = _supervision_run_evidence(plan_dir, args.state_dir)
+        text_lines = _outbox_lost_text_lines(
+            plan_dir,
+            wait_result.lost_reason,
+            run_evidence,
+        )
     else:
         state_token = SUPERVISE_TOKEN_IDLE
         token = SUPERVISE_TOKEN_IDLE
@@ -2509,6 +2734,8 @@ def outbox_supervise_from_args(args: argparse.Namespace) -> int:
         ],
         supervision_ended=bool(own_supervision_ends),
         supervision_id=supervision_id,
+        lost_reason=wait_result.lost_reason,
+        run_evidence=run_evidence,
         lease_supervision=_LeaseSupervision(
             degraded=lease_degraded,
             renewal_failures=renewal_failures,

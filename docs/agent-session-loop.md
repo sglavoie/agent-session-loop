@@ -741,10 +741,23 @@ The eight mailbox commands share normal plan-reference, `--state-dir`, and
   never reach stdout, so the cursor still advances past them. Text output is
   exactly one token, always with exit code 0: `IDLE` when the deadline passed
   with nothing actionable, `ACTION questions=<n>` with the framed open
-  questions, or `DONE outcome=<outcome> seq=<n>` with this launch's own
-  terminal record framed below it. `--json` returns the ordinary wait payload
-  plus `state`, `cursor_path`, and `since`. `asl outbox wait` is unchanged and
-  remains the general-purpose reader.
+  questions, `DONE outcome=<outcome> seq=<n>` with this launch's own
+  terminal record framed below it, or `LOST reason=<reason>` when this launch's
+  supervising helper is gone. `LOST` is decided by probing the `(pid, process
+  birth time)` identity the Autopilot helper records before starting its child:
+  a recorded identity whose process has died is
+  `helper-exited-without-record`, while a launch that recorded no identity is
+  `helper-never-started` only after a 120-second grace window and only when no
+  lock or fresh runner state shows a run holding the plan, so a plain
+  `asl run` supervised without the helper stays `IDLE`. A question or terminal
+  record on the same pass always outranks it. The framed text names the cause,
+  the run evidence (lock, `run_id`, runner state freshness, session counts),
+  the active turn, and `asl status` as the next step. `--json` returns the
+  ordinary wait payload plus `state`, `cursor_path`, and `since`, plus
+  `lost_reason` and a `run_evidence` object (`lock_active`, `lock_pid`,
+  `run_id`, `runner_state_fresh`, `active_turn`, `sessions_complete`,
+  `sessions_total`) that are `null` under the other three tokens.
+  `asl outbox wait` is unchanged and remains the general-purpose reader.
 
 In text mode, `asl inbox read`, `asl ask`, and `asl outbox wait` retain their
 human-readable record headers and command trailers but render each message as
