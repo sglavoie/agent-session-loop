@@ -35,6 +35,7 @@ _CONTROL_DEFAULT_ABORT_GRACE_SECONDS = 120  # control_queue.DEFAULT_ABORT_GRACE_
 _CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS = (
     60.0  # control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS
 )
+_INTERRUPTED_EXIT = 130  # runner.INTERRUPTED_EXIT
 
 
 _WORKBENCH_SERVE_CHILD_DESTS = {
@@ -1927,4 +1928,7 @@ def resolve_handler(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser(prog=Path(sys.argv[0]).name)
     args = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
-    return resolve_handler(args)(args)
+    try:
+        return resolve_handler(args)(args)
+    except KeyboardInterrupt:
+        return _INTERRUPTED_EXIT

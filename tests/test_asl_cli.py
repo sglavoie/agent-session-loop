@@ -1070,6 +1070,14 @@ class CommandAndConfigTests(unittest.TestCase):
             control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS,
             cli._CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS,
         )
+        self.assertEqual(runner.INTERRUPTED_EXIT, cli._INTERRUPTED_EXIT)
+
+    def test_main_returns_interrupted_exit_on_keyboard_interrupt(self) -> None:
+        def interrupted(_args: argparse.Namespace) -> int:
+            raise KeyboardInterrupt
+
+        with mock.patch.object(cli, "resolve_handler", return_value=interrupted):
+            self.assertEqual(130, cli.main(["tail", "/tmp/plan"]))
 
     def test_control_wait_flags_are_available_on_every_subcommand(self) -> None:
         parser = cli.build_parser()
