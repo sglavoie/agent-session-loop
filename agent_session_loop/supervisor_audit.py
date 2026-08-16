@@ -1590,6 +1590,8 @@ def _scopes_section(
         return {"available": False, "reason": REASON_NOT_RECORDED}
     sessions: list[dict[str, Any]] = []
     for path in sorted(plan_dir.glob("session-*.md")):
+        if plans.SESSION_EXPANSION_FILE_RE.fullmatch(path.name):
+            continue
         entry: dict[str, Any] = {"session": path.stem}
         try:
             text = path.read_text(encoding="utf-8")

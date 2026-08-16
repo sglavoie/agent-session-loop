@@ -316,6 +316,7 @@ class HarnessResult:
     aborted: bool = False
     interrupted: bool = False
     process_sweep: dict[str, Any] | None = None
+    observed_model: str | None = None
 
 
 class _OutputProcessor:
@@ -330,6 +331,16 @@ class _OutputProcessor:
         result-based detection for their harnesses.
         """
         return False
+
+    @property
+    def observed_model(self) -> str | None:
+        """The model the harness reported it actually executed with.
+
+        Only the claude stream-json processor can report one; processors that
+        do not parse structured output never do, which correctly leaves the
+        observed model unknown for their harnesses.
+        """
+        return None
 
     def process_chunk(self, stream_name: StreamName, text: str) -> str:
         del stream_name
@@ -355,10 +366,21 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
         self._assistant_messages: list[str] = []
         self._final_result: str | None = None
         self._final_result_seen = False
+        self._observed_model: str | None = None
 
     @property
     def final_result_seen(self) -> bool:
         return self._final_result_seen
+
+    @property
+    def observed_model(self) -> str | None:
+        return self._observed_model
+
+    def _note_observed_model(self, model: object) -> None:
+        # First wins: a resumed session's later records can name a different
+        # model than the one this turn started under.
+        if self._observed_model is None and isinstance(model, str) and model:
+            self._observed_model = model
 
     def process_chunk(self, stream_name: StreamName, text: str) -> str:
         if stream_name != "stdout":
@@ -432,6 +454,7 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
             parts = ["claude init"]
             model = record.get("model")
             if model:
+                self._note_observed_model(model)
                 parts.append(f"model {model}")
             session_id = record.get("session_id")
             if session_id:
@@ -447,6 +470,7 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
         if event_type == "message_start":
             message = event.get("message")
             if isinstance(message, dict) and message.get("model"):
+                self._note_observed_model(message["model"])
                 return [f"claude response: model {message['model']}"]
             return ["claude response started"]
         if event_type == "content_block_start":
@@ -645,6 +669,7 @@ class HarnessAdapter:
         effort: str | None = None,
         on_spawn: Callable[[int], None] | None = None,
         on_final_result: Callable[[], None] | None = None,
+        on_observed_model: Callable[[str], None] | None = None,
         access: AccessProfile = WORKER_ACCESS,
         abort: AbortSignal | None = None,
     ) -> HarnessResult:
@@ -689,6 +714,7 @@ class HarnessAdapter:
         reader_errors: list[BaseException] = []
         output_processor = self.output_processor()
         final_result_fired = threading.Event()
+        observed_model_fired = threading.Event()
         # Quiescence guard for abandoned readers: a reader that outlives the
         # bounded join still holds the stream callback, hooks, and output
         # state, so a late write from a pipe-holding descendant could fire
@@ -729,6 +755,16 @@ class HarnessAdapter:
                             final_result_fired.set()
                             with contextlib.suppress(Exception):
                                 on_final_result()
+                        if (
+                            stream_name == "stdout"
+                            and on_observed_model is not None
+                            and not observed_model_fired.is_set()
+                        ):
+                            observed = output_processor.observed_model
+                            if observed is not None:
+                                observed_model_fired.set()
+                                with contextlib.suppress(Exception):
+                                    on_observed_model(observed)
                         if not processed_chunk:
                             continue
                         chunks.append(processed_chunk)
@@ -809,6 +845,7 @@ class HarnessAdapter:
                 ),
                 interrupted=True,
                 process_sweep=interrupt_sweep,
+                observed_model=output_processor.observed_model,
             )
 
         if reader_errors:
@@ -832,6 +869,7 @@ class HarnessAdapter:
                 ),
                 aborted=True,
                 process_sweep=process_sweep,
+                observed_model=output_processor.observed_model,
             )
         if timed_out:
             return HarnessResult(
@@ -847,6 +885,7 @@ class HarnessAdapter:
                 ),
                 timed_out=True,
                 process_sweep=process_sweep,
+                observed_model=output_processor.observed_model,
             )
 
         interrupted = process.returncode == -signal.SIGINT
@@ -863,6 +902,7 @@ class HarnessAdapter:
             ),
             interrupted=interrupted,
             process_sweep=process_sweep,
+            observed_model=output_processor.observed_model,
         )
 
 
@@ -1073,6 +1113,7 @@ def run_harness(
     effort: str | None = None,
     on_spawn: Callable[[int], None] | None = None,
     on_final_result: Callable[[], None] | None = None,
+    on_observed_model: Callable[[str], None] | None = None,
     access: AccessProfile = WORKER_ACCESS,
     abort: AbortSignal | None = None,
 ) -> HarnessResult:
@@ -1089,6 +1130,7 @@ def run_harness(
         effort=effort,
         on_spawn=on_spawn,
         on_final_result=on_final_result,
+        on_observed_model=on_observed_model,
         access=access,
         abort=abort,
     )

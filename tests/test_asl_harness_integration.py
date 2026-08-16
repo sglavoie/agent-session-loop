@@ -5819,6 +5819,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         )
         spawn_pids: list[int] = []
         fired: list[int] = []
+        observed: list[str] = []
 
         with patched_env(XDG_CONFIG_HOME=str(config_home)):
             result = harnesses.run_harness(
@@ -5828,6 +5829,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
                 prompt="/session-run plan/",
                 on_spawn=spawn_pids.append,
                 on_final_result=lambda: fired.append(1),
+                on_observed_model=observed.append,
             )
 
         self.assertEqual(0, result.returncode, result.stderr)
@@ -5835,6 +5837,10 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         # Two stdout reads follow the result record; a second fire would have
         # landed there if the Event guard did not hold.
         self.assertEqual(1, len(fired))
+        # The init record names the model the harness actually ran, and the
+        # same Event guard keeps a later record from firing the hook again.
+        self.assertEqual(["claude-test"], observed)
+        self.assertEqual("claude-test", result.observed_model)
         self.assertIn("claude result: success", result.stdout)
         self.assertIn("claude status: late", result.stdout)
 

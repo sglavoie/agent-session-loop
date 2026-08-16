@@ -23,6 +23,9 @@ MODEL_SOURCE_CODEX_CONFIG = "codex_config"
 MODEL_SOURCE_COPILOT_SETTINGS = "copilot_settings"
 MODEL_SOURCE_CONTROL = "control"
 MODEL_SOURCE_SPARK = "spark"
+# Observed, never selected: the harness names the model it actually ran, so
+# this source never appears in `selected_model_payload`.
+MODEL_SOURCE_HARNESS_REPORTED = "harness_reported"
 EFFORT_SOURCE_FLAG = "flag"
 EFFORT_SOURCE_CONTROL = "control"
 

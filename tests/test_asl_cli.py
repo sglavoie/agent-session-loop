@@ -304,6 +304,7 @@ class CommandAndConfigTests(unittest.TestCase):
             "claude init; model claude-test; session session-1",
             result.stdout,
         )
+        self.assertEqual("claude-test", result.observed_model)
         self.assertIn("claude status: requesting", result.stdout)
         self.assertIn("claude response: model claude-test", result.stdout)
         self.assertIn("claude text: Runner status: complete", result.stdout)

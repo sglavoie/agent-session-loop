@@ -3039,6 +3039,16 @@ switched harness uses its native or configured default rather than inheriting
 and review turns, including later harness switches. `doctor --harness-model`
 checks the selected harness/model pairing without adding a review role.
 
+`model` and `model_source` report what was *requested*. Claude's stream also
+names the model it actually ran, in the `system`/`init` record and again in each
+`message_start`, and the adapter carries the first such name through to the turn
+payload and `state.json` as `observed_model` with `observed_model_source:
+harness_reported`. The requested and observed values sit side by side rather than
+overwriting each other, so an alias or a server-side substitution is visible
+instead of silently reported as the request. Harnesses that name no model leave
+both fields `null`. `observed_model_source` is observed, never selected, so it
+never appears as a `model_source`.
+
 ## Safety Modes
 
 By default, `run` and `doctor` use harness-specific bypass modes for every
@@ -3445,7 +3455,8 @@ error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `run --json` preserves its existing fields and adds the common `command` and
 `details` fields; important run fields include `paused`, `reason`,
 `pause_reason`, `pause_details`, `harness`, `harness_config`, `model`,
-`model_source`, `effort`, `effort_source`, `commit_mode`, `note`, `commits`,
+`model_source`, `observed_model`, `observed_model_source`, `effort`,
+`effort_source`, `commit_mode`, `note`, `commits`,
 `control`, `no_mailbox`, `mailbox_enabled`, `mailbox_activation`,
 `completed_sessions`, `completed_session_ids`, `turns`, `initial_snapshot`,
 `final_snapshot`, `state_path`, and `events_path`. Runs without commit flags

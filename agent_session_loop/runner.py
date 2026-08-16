@@ -3805,6 +3805,16 @@ def _turn_status_result(
     return "unknown"
 
 
+def _observed_model_payload(observed_model: str | None) -> dict[str, str | None]:
+    """The model the harness reported executing, beside the requested one."""
+    return {
+        "observed_model": observed_model,
+        "observed_model_source": (
+            None if observed_model is None else config.MODEL_SOURCE_HARNESS_REPORTED
+        ),
+    }
+
+
 def _write_turn_artifacts(
     *,
     paths: dict[str, Path],
@@ -3849,6 +3859,9 @@ def _write_turn_artifacts(
         "harness": result.name,
         "model": live_turn.get("model"),
         "model_source": live_turn.get("model_source"),
+        **_observed_model_payload(
+            result.observed_model or live_turn.get("observed_model")
+        ),
         "effort": live_turn.get("effort"),
         "effort_source": live_turn.get("effort_source"),
         "spark_route": live_turn.get("spark_route"),
@@ -6831,7 +6844,9 @@ class _HangSentinel:
             if tree is not None:
                 cpu_progress = {
                     "harness_pid": pid,
-                    "progressing": cpu_positive,
+                    # The first successful sample has no predecessor to compare
+                    # against, so progress is unknown rather than absent.
+                    "progressing": cpu_positive if cpu_delta is not None else None,
                     "cpu_delta_seconds": cpu_delta,
                     "cpu_total_seconds": cpu_total,
                     "tracked_processes": len(self._cpu_high_water),
@@ -6974,6 +6989,19 @@ class _LiveTurn:
 
     def note_final_result(self) -> None:
         self._hang_sentinel.note_final_result()
+
+    def note_observed_model(self, model: str) -> None:
+        with self._lock:
+            if self._active_turn.get("observed_model") is not None:
+                return
+            self._active_turn["observed_model"] = model
+            self._active_turn["observed_model_source"] = (
+                config.MODEL_SOURCE_HARNESS_REPORTED
+            )
+            snapshot = dict(self._active_turn)
+            with self._persistence.lock:
+                self._payload["active_turn"] = snapshot
+                self._persistence.write_state(self._payload)
 
     def record_activity(self, stream_name: harnesses.StreamName, text: str) -> None:
         signal_to_report: dict[str, Any] | None = None
@@ -10626,7 +10654,7 @@ def _advance_review_cycle(
             disposition=REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY,
         )
         with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
+            payload["final_snapshot"] = _snapshot_payload(materialized)
         _pause_run(
             event_path,
             payload,
@@ -12705,6 +12733,7 @@ def _initial_payload(
         harness=args.harness,
         spark=spark,
         **model_effort,
+        **_observed_model_payload(None),
         state_dir=str(state_dir),
         run_dir=str(run_dir),
         event_path=str(event_path),
@@ -14631,6 +14660,8 @@ def _run_locked(
                 "harness": turn_harness,
                 "model": turn_model_effort["model"],
                 "model_source": turn_model_effort["model_source"],
+                "observed_model": None,
+                "observed_model_source": None,
                 "effort": turn_model_effort["effort"],
                 "effort_source": turn_model_effort["effort_source"],
                 "spark_route": spark_route,
@@ -15041,6 +15072,7 @@ def _run_locked(
                     effort=requested_effort,
                     on_spawn=live_turn.note_harness_pid,
                     on_final_result=live_turn.note_final_result,
+                    on_observed_model=live_turn.note_observed_model,
                     abort=abort_signal,
                 )
             except KeyboardInterrupt:
@@ -15116,6 +15148,12 @@ def _run_locked(
             # replaces this record with the published one.
             with persistence.lock:
                 payload["turns"].append(turn_payload)
+                # A harness that reports no model leaves the last observation
+                # standing rather than erasing it.
+                if turn_payload.get("observed_model") is not None:
+                    payload.update(
+                        _observed_model_payload(turn_payload["observed_model"])
+                    )
                 _append_process_sweep_event(
                     event_path=event_path,
                     persistence=persistence,
