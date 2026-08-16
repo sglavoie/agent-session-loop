@@ -298,6 +298,7 @@ USER_REQUIRED_HARNESS_FAILURE_REASONS = (
     _pause_policy.USER_REQUIRED_HARNESS_FAILURE_REASONS
 )
 TRANSPORT_RETRY_DELAYS_SECONDS = _pause_policy.TRANSPORT_RETRY_DELAYS_SECONDS
+USER_ACTION_REPLY = _pause_policy.USER_ACTION_REPLY
 classify_pause = _pause_policy.classify_pause
 
 # Default automatic repair/rereview cycle cap, mirroring
@@ -3754,7 +3755,12 @@ def supervise_run(
             # useful Q&A context (quota/session-limit, auth, invalid-model):
             # surface immediately as `user_required` with any reset info, never
             # retry, and let run_autopilot skip `asl questions` for them.
-            if policy.get("requires_user"):
+            # `requires_user` now covers every pause a machine cannot retry, so
+            # the fast path narrows to the ones no reply can clear. A v1 block
+            # carries no `user_action` and keeps its original behaviour.
+            if policy.get("requires_user") and policy.get("user_action") != (
+                USER_ACTION_REPLY
+            ):
                 # Opt-in quota auto-resume sits here rather than in
                 # `pause_policy`, which keeps quota fail-closed for every other
                 # consumer. Waiting reuses the main loop's relaunch machinery
@@ -3857,7 +3863,13 @@ def supervise_run(
                     "classification": classification,
                 },
             )
-        if run_payload.get("ok") is False:
+        # Unresolved review findings are a completed run with an unclean
+        # verdict, not a blocked one. The loop re-polls and the caller's
+        # `_attach_review_context` re-tags the result `review_findings`, which
+        # carries the severity counts a bare `blocked` would throw away.
+        if run_payload.get("ok") is False and (
+            run_payload.get("reason") != _runner.REVIEW_FINDINGS_UNRESOLVED_REASON
+        ):
             return run_result(
                 False,
                 "blocked",

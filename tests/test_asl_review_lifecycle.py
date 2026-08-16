@@ -1530,7 +1530,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertTrue(payload["review_completed"])
         self.assertEqual(
             {
@@ -1541,6 +1541,10 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             },
             payload["review_verdict"],
         )
+        # The findings the run could not close keep it from claiming success.
+        self.assertFalse(payload["ok"])
+        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
+        self.assertEqual(5, payload["action_required"]["unresolved_findings"])
 
     def _setup_complete_plan_with_pending_review(self) -> plans.SessionFile:
         """Author a complete plan carrying a pending generated review session."""
@@ -1906,14 +1910,14 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("terminal", payload["review_resume"]["action"])
         self.assertEqual([], payload["turns"])
 
-    def test_stop_after_current_keeps_a_capped_plan_all_complete(self) -> None:
+    def test_stop_after_current_reports_a_capped_plan_unresolved(self) -> None:
         self._write_reviewed_plan([_structured_review_finding()])
         self._queue_stop_after_current()
 
         completed, payload = self._run(review_harness="claude", max_review_fix_cycles=0)
 
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
         self.assertEqual("higher-cap-required", payload["review_resume"]["blocker"])
         self.assertEqual([], payload["turns"])
         self.assertFalse((self.plan_dir / "session-2.1.md").is_file())

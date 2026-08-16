@@ -4398,8 +4398,9 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 ),
             )
 
+            # Cycles are disabled, so the finding stays open and the run says so.
             self.assertEqual(
-                0, completed.returncode, completed.stderr or completed.stdout
+                1, completed.returncode, completed.stderr or completed.stdout
             )
             payload = json.loads(completed.stdout)
             finding = payload["turns"][-1]["review_verdict"]["findings"][0]

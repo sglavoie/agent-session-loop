@@ -266,7 +266,8 @@ class EndToEndQATests(unittest.TestCase):
             mode="success-with-review",
             review_outcomes=outcomes,
         )
-        self.assertEqual(0, first.returncode, first.stderr)
+        # The zero cap leaves the finding open, so the first run reports it.
+        self.assertEqual(1, first.returncode, first.stderr)
         self.assertEqual(
             ["1", "2"],
             [turn["session_id"] for turn in first_payload["turns"]],

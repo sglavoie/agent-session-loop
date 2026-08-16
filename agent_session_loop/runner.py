@@ -5214,7 +5214,7 @@ def _runner_pause_can_wait_for_mailbox_reply(
     if not mailbox_enabled or result.returncode != 0:
         return False
     policy = pause_policy.classify_pause(pause_reason)
-    return not policy["recoverable"] and not policy["requires_user"]
+    return bool(policy["user_action"] == pause_policy.USER_ACTION_REPLY)
 
 
 def _worker_pause_resolution_for_turn(
@@ -10412,6 +10412,38 @@ def _set_review_resume(
     return resume
 
 
+REVIEW_FINDINGS_UNRESOLVED_REASON = "review-findings-unresolved"
+
+
+def _terminal_review_reason(payload: dict[str, Any]) -> str:
+    """Resolve the terminal reason for a run whose review cycle ended.
+
+    ``all-complete`` is only honest when the review actually cleared. A run
+    whose cycle terminated on an exhausted repair budget still carries the
+    findings that budget failed to close, so it reports them and stops
+    claiming success.
+    """
+    verdict = payload.get("review_verdict")
+    verdict = verdict if isinstance(verdict, Mapping) else {}
+    total_findings = verdict.get("total_findings")
+    if (
+        payload.get("review_fix_disposition")
+        == review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
+        and verdict.get("outcome") == review.REVIEW_OUTCOME_ALL_CLEAR
+        and total_findings == 0
+    ):
+        return "all-complete"
+    payload["ok"] = False
+    payload["action_required"] = {
+        "reason": REVIEW_FINDINGS_UNRESOLVED_REASON,
+        "review_fix_disposition": payload.get("review_fix_disposition"),
+        "review_outcome": verdict.get("outcome"),
+        "unresolved_findings": total_findings,
+        "findings_by_severity": verdict.get("findings_by_severity"),
+    }
+    return REVIEW_FINDINGS_UNRESOLVED_REASON
+
+
 def _set_existing_review_verdict(payload: dict[str, Any], plan_dir: Path) -> None:
     """Project the persisted verdict when a continuation stops before a turn."""
 
@@ -13811,7 +13843,7 @@ def _run_locked(
                             payload["final_snapshot"] = _snapshot_payload(snapshot)
                         if terminal_disposition:
                             with persistence.lock:
-                                payload["reason"] = "all-complete"
+                                payload["reason"] = _terminal_review_reason(payload)
                         else:
                             blocker = review_resume.blocker or "unknown blocker"
                             _pause_run(
@@ -13837,7 +13869,7 @@ def _run_locked(
                                 payload["final_snapshot"] = _snapshot_payload(snapshot)
                             if review_resume.blocker == "higher-cap-required":
                                 with persistence.lock:
-                                    payload["reason"] = "all-complete"
+                                    payload["reason"] = _terminal_review_reason(payload)
                                 break
 
                             reopen_error = (
@@ -16138,7 +16170,7 @@ def _run_locked(
                     break
                 if cycle_action == "complete":
                     with persistence.lock:
-                        payload["reason"] = "all-complete"
+                        payload["reason"] = _terminal_review_reason(payload)
                     break
                 # Repair children were materialized: clear the appended flag
                 # so the loop appends the next review session once the
@@ -16304,7 +16336,11 @@ def _run_locked(
                 payload["review_skipped_reason"] = (
                     payload.get("pause_reason") or "paused"
                 )
-            elif payload["reason"] not in ("", "all-complete"):
+            elif payload["reason"] not in (
+                "",
+                "all-complete",
+                REVIEW_FINDINGS_UNRESOLVED_REASON,
+            ):
                 payload["review_skipped_reason"] = payload["reason"]
 
     with persistence.lock:

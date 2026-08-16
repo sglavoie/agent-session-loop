@@ -105,6 +105,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         self.assertEqual(pause_policy.classify_pause("verify-failed"), policy)
         self.assertTrue(policy["recoverable"])
         self.assertFalse(policy["requires_user"])
+        self.assertIsNone(policy["user_action"])
         self.assertEqual(2, policy["max_retries"])
         self.assertEqual([], policy["backoff_seconds"])
 
@@ -116,7 +117,21 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         policy = payload["pause_policy"]
         self.assertFalse(policy["recoverable"])
         self.assertTrue(policy["requires_user"])
+        self.assertEqual(pause_policy.USER_ACTION_INSPECT, policy["user_action"])
         self.assertEqual(0, policy["max_retries"])
+
+    def test_set_pause_pause_policy_names_the_reply_resolvable_state(self) -> None:
+        # Neither machine-retryable nor a harness failure a reply cannot clear:
+        # the pause needs a human, and what the human does is answer.
+        for reason in ("blocked", "malformed-plan", "runner-pause"):
+            with self.subTest(reason=reason):
+                payload: dict[str, object] = {}
+                runner._set_pause(payload, reason=reason, message="stopped")
+                policy = payload["pause_policy"]
+                self.assertFalse(policy["recoverable"])
+                self.assertTrue(policy["requires_user"])
+                self.assertEqual(pause_policy.USER_ACTION_REPLY, policy["user_action"])
+                self.assertEqual(0, policy["max_retries"])
 
     def test_new_waits_emit_the_rolling_ceiling_and_not_a_hard_deadline(
         self,

@@ -2576,6 +2576,12 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
         counter.append("the state projection records the run as paused")
     if any(record.get("name") == events.RUN_PAUSED_EVENT for record in context.records):
         counter.append("the event log records the run as paused")
+    verdict = _mapping(context.section("review").get("review_verdict"))
+    unresolved = verdict.get("total_findings")
+    if isinstance(unresolved, int) and unresolved > 0:
+        counter.append(
+            f"the recorded review verdict leaves {unresolved} finding(s) unresolved"
+        )
 
     evidence = context.evidence(context.section("state").get("reference"), *references)
     if claimed and counter:
@@ -2621,7 +2627,10 @@ def _check_retry_resume(context: _CheckContext) -> _Verdict:
         )
 
     contradictions: list[str] = []
-    if recorded:
+    # A block written under an earlier policy version classified the same keys
+    # by different rules, so diffing it against today's classifier reports a
+    # schema change as a contradiction.
+    if recorded and recorded.get("policy_version") == pause_policy.POLICY_VERSION:
         expected = pause_policy.classify_pause(
             reason if isinstance(reason, str) else None
         )

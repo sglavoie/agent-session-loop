@@ -157,7 +157,11 @@ asl run ~/.local/share/agent-plans/example-plan/ --harness codex
 The runner stops when every `session-<id>.md` handoff status is `complete`, when
 `--max-sessions` is reached, when an operator requests stop-after-current, or
 when a pause condition requires review. The first three are successful exits
-(`reason: all-complete`, `max-sessions`, and `stopped` respectively). Resume a
+(`reason: all-complete`, `max-sessions`, and `stopped` respectively). A plan that
+completes every session but whose review cycle ends while findings are still open
+exits `reason: review-findings-unresolved` with `ok: false` instead of
+`all-complete`, and its `action_required` block carries the terminating
+disposition, the review outcome, and the unresolved finding counts. Resume a
 paused or stopped run by re-running the same command after fixing the blocker.
 
 `asl run` refuses any plan whose `**Readiness**` is not `loop-ready`, but it
@@ -4058,10 +4062,19 @@ The helper auto-retries recoverable same-session pauses (`verify-failed`,
 `transport-failed`, `timeout`, `no-status-change`) up to twice per session and
 reason before escalating. Only `transport-failed` backs off before relaunching:
 5 seconds, then 30 seconds; the other recoverable pauses retry immediately.
-An unclassified `nonzero-exit` pause is never retried. When a pause genuinely
-needs an answer, the result carries `needs_agent_reply` with a `questions`
-block (resolver prompt, the paused agent's last message, pause metadata,
-artifact paths). The driving agent either infers a clearly defensible reply
+An unclassified `nonzero-exit` pause is never retried. Which pauses are worth
+escalating comes from the persisted `pause_policy` block: `requires_user` is true
+for every pause a machine cannot retry, and `user_action` names what the human is
+supposed to do about it — `reply` when an operator answer can clear the pause,
+`inspect` when no answer can and the environment has to change instead
+(`quota-exhausted`, `auth-required`, `invalid-model`), and `null` for the
+recoverable pauses that need no human at all. The helper escalates `inspect`
+pauses immediately and routes `reply` pauses through the mailbox wait. The block
+also carries `policy_version`, which lets a consumer diffing a persisted block
+against a fresh classification tell a schema change from a real contradiction.
+When a pause genuinely needs an answer, the result carries `needs_agent_reply`
+with a `questions` block (resolver prompt, the paused agent's last message, pause
+metadata, artifact paths). The driving agent either infers a clearly defensible reply
 from the plan/repo/artifacts or relays the question to the operator, then
 resumes by streaming the reply on stdin:
 

@@ -449,7 +449,7 @@ back to the existing terminal pause flow below; there is no mailbox-only
 terminal status.
 
 Retry mechanics are helper-owned — see the result payload's `pause_policy`.
-The helper auto-retries recoverable same-session pauses (`verify-failed`, `transport-failed`, `timeout`, `no-status-change`) up to twice per session and reason. Only `transport-failed` backs off before relaunching (5 seconds, then 30 seconds); the other recoverable pauses retry immediately. An unclassified `nonzero-exit` pause is never retried. When a pause genuinely needs an answer, the result carries `reason: needs_agent_reply` with a `questions` block holding the resolver prompt, the paused agent's last message, the pause metadata, and artifact paths.
+The helper auto-retries recoverable same-session pauses (`verify-failed`, `transport-failed`, `timeout`, `no-status-change`) up to twice per session and reason. Only `transport-failed` backs off before relaunching (5 seconds, then 30 seconds); the other recoverable pauses retry immediately. An unclassified `nonzero-exit` pause is never retried. Escalation follows the block's `user_action`: `reply` means an operator answer can clear the pause, so it goes through the mailbox wait; `inspect` means no answer can and the environment has to change instead (`quota-exhausted`, `auth-required`, `invalid-model`), so it escalates immediately; `null` is a recoverable pause that needs no human. `requires_user` covers every pause a machine cannot retry, and `policy_version` distinguishes a schema change from a real contradiction when a persisted block is compared against a fresh classification. When a pause genuinely needs an answer, the result carries `reason: needs_agent_reply` with a `questions` block holding the resolver prompt, the paused agent's last message, the pause metadata, and artifact paths.
 
 Choose the closure conservatively, on two axes rather than one:
 
@@ -595,6 +595,11 @@ review reports findings, the helper returns `reason: review_findings` with a
 `review` block holding `review_output_path` (the `final-review.md` to read in
 full), `status_line`, `total_findings`, `findings_by_severity`, and a bounded
 `summary`.
+
+A run whose review cycle ends with findings still open exits `ok: false` with
+`reason: review-findings-unresolved` rather than `all-complete`; the helper
+re-tags it `review_findings` instead of treating it as a blocked run, so the
+severity counts survive.
 
 `review_findings` means no automatic continuation remains for the command's
 current cap and artifact state. Do **not** draft, split, or expand a

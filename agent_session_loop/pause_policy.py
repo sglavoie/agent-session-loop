@@ -48,6 +48,19 @@ USER_REQUIRED_HARNESS_FAILURE_REASONS: tuple[str, ...] = (
     events.PAUSE_REASON_INVALID_MODEL,
 )
 
+# What a human is supposed to do about a pause. Each pause carries exactly one:
+# ``reply`` when an operator answer can clear it, ``inspect`` when no answer can
+# and the environment has to change instead, ``None`` when the pause is
+# recoverable and no human is needed at all.
+USER_ACTION_REPLY = "reply"
+USER_ACTION_INSPECT = "inspect"
+
+# Bumped whenever the block's key set or the meaning of a key changes, so a
+# consumer diffing a persisted block against a fresh classification can tell a
+# schema difference from a real contradiction. v1 blocks carry no version and
+# classify ``requires_user`` as the harness-failure set alone.
+POLICY_VERSION = 2
+
 # How many times a supervisor relaunches the same session for a given
 # recoverable pause reason before giving up and surfacing the pause.
 DEFAULT_MAX_RETRIES = 2
@@ -68,11 +81,18 @@ def classify_pause(reason: str | None) -> dict[str, Any]:
 
     - ``reason``: the pause reason, echoed back for consumers that persist the
       block next to a payload keyed by something else;
+    - ``policy_version``: :data:`POLICY_VERSION`, so a consumer diffing a
+      persisted block can tell a schema difference from a contradiction;
     - ``recoverable``: whether the same session may be relaunched without a
       human answer (``reason`` is in :data:`RECOVERABLE_PAUSE_REASONS`);
-    - ``requires_user``: whether the pause is a non-retryable harness failure
-      that a human must resolve (``reason`` is in
-      :data:`USER_REQUIRED_HARNESS_FAILURE_REASONS`);
+    - ``requires_user``: whether a human has to act at all. A pause ASL cannot
+      prove a machine can retry needs one, so this is the negation of
+      ``recoverable`` rather than a set membership;
+    - ``user_action``: what that human does — :data:`USER_ACTION_REPLY` when an
+      operator answer can clear the pause, :data:`USER_ACTION_INSPECT` for the
+      non-retryable harness failures that carry no useful question context
+      (:data:`USER_REQUIRED_HARNESS_FAILURE_REASONS`), ``None`` when
+      recoverable;
     - ``max_retries``: the same-session retry budget (``DEFAULT_MAX_RETRIES``
       when recoverable, else ``0``);
     - ``backoff_seconds``: the per-retry backoff schedule — the
@@ -80,15 +100,22 @@ def classify_pause(reason: str | None) -> dict[str, Any]:
       list (the other recoverable pauses relaunch immediately).
     """
     recoverable = reason in RECOVERABLE_PAUSE_REASONS
-    requires_user = reason in USER_REQUIRED_HARNESS_FAILURE_REASONS
+    if recoverable:
+        user_action: str | None = None
+    elif reason in USER_REQUIRED_HARNESS_FAILURE_REASONS:
+        user_action = USER_ACTION_INSPECT
+    else:
+        user_action = USER_ACTION_REPLY
     if reason == events.PAUSE_REASON_TRANSPORT_FAILED:
         backoff_seconds = list(TRANSPORT_RETRY_DELAYS_SECONDS)
     else:
         backoff_seconds = []
     return {
+        "policy_version": POLICY_VERSION,
         "reason": reason,
         "recoverable": recoverable,
-        "requires_user": requires_user,
+        "requires_user": not recoverable,
+        "user_action": user_action,
         "max_retries": DEFAULT_MAX_RETRIES if recoverable else 0,
         "backoff_seconds": backoff_seconds,
     }

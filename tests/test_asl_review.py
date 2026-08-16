@@ -3605,9 +3605,9 @@ class ReviewRepairCycleTests(unittest.TestCase):
         # numbers; the normalized fingerprint must match and stop the loop.
         completed, payload = self._run_cycles(review_outcomes="findings,findings-drift")
 
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertTrue(payload["ok"])
-        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
         self.assertEqual(
             runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
             payload["review_fix_disposition"],
@@ -3634,7 +3634,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             review_outcomes="findings,findings-drift,all-clear",
             extra_args=["--max-review-fix-cycles", "8"],
         )
-        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertEqual(1, resumed.returncode, resumed.stderr)
         self.assertEqual([], resumed_payload["turns"])
         self.assertEqual("terminal", resumed_payload["review_resume"]["action"])
         self.assertEqual(
@@ -3701,7 +3701,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             extra_args=["--max-review-fix-cycles", "2"],
         )
 
-        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertEqual(1, resumed.returncode, resumed.stderr)
         self.assertEqual([], resumed_payload["turns"])
         self.assertEqual("terminal", resumed_payload["review_resume"]["action"])
         self.assertEqual(
@@ -3719,9 +3719,9 @@ class ReviewRepairCycleTests(unittest.TestCase):
             extra_args=["--max-review-fix-cycles", "0"],
         )
 
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertTrue(payload["ok"])
-        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
         self.assertEqual(0, payload["max_review_fix_cycles"])
         self.assertEqual(
             runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
@@ -3745,9 +3745,9 @@ class ReviewRepairCycleTests(unittest.TestCase):
             extra_args=["--max-review-fix-cycles", "1"],
         )
 
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertTrue(payload["ok"])
-        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
         self.assertEqual(
             runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
             payload["review_fix_disposition"],
@@ -3776,7 +3776,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             extra_args=["--max-review-fix-plans", "0"],
         )
 
-        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertEqual(0, payload["max_review_fix_cycles"])
         self.assertEqual(
             runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
@@ -3795,7 +3795,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             extra_args=["--max-review-fix-cycles", "0"],
         )
 
-        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(1, first.returncode, first.stderr)
         self.assertEqual("cycles-disabled", first_payload["review_fix_disposition"])
         self.assertEqual(
             "higher-cap-required", first_payload["review_resume"]["blocker"]
@@ -3812,7 +3812,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             extra_args=["--max-review-fix-cycles", "0"],
         )
 
-        self.assertEqual(0, same.returncode, same.stderr)
+        self.assertEqual(1, same.returncode, same.stderr)
         self.assertEqual([], same_payload["turns"])
         self.assertEqual(
             "higher-cap-required", same_payload["review_resume"]["blocker"]
@@ -3829,7 +3829,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             extra_args=["--max-review-fix-cycles", "1"],
         )
 
-        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertEqual(1, second.returncode, second.stderr)
         self.assertEqual(
             ["2.1", "3"],
             [turn["session_id"] for turn in second_payload["turns"]],
@@ -3858,7 +3858,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             review_outcomes=scripted,
             extra_args=["--max-review-fix-cycles", "1"],
         )
-        self.assertEqual(0, lower.returncode, lower.stderr)
+        self.assertEqual(1, lower.returncode, lower.stderr)
         self.assertEqual([], lower_payload["turns"])
         self.assertEqual(
             artifact_before_second_noop,
@@ -4020,7 +4020,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             review_outcomes="findings,all-clear",
             extra_args=["--max-review-fix-cycles", "0"],
         )
-        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(1, first.returncode, first.stderr)
 
         # Model a legacy source cycle whose persisted event predates digests.
         event_path = self._events_path()
@@ -4122,7 +4122,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             review_outcomes="findings,findings-new",
             extra_args=["--max-review-fix-cycles", "0"],
         )
-        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(1, first.returncode, first.stderr)
         self.assertEqual(
             runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
             first_payload["review_fix_disposition"],
@@ -4230,7 +4230,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             extra_args=["--max-review-fix-cycles", "1"],
         )
 
-        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertEqual(1, resumed.returncode, resumed.stderr)
         self.assertEqual(
             ["3.1", "4"],
             [turn["session_id"] for turn in resumed_payload["turns"]],
@@ -4262,7 +4262,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             review_outcomes="findings,all-clear",
             extra_args=["--max-review-fix-cycles", "0"],
         )
-        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(1, first.returncode, first.stderr)
 
         artifact_path = self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME
         original = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -4396,7 +4396,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                     review_outcomes="findings",
                     extra_args=["--max-review-fix-cycles", "0"],
                 )
-                self.assertEqual(0, first.returncode, first.stderr)
+                self.assertEqual(1, first.returncode, first.stderr)
                 older_fingerprint = first_payload["review_cycles"][0]["fingerprints"][0]
                 self.assertNotEqual(older_fingerprint, eventless_fingerprint)
 
@@ -4446,7 +4446,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                     extra_args=["--max-review-fix-cycles", "1"],
                 )
 
-                self.assertEqual(0, resumed.returncode, resumed.stderr)
+                self.assertEqual(1, resumed.returncode, resumed.stderr)
                 self.assertEqual(
                     ["3.1", "4"],
                     [turn["session_id"] for turn in payload["turns"]],
@@ -4542,7 +4542,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             extra_args=["--max-review-fix-cycles", "1"],
         )
 
-        self.assertEqual(0, resumed.returncode, resumed.stderr)
+        self.assertEqual(1, resumed.returncode, resumed.stderr)
         self.assertEqual(
             ["2.1", "3"], [turn["session_id"] for turn in payload["turns"]]
         )
@@ -4568,7 +4568,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             review_outcomes="findings,all-clear",
             extra_args=["--max-review-fix-cycles", "0"],
         )
-        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(1, first.returncode, first.stderr)
         materialized = review_repair.materialize_review_repair_sessions(
             self.plan_dir,
             review_session_id="2",
