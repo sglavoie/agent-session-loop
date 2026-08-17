@@ -31,7 +31,9 @@ from agent_session_loop import (
     contracts,
     control_queue,
     events,
+    harness_failures,
     harnesses,
+    pause_policy,
     plans,
     process_tree,
     progress_repair,
@@ -59,6 +61,14 @@ from tests.support import (
     write_plan,
     write_plan_with_ids,
     write_process_tree_scripts,
+)
+
+# The exact message the harness returned in run 20260814T210616107741Z-55923,
+# which fell through to a fail-closed ``nonzero-exit`` and paused the run with
+# four sessions still pending (ASI-125).
+OBSERVED_SOCKET_CLOSURE = (
+    "API Error: The socket connection was closed unexpectedly. For more "
+    "information, pass `verbose: true` in the second argument to fetch()"
 )
 
 
@@ -7022,6 +7032,77 @@ class AuditAccessProfileTests(unittest.TestCase):
             "profile-unenforceable",
             harnesses.audit_read_only_unavailable_reason("codex"),
         )
+
+
+class HarnessTransportClassificationTests(unittest.TestCase):
+    """Transport failures the classifier retries, and the ones it survives."""
+
+    def _result(self, **overrides: Any) -> harnesses.HarnessResult:
+        fields: dict[str, Any] = {
+            "name": "codex",
+            "argv": ["codex"],
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "",
+            "last_message": "",
+        }
+        fields.update(overrides)
+        return harnesses.HarnessResult(**fields)
+
+    def test_connection_was_closed_unexpectedly_classifies_as_retryable_transport(
+        self,
+    ) -> None:
+        classification = runner.classify_harness_failure(
+            self._result(last_message=OBSERVED_SOCKET_CLOSURE)
+        )
+
+        self.assertEqual(events.PAUSE_REASON_TRANSPORT_FAILED, classification.reason)
+        self.assertTrue(classification.retryable)
+        policy = pause_policy.classify_pause(classification.reason)
+        self.assertTrue(policy["recoverable"])
+        self.assertFalse(policy["requires_user"])
+        self.assertEqual(pause_policy.DEFAULT_MAX_RETRIES, policy["max_retries"])
+        self.assertEqual(
+            list(pause_policy.TRANSPORT_RETRY_DELAYS_SECONDS),
+            policy["backoff_seconds"],
+        )
+
+    def test_widened_transport_wording_stays_retryable(self) -> None:
+        for text in (
+            "the connection was closed by the remote host",
+            "Error: connection reset by peer",
+            "the connection has been refused",
+        ):
+            with self.subTest(text=text):
+                classification = runner.classify_harness_failure(
+                    self._result(stderr=text)
+                )
+                self.assertEqual(
+                    events.PAUSE_REASON_TRANSPORT_FAILED, classification.reason
+                )
+                self.assertTrue(classification.retryable)
+
+    def test_unrecognized_failure_still_fails_closed(self) -> None:
+        classification = runner.classify_harness_failure(
+            self._result(stderr="fake codex failure", returncode=3)
+        )
+
+        self.assertEqual(events.PAUSE_REASON_NONZERO_EXIT, classification.reason)
+        self.assertFalse(classification.retryable)
+
+    def test_invalid_model_and_capacity_outrank_the_widened_transport_rule(
+        self,
+    ) -> None:
+        invalid = runner.classify_harness_failure(
+            self._result(stderr="model not found; the connection was closed")
+        )
+        self.assertEqual(events.PAUSE_REASON_INVALID_MODEL, invalid.reason)
+        self.assertFalse(invalid.retryable)
+
+        capacity = runner.classify_harness_failure(
+            self._result(stderr="model is at capacity; the connection was closed")
+        )
+        self.assertEqual(harness_failures.MODEL_CAPACITY_MARKER, capacity.marker)
 
 
 if __name__ == "__main__":

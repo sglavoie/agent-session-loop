@@ -98,7 +98,12 @@ _FAILURE_CLASSIFICATION_RULES: tuple[tuple[str, str, bool, re.Pattern[str]], ...
         events.PAUSE_REASON_TRANSPORT_FAILED,
         True,
         re.compile(
-            r"connection reset|connection refused|connection closed|"
+            # Intervening words are tolerated between "connection" and its
+            # verb: the observed failure said "the socket connection was closed
+            # unexpectedly" and fell through to the fail-closed ``nonzero-exit``
+            # that the literal "connection closed" alternative was meant to
+            # catch. The window is bounded so the two words stay one clause.
+            r"connection(?:\s+\w+){0,3}\s+(?:closed|reset|refused|dropped)|"
             r"econnreset|econnrefused|etimedout|"
             r"\b50[234]\b|bad gateway|service unavailable|"
             r"gateway timeout|temporarily unavailable|"
