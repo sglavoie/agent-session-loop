@@ -679,9 +679,20 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             start_index = emitted.index(runner.AGENT_MUX_WAIT_START_EVENT)
             end_index = emitted.index(runner.AGENT_MUX_WAIT_END_EVENT)
             self.assertLess(start_index, end_index, emitted)
+            # The asking turn is never committed, so its wait is bracketed by
+            # the turn start alone; the only turn finish belongs to the turn
+            # that resumes after the answer.
             self.assertLess(
-                emitted.index(runner.AGENT_MUX_TURN_FINISH_EVENT),
+                emitted.index(runner.AGENT_MUX_TURN_START_EVENT),
                 start_index,
+                emitted,
+            )
+            self.assertEqual(
+                1, emitted.count(runner.AGENT_MUX_TURN_FINISH_EVENT), emitted
+            )
+            self.assertLess(
+                end_index,
+                emitted.index(runner.AGENT_MUX_TURN_FINISH_EVENT),
                 emitted,
             )
             self.assertNotIn(runner.AGENT_MUX_PAUSE_EVENT, emitted)
