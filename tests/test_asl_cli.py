@@ -5285,15 +5285,18 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 workspace_root,
                 tmp_dir / "state",
                 "--timeout",
-                # Leave enough startup budget for this shard to schedule the
-                # fake harness and publish its mutation under full-suite
-                # parallel load.  The sleep remains comfortably beyond the
-                # runner deadline, so this still exercises the timeout path.
-                "10",
+                # The deadline runs from the harness spawn, so it has to cover
+                # the fake harness reaching its mutation: a freshly copied
+                # executable can stall for seconds in Gatekeeper assessment on
+                # top of full-suite parallel load, and a deadline that lands
+                # first leaves nothing for the guard to see, which reports the
+                # bare timeout instead of the scope violation.  The sleep stays
+                # far beyond the deadline so this still exercises the timeout.
+                "30",
                 env_overrides=self._fake_codex_env(
                     tmp_dir,
                     FAKE_CODEX_MODE="timeout",
-                    FAKE_CODEX_SLEEP="30",
+                    FAKE_CODEX_SLEEP="120",
                     FAKE_CODEX_MUTATION_PATH=str(repositories["OAK"] / "README.md"),
                 ),
             )

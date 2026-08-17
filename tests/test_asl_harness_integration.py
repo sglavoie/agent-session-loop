@@ -63,6 +63,11 @@ from tests.support import (
     write_process_tree_scripts,
 )
 
+# Bounds a wedged child so it cannot hang the suite; it is not a latency
+# assertion, so it stays far above what a run needs on a machine already
+# saturated by the parallel shards.
+RUN_EXIT_TIMEOUT_SECONDS = 120
+
 # The exact message the harness returned in run 20260814T210616107741Z-55923,
 # which fell through to a fail-closed ``nonzero-exit`` and paused the run with
 # four sessions still pending (ASI-125).
@@ -3955,7 +3960,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertIn("Stdout:", status_text.stdout)
         self.assertIn("Stderr:", status_text.stdout)
 
-        run_stdout, run_stderr = run_process.communicate(timeout=10)
+        run_stdout, run_stderr = run_process.communicate(
+            timeout=RUN_EXIT_TIMEOUT_SECONDS
+        )
         self.assertEqual("", run_stderr)
         run_payload = json.loads(run_stdout)
         self.assertTrue(run_payload["ok"])
@@ -4012,8 +4019,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             lambda: tail_process.kill() if tail_process.poll() is None else None
         )
 
-        run_stdout, run_stderr = run_process.communicate(timeout=10)
-        tail_stdout, tail_stderr = tail_process.communicate(timeout=10)
+        run_stdout, run_stderr = run_process.communicate(
+            timeout=RUN_EXIT_TIMEOUT_SECONDS
+        )
+        tail_stdout, tail_stderr = tail_process.communicate(
+            timeout=RUN_EXIT_TIMEOUT_SECONDS
+        )
         self.assertEqual("", run_stderr)
         run_payload = json.loads(run_stdout)
         self.assertTrue(run_payload["ok"])
