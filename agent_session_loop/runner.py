@@ -131,6 +131,11 @@ SESSION_KINDS: tuple[str, ...] = (
     SESSION_KIND_IMPLEMENTATION,
     SESSION_KIND_REVIEW,
 )
+# Streams whose control markers the runner is willing to act on. The agent's
+# final message and stdout are what the agent chose to say; stderr is a
+# transcript of everything that happened to it.
+TRUSTED_RUNNER_SIGNAL_SOURCES: tuple[str, ...] = ("last_message", "stdout")
+RUNNER_STATUS_SOURCE_ABSENT = "absent"
 APPROVAL_SIGNAL_PATTERNS: tuple[str, ...] = (
     "approval required",
     "requires approval",
@@ -3018,8 +3023,8 @@ def _is_noop_runner_pause(message: str) -> bool:
     return message.strip().casefold() == "none"
 
 
-def _runner_signal_lines(text: str) -> list[tuple[str, str]]:
-    signals: list[tuple[str, str]] = []
+def _runner_signal_lines(text: str) -> list[tuple[str, str, str]]:
+    signals: list[tuple[str, str, str]] = []
     for line in text.splitlines():
         for candidate in _signal_line_candidates(line):
             if candidate.startswith(events.RUNNER_STATUS_PREFIX):
@@ -3027,6 +3032,7 @@ def _runner_signal_lines(text: str) -> list[tuple[str, str]]:
                     (
                         "status",
                         candidate[len(events.RUNNER_STATUS_PREFIX) :].strip(),
+                        candidate,
                     )
                 )
                 break
@@ -3034,12 +3040,25 @@ def _runner_signal_lines(text: str) -> list[tuple[str, str]]:
                 message = candidate[len(events.RUNNER_PAUSE_PREFIX) :].strip()
                 if _is_noop_runner_pause(message):
                     break
-                signals.append(("pause", message))
+                signals.append(("pause", message, candidate))
                 break
     return signals
 
 
+def _signal_source_trusted(source: str) -> bool:
+    """Whether a stream may drive runner control state rather than only inform.
+
+    ``stderr`` carries echoed prompts, tool arguments and file diffs, so a
+    control marker seen there attests to nothing about what the agent decided.
+    Both the post-turn signal read and the live stream watch route their source
+    decision through here so the two cannot disagree about which stream is
+    control and which is transcript.
+    """
+    return source in TRUSTED_RUNNER_SIGNAL_SOURCES
+
+
 def _runner_signals(result: harnesses.HarnessResult) -> dict[str, Any]:
+    degraded: dict[str, Any] | None = None
     for source, text in (
         ("last_message", result.last_message),
         ("stdout", result.stdout),
@@ -3048,7 +3067,14 @@ def _runner_signals(result: harnesses.HarnessResult) -> dict[str, Any]:
         source_signals = _runner_signal_lines(text)
         if not source_signals:
             continue
-        signal_kind, message = source_signals[-1]
+        signal_kind, message, line = source_signals[-1]
+        if not _signal_source_trusted(source):
+            degraded = {
+                "source": source,
+                "kind": signal_kind,
+                "preview": _preview_text(line),
+            }
+            continue
         signals: dict[str, Any] = {}
         if signal_kind == "status":
             signals["runner_status"] = message
@@ -3061,7 +3087,13 @@ def _runner_signals(result: harnesses.HarnessResult) -> dict[str, Any]:
             signals["runner_pause_source"] = source
         return signals
 
-    return {}
+    # Absence is itself evidence: an explicit record says the trusted streams
+    # were read and carried no marker, and a marker refused on an untrusted
+    # stream is demoted beside it rather than dropped.
+    absent: dict[str, Any] = {"runner_status_source": RUNNER_STATUS_SOURCE_ABSENT}
+    if degraded is not None:
+        absent["runner_status_degraded"] = degraded
+    return absent
 
 
 def _runner_pause_reason(message: str) -> str:
@@ -3085,7 +3117,9 @@ def _live_action_signal(
     stream_name: harnesses.StreamName,
     text: str,
 ) -> dict[str, Any] | None:
-    if stream_name != "stderr":
+    # Only the prefix branch is source-gated: an approval prompt on stderr is a
+    # report about the harness, not an assertion the agent made about itself.
+    if _signal_source_trusted(stream_name):
         pause = _extract_prefixed_line(text, events.RUNNER_PAUSE_PREFIX)
         if pause is not None and not _is_noop_runner_pause(pause):
             return {

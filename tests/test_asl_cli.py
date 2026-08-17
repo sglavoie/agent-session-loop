@@ -401,6 +401,65 @@ class CommandAndConfigTests(unittest.TestCase):
             signals,
         )
 
+    def test_runner_status_source_absent_when_marker_only_in_stderr(self) -> None:
+        stderr = "```text\nRunner status: complete\n```\n"
+        result = harnesses.HarnessResult(
+            name="codex",
+            argv=["codex"],
+            returncode=0,
+            stdout="working\n",
+            stderr=stderr,
+            last_message="",
+        )
+
+        signals = runner._runner_signals(result)
+        self.assertNotIn("runner_status", signals)
+        self.assertNotIn("runner_pause", signals)
+        self.assertEqual(
+            runner.RUNNER_STATUS_SOURCE_ABSENT,
+            signals["runner_status_source"],
+        )
+        self.assertEqual(
+            {
+                "source": "stderr",
+                "kind": "status",
+                "preview": "Runner status: complete",
+            },
+            signals["runner_status_degraded"],
+        )
+        self.assertEqual(
+            "complete",
+            runner._turn_status_result(
+                result=result,
+                status_changes=(
+                    runner._session_status_change_payload(
+                        "9",
+                        before="pending",
+                        after="complete",
+                    ),
+                ),
+                pending_completed=("9",),
+                session_id="9",
+                runner_signals=signals,
+                plan_error=None,
+            ),
+        )
+
+        trusted = runner._runner_signals(
+            harnesses.HarnessResult(
+                name="codex",
+                argv=["codex"],
+                returncode=0,
+                stdout="working\n",
+                stderr=stderr,
+                last_message="Runner status: complete\n",
+            )
+        )
+        self.assertEqual(
+            {"runner_status": "complete", "runner_status_source": "last_message"},
+            trusted,
+        )
+
     def test_live_action_signal_ignores_stderr_runner_pause_text(self) -> None:
         self.assertIsNone(
             runner._live_action_signal(
