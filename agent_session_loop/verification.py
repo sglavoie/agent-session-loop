@@ -261,6 +261,26 @@ class CheckResult:
     qualified_path: str | None = None
 
 
+#: The one skip a recipe produces on its own: a diagnostic whose gates all
+#: passed, so the condition it exists to explain never arose. Consumers grading
+#: a run tell this apart from a check that was skipped for any other cause.
+SKIP_REASON_CONDITION_NOT_MET = "condition-not-met"
+
+#: What a check does to the aggregate result: a gate determines it, a
+#: conditional diagnostic only explains a gate that already failed. Consumers
+#: reading executed checks one at a time need the role on each record, because
+#: a recipe-level diagnostic count cannot say which of the checks that ran was
+#: the diagnostic.
+CHECK_ROLE_GATE = "gate"
+CHECK_ROLE_DIAGNOSTIC = "diagnostic"
+
+
+def check_role(check: VerificationCheck) -> str:
+    """Whether ``check`` gates the verification or only diagnoses a failure."""
+
+    return CHECK_ROLE_DIAGNOSTIC if check.on_failure_of else CHECK_ROLE_GATE
+
+
 @dataclass(frozen=True)
 class SkippedCheck:
     """A conditional diagnostic omitted because none of its gates failed."""
@@ -268,7 +288,7 @@ class SkippedCheck:
     name: str
     kind: str
     on_failure_of: tuple[str, ...]
-    reason: str = "condition-not-met"
+    reason: str = SKIP_REASON_CONDITION_NOT_MET
     repo: str | None = None
     resolved_root: str | None = None
     cwd: str | None = None
@@ -351,6 +371,7 @@ class CheckFinishedEvent:
     name: str
     kind: str
     result: CheckResult
+    role: str
     repo: str | None = None
     resolved_root: str | None = None
     cwd: str | None = None
@@ -1351,6 +1372,7 @@ def run_verification(
                     name=check.name,
                     kind=check.kind,
                     result=check_result,
+                    role=check_role(check),
                     repo=check.repo,
                     resolved_root=str(resolved.resolved_root),
                     cwd=str(resolved.cwd) if resolved.cwd is not None else None,

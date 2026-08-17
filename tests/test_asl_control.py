@@ -4390,7 +4390,12 @@ event = threading.Event()
 with control_signal.open_wakeup_endpoint(sys.argv[2], event) as path:
     if path is None:
         sys.exit(2)
-    ready.write_text(str(path), encoding="utf-8")
+    # Published by rename: the parent waits on this path existing, so a
+    # truncate-then-write would let it read the empty file the create leaves
+    # behind and take Path("") — the current directory — for the endpoint.
+    staged = ready.with_name(ready.name + ".staged")
+    staged.write_text(str(path), encoding="utf-8")
+    os.replace(staged, ready)
     sys.exit(0 if event.wait(30) else 1)
 """
 

@@ -184,6 +184,9 @@ class RunReadinessGateTests(unittest.TestCase):
         max_sessions: int | None = None,
         max_pending_sessions: int | None = None,
         allow_not_loop_ready: bool = False,
+        turn_timeout: int | None = None,
+        env_overrides: dict[str, str] | None = None,
+        process_timeout: int = 20,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         argv = [
             sys.executable,
@@ -205,6 +208,8 @@ class RunReadinessGateTests(unittest.TestCase):
             argv.extend(["--max-sessions", str(max_sessions)])
         if max_pending_sessions is not None:
             argv.extend(["--max-pending-sessions", str(max_pending_sessions)])
+        if turn_timeout is not None:
+            argv.extend(["--timeout", str(turn_timeout)])
         env = os.environ.copy()
         env.update(
             {
@@ -214,13 +219,14 @@ class RunReadinessGateTests(unittest.TestCase):
                 "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
             }
         )
+        env.update(env_overrides or {})
         completed = subprocess.run(
             argv,
             cwd=REPO_ROOT,
             env=env,
             text=True,
             capture_output=True,
-            timeout=20,
+            timeout=process_timeout,
             check=False,
         )
         return completed, json.loads(completed.stdout)
@@ -900,17 +906,110 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertEqual(1, len(budget_findings))
         self.assertEqual("green", budget_findings[0]["severity"])
 
-    def test_lifecycle_refreshes_running_sha_after_future_session_notes(
+    def test_note_written_into_another_sessions_packet_pauses_the_run(self) -> None:
+        self._write_plan(("pending", "pending"), readiness="loop-ready")
+
+        completed, payload = self._run(mode="success-future-note")
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            events.PAUSE_REASON_PLAN_ARTIFACT_TAMPERED, payload["pause_reason"]
+        )
+        guard = payload["turns"][0]["plan_artifact_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual(["session-2.md"], guard["changed_artifacts"])
+        self.assertTrue(guard["reverted_to_pending"])
+        self.assertEqual(guard, payload["pause_details"]["plan_artifact_guard"])
+        # The turn is refused whole, so the session it did select goes back to
+        # pending rather than banking a completion earned against a plan it
+        # rewrote underneath itself.
+        self.assertEqual(
+            "pending",
+            plans.inspect_plan(self.plan_dir).status_by_id["1"],
+        )
+
+    def test_timeout_that_tampers_with_another_packet_pauses_on_the_guard(self) -> None:
+        self._write_plan(("pending", "pending"), readiness="loop-ready")
+
+        completed, payload = self._run(
+            mode="timeout",
+            # The deadline runs from the harness spawn, so it has to cover the
+            # fake harness reaching its tamper: a freshly copied executable can
+            # stall for seconds in Gatekeeper assessment on top of full-suite
+            # parallel load, and a deadline that lands first leaves nothing for
+            # the guard to see. The sleep stays far beyond the deadline so the
+            # turn still times out.
+            turn_timeout=30,
+            env_overrides={
+                "FAKE_CODEX_SLEEP": "120",
+                "FAKE_CODEX_TAMPER_SESSION": "session-2.md",
+            },
+            process_timeout=90,
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertTrue(payload["turns"][0]["timed_out"])
+        # A bare timeout is a recoverable pause, so reporting one here would
+        # relaunch against the packet the timed-out turn rewrote.
+        self.assertEqual(
+            events.PAUSE_REASON_PLAN_ARTIFACT_TAMPERED, payload["pause_reason"]
+        )
+        self.assertFalse(payload["pause_policy"]["recoverable"])
+        guard = payload["turns"][0]["plan_artifact_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual(["session-2.md"], guard["changed_artifacts"])
+        self.assertEqual("timeout", guard["result_disposition"])
+        self.assertEqual(guard, payload["pause_details"]["plan_artifact_guard"])
+
+    def test_structured_pause_that_tampers_with_another_packet_hits_the_guard(
         self,
     ) -> None:
         self._write_plan(("pending", "pending"), readiness="loop-ready")
-        original_metadata = plans.read_readiness_metadata(self.plan_dir)
-        self.assertIsNotNone(original_metadata)
 
         completed, payload = self._run(
-            mode="success-future-note",
-            max_sessions=1,
+            mode="runner-pause",
+            env_overrides={"FAKE_CODEX_TAMPER_SESSION": "session-2.md"},
         )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual(
+            events.PAUSE_REASON_PLAN_ARTIFACT_TAMPERED, payload["pause_reason"]
+        )
+        self.assertFalse(payload["pause_policy"]["recoverable"])
+        guard = payload["turns"][0]["plan_artifact_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual(["session-2.md"], guard["changed_artifacts"])
+        self.assertEqual("runner-pause", guard["result_disposition"])
+        self.assertEqual(guard, payload["pause_details"]["plan_artifact_guard"])
+
+    def test_wrong_session_completion_keeps_its_status_diagnosis(self) -> None:
+        self._write_plan(("pending", "pending"), readiness="loop-ready")
+
+        completed, payload = self._run(mode="unexpected-progress")
+
+        # Completing the wrong session also changes that session's artifact,
+        # so the ordering below the status guards is what keeps this sharper
+        # than a bare tamper report.
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual("unexpected-status-change", payload["pause_reason"])
+        self.assertNotIn("plan_artifact_guard", payload["turns"][0])
+
+    def test_selected_session_completion_passes_the_plan_artifact_guard(self) -> None:
+        self._write_plan(("pending", "pending"), readiness="loop-ready")
+
+        completed, payload = self._run(max_sessions=1)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        guard = payload["turns"][0]["plan_artifact_guard"]
+        self.assertTrue(guard["passed"])
+        self.assertEqual(1, guard["artifact_count"])
+
+    def test_lifecycle_keeps_the_running_sha_in_sync_across_a_turn(self) -> None:
+        self._write_plan(("pending", "pending"), readiness="loop-ready")
+
+        completed, payload = self._run(max_sessions=1)
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertTrue(payload["ok"])
@@ -918,19 +1017,10 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertEqual("loop-ready", payload["readiness_state_final"])
         self.assertIsNone(payload.get("readiness_state_refresh_error"))
         self.assertIsNotNone(payload.get("readiness_state_refreshed_at"))
-        future_session = self.plan_dir / "session-2.md"
-        self.assertIn(
-            "Generated future-session note",
-            future_session.read_text(encoding="utf-8"),
-        )
         refreshed_metadata = plans.read_readiness_metadata(self.plan_dir)
         self.assertEqual("loop-ready", refreshed_metadata.state)
         self.assertEqual(
             plans.stable_readiness_sha256(self.plan_dir),
-            refreshed_metadata.readiness_sha256,
-        )
-        self.assertNotEqual(
-            original_metadata.readiness_sha256,
             refreshed_metadata.readiness_sha256,
         )
 
@@ -1336,6 +1426,13 @@ class RunVerificationEnforcementTests(unittest.TestCase):
         )
         self.assertEqual("readme", check_started["name"])
         self.assertEqual("file_exists", check_started["kind"])
+        check_finished = next(
+            record["payload"]
+            for record in event_records
+            if record["name"] == events.VERIFICATION_CHECK_FINISHED_EVENT
+        )
+        self.assertEqual("readme", check_finished["name"])
+        self.assertEqual(verification.CHECK_ROLE_GATE, check_finished["role"])
         finished = next(
             record["payload"]
             for record in event_records
@@ -1723,6 +1820,10 @@ class LegacyImplementationGuardTests(unittest.TestCase):
         guard = payload["pause_details"]["workspace_write_guard"]
         self.assertEqual("legacy-single-repository", guard["scope_mode"])
         self.assertEqual("repository-unavailable", guard["unavailable"]["."]["reason"])
+        # A refusal before the harness leaves nothing turn-shaped behind. An
+        # empty turn directory reads downstream as a turn that ran and wrote no
+        # result.json, which is a turn this run never spent.
+        self.assertEqual([], sorted(self.state_dir.rglob("turn-*")))
 
 
 class WorkspaceGuardExceptionTests(unittest.TestCase):
@@ -3281,6 +3382,11 @@ class HandoffCorrectionTests(unittest.TestCase):
         self.assertEqual(2, evidence["attempt"])
         self.assertEqual(runner.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, evidence["defect"])
         self.assertEqual(1, len(self._payloads(events.TURN_HANDOFF_CORRECTION_EVENT)))
+        # The session is still reopened so the plan parses, but a defect the
+        # bounded correction already failed on is not advertised as repairable.
+        reopen = payload["pause_details"]["handoff_reopen"]
+        self.assertTrue(reopen["reopened"])
+        self.assertFalse(reopen["repairable"])
 
     def test_scope_violation_is_not_treated_as_a_correctable_defect(self) -> None:
         with mock.patch.object(
@@ -3296,6 +3402,42 @@ class HandoffCorrectionTests(unittest.TestCase):
         self.assertNotIn("handoff_correction", payload["pause_details"])
         self.assertEqual([], self._payloads(events.TURN_HANDOFF_CORRECTION_EVENT))
         self.assertEqual(1, run_harness.call_count)
+
+    def test_uninspectable_completed_handoff_is_reopened_as_repairable(self) -> None:
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=self._harness("OAK:README.md"),
+        ):
+            _, payload = self._invoke("reopen-run")
+
+        self.assertEqual("malformed-plan", payload["pause_reason"])
+        evidence = payload["pause_details"]["handoff_reopen"]
+        self.assertTrue(evidence["reopened"])
+        self.assertTrue(evidence["repairable"])
+        self.assertIn("session-1.md", evidence["plan_error"])
+
+        # The plan parses again, and it claims the work still has to be handed
+        # off, so a relaunch has something to select.
+        session_text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
+        self.assertIn(f"{plans.STATUS_PREFIX} pending", session_text)
+        self.assertIn("The status was reset to pending", session_text)
+        self.assertIn("OAK:README.md", session_text)
+        snapshot = plans.inspect_plan(self.plan_dir)
+        self.assertEqual(["pending"], [item.status for item in snapshot.sessions])
+        self.assertEqual(
+            ["pending"],
+            [item["status"] for item in payload["final_snapshot"]["sessions"]],
+        )
+
+        rejections = self._payloads(events.TURN_REJECTED_EVENT)
+        self.assertEqual(1, len(rejections))
+        self.assertTrue(rejections[0]["reopened"])
+        reopenings = self._payloads(events.SESSION_REOPENED_EVENT)
+        self.assertEqual(1, len(reopenings))
+        self.assertEqual("complete", reopenings[0]["from_status"])
+        self.assertEqual("pending", reopenings[0]["to_status"])
+        self.assertEqual("plan-inspection", reopenings[0]["guard"])
 
     def test_correction_turn_preserves_review_artifacts(self) -> None:
         (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
@@ -3326,6 +3468,139 @@ class HandoffCorrectionTests(unittest.TestCase):
         self.assertTrue(preserved["review_verdict_ok"])
         self.assertEqual("all-clear", preserved["review_outcome"])
         self.assertEqual(digest, review.final_review_artifact_sha256(self.plan_dir))
+
+
+class PausedHandoffStatusTests(unittest.TestCase):
+    """A structured runner pause outranks the status value it was written with."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.repo_root = self.tmp_path / "repo"
+        init_git_repo(self.repo_root)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        write_plan(self.plan_dir, ("pending",))
+
+    def _args(self) -> argparse.Namespace:
+        return argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.repo_root),
+            harness="codex",
+            state_dir=str(self.state_dir),
+            json=True,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+
+    def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
+        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        try:
+            return runner._run_locked(
+                args=self._args(),
+                cwd=self.repo_root,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                lock_info=lock_info,
+                run_id=run_id,
+            )
+        finally:
+            state.release_lock(self.plan_dir, self.state_dir)
+
+    def _payloads(self, name: str) -> list[dict[str, Any]]:
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        return [
+            record["payload"]
+            for record in read_jsonl(event_path)
+            if record["name"] == name
+        ]
+
+    def _harness(self, status: str, last_message: str):
+        def run(*_args: object, **_kwargs: object) -> harnesses.HarnessResult:
+            session_path = self.plan_dir / "session-1.md"
+            lines = session_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            for index, line in enumerate(lines):
+                if line.startswith(plans.STATUS_PREFIX):
+                    lines[index] = f"{plans.STATUS_PREFIX} {status}\n"
+            session_path.write_text("".join(lines), encoding="utf-8")
+            return harnesses.HarnessResult(
+                name="codex",
+                argv=["fake"],
+                returncode=0,
+                stdout="ok\n",
+                stderr="",
+                last_message=last_message,
+            )
+
+        return run
+
+    def test_structured_pause_outranks_a_paused_handoff_status(self) -> None:
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=self._harness(
+                "paused",
+                "Runner status: paused\nRUNNER_PAUSE: blocked - needs a decision\n",
+            ),
+        ):
+            _, payload = self._invoke("paused-status-run")
+
+        self.assertTrue(payload["paused"])
+        self.assertEqual("blocked", payload["pause_reason"])
+        repair = payload["pause_details"]["handoff_status_repair"]
+        self.assertEqual("paused", repair["from_status"])
+        self.assertEqual("pending", repair["to_status"])
+        self.assertEqual("blocked", repair["pause_reason"])
+
+        session_text = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
+        self.assertIn(f"{plans.STATUS_PREFIX} pending", session_text)
+        self.assertIn("there is no paused status value", session_text)
+        self.assertEqual(
+            "pending", plans.inspect_plan(self.plan_dir).sessions[0].status
+        )
+        self.assertEqual(
+            ["pending"],
+            [item["status"] for item in payload["final_snapshot"]["sessions"]],
+        )
+
+        reopenings = self._payloads(events.SESSION_REOPENED_EVENT)
+        self.assertEqual(1, len(reopenings))
+        self.assertEqual("paused", reopenings[0]["from_status"])
+        self.assertEqual("pending", reopenings[0]["to_status"])
+        self.assertEqual("plan-status-validity", reopenings[0]["guard"])
+        self.assertEqual("blocked", reopenings[0]["reason"])
+
+    def test_unstructured_pause_leaves_an_invalid_status_terminal(self) -> None:
+        with mock.patch.object(
+            runner.harnesses,
+            "run_harness",
+            side_effect=self._harness(
+                "paused",
+                "RUNNER_PAUSE: wrangler auth expired\n",
+            ),
+        ):
+            _, payload = self._invoke("unstructured-pause-run")
+
+        self.assertTrue(payload["paused"])
+        self.assertEqual("unknown-status", payload["pause_reason"])
+        self.assertNotIn("handoff_status_repair", payload["pause_details"])
+        self.assertIn(
+            f"{plans.STATUS_PREFIX} paused",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+        self.assertEqual([], self._payloads(events.SESSION_REOPENED_EVENT))
 
 
 if __name__ == "__main__":

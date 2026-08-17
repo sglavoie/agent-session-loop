@@ -30,6 +30,10 @@ this defect now — is answered by replaying those records in order:
 * **Merge is irreversible and always forward.** A merged issue can never be
   merged again or un-merged, its whole history moves to the target, and later
   observations of either fingerprint land on the final canonical target.
+* **Declining to merge is a fact too.** A reviewed pair that is two defects is
+  recorded with the identity digest each issue had when it was read, so the
+  suggestion stops being re-proposed while both issues still read that way and
+  becomes a question again once one of them materially changes.
 * **An identity key outlives the issue it was minted for.** Bindings are
   replayed against the settled merge chain, so a key keeps naming whoever owns
   that history today without any stored record being reinterpreted. The same
@@ -65,6 +69,7 @@ from .assurance_ledger import (
     KIND_IMPROVEMENT_PLAN_DRAFTED,
     KIND_ISSUE_DISPOSITION,
     KIND_ISSUE_IDENTITY_BOUND,
+    KIND_ISSUE_KEPT_DISTINCT,
     KIND_ISSUE_MERGED,
     KIND_ISSUE_OBSERVED,
     LedgerRecord,
@@ -91,6 +96,7 @@ from .assurance_models import (
     Finding,
     ImprovementPlanDraft,
     IssueIdentityBinding,
+    IssueKeptDistinct,
     IssueMerge,
     IssueObservation,
     IssueState,
@@ -1025,6 +1031,15 @@ class ProjectionAnomaly:
     detail: str
 
 
+def issue_pair_key(left: str, right: str) -> tuple[str, str]:
+    """Order two issue IDs by number, so both directions name one pair."""
+    return (
+        (left, right)
+        if issue_id_number(left) <= issue_id_number(right)
+        else (right, left)
+    )
+
+
 @dataclass(frozen=True)
 class AssuranceProjection:
     """The whole inbox, derived from ledger bytes and nothing else."""
@@ -1037,6 +1052,17 @@ class AssuranceProjection:
     #: Every bound identity key mapped to the issue that owns its history now,
     #: merges already followed.
     identity_bindings: Mapping[str, str] = field(default_factory=dict)
+    #: Every reviewed keep-distinct pair, named by the issues that own those
+    #: histories now, mapped to the identity digest each one was reviewed at.
+    kept_distinct: Mapping[tuple[str, str], Mapping[str, str]] = field(
+        default_factory=dict
+    )
+    #: Every keep-distinct ruling the replay accepted, as it was written and in
+    #: ledger order. A caller asking whether a pair has already been ruled on has
+    #: to read these rather than the stored records: a record replay rejected
+    #: means nothing, and reading it as a standing ruling would let it answer for
+    #: a review nobody made.
+    rulings: tuple[IssueKeptDistinct, ...] = ()
     _catalog: IdentityCatalog | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -1047,6 +1073,16 @@ class AssuranceProjection:
             self,
             "identity_bindings",
             MappingProxyType(dict(self.identity_bindings)),
+        )
+        object.__setattr__(
+            self,
+            "kept_distinct",
+            MappingProxyType(
+                {
+                    pair: MappingProxyType(dict(digests))
+                    for pair, digests in self.kept_distinct.items()
+                }
+            ),
         )
 
     def resolve(self, issue_id: str) -> str:
@@ -1071,6 +1107,26 @@ class AssuranceProjection:
             if item.run_id == run_id:
                 return item
         return None
+
+    def is_kept_distinct(self, left: str, right: str) -> bool:
+        """Whether a reviewed ruling still says these two are separate defects.
+
+        The ruling was reached about the issues as they read then, so it holds
+        only while both still read that way. A digest that has moved means this
+        pair, in the shape it has now, is a question nobody has answered — which
+        is why a stale ruling lapses into another review rather than suppressing
+        the suggestion forever.
+        """
+        reviewed = self.kept_distinct.get(
+            issue_pair_key(self.resolve(left), self.resolve(right))
+        )
+        if reviewed is None:
+            return False
+        catalog = self.catalog
+        return all(
+            catalog.identity_digest(issue_id) == digest
+            for issue_id, digest in reviewed.items()
+        )
 
     @property
     def open_issues(self) -> tuple[Issue, ...]:
@@ -1174,6 +1230,7 @@ def project(view: LedgerView) -> AssuranceProjection:
     runs: dict[str, _RunNode] = {}
     aliases: dict[str, str] = {}
     bindings: dict[str, str] = {}
+    rulings: list[IssueKeptDistinct] = []
     anomalies: list[ProjectionAnomaly] = []
 
     def note(record: LedgerRecord, reason: str, detail: str) -> None:
@@ -1274,6 +1331,20 @@ def project(view: LedgerView) -> AssuranceProjection:
                 )
                 continue
             bindings[payload.identity_key] = payload.issue_id
+        elif record.kind == KIND_ISSUE_KEPT_DISTINCT:
+            unknown = [
+                issue_id
+                for issue_id in payload.issue_ids
+                if follow_merge_chain(aliases, issue_id) not in nodes
+            ]
+            if unknown:
+                note(
+                    record,
+                    UNKNOWN_ISSUE,
+                    f"{', '.join(unknown)} names no issue observed before this record",
+                )
+                continue
+            rulings.append(payload)
         elif record.kind == KIND_HUMAN_CLOSEOUT:
             run = runs.get(payload.run_id)
             if run is None:
@@ -1302,6 +1373,25 @@ def project(view: LedgerView) -> AssuranceProjection:
         canonical = follow_merge_chain(aliases, bindings[identity_key])
         identity_bindings[identity_key] = canonical
         keys_by_issue.setdefault(canonical, []).append(identity_key)
+
+    # Rulings resolve against the settled chain for the same reason, and a pair
+    # whose members have since merged into one issue disappears rather than
+    # becoming an anomaly: that merge is a later answer to the same question,
+    # and the reviewer who gave it was entitled to change their mind. A later
+    # ruling about one pair supersedes an earlier one, which is how a pair read
+    # again after an issue moved settles on the digests it was last read at.
+    kept_distinct: dict[tuple[str, str], dict[str, str]] = {}
+    for ruling in rulings:
+        digests: dict[str, str] = {}
+        for issue_id, digest in ruling.reviewed_digests:
+            digests.setdefault(follow_merge_chain(aliases, issue_id), digest)
+        named = sorted(digests, key=issue_id_number)
+        for position, left in enumerate(named):
+            for right in named[position + 1 :]:
+                kept_distinct[(left, right)] = {
+                    left: digests[left],
+                    right: digests[right],
+                }
 
     issues = tuple(
         _build_issue(nodes[issue_id], keys_by_issue.get(issue_id, ()))
@@ -1334,6 +1424,8 @@ def project(view: LedgerView) -> AssuranceProjection:
         anomalies=tuple(anomalies),
         rejected=view.rejected,
         identity_bindings=identity_bindings,
+        kept_distinct=kept_distinct,
+        rulings=tuple(rulings),
     )
 
 
@@ -1491,6 +1583,46 @@ def _catalog_digest(entries: Sequence[CatalogEntry]) -> str:
     )
 
 
+#: Version of the material :func:`issue_identity_digest` is taken over. It is
+#: part of that material, so changing which fields participate changes every
+#: digest rather than silently making two different issues collide.
+ISSUE_IDENTITY_DIGEST_VERSION = 1
+
+
+def issue_identity_digest(entry: CatalogEntry) -> str:
+    """Return the digest of everything one issue is recognized as a defect by.
+
+    This is the material a reviewer weighs when ruling on whether two issues are
+    one defect: the fingerprints the issue has been seen under, and the exact and
+    normalized text every candidate reason is drawn from.
+
+    What is excluded is what a ruling cannot be invalidated by. Identity keys and
+    lifecycle state are not here even though
+    :func:`_catalog_digest` covers them, because naming an issue or deciding what
+    to do about it says nothing about whether it and another issue describe the
+    same defect; occurrence counts and timestamps are absent for the reason they
+    are absent there. Folding any of them in would expire a reviewed ruling for
+    events that cannot have changed it.
+    """
+    return sha256_hex(
+        canonical_json_bytes(
+            {
+                "kind": "assurance-issue-identity",
+                "version": ISSUE_IDENTITY_DIGEST_VERSION,
+                "issue_id": entry.issue_id,
+                "category": entry.category,
+                "component": entry.component,
+                "invariant_key": entry.invariant_key,
+                "lane": entry.lane,
+                "fingerprints": list(entry.fingerprints),
+                "localization": list(entry.localization),
+                "summary_tokens": list(entry.summary_tokens),
+                "invariant_tokens": list(entry.invariant_tokens),
+            }
+        )
+    )
+
+
 @dataclass(frozen=True)
 class IdentityCatalog:
     """Every canonical issue, indexed by the ways one defect is recognized.
@@ -1568,6 +1700,11 @@ class IdentityCatalog:
 
     def entry(self, issue_id: str) -> CatalogEntry | None:
         return self.by_issue_id.get(parse_issue_id(issue_id))
+
+    def identity_digest(self, issue_id: str) -> str | None:
+        """Return one issue's recognition digest, or ``None`` when it names none."""
+        entry = self.entry(issue_id)
+        return None if entry is None else issue_identity_digest(entry)
 
     def issue_for_fingerprint(self, fingerprint: str) -> str | None:
         return self.by_fingerprint.get(fingerprint)

@@ -2492,6 +2492,9 @@ GENERIC_RECOVERY_PAUSE_REASONS: tuple[str, ...] = (
     "auth-failed",
     "invalid-model",
     "transport-failed",
+    # The turn rewrote another session's instructions. The plan needs inspecting
+    # and the tampered artifact restoring before a relaunch; no reply undoes it.
+    "plan-artifact-tampered",
 )
 
 

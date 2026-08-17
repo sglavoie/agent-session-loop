@@ -66,6 +66,7 @@ from . import (
     preflight,
     repository_evidence,
     state,
+    verification,
     workspaces,
 )
 from .assurance_models import (
@@ -789,13 +790,26 @@ _CONTENT_KEYS = frozenset(
 #: credential embedded in a remote URL cannot reach the bundle.
 _ORIGIN_KEYS = frozenset({"origin", "origins", "remote", "remote_url", "url"})
 
+#: The bounded enum a reply origin is drawn from, mirroring
+#: ``runner.REPLY_ORIGINS``. No Git remote can collide with these tokens.
+_REPLY_ORIGIN_VALUES = frozenset({"argv", "stdin", "mailbox"})
+
+#: Field parents under which ``origin`` names how an operator reply reached the
+#: run rather than a repository. ``None`` covers the reply event, which carries
+#: the enum at its payload root.
+_REPLY_ORIGIN_PARENTS = frozenset({None, "reply_source", "source"})
+
 #: Keys holding a process environment, whose values are withheld wholesale.
 _ENVIRONMENT_KEYS = frozenset({"env", "environ", "environment"})
 
+#: A key is secret-bearing when one of these words is the whole key or a whole
+#: word inside it. The trailing boundary is what keeps ``auth`` from swallowing
+#: ``authorized_aliases``; it admits a plural and an upper-case camelCase
+#: continuation (``authToken``) so narrowing the match sheds no real secret.
 _SECRET_KEY_RE = re.compile(
     r"(?i)(?:^|[-_.])(?:api[-_]?key|access[-_]?key|auth|authorization|bearer|"
     r"cookie|credential|credentials|passphrase|passwd|password|private[-_]?key|"
-    r"pwd|secret|session[-_]?key|signature|token)"
+    r"pwd|secret|session[-_]?key|signature|token)s?(?=$|[-_.]|(?-i:[A-Z]))"
 )
 _SECRET_VALUE_RE = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{16,}"
@@ -1120,28 +1134,35 @@ class _Collector:
 
     # -- redaction -------------------------------------------------------
 
-    def redact(self, value: Any, *, key: str | None = None) -> Any:
+    def redact(
+        self, value: Any, *, key: str | None = None, parent: str | None = None
+    ) -> Any:
         """Return ``value`` with credentials, content, and unsafe paths removed."""
         if isinstance(value, Mapping):
             return {
-                str(name): self.redact(item, key=str(name))
+                str(name): self.redact(item, key=str(name), parent=key)
                 for name, item in value.items()
             }
         if isinstance(value, (list, tuple)):
             items = list(value)
             if key in _ARGV_KEYS:
                 items = _redact_argv(items)
-            kept = [self.redact(item, key=key) for item in items[:MAX_SEQUENCE_ITEMS]]
+            kept = [
+                self.redact(item, key=key, parent=parent)
+                for item in items[:MAX_SEQUENCE_ITEMS]
+            ]
             for dropped in items[MAX_SEQUENCE_ITEMS:]:
                 self.omissions.record(key or "payload", REASON_SIZE_CAP, dropped)
             return kept
         if isinstance(value, str):
-            return self._redact_string(value, key=key)
+            return self._redact_string(value, key=key, parent=parent)
         if isinstance(value, (bool, int, float)) or value is None:
             return value
-        return self._redact_string(str(value), key=key)
+        return self._redact_string(str(value), key=key, parent=parent)
 
-    def _redact_string(self, text: str, *, key: str | None) -> str:
+    def _redact_string(
+        self, text: str, *, key: str | None, parent: str | None = None
+    ) -> str:
         if key is not None:
             if _SECRET_KEY_RE.search(key):
                 return REDACTED
@@ -1150,6 +1171,8 @@ class _Collector:
             if key in _CONTENT_KEYS:
                 return self._content_stub(text)
             if key in _ORIGIN_KEYS:
+                if _is_reply_origin(text, key=key, parent=parent):
+                    return text
                 return _redact_origin(text)
         if text.startswith("/") and "\n" not in text:
             located = self._roots.locate(text)
@@ -1298,6 +1321,20 @@ def _redact_argv(items: Sequence[Any]) -> list[Any]:
     return redacted
 
 
+def _is_reply_origin(value: str, *, key: str, parent: str | None) -> bool:
+    """Whether an ``origin`` field names a reply channel rather than a remote.
+
+    Canonicalizing one erases the only record of whether an operator reply
+    arrived by argv, by stdin, or through the mailbox, and leaves an
+    ``[unparsable-origin:…]`` hash in its place.
+    """
+    return (
+        key == "origin"
+        and parent in _REPLY_ORIGIN_PARENTS
+        and value in _REPLY_ORIGIN_VALUES
+    )
+
+
 def _redact_origin(value: str) -> str:
     """Return a credential-free origin identity, or a stable stand-in."""
     try:
@@ -1393,8 +1430,29 @@ def _turn_shows_failure(result: Mapping[str, Any]) -> bool:
         return True
     if result.get("plan_error"):
         return True
+    if _guard_shows_failure(result.get("workspace_write_guard")):
+        return True
     status_result = result.get("status_result")
     return status_result is not None and status_result != "complete"
+
+
+def _guard_shows_failure(guard: Any) -> bool:
+    """Whether a workspace write guard refused the turn or could not judge it.
+
+    A turn that wrote outside its declared scope exits zero and reports a
+    complete status, so the guard result is the only place that failure is
+    recorded. A guard that could not compare the workspace counts too: it
+    proves nothing about the writes it was there to bound.
+    """
+    if not isinstance(guard, Mapping):
+        return False
+    if guard.get("passed") is False:
+        return True
+    if guard.get("violations"):
+        return True
+    if guard.get("unavailable"):
+        return True
+    return bool(guard.get("reason"))
 
 
 def _turn_directories(run_dir: Path) -> list[Path]:
@@ -1519,6 +1577,9 @@ def _plan_section(
         "reference": collector.reference(plan_dir, kind="plan"),
         "context": collector.file_digest(plan_dir / "context.md", kind="plan"),
         "manifest": collector.file_digest(plan_dir / "manifest.md", kind="plan"),
+        # Every turn claims ``progress_appended``; without this the claim cites
+        # nothing, and a journal that was never written goes unreported.
+        "progress": collector.file_digest(plans.progress_path(plan_dir), kind="plan"),
         "metadata": _plan_metadata(collector, plan_dir),
     }
     for label, key in (("initial", "initial_snapshot"), ("final", "final_snapshot")):
@@ -1649,10 +1710,12 @@ def _verification_section(turns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         result = turn.get("result")
         if not isinstance(result, Mapping):
             continue
-        verification = result.get("verification")
-        if not isinstance(verification, Mapping):
+        session_verification = result.get("verification")
+        if not isinstance(session_verification, Mapping):
             continue
-        sessions.append({"turn": turn.get("name"), "verification": verification})
+        sessions.append(
+            {"turn": turn.get("name"), "verification": session_verification}
+        )
     return {"sessions": sessions, "session_count": len(sessions)}
 
 
@@ -1863,7 +1926,15 @@ def collect_audit_input(
         "state": {
             "reference": state_reference,
             "harness": state_payload.get("harness"),
+            # Beside the configured model, never over it: `model` records what
+            # the run asked for and `observed_model` what a harness reported
+            # executing, and an audit that saw only one cannot tell them apart.
             "model": collector.redact(state_payload.get("model"), key="model"),
+            "model_source": state_payload.get("model_source"),
+            "observed_model": collector.redact(
+                state_payload.get("observed_model"), key="observed_model"
+            ),
+            "observed_model_source": state_payload.get("observed_model_source"),
             "effort": state_payload.get("effort"),
             "turn_count": len(turns),
         },
@@ -1926,7 +1997,9 @@ _CLASSIFIED_EVENT_NAMES = frozenset(
         events.RUN_PAUSED_EVENT,
         events.TURN_HANG_CLEARED_EVENT,
         events.TURN_HANG_SUSPECTED_EVENT,
+        events.VERIFICATION_CHECK_FINISHED_EVENT,
         events.VERIFICATION_CHECK_SKIPPED_EVENT,
+        events.VERIFICATION_FINISHED_EVENT,
         events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
     }
 )
@@ -2532,6 +2605,37 @@ def _check_terminal_artifacts(context: _CheckContext) -> _Verdict:
     )
 
 
+def _is_expected_conditional_skip(entry: Any) -> bool:
+    """Whether a skip is the recipe working as designed rather than a gap.
+
+    A diagnostic that names the gates it explains and was omitted because none
+    of them failed proves the recipe reached a clean result, so counting it
+    against the run's success claim would make every healthy recipe look
+    contradicted. Every other skip is a check that did not run.
+    """
+
+    if not isinstance(entry, Mapping):
+        return False
+    return bool(
+        entry.get("reason") == verification.SKIP_REASON_CONDITION_NOT_MET
+        and _sequence(entry.get("on_failure_of"))
+    )
+
+
+def _verification_covered_the_turn(session_verification: Mapping[str, Any]) -> bool:
+    """Whether a recipe actually gated the changes the turn made.
+
+    An expected skip is only neutral while something else still checked the
+    work. A recipe that declared no gates, or that executed nothing, left the
+    turn's mutation uncovered no matter how well-formed its skips were.
+    """
+
+    gate_count = _mapping(session_verification.get("recipe")).get("gate_count")
+    if isinstance(gate_count, int) and gate_count <= 0:
+        return False
+    return bool(_sequence(session_verification.get("checks")))
+
+
 def _check_misleading_success(context: _CheckContext) -> _Verdict:
     status = context.section("status")
     finished = [
@@ -2558,25 +2662,58 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
         if contradicts and isinstance(turn.get("directory"), str):
             references.append(turn["directory"])
     for session in _sequence(context.section("verification").get("sessions")):
-        verification = _mapping(_mapping(session).get("verification"))
-        if verification.get("passed") is False:
+        session_verification = _mapping(_mapping(session).get("verification"))
+        if session_verification.get("passed") is False:
             counter.append(f"verification failed for {_mapping(session).get('turn')}")
-        skipped = _sequence(verification.get("skipped_checks"))
-        if skipped:
+        skipped = _sequence(session_verification.get("skipped_checks"))
+        unexplained = [
+            entry for entry in skipped if not _is_expected_conditional_skip(entry)
+        ]
+        if unexplained:
             counter.append(
-                f"{len(skipped)} verification check(s) were skipped for "
-                f"{_mapping(session).get('turn')}"
+                f"{len(unexplained)} verification check(s) were skipped for "
+                f"{_mapping(session).get('turn')} without a condition that "
+                "explains the skip"
+            )
+        elif skipped and not _verification_covered_the_turn(session_verification):
+            counter.append(
+                f"every verification check for {_mapping(session).get('turn')} was "
+                "skipped, so nothing gated the changes it made"
             )
     skipped_records = [
-        record
+        _mapping(record.get("payload"))
         for record in context.records
         if record.get("name") == events.VERIFICATION_CHECK_SKIPPED_EVENT
     ]
-    if skipped_records:
+    unexplained_records = [
+        payload
+        for payload in skipped_records
+        if not _is_expected_conditional_skip(payload)
+    ]
+    if unexplained_records:
         counter.append(
-            f"{len(skipped_records)} verification check(s) recorded themselves as "
-            "skipped"
+            f"{len(unexplained_records)} verification check(s) recorded themselves "
+            "as skipped without a condition that explains the skip"
         )
+    elif skipped_records:
+        executed_turns = {
+            _mapping(record.get("payload")).get("turn_index")
+            for record in context.records
+            if record.get("name") == events.VERIFICATION_CHECK_FINISHED_EVENT
+        }
+        uncovered = sorted(
+            {
+                str(payload.get("turn_index"))
+                for payload in skipped_records
+                if payload.get("turn_index") not in executed_turns
+            }
+        )
+        if uncovered:
+            counter.append(
+                f"every verification check recorded for turn(s) "
+                f"{_joined(uncovered)} was skipped, so nothing gated the changes "
+                "they made"
+            )
     if status.get("paused") is True:
         counter.append("the state projection records the run as paused")
     if any(record.get("name") == events.RUN_PAUSED_EVENT for record in context.records):
@@ -2760,6 +2897,162 @@ def _check_review_independence(context: _CheckContext) -> _Verdict:
         "pass",
         f"the {review_harness} review harness is independent of the {harness} "
         "implementation harness",
+        evidence,
+    )
+
+
+def _verification_turn_label(key: tuple[Any, Any]) -> str:
+    turn_index = key[1]
+    return "an unidentified turn" if turn_index is None else f"turn {turn_index}"
+
+
+def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
+    """Reconcile every failing check against the outcome its recipe reported.
+
+    A verification only earns ``passed`` when every failure it saw was a
+    conditional diagnostic, which by construction does not gate. So a failing
+    check is accounted for in exactly two ways: the recipe reported the failure,
+    or the recipe absorbed it as a diagnostic. Anything else is a verification
+    that watched a check fail and said nothing. Both the turn result and the
+    event records are read, because either can survive without the other.
+
+    Event records carry the role each executed check played, so a failure is
+    reconciled against what that check actually was. Records collected before
+    the role was emitted fall back to the count of diagnostics that ran, which
+    bounds how many failures a recipe could have absorbed.
+    """
+
+    evidence = context.evidence(
+        context.event_summary.get("reference"),
+        context.section("state").get("reference"),
+    )
+    executed: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
+    outcomes: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for record in context.records:
+        name = record.get("name")
+        if name not in (
+            events.VERIFICATION_CHECK_FINISHED_EVENT,
+            events.VERIFICATION_FINISHED_EVENT,
+        ):
+            continue
+        payload = _mapping(record.get("payload"))
+        key = (payload.get("run_id"), payload.get("turn_index"))
+        if name == events.VERIFICATION_FINISHED_EVENT:
+            outcomes[key] = payload
+        else:
+            executed.setdefault(key, []).append(payload)
+
+    sessions = [
+        _mapping(session)
+        for session in _sequence(context.section("verification").get("sessions"))
+        if _mapping(_mapping(session).get("verification"))
+    ]
+    if not executed and not outcomes and not sessions:
+        return _Verdict(
+            "unavailable",
+            "the run recorded no verification outcomes to reconcile",
+            evidence,
+        )
+
+    problems: list[str] = []
+    blind: list[str] = []
+    failing_total = 0
+    for session in sessions:
+        outcome = _mapping(session.get("verification"))
+        if outcome.get("passed") is not True:
+            continue
+        failed = [
+            entry
+            for entry in _sequence(outcome.get("checks"))
+            if _payload_shows_failure(_mapping(entry))
+        ]
+        failing_total += len(failed)
+        absorbed = len(_sequence(outcome.get("diagnostic_failures")))
+        if len(failed) > absorbed:
+            problems.append(
+                f"the verification recorded for {session.get('turn')} passed while "
+                f"{len(failed)} of its check(s) failed and only {absorbed} of those "
+                "was a diagnostic"
+            )
+    for key in sorted(
+        set(executed) | set(outcomes), key=lambda item: (str(item[0]), str(item[1]))
+    ):
+        label = _verification_turn_label(key)
+        failures = [
+            payload
+            for payload in executed.get(key, ())
+            if _payload_shows_failure(payload)
+        ]
+        failing_total += len(failures)
+        outcome = outcomes.get(key)
+        if outcome is None:
+            if failures:
+                target = (
+                    blind
+                    if context.events_shed or context.terminal_pending
+                    else problems
+                )
+                target.append(
+                    f"{len(failures)} failing check record(s) for {label} never "
+                    f"reached a {events.VERIFICATION_FINISHED_EVENT} record"
+                )
+            continue
+        if outcome.get("passed") is not True:
+            continue
+        diagnostics = outcome.get("diagnostic_count")
+        diagnostics = diagnostics if isinstance(diagnostics, int) else 0
+        skipped = outcome.get("skipped_count")
+        skipped = skipped if isinstance(skipped, int) else 0
+        # Only a conditional diagnostic is ever skipped, and only a diagnostic
+        # that actually ran can absorb a failure — the declared count on its own
+        # lets a skipped diagnostic stand in for a gate that failed.
+        absorbable = max(diagnostics - skipped, 0)
+        roles = [payload.get("role") for payload in failures]
+        gate_failures = sum(1 for role in roles if role == verification.CHECK_ROLE_GATE)
+        diagnostic_failures = sum(
+            1 for role in roles if role == verification.CHECK_ROLE_DIAGNOSTIC
+        )
+        unidentified = len(roles) - gate_failures - diagnostic_failures
+        if gate_failures:
+            problems.append(
+                f"verification for {label} passed while {gate_failures} of its "
+                "check record(s) reported a failure against a gate"
+            )
+        elif unidentified > max(absorbable - diagnostic_failures, 0):
+            problems.append(
+                f"verification for {label} passed while {unidentified} check "
+                f"record(s) of unidentified role reported a failure against "
+                f"{absorbable} executed diagnostic(s)"
+            )
+        executed_count = outcome.get("executed_count")
+        passed_count = outcome.get("passed_count")
+        if isinstance(executed_count, int) and isinstance(passed_count, int):
+            unpassed = executed_count - passed_count
+            if unpassed > absorbable:
+                problems.append(
+                    f"verification for {label} passed while its own counts leave "
+                    f"{unpassed} of {executed_count} check(s) unpassed against "
+                    f"{absorbable} executed diagnostic(s)"
+                )
+
+    if problems:
+        return _Verdict(
+            "fail",
+            f"the run's verification outcomes do not account for the checks that "
+            f"failed under them: {_joined(problems)}",
+            evidence,
+        )
+    if blind:
+        return _Verdict(
+            "unavailable",
+            f"the run's verification records are incomplete, so {_joined(blind)} "
+            "cannot be distinguished from evidence the audit never saw",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"every one of the {failing_total} failing verification check(s) is "
+        "accounted for by the outcome of the recipe that ran it",
         evidence,
     )
 
@@ -3093,6 +3386,22 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             ),
         ),
         _check_review_independence,
+    ),
+    (
+        CheckSpec(
+            check="verification-outcomes",
+            lane="verification-review-independence",
+            category="verification",
+            component="verification-recipe",
+            invariant_key="verification.failure-accounting",
+            severity="high",
+            recommendation=(
+                "Reconcile the recipe's outcome with the checks that ran under "
+                "it: a verification may only pass when every failure it recorded "
+                "belongs to a conditional diagnostic."
+            ),
+        ),
+        _check_verification_outcomes,
     ),
     (
         CheckSpec(

@@ -950,6 +950,38 @@ class VerificationExecutorTests(unittest.TestCase):
                 started.cwd,
             )
 
+    def test_finished_observer_events_name_the_role_each_check_played(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            contract = self._contract(
+                checks=(
+                    contracts.FileExistsCheck(name="suite", path="missing.txt"),
+                    contracts.CommandCheck(
+                        name="focused",
+                        argv=("python3", "-c", "raise SystemExit(3)"),
+                        timeout_seconds=10.0,
+                        on_failure_of=("suite",),
+                    ),
+                )
+            )
+            observer, events = self._record_observer()
+
+            verification.run_verification(
+                contract, repo_root=repo_root, observer=observer
+            )
+
+            self.assertEqual(
+                [
+                    ("suite", verification.CHECK_ROLE_GATE),
+                    ("focused", verification.CHECK_ROLE_DIAGNOSTIC),
+                ],
+                [
+                    (event.name, event.role)
+                    for tag, event in events
+                    if tag == "finished"
+                ],
+            )
+
     def test_run_verification_with_partial_observer_only_fires_set_callback(
         self,
     ) -> None:

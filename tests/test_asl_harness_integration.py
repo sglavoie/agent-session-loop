@@ -21,7 +21,7 @@ import time
 import unittest
 from collections.abc import Callable
 from contextlib import redirect_stderr, suppress
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -418,6 +418,98 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             check=False,
         )
         return completed, json.loads(completed.stdout)
+
+    def enable_fake_review_harness(
+        self,
+        config_home: Path,
+        fake_codex: Path,
+    ) -> None:
+        config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        configured = json.loads(config_path.read_text(encoding="utf-8"))
+        configured["claude"] = {"executable": str(fake_codex)}
+        config_path.write_text(json.dumps(configured), encoding="utf-8")
+
+    def run_locked_review_run(
+        self,
+        *,
+        plan_dir: Path,
+        state_dir: Path,
+        config_home: Path,
+        run_id: str,
+        review_outcomes: str,
+        max_review_fix_cycles: int,
+    ) -> tuple[int, dict[str, Any]]:
+        """Run one review-enabled loop in process over an existing plan."""
+        listener = FakeRunControlListener()
+        real_state_dir = state.plan_state_dir(plan_dir, state_dir)
+        listener.state_path = real_state_dir / events.STATE_FILE_NAME
+        listener.events_path = real_state_dir / events.EVENTS_FILE_NAME
+        args = argparse.Namespace(
+            plan_dir=str(plan_dir),
+            cwd=str(REPO_ROOT),
+            harness="codex",
+            review_harness="claude",
+            state_dir=str(state_dir),
+            json=False,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            harness_model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+            max_review_fix_cycles=max_review_fix_cycles,
+        )
+
+        def fake_for_run(*_args, **kwargs):
+            listener.on_action = kwargs.get("on_action")
+            listener.on_status = kwargs.get("on_status")
+            return listener
+
+        with (
+            patched_env(
+                XDG_CONFIG_HOME=str(config_home),
+                FAKE_CODEX_MODE="success-with-review",
+                FAKE_CODEX_REVIEW_OUTCOMES=review_outcomes,
+                PYTHONPATH=str(REPO_ROOT)
+                + os.pathsep
+                + os.environ.get("PYTHONPATH", ""),
+            ),
+            mock.patch.object(
+                runner.run_control.RunControlListener,
+                "for_run",
+                side_effect=fake_for_run,
+            ),
+        ):
+            lock_info = state.acquire_lock(plan_dir, state_dir)
+            try:
+                return runner._run_locked(
+                    args=args,
+                    cwd=REPO_ROOT,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=None,
+                    lock_info=lock_info,
+                    run_id=run_id,
+                )
+            finally:
+                state.release_lock(plan_dir, state_dir)
+
+    def idle_started_at(self, turn: dict[str, Any]) -> datetime:
+        started_at = runner._parse_datetime(turn["started_at"])
+        assert isinstance(started_at, datetime)
+        return started_at - timedelta(seconds=turn["idle_seconds_since_previous_turn"])
+
+    def last_event_created_at(self, events_path: Path, name: str) -> datetime:
+        created_at = [
+            runner._parse_datetime(record["created_at"])
+            for record in read_jsonl(events_path)
+            if record["name"] == name
+        ][-1]
+        assert created_at is not None
+        return created_at
 
     def run_loop(
         self,
@@ -4298,6 +4390,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     check_index=0,
                     name="pytest",
                     kind="command",
+                    role=verification.CHECK_ROLE_GATE,
                     status="pass",
                     duration_seconds=1.25,
                     failure_reason=None,
@@ -4474,6 +4567,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 check_index=0,
                 name="readme",
                 kind="file_exists",
+                role=verification.CHECK_ROLE_GATE,
                 status="fail",
                 duration_seconds=0.0,
                 failure_reason="file-missing",
@@ -4573,6 +4667,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 check_index=0,
                 name="fast",
                 kind="command",
+                role=verification.CHECK_ROLE_GATE,
                 status="pass",
                 duration_seconds=0.1,
                 failure_reason=None,
@@ -4599,6 +4694,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 check_index=1,
                 name="slow",
                 kind="command",
+                role=verification.CHECK_ROLE_GATE,
                 status="pass",
                 duration_seconds=0.5,
                 failure_reason=None,
@@ -4663,6 +4759,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 check_index=2,
                 name="fast",
                 kind="command",
+                role=verification.CHECK_ROLE_GATE,
                 status="pass",
                 duration_seconds=0.1,
                 failure_reason=None,
@@ -4683,6 +4780,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 check_index=1,
                 name="medium",
                 kind="command",
+                role=verification.CHECK_ROLE_GATE,
                 status="pass",
                 duration_seconds=0.3,
                 failure_reason=None,
@@ -4705,6 +4803,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 check_index=0,
                 name="slow",
                 kind="command",
+                role=verification.CHECK_ROLE_GATE,
                 status="pass",
                 duration_seconds=0.9,
                 failure_reason=None,
@@ -4767,6 +4866,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     check_index=0,
                     name="first",
                     kind="command",
+                    role=verification.CHECK_ROLE_GATE,
                     status="pass",
                     duration_seconds=1.0,
                     failure_reason=None,
@@ -4871,6 +4971,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                         check_index=0,
                         name="first",
                         kind="command",
+                        role=verification.CHECK_ROLE_GATE,
                         status="pass",
                         duration_seconds=1.0,
                         failure_reason=None,
@@ -4952,6 +5053,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     check_index=0,
                     name="first",
                     kind="command",
+                    role=verification.CHECK_ROLE_GATE,
                     status="pass",
                     duration_seconds=1.0,
                     failure_reason=None,
@@ -5096,6 +5198,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     check_index=event.check_index,
                     name=event.name,
                     kind=event.kind,
+                    role=event.role,
                     status=event.result.status,
                     duration_seconds=event.result.duration_seconds,
                     failure_reason=event.result.failure_reason,
@@ -5241,6 +5344,209 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(1, len(action_events))
             self.assertEqual("codex", action_events[0]["harness"])
             self.assertEqual("codex", state_payload["action_required"]["harness"])
+
+    def test_idle_time_excludes_the_previous_turns_verification(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        slow_check = Path(tmp.name) / "slow-check.sh"
+        slow_check.write_text("#!/bin/sh\nsleep 1\nexit 0\n", encoding="utf-8")
+        contract = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "",
+                "- it runs",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                json.dumps(
+                    {
+                        "session": "1",
+                        "checks": [
+                            {
+                                "name": "slow-check",
+                                "type": "command",
+                                "argv": ["sh", str(slow_check)],
+                                "timeout_seconds": 60,
+                            }
+                        ],
+                    },
+                    indent=2,
+                ),
+                "```",
+            ]
+        )
+
+        def inject_contract(plan_dir: Path, _state_dir: Path) -> None:
+            write_plan(
+                plan_dir, ("pending", "pending"), contracts_by_id={"1": contract}
+            )
+
+        exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
+            self.run_locked_with_listener(
+                mode="success",
+                statuses=("pending", "pending"),
+                listener=FakeRunControlListener(),
+                before_run=inject_contract,
+            )
+        )
+
+        self.assertEqual(0, exit_code, payload)
+        turns = payload["turns"]
+        self.assertEqual(2, len(turns))
+        verification_finished_at = next(
+            runner._parse_datetime(record["payload"]["finished_at"])
+            for record in read_jsonl(Path(payload["events_path"]))
+            if record["name"] == events.VERIFICATION_FINISHED_EVENT
+        )
+        harness_exited_at = runner._parse_datetime(turns[0]["finished_at"])
+        idle_started_at = self.idle_started_at(turns[1])
+        # The idle clock starts after the runner's own verification and
+        # finalization, so it cannot begin back at the harness's exit.
+        self.assertGreaterEqual(idle_started_at, verification_finished_at)
+        self.assertGreaterEqual(
+            (idle_started_at - harness_exited_at).total_seconds(), 1.0
+        )
+
+    def test_idle_time_excludes_generated_review_creation(self) -> None:
+        plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        self.enable_fake_review_harness(config_home, fake_codex)
+
+        exit_code, payload = self.run_locked_review_run(
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            run_id="review-creation-idle",
+            review_outcomes="all-clear",
+            max_review_fix_cycles=0,
+        )
+
+        self.assertEqual(0, exit_code, payload)
+        turns = payload["turns"]
+        self.assertEqual(["1", "2"], [turn["session_id"] for turn in turns])
+        review_created_at = self.last_event_created_at(
+            Path(payload["events_path"]),
+            events.REVIEW_SESSION_CREATED_EVENT,
+        )
+        # Creating the generated review session is runner-owned work between
+        # the two turns, so the review turn's idle clock starts after it.
+        self.assertGreaterEqual(self.idle_started_at(turns[1]), review_created_at)
+
+    def test_idle_time_excludes_review_repair_materialization(self) -> None:
+        plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        self.enable_fake_review_harness(config_home, fake_codex)
+
+        _first_exit, first_payload = self.run_locked_review_run(
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            run_id="repair-idle-seed",
+            review_outcomes="findings,all-clear",
+            max_review_fix_cycles=0,
+        )
+        self.assertEqual(
+            "higher-cap-required",
+            first_payload["review_resume"]["blocker"],
+            first_payload,
+        )
+        # Reopening the implementation session makes the resumed run execute a
+        # turn *before* the all-complete branch materializes the repair child,
+        # which is the only arrangement where that materialization can be
+        # charged to a later turn as idle time.
+        session_one = plan_dir / "session-1.md"
+        session_one.write_text(
+            session_one.read_text(encoding="utf-8").replace(
+                "- **Status**: complete", "- **Status**: pending", 1
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code, payload = self.run_locked_review_run(
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            run_id="repair-idle-resume",
+            review_outcomes="findings,all-clear",
+            max_review_fix_cycles=1,
+        )
+
+        self.assertEqual(0, exit_code, payload)
+        turns = payload["turns"]
+        self.assertEqual(["1", "2.1", "3"], [turn["session_id"] for turn in turns])
+        reopened_at = self.last_event_created_at(
+            Path(payload["events_path"]),
+            events.REVIEW_REPAIR_REOPENED_EVENT,
+        )
+        # Materializing the repair child, re-gating the grown plan and
+        # refreshing readiness are all runner-owned work, so the repair turn's
+        # idle clock cannot start back at the previous turn's finalization.
+        self.assertGreaterEqual(self.idle_started_at(turns[1]), reopened_at)
+
+    def test_a_new_turn_supersedes_the_previous_turns_action_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload: dict[str, Any] = {
+                "state_path": str(state_path),
+                "active_turn": None,
+                "action_required": {
+                    "run_id": "run-1",
+                    "turn_index": 1,
+                    "reason": "approval-required",
+                    "message": "approval required before continuing",
+                    "source": "stderr",
+                    "matched": "approval required",
+                },
+            }
+            active_turn = {
+                "run_id": "run-1",
+                "turn_index": 2,
+                "session": 2,
+                "total_sessions": 3,
+                "harness": "codex",
+                "artifact_dir": str(tmp_dir / "turn"),
+                "stdout_path": str(tmp_dir / "stdout.log"),
+                "stderr_path": str(tmp_dir / "stderr.log"),
+                "last_message_path": str(tmp_dir / "last-message.txt"),
+                "result_path": str(tmp_dir / "result.json"),
+                "started_at": runner._isoformat(runner._utc_now()),
+                "finished_at": None,
+                "duration_seconds": None,
+                "idle_seconds_since_previous_turn": 0.0,
+                "last_activity_at": None,
+                "last_activity_stream": None,
+                "last_activity_preview": "",
+                "last_heartbeat_at": None,
+                "elapsed_seconds": 0.0,
+                "idle_seconds": 0.0,
+                "heartbeat_count": 0,
+                "stdout_chars": 0,
+                "stderr_chars": 0,
+                "action_required": None,
+            }
+            live_turn = runner._LiveTurn(
+                payload=payload,
+                event_path=event_path,
+                progress=runner._ProgressReporter(enabled=False),
+                active_turn=active_turn,
+                heartbeat_interval=60,
+            )
+
+            live_turn.start()
+            live_turn.stop()
+            live_turn.finish(runner._utc_now())
+
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertIsNone(payload["action_required"])
+        self.assertIsNone(state_payload["action_required"])
 
     def test_run_persistence_serializes_live_turn_and_control_state_writes(
         self,

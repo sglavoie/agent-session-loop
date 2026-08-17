@@ -1016,6 +1016,7 @@ class AssuranceProcessPendingTests(AssuranceCliTestCase):
                     "state": None,
                     "reason": state.ASSURANCE_SKIP_PREDATES,
                     "issue_ids": [],
+                    "archived_artifacts": [],
                 }
             ],
             payload["results"],

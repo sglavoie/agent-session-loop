@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -100,6 +100,7 @@ class ReviewResume:
     completed_repair_session_ids: tuple[str, ...] = ()
     source_fingerprints: tuple[str, ...] | None = None
     current_fingerprints: tuple[str, ...] | None = None
+    current_repeat_keys: tuple[str, ...] | None = None
     source_review_output_sha256: str | None = None
     source_review_artifact_sha256: str | None = None
     current_review_output_sha256: str | None = None
@@ -134,6 +135,11 @@ class ReviewResume:
             "current_fingerprints": (
                 list(self.current_fingerprints)
                 if self.current_fingerprints is not None
+                else None
+            ),
+            "current_repeat_keys": (
+                list(self.current_repeat_keys)
+                if self.current_repeat_keys is not None
                 else None
             ),
             "source_review_output_sha256": self.source_review_output_sha256,
@@ -231,6 +237,49 @@ def _string_tuple(value: Any) -> tuple[str, ...] | None:
     if not isinstance(value, list):
         return None
     return tuple(item for item in value if isinstance(item, str))
+
+
+def repeated_finding_positions(
+    *,
+    fingerprints: Sequence[str],
+    repeat_keys: Sequence[str],
+    previous_fingerprints: Sequence[str],
+    previous_repeat_keys: Sequence[str],
+) -> tuple[int, ...]:
+    """Return the positions of current findings that a previous cycle raised.
+
+    A finding repeats when its exact fingerprint returns *or* when its
+    drift-tolerant repeat key does. The fingerprint lane keeps a genuinely
+    unchanged finding detected; the repeat-key lane catches the same defect
+    re-reported against a moved evidence path or a different repository alias,
+    which the fingerprint alone reads as newly introduced. Single-sourced here
+    so the live cycle breaker and its crash-recovery mirror cannot diverge.
+    """
+    previous = set(previous_fingerprints)
+    previous_keys = set(previous_repeat_keys)
+    return tuple(
+        position
+        for position, fingerprint in enumerate(fingerprints)
+        if fingerprint in previous
+        or (position < len(repeat_keys) and repeat_keys[position] in previous_keys)
+    )
+
+
+def _reopen_repeat_keys(payload: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """Read a reopen record's repeat keys, recomputing them from its findings.
+
+    Reopen records written before repeat keys existed carry no
+    ``current_repeat_keys`` list but do carry ``current_findings``, so the keys
+    are recomputed and an in-flight run keeps its repeat baseline across the
+    upgrade.
+    """
+    stored = _string_tuple(payload.get("current_repeat_keys"))
+    if stored is not None:
+        return stored
+    findings = payload.get("current_findings")
+    if isinstance(findings, list):
+        return review.finding_repeat_keys(findings)
+    return None
 
 
 def _mapping_tuple(value: Any) -> tuple[Mapping[str, Any], ...] | None:
@@ -636,12 +685,12 @@ def reconciled_materialization_keys(
     )
 
 
-def _post_reopen_fingerprint_baseline(
+def _post_reopen_baseline_payload(
     records: tuple[ReviewEventRecord, ...],
     latest_cycle: Mapping[str, Any],
     generated_reviews: Mapping[str, plans.SessionStatus] | None = None,
-) -> tuple[str, ...] | None:
-    """Return corrected fingerprints from a later successful reopen.
+) -> Mapping[str, Any] | None:
+    """Return the later successful reopen whose evidence corrects a cycle.
 
     Only reopen records appended after ``latest_cycle`` can replace that
     cycle's baseline.  The last materialized reopen for the same or a newer
@@ -657,9 +706,7 @@ def _post_reopen_fingerprint_baseline(
     source_id_text = _cycle_source_id(latest_cycle)
     source_id = _parse_session_id_or_none(source_id_text)
     positional_source_id: plans.SessionId | None = None
-    unresolved_source_reopen: tuple[plans.SessionId, tuple[str, ...] | None] | None = (
-        None
-    )
+    unresolved_source_reopen: tuple[plans.SessionId, Mapping[str, Any]] | None = None
     if source_id_text is None and generated_reviews:
         review_ids = sorted(
             generated_reviews,
@@ -709,10 +756,7 @@ def _post_reopen_fingerprint_baseline(
                     unresolved_source_reopen is None
                     or reopen_source_id.sort_key > unresolved_source_reopen[0].sort_key
                 ):
-                    unresolved_source_reopen = (
-                        reopen_source_id,
-                        _string_tuple(record.payload.get("current_fingerprints")),
-                    )
+                    unresolved_source_reopen = (reopen_source_id, record.payload)
                 continue
         elif source_cycle is not None:
             reopened_cycle = _nonnegative_int(record.payload.get("source_cycle"))
@@ -720,15 +764,15 @@ def _post_reopen_fingerprint_baseline(
                 continue
         else:
             continue
-        return _string_tuple(record.payload.get("current_fingerprints"))
+        return record.payload
     if unresolved_source_reopen is not None:
         return unresolved_source_reopen[1]
     return None
 
 
-def _latest_materialized_reopen_fingerprint_baseline(
+def _latest_materialized_reopen_baseline_payload(
     records: tuple[ReviewEventRecord, ...],
-) -> tuple[str, ...] | None:
+) -> Mapping[str, Any] | None:
     """Return the durable reopen baseline without a cycle record.
 
     A crash after repair children are atomically written but before the first
@@ -739,8 +783,8 @@ def _latest_materialized_reopen_fingerprint_baseline(
     Legacy records without source lineage retain their newest-record fallback.
     """
 
-    latest_source_reopen: tuple[plans.SessionId, tuple[str, ...] | None] | None = None
-    latest_legacy_reopen: tuple[str, ...] | None = None
+    latest_source_reopen: tuple[plans.SessionId, Mapping[str, Any]] | None = None
+    latest_legacy_reopen: Mapping[str, Any] | None = None
     for record in records:
         if (
             record.name != events.REVIEW_REPAIR_REOPENED_EVENT
@@ -749,14 +793,13 @@ def _latest_materialized_reopen_fingerprint_baseline(
             continue
         source_id_text = _reopen_source_id(record.payload)
         source_id = _parse_session_id_or_none(source_id_text)
-        fingerprints = _string_tuple(record.payload.get("current_fingerprints"))
         if source_id_text is None:
-            latest_legacy_reopen = fingerprints
+            latest_legacy_reopen = record.payload
         elif source_id is not None and (
             latest_source_reopen is None
             or source_id.sort_key >= latest_source_reopen[0].sort_key
         ):
-            latest_source_reopen = (source_id, fingerprints)
+            latest_source_reopen = (source_id, record.payload)
     if latest_source_reopen is not None:
         return latest_source_reopen[1]
     return latest_legacy_reopen
@@ -794,19 +837,20 @@ def review_cycle_state(
         record.payload for record in records if record.name == events.REVIEW_CYCLE_EVENT
     ]
     previous_fingerprints: tuple[str, ...] = ()
+    previous_repeat_keys: tuple[str, ...] = ()
     if cycles:
         previous_fingerprints = _string_tuple(cycles[-1].get("fingerprints")) or ()
-        reopened_fingerprints = _post_reopen_fingerprint_baseline(
-            records, cycles[-1], generated_reviews
-        )
-        if reopened_fingerprints is not None:
-            previous_fingerprints = reopened_fingerprints
+        previous_repeat_keys = _string_tuple(cycles[-1].get("repeat_keys")) or ()
+        reopened = _post_reopen_baseline_payload(records, cycles[-1], generated_reviews)
     else:
-        reopened_fingerprints = _latest_materialized_reopen_fingerprint_baseline(
-            records
-        )
+        reopened = _latest_materialized_reopen_baseline_payload(records)
+    if reopened is not None:
+        reopened_fingerprints = _string_tuple(reopened.get("current_fingerprints"))
         if reopened_fingerprints is not None:
             previous_fingerprints = reopened_fingerprints
+        reopened_repeat_keys = _reopen_repeat_keys(reopened)
+        if reopened_repeat_keys is not None:
+            previous_repeat_keys = reopened_repeat_keys
     return {
         "cycle": len(cycles) + 1,
         "repairs_materialized": len(
@@ -815,6 +859,7 @@ def review_cycle_state(
             )
         ),
         "previous_fingerprints": previous_fingerprints,
+        "previous_repeat_keys": previous_repeat_keys,
     }
 
 
@@ -1110,6 +1155,7 @@ def _resume(
     planning: review_repair.ReviewRepairPlan | None = None,
 ) -> ReviewResume:
     current_fingerprints: tuple[str, ...] | None = None
+    current_repeat_keys: tuple[str, ...] | None = None
     current_output_digest: str | None = None
     current_artifact_digest: str | None = None
     artifact_valid: bool | None = None
@@ -1131,6 +1177,10 @@ def _resume(
             if planning.ok or planning.finding_fingerprints
             else None
         )
+        if current_fingerprints is not None:
+            current_repeat_keys = (
+                review.finding_repeat_keys(list(planning.validated_findings)) or ()
+            )
         current_output_digest = planning.review_output_sha256
         current_artifact_digest = planning.review_artifact_sha256
         artifact_valid = planning.ok
@@ -1193,6 +1243,7 @@ def _resume(
         completed_repair_session_ids=completed_ids,
         source_fingerprints=source_fingerprints,
         current_fingerprints=current_fingerprints,
+        current_repeat_keys=current_repeat_keys,
         current_review_output_sha256=current_output_digest,
         current_review_artifact_sha256=current_artifact_digest,
         artifact_valid=artifact_valid,
@@ -1490,14 +1541,19 @@ def evaluate_review_continuation(
             planning=planning,
         )
 
-    if (
-        disposition is None
-        and not generated_for_source
-        and planning.ok
-        and set(planning.finding_fingerprints).intersection(
-            review_cycle_state(event_path, snapshot)["previous_fingerprints"]
+    if disposition is None and not generated_for_source and planning.ok:
+        cycle_state = review_cycle_state(event_path, snapshot)
+        repeats = repeated_finding_positions(
+            fingerprints=planning.finding_fingerprints,
+            repeat_keys=(
+                review.finding_repeat_keys(list(planning.validated_findings)) or ()
+            ),
+            previous_fingerprints=cycle_state["previous_fingerprints"],
+            previous_repeat_keys=cycle_state["previous_repeat_keys"],
         )
-    ):
+    else:
+        repeats = ()
+    if repeats:
         # A completed rereview can survive a crash before its review_cycle
         # append.  Its repair plan must still honor the same repeated-finding
         # breaker as an uninterrupted _advance_review_cycle invocation.

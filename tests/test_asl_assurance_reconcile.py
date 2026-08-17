@@ -79,27 +79,30 @@ class ReconcileTestCase(unittest.TestCase):
         kwargs.setdefault("recorded_at", TIMESTAMP)
         return projection.publish_audit(publication, state_dir=self.state_dir, **kwargs)
 
-    def observe(self, finding: models.Finding, *, run_id: str) -> str:
+    def observe(
+        self, finding: models.Finding, *, run_id: str, state_dir: Path | None = None
+    ) -> str:
         """Open an issue the way pre-identity history did: minted, never bound."""
         record = ledger.append_issue_observation(
             models.IssueObservation(
                 run_id=run_id, finding=finding, observed_at=TIMESTAMP
             ),
-            state_dir=self.state_dir,
+            state_dir=state_dir or self.state_dir,
             recorded_at=TIMESTAMP,
         )
         assert record.issue_id is not None
         return record.issue_id
 
-    def open_unbound_twins(self) -> tuple[str, str]:
+    def open_unbound_twins(self, *, state_dir: Path | None = None) -> tuple[str, str]:
         """Two unbound issues one reworded invariant key apart, plus a third."""
-        first = self.observe(_finding(), run_id=RUN_ID)
+        first = self.observe(_finding(), run_id=RUN_ID, state_dir=state_dir)
         second = self.observe(
             _finding(
                 invariant_key="retry.budget-respect",
                 summary="A retry ran after the retry budget was fully exhausted.",
             ),
             run_id=OTHER_RUN_ID,
+            state_dir=state_dir,
         )
         self.observe(
             _finding(
@@ -109,11 +112,15 @@ class ReconcileTestCase(unittest.TestCase):
                 localization=("agent_session_loop/supervisor_audit.py",),
             ),
             run_id=THIRD_RUN_ID,
+            state_dir=state_dir,
         )
         return first, second
 
     def inbox(self) -> projection.AssuranceProjection:
         return projection.read_projection(state_dir=self.state_dir)
+
+    def ledger_view(self) -> ledger.LedgerView:
+        return ledger.read_ledger(state_dir=self.state_dir)
 
     def ledger_lines(self) -> int:
         if not self.ledger_path.exists():
@@ -169,6 +176,28 @@ class ReconcileTestCase(unittest.TestCase):
                     }
                 )
         return {**manifest, "decisions": decisions}
+
+    def keep_distinct_only_manifest(self) -> dict:
+        """Rule every open pair distinct, and leave the bindings out of it."""
+        manifest = self.resolve_reviews(
+            self.preview_manifest(), decision=models.DECISION_KEEP_DISTINCT
+        )
+        return {
+            **manifest,
+            "decisions": [
+                item
+                for item in manifest["decisions"]
+                if item["decision"] == models.DECISION_KEEP_DISTINCT
+            ],
+        }
+
+    def apply_path(self, path: Path) -> dict:
+        """Apply one manifest file, asserting it was accepted."""
+        code, payload, err = self.run_json(
+            ["assurance", "reconcile", "--apply", str(path), "--yes"]
+        )
+        self.assertEqual(0, code, err)
+        return payload
 
 
 class ManifestSchemaTests(ReconcileTestCase):
@@ -515,28 +544,23 @@ class ApplyTests(ReconcileTestCase):
         self.assertEqual(0, payload["records"])
         self.assertEqual(settled, self.ledger_path.read_bytes())
 
-    def test_a_manifest_of_keep_distinct_alone_writes_nothing_and_succeeds(
-        self,
-    ) -> None:
+    def test_a_manifest_of_keep_distinct_alone_records_the_ruling(self) -> None:
         self.open_unbound_twins()
-        manifest = self.preview_manifest()
-        manifest["decisions"] = [
-            item
-            for item in self.resolve_reviews(
-                manifest, decision=models.DECISION_KEEP_DISTINCT
-            )["decisions"]
-            if item["decision"] == models.DECISION_KEEP_DISTINCT
-        ]
-        path = self.write_manifest(manifest)
-        before = self.ledger_path.read_bytes()
+        path = self.write_manifest(self.keep_distinct_only_manifest())
+        before = self.ledger_lines()
 
         code, payload, err = self.run_json(
             ["assurance", "reconcile", "--apply", str(path), "--yes"]
         )
         self.assertEqual(0, code, err)
-        self.assertFalse(payload["applied"])
+        self.assertTrue(payload["applied"])
         self.assertEqual(1, payload["kept_distinct"])
-        self.assertEqual(before, self.ledger_path.read_bytes())
+        self.assertEqual(1, payload["records"])
+        self.assertEqual(before + 1, self.ledger_lines())
+        self.assertEqual(
+            (ledger.KIND_ISSUE_KEPT_DISTINCT,),
+            tuple(record.kind for record in self.ledger_view().records[before:]),
+        )
 
     def test_an_unread_suggestion_refuses_the_whole_manifest(self) -> None:
         self.open_unbound_twins()
@@ -683,8 +707,195 @@ class ApplyTests(ReconcileTestCase):
             ["assurance", "reconcile", "--apply", str(path), "--yes"]
         )
         self.assertEqual(0, code, err)
-        self.assertIn("Applied 4 record(s): 3 binding(s) and 1 merge(s).", out)
+        self.assertIn(
+            "Applied 4 record(s): 3 binding(s), 0 ruling(s) and 1 merge(s).", out
+        )
         self.assertIn("Merging is irreversible.", out)
+
+
+class KeepDistinctTests(ReconcileTestCase):
+    """A reviewed 'these are two defects' has to survive the reviewer's session."""
+
+    def rule_the_twins_distinct(self) -> Path:
+        path = self.write_manifest(
+            self.keep_distinct_only_manifest(), name="keep-distinct.json"
+        )
+        self.assertEqual(1, self.apply_path(path)["kept_distinct"])
+        return path
+
+    def test_a_reviewed_pair_is_not_suggested_again(self) -> None:
+        self.open_unbound_twins()
+        self.rule_the_twins_distinct()
+
+        code, payload, err = self.run_json(["assurance", "reconcile"])
+        self.assertEqual(0, code, err)
+        self.assertEqual([], payload["unresolved"])
+        self.assertEqual(1, payload["suppressed_pairs"])
+
+    def test_applying_a_ruling_twice_writes_nothing_the_second_time(self) -> None:
+        self.open_unbound_twins()
+        path = self.rule_the_twins_distinct()
+        settled = self.ledger_path.read_bytes()
+
+        payload = self.apply_path(path)
+        self.assertFalse(payload["applied"])
+        self.assertEqual(0, payload["kept_distinct"])
+        self.assertEqual(settled, self.ledger_path.read_bytes())
+
+    def test_the_apply_preview_loop_repeats_no_decision_and_still_finds_new_ones(
+        self,
+    ) -> None:
+        """The whole point of FR-3: reviewing a pair has to reduce the next preview."""
+        self.open_unbound_twins()
+        first = self.preview_manifest()
+        path = self.write_manifest(
+            self.resolve_reviews(first, decision=models.DECISION_KEEP_DISTINCT)
+        )
+        self.apply_path(path)
+
+        second = self.preview_manifest()
+        self.assertEqual(
+            [],
+            [
+                item
+                for item in second["decisions"]
+                if item["decision"] == models.DECISION_REVIEW
+            ],
+        )
+
+        self.observe(
+            _finding(
+                component="agent_session_loop/supervisor_audit.py",
+                invariant_key="audit.report-presence",
+                summary="The audit report never appeared in the run directory at all.",
+                localization=("agent_session_loop/supervisor_audit.py",),
+            ),
+            run_id="20260810T101116444444Z-4247",
+        )
+        third = self.preview_manifest()
+        self.assertEqual(
+            [["ASI-3", "ASI-4"]],
+            [
+                item["issue_ids"]
+                for item in third["decisions"]
+                if item["decision"] == models.DECISION_REVIEW
+            ],
+        )
+
+    def test_a_ruling_lapses_when_one_of_its_issues_materially_changes(self) -> None:
+        first, second = self.open_unbound_twins()
+        self.rule_the_twins_distinct()
+        # The same defect recurs, described differently enough that what the pair
+        # was ruled on is no longer what the pair says.
+        self.observe(
+            _finding(summary="A retry ran once more after the budget was exhausted."),
+            run_id="20260810T101117555555Z-4248",
+        )
+
+        code, payload, err = self.run_json(["assurance", "reconcile"])
+        self.assertEqual(0, code, err)
+        self.assertEqual(0, payload["suppressed_pairs"])
+        self.assertEqual(
+            [[first, second]], [item["issue_ids"] for item in payload["unresolved"]]
+        )
+
+    def test_a_ruling_about_an_issue_that_merged_away_is_refused(self) -> None:
+        first, second = self.open_unbound_twins()
+        manifest = self.keep_distinct_only_manifest()
+        projection.record_merge(second, first, state_dir=self.state_dir)
+        manifest["catalog_digest"] = self.inbox().catalog.digest
+        path = self.write_manifest(manifest)
+        before = self.ledger_path.read_bytes()
+
+        code, payload, err = self.run_json(
+            ["assurance", "reconcile", "--apply", str(path), "--yes"]
+        )
+        self.assertEqual(1, code)
+        self.assertEqual(reconcile.ISSUE_NOT_CANONICAL, payload["reason"])
+        self.assertEqual(before, self.ledger_path.read_bytes())
+
+    def test_a_ruling_naming_an_issue_nobody_observed_is_refused(self) -> None:
+        first, _ = self.open_unbound_twins()
+        manifest = self.keep_distinct_only_manifest()
+        manifest["decisions"] = [
+            {
+                "decision": models.DECISION_KEEP_DISTINCT,
+                "issue_ids": [first, "ASI-99"],
+                "note": None,
+            }
+        ]
+        path = self.write_manifest(manifest)
+        before = self.ledger_path.read_bytes()
+
+        code, payload, err = self.run_json(
+            ["assurance", "reconcile", "--apply", str(path), "--yes"]
+        )
+        self.assertEqual(1, code)
+        self.assertEqual(projection.UNKNOWN_ISSUE, payload["reason"])
+        self.assertEqual(before, self.ledger_path.read_bytes())
+
+    def twin_identity_digests(self) -> tuple[str, str]:
+        """The digests the twins mint with, replayed in a throwaway inbox.
+
+        A ruling that names issues nothing has observed yet can only be written
+        before they exist, so the digests it needs to carry to look current have
+        to come from somewhere other than the inbox it is written into.
+        """
+        scratch = Path(self._tmp.name) / "scratch-inbox"
+        first, second = self.open_unbound_twins(state_dir=scratch)
+        catalog = projection.read_projection(state_dir=scratch).catalog
+        first_digest = catalog.identity_digest(first)
+        second_digest = catalog.identity_digest(second)
+        assert first_digest is not None and second_digest is not None
+        return first_digest, second_digest
+
+    def test_an_anomalous_prior_ruling_cannot_suppress_a_fresh_apply(self) -> None:
+        """A record the projection threw out must not answer for a live review."""
+        ledger.append_record(
+            ledger.KIND_ISSUE_KEPT_DISTINCT,
+            models.IssueKeptDistinct(
+                issue_ids=("ASI-1", "ASI-2"),
+                identity_digests=self.twin_identity_digests(),
+                recorded_at=TIMESTAMP,
+            ),
+            state_dir=self.state_dir,
+            recorded_at=TIMESTAMP,
+        )
+        first, second = self.open_unbound_twins()
+        anomalous = self.inbox()
+        self.assertEqual(
+            [projection.UNKNOWN_ISSUE], [item.reason for item in anomalous.anomalies]
+        )
+        self.assertFalse(anomalous.is_kept_distinct(first, second))
+
+        path = self.write_manifest(
+            self.resolve_reviews(
+                self.preview_manifest(), decision=models.DECISION_KEEP_DISTINCT
+            )
+        )
+        self.assertEqual(1, self.apply_path(path)["kept_distinct"])
+
+        settled = self.inbox()
+        self.assertTrue(settled.is_kept_distinct(first, second))
+        # The rejected record stays exactly where it landed: the ledger is never
+        # rewritten, so the anomaly it reports is still readable as evidence.
+        self.assertEqual(
+            [projection.UNKNOWN_ISSUE], [item.reason for item in settled.anomalies]
+        )
+
+        code, payload, err = self.run_json(["assurance", "reconcile"])
+        self.assertEqual(0, code, err)
+        self.assertEqual([], payload["unresolved"])
+        self.assertEqual(1, payload["suppressed_pairs"])
+
+    def test_text_says_which_pairs_a_standing_ruling_already_answered(self) -> None:
+        self.open_unbound_twins()
+        self.rule_the_twins_distinct()
+
+        code, out, err = self.run_cli(["assurance", "reconcile"])
+        self.assertEqual(0, code, err)
+        self.assertIn("No pairs need review.", out)
+        self.assertIn("1 pair(s) were already reviewed as distinct defects", out)
 
 
 class ConcurrentApplyTests(ReconcileTestCase):

@@ -177,8 +177,20 @@ class ProjectionTestCase(unittest.TestCase):
             recorded_at=LATER_TIMESTAMP,
         )
 
+    def keep_distinct(self, left: str, right: str) -> None:
+        catalog = self.read().catalog
+        digests = tuple(catalog.identity_digest(issue) or "" for issue in (left, right))
+        self.force_record(
+            ledger.KIND_ISSUE_KEPT_DISTINCT,
+            models.IssueKeptDistinct(
+                issue_ids=(left, right),
+                identity_digests=digests,
+                recorded_at=LAST_TIMESTAMP,
+            ),
+        )
+
     def build_every_kind(self) -> None:
-        """Write one record of all ten ledger kinds across three runs."""
+        """Write one record of all eleven ledger kinds across three runs."""
         self.publish(AuditPublication(run_id=RUN_ID, state="pending", eligible=True))
         self.publish(_publication(), recorded_at=LATER_TIMESTAMP)
         self.publish(
@@ -206,6 +218,7 @@ class ProjectionTestCase(unittest.TestCase):
         projection.record_disposition(
             "ASI-1", "resolve", state_dir=self.state_dir, recorded_at=LAST_TIMESTAMP
         )
+        self.keep_distinct("ASI-1", "ASI-2")
         projection.record_merge(
             "ASI-2", "ASI-1", state_dir=self.state_dir, recorded_at=LAST_TIMESTAMP
         )
@@ -1755,6 +1768,71 @@ class UnavailableAuditTests(ProjectionTestCase):
     def test_an_unavailable_audit_must_name_its_reason_class(self) -> None:
         with self.assertRaises(models.AssuranceError):
             AuditPublication(run_id=RUN_ID, state="unavailable", eligible=True)
+
+
+class KeptDistinctTests(ProjectionTestCase):
+    def test_a_ruling_holds_while_both_issues_still_read_the_way_they_did(self) -> None:
+        self.open_two_issues()
+        self.keep_distinct("ASI-1", "ASI-2")
+        projected = self.read()
+        self.assertEqual((), projected.anomalies)
+        self.assertTrue(projected.is_kept_distinct("ASI-1", "ASI-2"))
+        self.assertTrue(projected.is_kept_distinct("ASI-2", "ASI-1"))
+
+    def test_a_ruling_lapses_once_one_issue_is_recognized_differently(self) -> None:
+        self.open_two_issues()
+        self.keep_distinct("ASI-1", "ASI-2")
+        self.publish(
+            _publication(
+                run_id=THIRD_RUN_ID,
+                findings=(_finding(summary="A retry ran after the budget ran out."),),
+                artifacts=_artifacts(THIRD_INPUT_DIGEST),
+            ),
+            recorded_at=LAST_TIMESTAMP,
+        )
+        projected = self.read()
+        self.assertEqual((), projected.anomalies)
+        self.assertFalse(projected.is_kept_distinct("ASI-1", "ASI-2"))
+
+    def test_a_ruling_about_an_unobserved_issue_is_reported_not_applied(self) -> None:
+        self.publish(_publication())
+        self.force_record(
+            ledger.KIND_ISSUE_KEPT_DISTINCT,
+            models.IssueKeptDistinct(
+                issue_ids=("ASI-1", "ASI-7"),
+                identity_digests=("a" * 64, "b" * 64),
+                recorded_at=LATER_TIMESTAMP,
+            ),
+        )
+        projected = self.read()
+        self.assertEqual({}, dict(projected.kept_distinct))
+        self.assertEqual(
+            [projection.UNKNOWN_ISSUE], [item.reason for item in projected.anomalies]
+        )
+
+    def test_a_ruling_whose_pair_became_one_issue_leaves_nothing_behind(self) -> None:
+        self.open_two_issues()
+        self.keep_distinct("ASI-1", "ASI-2")
+        projection.record_merge(
+            "ASI-2", "ASI-1", state_dir=self.state_dir, recorded_at=LAST_TIMESTAMP
+        )
+        projected = self.read()
+        self.assertEqual((), projected.anomalies)
+        self.assertEqual({}, dict(projected.kept_distinct))
+        self.assertFalse(projected.is_kept_distinct("ASI-1", "ASI-2"))
+
+    def test_the_later_ruling_about_a_pair_is_the_one_that_stands(self) -> None:
+        self.open_two_issues()
+        self.force_record(
+            ledger.KIND_ISSUE_KEPT_DISTINCT,
+            models.IssueKeptDistinct(
+                issue_ids=("ASI-1", "ASI-2"),
+                identity_digests=("a" * 64, "b" * 64),
+                recorded_at=LATER_TIMESTAMP,
+            ),
+        )
+        self.keep_distinct("ASI-1", "ASI-2")
+        self.assertTrue(self.read().is_kept_distinct("ASI-1", "ASI-2"))
 
 
 class RecordKindTests(ProjectionTestCase):

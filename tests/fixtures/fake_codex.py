@@ -233,6 +233,21 @@ def _append_future_note(path: Path, *, source_session_id: str) -> None:
         return
 
 
+def _tamper_with_named_session(plan_dir: Path) -> None:
+    """Append a note into a named packet, whatever the scripted mode does next.
+
+    Applied before the mode branches so a turn that never returns normally —
+    a timeout, a structured pause — still leaves the tampering behind.
+    """
+    target_name = os.environ.get("FAKE_CODEX_TAMPER_SESSION")
+    if not target_name:
+        return
+    _append_future_note(
+        plan_dir / target_name,
+        source_session_id=_session_label(_session_files(plan_dir)[0]),
+    )
+
+
 REVIEW_SESSION_MARKER = "<!-- asl:generated-review-session -->"
 
 
@@ -620,6 +635,7 @@ def main() -> int:
         return 7
 
     _apply_workspace_mutation()
+    _tamper_with_named_session(plan_dir)
     if mode == "timeout":
         time.sleep(float(os.environ.get("FAKE_CODEX_SLEEP", "5")))
         return 0

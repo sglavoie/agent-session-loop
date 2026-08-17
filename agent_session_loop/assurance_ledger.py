@@ -57,6 +57,7 @@ from .assurance_models import (
     Disposition,
     ImprovementPlanDraft,
     IssueIdentityBinding,
+    IssueKeptDistinct,
     IssueMerge,
     IssueObservation,
     canonical_json_bytes,
@@ -68,6 +69,7 @@ from .assurance_models import (
     parse_improvement_plan_draft,
     parse_issue_id,
     parse_issue_identity_binding,
+    parse_issue_kept_distinct,
     parse_issue_merge,
     parse_issue_observation,
 )
@@ -79,12 +81,12 @@ LEDGER_LOCK_FILE_NAME = "assurance-inbox.lock"
 LEDGER_INDEX_FILE_NAME = "assurance-index.json"
 
 #: Bumped when the meaning of the record envelope changes. Records written by a
-#: newer build are rejected rather than guessed at. v2 adds the identity-binding
-#: kind and nothing else, so every v1 line means in v2 exactly what it meant when
-#: it was written and the whole prior history reads without reinterpretation.
-LEDGER_SCHEMA_VERSION = 2
-LEDGER_LEGACY_SCHEMA_VERSION = 1
-SUPPORTED_LEDGER_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2})
+#: newer build are rejected rather than guessed at. Every bump so far has added
+#: one kind and changed nothing else -- v2 the identity binding, v3 the
+#: keep-distinct ruling -- so a line means under a later version exactly what it
+#: meant when it was written and the whole prior history reads without
+#: reinterpretation.
+LEDGER_SCHEMA_VERSION = 3
 
 #: The cache format is versioned separately: it may change freely because a
 #: version this build does not recognize simply triggers a rebuild.
@@ -111,6 +113,7 @@ LedgerKind = Literal[
     "human_closeout",
     "improvement_plan_drafted",
     "issue_identity_bound",
+    "issue_kept_distinct",
 ]
 
 KIND_AUDIT_PENDING = "audit_pending"
@@ -123,6 +126,7 @@ KIND_ISSUE_MERGED = "issue_merged"
 KIND_HUMAN_CLOSEOUT = "human_closeout"
 KIND_IMPROVEMENT_PLAN_DRAFTED = "improvement_plan_drafted"
 KIND_ISSUE_IDENTITY_BOUND = "issue_identity_bound"
+KIND_ISSUE_KEPT_DISTINCT = "issue_kept_distinct"
 
 #: Every record kind the ledger stores, in the order they occur in a run's life.
 LEDGER_KINDS: tuple[LedgerKind, ...] = (
@@ -136,14 +140,19 @@ LEDGER_KINDS: tuple[LedgerKind, ...] = (
     KIND_HUMAN_CLOSEOUT,
     KIND_IMPROVEMENT_PLAN_DRAFTED,
     KIND_ISSUE_IDENTITY_BOUND,
+    KIND_ISSUE_KEPT_DISTINCT,
 )
 
-#: The kinds a v1 envelope may carry. A v1 line claiming a kind introduced later
-#: is rejected as an unknown kind for its version rather than read as if the
-#: build that wrote it had meant the new one.
-LEGACY_LEDGER_KINDS: frozenset[str] = frozenset(LEDGER_KINDS) - {
-    KIND_ISSUE_IDENTITY_BOUND
+#: The kinds each readable schema version may carry. A line claiming a kind
+#: introduced after its own version is rejected as an unknown kind for that
+#: version rather than read as if the build that wrote it had meant the new one.
+KINDS_BY_SCHEMA_VERSION: Mapping[int, frozenset[str]] = {
+    1: frozenset(LEDGER_KINDS) - {KIND_ISSUE_IDENTITY_BOUND, KIND_ISSUE_KEPT_DISTINCT},
+    2: frozenset(LEDGER_KINDS) - {KIND_ISSUE_KEPT_DISTINCT},
+    3: frozenset(LEDGER_KINDS),
 }
+
+SUPPORTED_LEDGER_SCHEMA_VERSIONS: frozenset[int] = frozenset(KINDS_BY_SCHEMA_VERSION)
 
 #: The only kind that mints an issue ID. Keeping the set explicit is what makes
 #: "allocated under the append lock" a property of the module rather than of a
@@ -186,6 +195,7 @@ _PAYLOAD_PARSERS: Mapping[str, Callable[[Any], Any]] = {
     KIND_HUMAN_CLOSEOUT: parse_closeout,
     KIND_IMPROVEMENT_PLAN_DRAFTED: parse_improvement_plan_draft,
     KIND_ISSUE_IDENTITY_BOUND: parse_issue_identity_binding,
+    KIND_ISSUE_KEPT_DISTINCT: parse_issue_kept_distinct,
 }
 
 _PAYLOAD_TYPES: Mapping[str, type[Any]] = {
@@ -199,6 +209,7 @@ _PAYLOAD_TYPES: Mapping[str, type[Any]] = {
     KIND_HUMAN_CLOSEOUT: Closeout,
     KIND_IMPROVEMENT_PLAN_DRAFTED: ImprovementPlanDraft,
     KIND_ISSUE_IDENTITY_BOUND: IssueIdentityBinding,
+    KIND_ISSUE_KEPT_DISTINCT: IssueKeptDistinct,
 }
 
 
@@ -753,12 +764,7 @@ def parse_ledger_bytes(data: bytes, path: Path) -> LedgerView:
                 detail=f"version {version!r} is not one this build reads",
             )
             continue
-        allowed_kinds: frozenset[str] | tuple[LedgerKind, ...] = (
-            LEGACY_LEDGER_KINDS
-            if version == LEDGER_LEGACY_SCHEMA_VERSION
-            else LEDGER_KINDS
-        )
-        if envelope.get("kind") not in allowed_kinds:
+        if envelope.get("kind") not in KINDS_BY_SCHEMA_VERSION[version]:
             _reject(
                 rejected,
                 seq=seq,

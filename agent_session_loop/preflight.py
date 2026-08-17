@@ -2758,11 +2758,17 @@ def _turn_budget_max_pending_sessions(max_pending_sessions: int | None) -> int:
     return max_pending_sessions
 
 
-def _check_env_turn_budget(
+def check_env_turn_budget(
     snapshot: PlanSnapshot,
     *,
     max_pending_sessions: int | None = None,
 ) -> tuple[PreflightFinding, ...]:
+    """Return the turn-budget and session-inventory findings for a snapshot.
+
+    Public because the runner re-evaluates exactly these two after review
+    repairs reopen sessions: the startup gate saw the plan as authored, and
+    plan growth is what invalidates them.
+    """
     total = len(snapshot.sessions)
     pending = sum(1 for status in snapshot.sessions if status.status == "pending")
     pending_limit = _turn_budget_max_pending_sessions(max_pending_sessions)
@@ -2847,7 +2853,7 @@ def _run_environment_checks(
 
     if snapshot is not None:
         findings.extend(
-            _check_env_turn_budget(
+            check_env_turn_budget(
                 snapshot,
                 max_pending_sessions=max_pending_sessions,
             )

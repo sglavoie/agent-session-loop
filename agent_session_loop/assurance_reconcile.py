@@ -17,6 +17,12 @@ Nothing here decides a merge. Every candidate reason the catalog offers is
 semantic -- normalized summaries, invariant keys, file paths -- so a rule that
 acted on one would let rewording a finding merge two unrelated defects. A
 suggestion that still reads ``review`` when apply runs is refused, not guessed at.
+
+Both verdicts are recorded. ``keep-distinct`` writes a ruling of its own, because
+a review nobody stored is a review the next preview asks for again; the ruling
+carries the identity digest of each issue it was reached about, so it suppresses
+the pair while those issues still read that way and lapses when one of them does
+not.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ from . import assurance_ledger as ledger
 from . import assurance_projection as projection
 from .assurance_ledger import (
     KIND_ISSUE_IDENTITY_BOUND,
+    KIND_ISSUE_KEPT_DISTINCT,
     KIND_ISSUE_MERGED,
     LedgerRecord,
     LedgerView,
@@ -43,6 +50,7 @@ from .assurance_models import (
     DECISION_REVIEW,
     BindDecision,
     IssueIdentityBinding,
+    IssueKeptDistinct,
     IssueMerge,
     KeepDistinctDecision,
     MergeDecision,
@@ -56,8 +64,10 @@ from .assurance_projection import (
     UNKNOWN_ISSUE,
     AssuranceProjection,
     IdentityCandidate,
+    IdentityCatalog,
     ProjectionError,
     candidate_order,
+    issue_pair_key,
 )
 
 #: The manifest still carries a suggestion nobody ruled on. Applying it would
@@ -123,6 +133,10 @@ class ReconciliationPreview:
     blocked: tuple[BlockedBinding, ...] = ()
     unresolved: tuple[ReviewDecision, ...] = ()
     truncated_pairs: int = 0
+    #: Pairs the catalog suggested that a standing ruling already answered.
+    #: Reported rather than hidden, so a reviewer can see the difference between
+    #: a quiet inbox and matching that stopped working.
+    suppressed_pairs: int = 0
 
     @property
     def manifest(self) -> ReconciliationManifest:
@@ -144,6 +158,7 @@ class ReconciliationPreview:
             "blocked": [item.to_dict() for item in self.blocked],
             "unresolved": [item.to_dict() for item in self.unresolved],
             "truncated_pairs": self.truncated_pairs,
+            "suppressed_pairs": self.suppressed_pairs,
             "manifest": self.manifest.to_dict(),
         }
 
@@ -181,23 +196,18 @@ def _safe_bindings(
     return tuple(bindings), tuple(blocked)
 
 
-def _pair_key(left: str, right: str) -> tuple[str, str]:
-    """Order a pair by issue number so both directions are one suggestion."""
-    return (
-        (left, right)
-        if issue_id_number(left) <= issue_id_number(right)
-        else (right, left)
-    )
-
-
 def _suggested_pairs(
     inbox: AssuranceProjection, *, limit: int = MAX_PREVIEW_PAIRS
-) -> tuple[tuple[ReviewDecision, ...], int]:
+) -> tuple[tuple[ReviewDecision, ...], int, int]:
     """Return the pairs the catalog thinks might be one defect, strongest first.
 
     Each pair is asked about once. The catalog is symmetric for most reasons --
     issue A lists B and B lists A -- and offering both would make a reviewer rule
     on one question twice, with the two orderings looking like two decisions.
+
+    A pair a standing ruling already answers is counted and dropped. The catalog
+    goes on matching it, because the reasons that matched it are still true; what
+    changed is that someone read them and said no.
     """
     catalog = inbox.catalog
     strongest: dict[tuple[str, str], IdentityCandidate] = {}
@@ -205,7 +215,7 @@ def _suggested_pairs(
         for candidate in catalog.candidates(issue.finding):
             if candidate.issue_id == issue.issue_id:
                 continue
-            pair = _pair_key(issue.issue_id, candidate.issue_id)
+            pair = issue_pair_key(issue.issue_id, candidate.issue_id)
             # Both directions are recorded under the higher-numbered ID so the
             # two sightings of one pair can be folded together at all.
             named = IdentityCandidate(
@@ -215,8 +225,13 @@ def _suggested_pairs(
             )
             previous = strongest.get(pair)
             strongest[pair] = named if previous is None else previous.merged(named)
+    settled = {pair for pair in strongest if inbox.is_kept_distinct(*pair)}
     ordered = sorted(
-        strongest.items(),
+        (
+            (pair, candidate)
+            for pair, candidate in strongest.items()
+            if pair not in settled
+        ),
         key=lambda item: (candidate_order(item[1]), issue_id_number(item[0][0])),
     )
     return (
@@ -229,6 +244,7 @@ def _suggested_pairs(
             for pair, candidate in ordered[:limit]
         ),
         max(len(ordered) - limit, 0),
+        len(settled),
     )
 
 
@@ -240,7 +256,7 @@ def build_preview(
 ) -> ReconciliationPreview:
     """Describe what reconciling ``inbox`` would have to decide, writing nothing."""
     bindings, blocked = _safe_bindings(inbox)
-    unresolved, truncated = _suggested_pairs(inbox, limit=limit)
+    unresolved, truncated, suppressed = _suggested_pairs(inbox, limit=limit)
     return ReconciliationPreview(
         catalog_digest=inbox.catalog.digest,
         generated_at=generated_at or _utc_now(),
@@ -250,6 +266,7 @@ def build_preview(
         blocked=blocked,
         unresolved=unresolved,
         truncated_pairs=truncated,
+        suppressed_pairs=suppressed,
     )
 
 
@@ -274,6 +291,8 @@ class ApplyResult:
     records: tuple[LedgerRecord, ...] = ()
     bindings_written: int = 0
     merges_written: int = 0
+    #: Rulings written, not decisions read: a keep-distinct the ledger already
+    #: carries is counted nowhere, the same way an existing binding is.
     kept_distinct: int = 0
 
     @property
@@ -290,18 +309,67 @@ class ApplyResult:
         }
 
 
+def _recorded_rulings(
+    inbox: AssuranceProjection,
+) -> dict[frozenset[str], Mapping[str, str]]:
+    """Map each ruled set of issues to the digests its latest ruling stored.
+
+    Keyed by set because a ruling is a statement about issues rather than an
+    ordered edge, and the reviewer who names the same pair the other way round
+    is repeating a decision rather than making a new one.
+
+    Only rulings the projection accepted are read. The ledger stores a record
+    that names an issue nothing had observed yet, and the projection reports it
+    as an anomaly and suppresses nothing with it; treating that same record as a
+    standing ruling here would make apply skip a fresh verdict the preview still
+    asks for, and the pair would come back on every preview with no way to
+    settle it.
+    """
+    rulings: dict[frozenset[str], Mapping[str, str]] = {}
+    for payload in inbox.rulings:
+        rulings[frozenset(payload.issue_ids)] = dict(payload.reviewed_digests)
+    return rulings
+
+
+def _ruling_is_recorded(
+    decision: KeepDistinctDecision,
+    *,
+    rulings: Mapping[frozenset[str], Mapping[str, str]],
+    catalog: IdentityCatalog,
+) -> bool:
+    """Whether the ledger already rules on these issues as they read right now.
+
+    A stored ruling whose digests have moved is not this decision: the issues
+    were reviewed again because they changed, and the fresh verdict has to land
+    or the pair keeps coming back. An issue the catalog no longer names has
+    merged away and has no current digest to compare, so its ruling stands as
+    written rather than being rewritten on every apply.
+    """
+    stored = rulings.get(frozenset(decision.issue_ids))
+    if stored is None:
+        return False
+    return all(
+        catalog.identity_digest(issue_id) in (digest, None)
+        for issue_id, digest in stored.items()
+    )
+
+
 def _pending(
-    view: LedgerView, manifest: ReconciliationManifest
-) -> tuple[tuple[BindDecision, ...], tuple[MergeDecision, ...]]:
+    view: LedgerView, inbox: AssuranceProjection, manifest: ReconciliationManifest
+) -> tuple[
+    tuple[BindDecision, ...],
+    tuple[MergeDecision, ...],
+    tuple[KeepDistinctDecision, ...],
+]:
     """Return the decisions the ledger does not already record.
 
     Pure and non-raising, because it runs before validation: a manifest that was
     already applied is answered from what is on disk rather than re-checked
-    against a catalog its own application moved. ``keep-distinct`` never appears
-    here -- it writes nothing, so it is satisfied the moment it is read.
+    against a catalog its own application moved.
     """
     bindings = view.identity_bindings
     edges = view.merge_edges
+    rulings = _recorded_rulings(inbox)
     binds = tuple(
         item
         for item in manifest.decisions
@@ -314,7 +382,13 @@ def _pending(
         if isinstance(item, MergeDecision)
         and edges.get(item.source_issue_id) != item.target_issue_id
     )
-    return binds, merges
+    keeps = tuple(
+        item
+        for item in manifest.decisions
+        if isinstance(item, KeepDistinctDecision)
+        and not _ruling_is_recorded(item, rulings=rulings, catalog=inbox.catalog)
+    )
+    return binds, merges, keeps
 
 
 def _bind_rejection(
@@ -359,6 +433,50 @@ def _bind_rejection(
     return None
 
 
+def _keep_distinct_rejection(
+    decision: KeepDistinctDecision,
+    *,
+    known: frozenset[str] | set[str],
+    edges: Mapping[str, str],
+) -> ProjectionError | None:
+    """Return the error refusing this ruling, or ``None`` when it can be written.
+
+    A ruling changes no issue, so the only ways it can be wrong are naming an
+    issue nobody observed and naming one that has since merged: the pair a
+    reviewer ruled two defects became one defect before the ruling landed, and
+    storing it would suppress a question the merge already answered differently.
+    """
+    for issue_id in decision.issue_ids:
+        if issue_id not in known:
+            return ProjectionError(
+                UNKNOWN_ISSUE, f"{issue_id} names no issue in the inbox"
+            )
+        canonical = follow_merge_chain(edges, issue_id)
+        if canonical != issue_id:
+            return ProjectionError(
+                ISSUE_NOT_CANONICAL,
+                f"{issue_id} merged into {canonical}, so the pair reviewed as "
+                "distinct is one issue now",
+            )
+    return None
+
+
+def _reviewed_digests(
+    decision: KeepDistinctDecision, *, catalog: IdentityCatalog
+) -> tuple[str, ...]:
+    """The digest each named issue is recognized by, in the order it was named."""
+    digests: list[str] = []
+    for issue_id in decision.issue_ids:
+        digest = catalog.identity_digest(issue_id)
+        if digest is None:
+            raise ProjectionError(
+                UNKNOWN_ISSUE,
+                f"{issue_id} has no catalog identity for a ruling to hold against",
+            )
+        digests.append(digest)
+    return tuple(digests)
+
+
 def apply_manifest(
     manifest: ReconciliationManifest,
     *,
@@ -369,8 +487,8 @@ def apply_manifest(
 
     Three questions are asked in this order, and the order is the design.
 
-    First, what is left to do. A manifest whose bindings and merges are all
-    already in the ledger writes nothing and succeeds, so re-running an apply
+    First, what is left to do. A manifest whose bindings, rulings and merges are
+    all already in the ledger writes nothing and succeeds, so re-running an apply
     after a crash, a retry, or an operator who lost track is a no-op rather than
     a second attempt at history that already happened.
 
@@ -382,15 +500,16 @@ def apply_manifest(
     than completed, which is the safe direction to fail in.
 
     Third, whether the decisions are legal against the ledger as it stands. Each
-    binding and merge is judged against maps that advance as the transaction is
-    built, so a manifest cannot pass by having every decision checked against a
-    state its siblings already changed.
+    decision is judged against maps that advance as the transaction is built, so
+    a manifest cannot pass by having every decision checked against a state its
+    siblings already changed.
 
-    Bindings are written before merges. A binding's issue must be canonical when
-    its record replays, and every binding in one manifest was reviewed against
-    the pre-merge inbox -- so binding ``issue.asi-123`` to ASI-123 and then
-    merging ASI-123 into ASI-80 leaves the older name resolving to the surviving
-    issue, which is what the merge chain is for.
+    Bindings are written before merges, and rulings between them. Both kinds
+    name issues that must still be canonical when their record replays, and every
+    decision in one manifest was reviewed against the pre-merge inbox -- so
+    binding ``issue.asi-123`` to ASI-123 and then merging ASI-123 into ASI-80
+    leaves the older name resolving to the surviving issue, which is what the
+    merge chain is for.
     """
     unresolved = manifest.unresolved
     if unresolved:
@@ -404,13 +523,15 @@ def apply_manifest(
             f"{DECISION_KEEP_DISTINCT!r} before applying",
         )
     stamp = recorded_at or _utc_now()
-    counts = {"bindings": 0, "merges": 0}
+    counts = {"bindings": 0, "merges": 0, "kept_distinct": 0}
 
     def build(view: LedgerView) -> tuple[PendingRecord, ...]:
-        binds, merges = _pending(view, manifest)
-        if not binds and not merges:
+        inbox = projection.project(view)
+        catalog = inbox.catalog
+        binds, merges, keeps = _pending(view, inbox, manifest)
+        if not binds and not merges and not keeps:
             return ()
-        digest = projection.project(view).catalog.digest
+        digest = catalog.digest
         if digest != manifest.catalog_digest:
             raise ProjectionError(
                 STALE_CATALOG_DIGEST,
@@ -442,6 +563,22 @@ def apply_manifest(
                     recorded_at=stamp,
                 )
             )
+        for keep in keeps:
+            refused = _keep_distinct_rejection(keep, known=known, edges=edges)
+            if refused is not None:
+                raise refused
+            records.append(
+                PendingRecord(
+                    kind=KIND_ISSUE_KEPT_DISTINCT,
+                    payload=IssueKeptDistinct(
+                        issue_ids=keep.issue_ids,
+                        identity_digests=_reviewed_digests(keep, catalog=catalog),
+                        recorded_at=stamp,
+                        note=keep.note,
+                    ),
+                    recorded_at=stamp,
+                )
+            )
         for merge in merges:
             rejected = projection.merge_rejection(
                 source=merge.source_issue_id,
@@ -466,6 +603,7 @@ def apply_manifest(
             )
         counts["bindings"] = len(binds)
         counts["merges"] = len(merges)
+        counts["kept_distinct"] = len(keeps)
         return tuple(records)
 
     records = ledger.append_transaction(build, state_dir=state_dir, recorded_at=stamp)
@@ -473,7 +611,5 @@ def apply_manifest(
         records=records,
         bindings_written=counts["bindings"],
         merges_written=counts["merges"],
-        kept_distinct=sum(
-            1 for item in manifest.decisions if isinstance(item, KeepDistinctDecision)
-        ),
+        kept_distinct=counts["kept_distinct"],
     )

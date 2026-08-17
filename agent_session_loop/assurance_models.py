@@ -238,7 +238,7 @@ AUDIT_ROLE_SOURCES: tuple[AuditRoleSource, ...] = ("explicit", "review")
 AUDIT_INPUT_FILENAME = "supervisor-audit-input.json"
 AUDIT_REPORT_FILENAME = "supervisor-audit.json"
 AUDIT_MARKDOWN_FILENAME = "supervisor-audit.md"
-_ATTEMPT_DIR_PREFIX = "supervisor-audit-attempt-"
+ATTEMPT_DIR_PREFIX = "supervisor-audit-attempt-"
 
 #: Canonical per-run audit artifacts, in the order they are produced.
 CANONICAL_AUDIT_ARTIFACTS: tuple[str, ...] = (
@@ -1426,6 +1426,99 @@ def parse_issue_merge(payload: object, *, label: str = "merge") -> IssueMerge:
 
 
 @dataclass(frozen=True)
+class IssueKeptDistinct:
+    """A durable statement that two reviewed issues describe separate defects.
+
+    A merge is an event, and its negative is not simply the absence of one: a
+    reviewer read a suggested pair and ruled that it is two defects, and without
+    that ruling on disk every later reconciliation asks the same question again.
+
+    What the ruling cannot say is "never ask again". It was reached about issues
+    as they read at the time, so the identity digest each named issue had then is
+    stored beside it, and the ruling holds only while those digests still
+    describe them. An issue that absorbs a materially different sighting is a
+    different question, and gets asked again rather than answered by a verdict
+    nobody gave about it.
+    """
+
+    issue_ids: tuple[str, ...]
+    identity_digests: tuple[str, ...]
+    recorded_at: str
+    note: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "issue_ids",
+            _require_issue_ids(list(self.issue_ids), label="keep-distinct 'issue_ids'"),
+        )
+        if len(self.issue_ids) < 2:
+            raise AssuranceError(
+                "keep-distinct must name at least two issues; "
+                f"got {len(self.issue_ids)}"
+            )
+        object.__setattr__(
+            self,
+            "identity_digests",
+            tuple(
+                _require_digest(digest, label="keep-distinct 'identity_digests' entry")
+                for digest in self.identity_digests
+            ),
+        )
+        if len(self.identity_digests) != len(self.issue_ids):
+            raise AssuranceError(
+                "keep-distinct must carry one identity digest per issue; got "
+                f"{len(self.identity_digests)} digest(s) for "
+                f"{len(self.issue_ids)} issue(s)"
+            )
+        _require_timestamp(self.recorded_at, label="keep-distinct 'recorded_at'")
+        if self.note is not None:
+            _require_text(self.note, label="keep-distinct 'note'")
+
+    @property
+    def reviewed_digests(self) -> tuple[tuple[str, str], ...]:
+        """Each named issue beside the identity digest it was reviewed at."""
+        return tuple(zip(self.issue_ids, self.identity_digests, strict=True))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "issue_ids": list(self.issue_ids),
+            "identity_digests": list(self.identity_digests),
+            "recorded_at": self.recorded_at,
+            "note": self.note,
+        }
+
+
+def parse_issue_kept_distinct(
+    payload: object, *, label: str = "keep-distinct"
+) -> IssueKeptDistinct:
+    """Parse one keep-distinct record, failing closed."""
+    data = _require_object(
+        payload,
+        label=label,
+        allowed_keys=("issue_ids", "identity_digests", "recorded_at", "note"),
+    )
+    digests = _require_sequence(
+        data.get("identity_digests"),
+        label=f"{label} 'identity_digests'",
+        maximum=MAX_ISSUE_REFERENCES,
+    )
+    return IssueKeptDistinct(
+        issue_ids=_require_issue_ids(
+            data.get("issue_ids"), label=f"{label} 'issue_ids'"
+        ),
+        identity_digests=tuple(
+            _require_digest(digest, label=f"{label} 'identity_digests' entry")
+            for digest in digests
+        ),
+        recorded_at=_require_timestamp(
+            data.get("recorded_at"), label=f"{label} 'recorded_at'"
+        ),
+        note=_optional_text(data.get("note"), label=f"{label} 'note'"),
+    )
+
+
+@dataclass(frozen=True)
 class IssueIdentityBinding:
     """A durable statement that one identity key names one canonical issue.
 
@@ -2521,7 +2614,7 @@ def attempt_dir_name(number: int) -> str:
     _require_int(
         number, label="attempt number", minimum=1, maximum=MAX_AUDIT_ATTEMPT_RECORDS
     )
-    return f"{_ATTEMPT_DIR_PREFIX}{number}"
+    return f"{ATTEMPT_DIR_PREFIX}{number}"
 
 
 def write_new_bytes(path: Path | str, data: bytes, *, durable: bool = True) -> Path:

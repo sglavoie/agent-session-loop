@@ -35,7 +35,11 @@ from typing import Any
 
 from . import assurance_projection as projection
 from . import events, plans, state, supervisor_audit
-from .assurance_models import AssuranceError
+from .assurance_models import (
+    ATTEMPT_DIR_PREFIX,
+    CANONICAL_AUDIT_ARTIFACTS,
+    AssuranceError,
+)
 
 #: Runs audited per invocation unless the operator raises it. Each audit is a
 #: harness turn under a timeout, so the default bounds one catch-up pass to
@@ -64,6 +68,10 @@ REASON_AUDIT_CONFIG_UNAVAILABLE = "audit-config-unavailable"
 
 REASON_UNKNOWN_RUN = "unknown-run"
 REASON_AMBIGUOUS_RUN = "ambiguous-run"
+
+#: Where a dead runner's half-written audit artifacts are moved so the
+#: re-audit can write the canonical names itself.
+ABANDONED_AUDIT_ARCHIVE_PREFIX = "abandoned-audit-"
 
 #: The ``run_config`` keys that reconstruct the dead run's audit decision.
 #: Names are ``RUN_FLAG_SPEC`` dests, which is what ``plan_audit`` reads.
@@ -130,6 +138,7 @@ class CatchupResult:
     state: str | None = None
     reason: str | None = None
     issue_ids: tuple[str, ...] = ()
+    archived_artifacts: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -139,6 +148,7 @@ class CatchupResult:
             "state": self.state,
             "reason": self.reason,
             "issue_ids": list(self.issue_ids),
+            "archived_artifacts": list(self.archived_artifacts),
         }
 
 
@@ -323,6 +333,37 @@ def _registered_repositories(pending: PendingRun) -> tuple[tuple[str, ...], bool
     return (paths, True) if paths else ((".",), False)
 
 
+def _archive_abandoned_audit_artifacts(run_dir: Path) -> tuple[str, ...]:
+    """Move a dead runner's half-written audit artifacts aside.
+
+    The canonical writers create exclusively, so a run that died *after* its
+    own audit began can never be re-audited in place: the bundle write raises
+    "written exactly once", `audit_terminal_run` folds that into a pending
+    summary, and catch-up reports an audit that wrote nothing. Renaming the
+    leftovers into a numbered archive keeps them as evidence of the abandoned
+    attempt — they are never deleted — while freeing the canonical names.
+
+    Returns the archived names, empty when the run left nothing behind.
+    """
+    leftovers = [
+        path
+        for path in (
+            [run_dir / name for name in CANONICAL_AUDIT_ARTIFACTS]
+            + sorted(run_dir.glob(f"{ATTEMPT_DIR_PREFIX}*"))
+        )
+        if path.exists()
+    ]
+    if not leftovers:
+        return ()
+    index = 1
+    while (archive := run_dir / f"{ABANDONED_AUDIT_ARCHIVE_PREFIX}{index}").exists():
+        index += 1
+    archive.mkdir(parents=True)
+    for path in leftovers:
+        path.rename(archive / path.name)
+    return tuple(path.name for path in leftovers)
+
+
 def process_run(
     pending: PendingRun,
     *,
@@ -360,6 +401,12 @@ def process_run(
             return result(OUTCOME_ALREADY_AUDITED)
         if not _state_still_describes(pending):
             return result(OUTCOME_UNUSABLE, reason=REASON_EVIDENCE_SUPERSEDED)
+        # Only reachable once the ledger has shown nothing was published for
+        # this run, so nothing being moved aside backs a published finding.
+        try:
+            archived = _archive_abandoned_audit_artifacts(pending.run_dir)
+        except OSError as error:
+            return result(OUTCOME_UNUSABLE, reason=str(error))
         try:
             plan = supervisor_audit.plan_audit(
                 _audit_namespace(pending, overrides=overrides, force_enabled=force)
@@ -386,6 +433,7 @@ def process_run(
         state=summary.state,
         reason=summary.reason,
         issue_ids=summary.issue_ids,
+        archived_artifacts=archived,
     )
 
 

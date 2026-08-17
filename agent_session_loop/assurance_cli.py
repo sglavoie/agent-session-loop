@@ -1396,6 +1396,11 @@ def _reconcile_preview_text_lines(payload: dict[str, Any]) -> list[str]:
             f"{payload['truncated_pairs']} weaker pair(s) were not offered; "
             "reconcile again after applying this manifest to see them."
         )
+    if payload["suppressed_pairs"]:
+        lines.append(
+            f"{payload['suppressed_pairs']} pair(s) were already reviewed as "
+            "distinct defects and are not asked about again."
+        )
     lines.append("Nothing was written. To act on this:")
     lines.append("  asl assurance reconcile --json | jq .manifest > manifest.json")
     lines.append("  # rewrite each 'review' decision as 'merge' or 'keep-distinct'")
@@ -1409,13 +1414,13 @@ def _reconcile_apply_text_lines(payload: dict[str, Any]) -> list[str]:
             "Every decision in this manifest is already recorded; nothing was written."
         ]
     lines = [
-        f"Applied {payload['records']} record(s): {payload['bindings']} binding(s) "
-        f"and {payload['merges']} merge(s).",
+        f"Applied {payload['records']} record(s): {payload['bindings']} binding(s), "
+        f"{payload['kept_distinct']} ruling(s) and {payload['merges']} merge(s).",
     ]
     if payload["kept_distinct"]:
         lines.append(
             f"{payload['kept_distinct']} pair(s) were reviewed as distinct defects; "
-            "that verdict is not a ledger record and is not stored."
+            "they stop being suggested until one of them changes."
         )
     if payload["merges"]:
         lines.append("Merging is irreversible.")

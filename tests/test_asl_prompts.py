@@ -146,6 +146,39 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn(".expand.md", rendered)
         self.assertIn("never inline in chat", rendered)
 
+    def test_review_session_packet_renders_reviewer_role_not_worker_role(self) -> None:
+        implementation = runner.build_task_packet(
+            "codex", self.PLAN_DIR, session_id="9"
+        )
+        review = runner.build_task_packet(
+            "codex",
+            self.PLAN_DIR,
+            session_id="9",
+            session_kind=runner.SESSION_KIND_REVIEW,
+        )
+
+        self.assertFalse(implementation.is_review)
+        self.assertTrue(review.is_review)
+        rendered = review.render()
+        self.assertIn("You are an autonomous ASL reviewer", rendered)
+        self.assertNotIn("You are an autonomous ASL worker", rendered)
+        self.assertIn("## Read before reviewing", rendered)
+        self.assertNotIn("## Read before implementing", rendered)
+        self.assertIn("## Review", rendered)
+        self.assertNotIn("## Implement\n", rendered)
+        self.assertIn("Judge the work; do not repair it", rendered)
+        self.assertIn("run focused read-only checks", rendered)
+        self.assertIn(runner.FINAL_REVIEW_FILENAME, rendered)
+        self.assertIn(runner.FINAL_REVIEW_ARTIFACT_FILENAME, rendered)
+        self.assertIn("a fix is not yours to write", rendered)
+        self.assertIn("as a finding with its own repair group", rendered)
+
+    def test_unknown_session_kind_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            runner.build_task_packet(
+                "codex", self.PLAN_DIR, session_id="9", session_kind="auditor"
+            )
+
     def test_packet_states_runner_signal_protocol(self) -> None:
         rendered = runner.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9"

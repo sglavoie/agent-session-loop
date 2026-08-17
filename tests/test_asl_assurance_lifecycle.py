@@ -1710,6 +1710,47 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
             with self.assertRaises(assurance_catchup.CatchupError):
                 self._process(history, limit=0)
 
+    def test_a_run_that_died_mid_audit_is_re_audited_beside_its_leftovers(self) -> None:
+        attempt_dir_name = f"{assurance_models.ATTEMPT_DIR_PREFIX}1"
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            root = history[2].parent
+            run_dir = history[3]
+            self._abandon(history)
+            # What a runner killed after its own audit began leaves behind. The
+            # canonical writers create exclusively, so without archiving these
+            # the re-audit refuses and reports a no-op as a completed audit.
+            (run_dir / assurance_models.AUDIT_INPUT_FILENAME).write_text(
+                "{}", encoding="utf-8"
+            )
+            (run_dir / attempt_dir_name).mkdir()
+
+            report = self._process(history)
+
+            result = report.results[0]
+            self.assertEqual(assurance_catchup.OUTCOME_AUDITED, result.outcome)
+            self.assertEqual("all-clear", result.state, result.reason)
+            self.assertEqual(
+                [assurance_models.AUDIT_INPUT_FILENAME, attempt_dir_name],
+                list(result.archived_artifacts),
+            )
+            archive = run_dir / f"{assurance_catchup.ABANDONED_AUDIT_ARCHIVE_PREFIX}1"
+            self.assertEqual(
+                "{}",
+                (archive / assurance_models.AUDIT_INPUT_FILENAME).read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assertTrue((archive / attempt_dir_name).is_dir())
+            self.assertTrue(
+                (run_dir / assurance_models.AUDIT_REPORT_FILENAME).is_file()
+            )
+            view = assurance_ledger.read_ledger(state_dir=root)
+            self.assertEqual(
+                [assurance_ledger.KIND_AUDIT_COMPLETED],
+                [record.kind for record in view.records],
+            )
+
     def test_an_override_replaces_the_dead_run_s_own_audit_harness(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))

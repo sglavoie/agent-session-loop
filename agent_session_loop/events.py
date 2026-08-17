@@ -176,6 +176,10 @@ PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED = "repository-registry-required"
 # Two agents writing one working tree cannot be made safe, so the overlap is
 # refused at startup rather than explained by a guard afterwards.
 PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION = "workspace-repository-contention"
+# A turn changed a session artifact belonging to a session other than the one
+# its task packet selected. The packet fixes exactly one writable session file,
+# so any other session's instructions changing under it is tampering.
+PAUSE_REASON_PLAN_ARTIFACT_TAMPERED = "plan-artifact-tampered"
 
 # The subset of harness-failure categories that a supervisor may safely retry
 # by relaunching the same session. Quota, authentication, invalid-model, and
@@ -212,6 +216,7 @@ PAUSE_REASONS: tuple[str, ...] = (
     PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
     PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
     PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION,
+    PAUSE_REASON_PLAN_ARTIFACT_TAMPERED,
     PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     PAUSE_REASON_QUOTA_EXHAUSTED,
     PAUSE_REASON_AUTH_FAILED,

@@ -32,6 +32,7 @@ from agent_session_loop import (
     runner,
     state,
     supervisor_audit,
+    verification,
 )
 from agent_session_loop.assurance_models import (
     AUDIT_MARKDOWN_FILENAME,
@@ -1680,6 +1681,168 @@ class EvidenceBundleTests(unittest.TestCase):
                 events.EVENT_SCHEMA_VERSION, payload["versions"]["event_schema_version"]
             )
 
+    def _rewrite_result(self, run_dir: Path, **fields: Any) -> None:
+        path = run_dir / "turn-0001-01" / state.RESULT_FILE_NAME
+        result = json.loads(path.read_text(encoding="utf-8"))
+        result.update(fields)
+        path.write_text(json.dumps(result), encoding="utf-8")
+
+    def _rewrite_state(self, state_dir: Path, **fields: Any) -> None:
+        path = state_dir / events.STATE_FILE_NAME
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.update(fields)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_authorized_aliases_survive_redaction_but_secret_keys_do_not(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._rewrite_result(
+                run_dir,
+                workspace_write_guard={
+                    "passed": True,
+                    "violations": [],
+                    "unavailable": {},
+                    "authorized_aliases": ["app"],
+                },
+                auth_token=self.SECRET_ARGV,
+                authorization=self.SECRET_ARGV,
+            )
+
+            result = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "turns"
+            ][0]["result"]
+
+            self.assertEqual(
+                ["app"], result["workspace_write_guard"]["authorized_aliases"]
+            )
+            self.assertEqual(supervisor_audit.REDACTED, result["auth_token"])
+            self.assertEqual(supervisor_audit.REDACTED, result["authorization"])
+
+    def test_a_reply_origin_survives_while_a_remote_is_canonicalized(self) -> None:
+        for origin in runner.REPLY_ORIGINS:
+            with self.subTest(origin=origin), tempfile.TemporaryDirectory() as tmp:
+                workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+                self._rewrite_result(
+                    run_dir, reply_source={"origin": origin, "reply_length": 6}
+                )
+
+                payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+
+                self.assertEqual(
+                    origin, payload["turns"][0]["result"]["reply_source"]["origin"]
+                )
+                self.assertEqual(
+                    "github.com/owner/repo",
+                    payload["registry"]["repositories"][0]["origin"],
+                )
+
+    def test_a_failed_write_guard_makes_its_turn_anomalous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            # The turn exits zero and reports a complete status: the guard
+            # result is the only record that it wrote outside its scope.
+            self._rewrite_result(
+                run_dir,
+                status_result="complete",
+                workspace_write_guard={
+                    "passed": False,
+                    "violations": [{"kind": "repository-added", "alias": "app"}],
+                    "unavailable": {},
+                    "reason": events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+                },
+            )
+
+            payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+
+            self.assertTrue(payload["turns"][0]["anomalous"])
+
+    def test_a_passing_write_guard_leaves_its_turn_unremarkable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._rewrite_result(
+                run_dir,
+                status_result="complete",
+                workspace_write_guard={
+                    "passed": True,
+                    "violations": [],
+                    "unavailable": {},
+                    "authorized_aliases": ["app"],
+                },
+            )
+
+            payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+
+            self.assertFalse(payload["turns"][0]["anomalous"])
+
+    def test_an_unjudgeable_write_guard_makes_its_turn_anomalous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._rewrite_result(
+                run_dir,
+                status_result="complete",
+                workspace_write_guard={
+                    "passed": False,
+                    "violations": [],
+                    "unavailable": {"app": {"reason": "unreadable"}},
+                },
+            )
+
+            payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+
+            self.assertTrue(payload["turns"][0]["anomalous"])
+
+    def test_the_progress_journal_is_indexed_with_its_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            journal = plans.progress_path(plan_dir)
+            journal.write_text("# Progress Journal\n\n## Session 1\n", encoding="utf-8")
+
+            bundle = self._collect(workspace, plan_dir, state_dir, run_dir)
+            entry = bundle.payload["plan"]["progress"]
+            indexed = {reference.locator: reference for reference in bundle.evidence}
+
+            self.assertTrue(entry["available"])
+            self.assertIn(entry["reference"], indexed)
+            self.assertEqual(
+                artifacts.sha256_hex(journal.read_bytes()),
+                indexed[entry["reference"]].digest,
+            )
+
+    def test_a_missing_progress_journal_is_recorded_as_an_omission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._collect(*self._history(Path(tmp))).payload
+            entry = payload["plan"]["progress"]
+
+            self.assertFalse(entry["available"])
+            self.assertEqual(supervisor_audit.REASON_MISSING, entry["reason"])
+            self.assertTrue(
+                any(
+                    omission["section"] == "plan"
+                    and omission["reason"] == supervisor_audit.REASON_MISSING
+                    for omission in payload["omissions"]
+                )
+            )
+
+    def test_the_observed_model_is_projected_beside_the_configured_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._rewrite_state(
+                state_dir,
+                model="native CLI default",
+                model_source="unresolved",
+                observed_model="claude-opus-5",
+                observed_model_source="harness_reported",
+            )
+
+            section = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "state"
+            ]
+
+            self.assertEqual("native CLI default", section["model"])
+            self.assertEqual("unresolved", section["model_source"])
+            self.assertEqual("claude-opus-5", section["observed_model"])
+            self.assertEqual("harness_reported", section["observed_model_source"])
+
 
 class _RunHistoryFixture:
     """One recorded run, shared by the deterministic and agent audit tests."""
@@ -2190,6 +2353,357 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual(
                 ["observability.success-is-earned"],
                 [item.invariant_key for item in findings],
+            )
+
+    def test_every_recorded_verification_failure_is_classified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.VERIFICATION_CHECK_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "name": "diagnose",
+                            "kind": "command",
+                            "role": verification.CHECK_ROLE_DIAGNOSTIC,
+                            "status": "fail",
+                            "returncode": 1,
+                            "failure_reason": "command-failed",
+                        },
+                    ),
+                    (
+                        events.VERIFICATION_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "passed": True,
+                            "executed_count": 2,
+                            "passed_count": 1,
+                            "gate_count": 1,
+                            "diagnostic_count": 1,
+                            "skipped_count": 0,
+                        },
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["unclassified-anomalies"].status)
+            self.assertEqual("pass", results["verification-outcomes"].status)
+            self.assertIn("accounted for", results["verification-outcomes"].detail)
+
+    def test_a_skipped_diagnostic_cannot_absorb_a_failed_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.VERIFICATION_CHECK_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "name": "tests",
+                            "kind": "command",
+                            "role": verification.CHECK_ROLE_GATE,
+                            "status": "fail",
+                            "returncode": 1,
+                            "failure_reason": "command-failed",
+                        },
+                    ),
+                    (
+                        events.VERIFICATION_CHECK_SKIPPED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "name": "diagnose",
+                            "kind": "command",
+                            "on_failure_of": ["lint"],
+                            "reason": verification.SKIP_REASON_CONDITION_NOT_MET,
+                        },
+                    ),
+                    (
+                        events.VERIFICATION_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "passed": True,
+                            "executed_count": 1,
+                            "passed_count": 0,
+                            "gate_count": 1,
+                            "diagnostic_count": 1,
+                            "skipped_count": 1,
+                        },
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["verification-outcomes"].status)
+            self.assertIn(
+                "reported a failure against a gate",
+                results["verification-outcomes"].detail,
+            )
+
+    def test_a_passing_diagnostic_cannot_absorb_a_failed_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.VERIFICATION_CHECK_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "name": "tests",
+                            "kind": "command",
+                            "role": verification.CHECK_ROLE_GATE,
+                            "status": "fail",
+                            "returncode": 1,
+                            "failure_reason": "command-failed",
+                        },
+                    ),
+                    (
+                        events.VERIFICATION_CHECK_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "name": "diagnose",
+                            "kind": "command",
+                            "role": verification.CHECK_ROLE_DIAGNOSTIC,
+                            "status": "pass",
+                            "returncode": 0,
+                            "failure_reason": None,
+                        },
+                    ),
+                    (
+                        events.VERIFICATION_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "passed": True,
+                            "executed_count": 2,
+                            "passed_count": 1,
+                            "gate_count": 1,
+                            "diagnostic_count": 1,
+                            "skipped_count": 0,
+                        },
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["verification-outcomes"].status)
+            self.assertIn(
+                "reported a failure against a gate",
+                results["verification-outcomes"].detail,
+            )
+
+    def test_a_skipped_diagnostic_absorbs_nothing_without_recorded_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.VERIFICATION_CHECK_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "name": "tests",
+                            "kind": "command",
+                            "status": "fail",
+                            "returncode": 1,
+                            "failure_reason": "command-failed",
+                        },
+                    ),
+                    (
+                        events.VERIFICATION_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "passed": True,
+                            "executed_count": 1,
+                            "passed_count": 0,
+                            "gate_count": 1,
+                            "diagnostic_count": 1,
+                            "skipped_count": 1,
+                        },
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["verification-outcomes"].status)
+            self.assertIn("unidentified role", results["verification-outcomes"].detail)
+
+    def test_a_verification_that_passed_over_a_failed_gate_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.VERIFICATION_CHECK_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "name": "tests",
+                            "kind": "command",
+                            "status": "fail",
+                            "returncode": 1,
+                            "failure_reason": "command-failed",
+                        },
+                    ),
+                    (
+                        events.VERIFICATION_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "passed": True,
+                            "executed_count": 1,
+                            "passed_count": 0,
+                            "gate_count": 1,
+                            "diagnostic_count": 0,
+                        },
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            _, results = self._audit(history)
+            findings = supervisor_audit.findings_from_results(results.values())
+
+            self.assertEqual("pass", results["unclassified-anomalies"].status)
+            self.assertEqual("fail", results["verification-outcomes"].status)
+            self.assertIn(
+                "verification.failure-accounting",
+                [item.invariant_key for item in findings],
+            )
+
+    def test_an_expected_conditional_skip_does_not_contradict_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_result(history[3])
+            payload["verification"] = {
+                "passed": True,
+                "recipe": {"check_count": 2, "gate_count": 1, "diagnostic_count": 1},
+                "checks": [{"name": "tests", "status": "pass", "returncode": 0}],
+                "skipped_checks": [
+                    {
+                        "name": "diagnose",
+                        "kind": "command",
+                        "on_failure_of": ["tests"],
+                        "reason": verification.SKIP_REASON_CONDITION_NOT_MET,
+                    }
+                ],
+            }
+            self._write_result(history[3] / "turn-0001-01", payload)
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.VERIFICATION_CHECK_SKIPPED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "name": "diagnose",
+                            "kind": "command",
+                            "on_failure_of": ["tests"],
+                            "reason": verification.SKIP_REASON_CONDITION_NOT_MET,
+                        },
+                    ),
+                    (
+                        events.VERIFICATION_CHECK_FINISHED_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "turn_index": 1,
+                            "name": "tests",
+                            "kind": "command",
+                            "status": "pass",
+                            "returncode": 0,
+                        },
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["misleading-success"].status)
+            self.assertEqual(
+                (), supervisor_audit.findings_from_results(results.values())
+            )
+
+    def test_a_skipped_required_check_contradicts_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_result(history[3])
+            payload["verification"] = {
+                "passed": True,
+                "recipe": {"check_count": 2, "gate_count": 2, "diagnostic_count": 0},
+                "checks": [{"name": "tests", "status": "pass", "returncode": 0}],
+                "skipped_checks": [
+                    {
+                        "name": "lint",
+                        "kind": "command",
+                        "on_failure_of": [],
+                        "reason": "executable-not-found",
+                    }
+                ],
+            }
+            self._write_result(history[3] / "turn-0001-01", payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["misleading-success"].status)
+            self.assertIn(
+                "without a condition that explains the skip",
+                results["misleading-success"].detail,
+            )
+
+    def test_a_verification_that_gated_nothing_contradicts_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_result(history[3])
+            payload["verification"] = {
+                "passed": True,
+                "recipe": {"check_count": 1, "gate_count": 0, "diagnostic_count": 1},
+                "checks": [],
+                "skipped_checks": [
+                    {
+                        "name": "diagnose",
+                        "kind": "command",
+                        "on_failure_of": ["tests"],
+                        "reason": verification.SKIP_REASON_CONDITION_NOT_MET,
+                    }
+                ],
+            }
+            self._write_result(history[3] / "turn-0001-01", payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["misleading-success"].status)
+            self.assertIn(
+                "nothing gated the changes", results["misleading-success"].detail
             )
 
     def test_a_damaged_event_log_lands_in_the_unknown_lane(self) -> None:

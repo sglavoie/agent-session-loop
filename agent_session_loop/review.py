@@ -900,6 +900,17 @@ def _print_text_review_verdict(payload: dict[str, Any]) -> None:
 # (regenerated per review) or line numbers (drift between reviews).
 FINDING_FINGERPRINT_PREFIX = "finding"
 
+# Drift-tolerant repeat identity. The fingerprint above hashes evidence paths
+# and the repository alias, so a finding that survives its repair but is
+# re-reported against a moved path, a renamed helper, or a different alias
+# earns a fresh fingerprint and reads as newly introduced. The repeat key drops
+# exactly those two drifting dimensions and adds the repair group, which is the
+# reviewer's own statement of "one fix closes these", so a finding that comes
+# back under any evidence still collides with the attempt that failed to close
+# it. It is deliberately coarser than the fingerprint and is only ever used to
+# widen repeat detection, never to narrow it.
+FINDING_REPEAT_KEY_PREFIX = "repeat"
+
 # ``path/to/file.py:12`` / ``file.py:12-34`` / ``file.py:12:8`` trailing
 # location suffixes, and prose ``line 12`` / ``lines 12-34`` references.
 _EVIDENCE_LINE_SUFFIX_RE = re.compile(r"(:[0-9]+(?:[:-][0-9]+)*)+$")
@@ -973,4 +984,36 @@ def finding_fingerprints(
         finding_fingerprint(finding)
         for finding in findings
         if isinstance(finding, dict)
+    )
+
+
+def finding_repeat_key(finding: dict[str, Any]) -> str:
+    """Return the ``repeat:<16hex>`` cross-cycle repeat key for a finding.
+
+    Hashes normalized severity, normalized title, and the normalized repair
+    group. Evidence paths, evidence symbols, and the repository alias are
+    excluded so a finding reintroduced under moved or re-aliased evidence still
+    matches the cycle that tried to close it.
+    """
+    severity = str(finding.get("severity", "")).strip().lower()
+    title = _normalized_title(str(finding.get("title", "")))
+    repair_group = " ".join(str(finding.get("repair_group", "")).split()).lower()
+    identity = json.dumps(
+        {"severity": severity, "title": title, "repair_group": repair_group},
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"{FINDING_REPEAT_KEY_PREFIX}:{digest}"
+
+
+def finding_repeat_keys(findings: Any) -> tuple[str, ...] | None:
+    """Repeat-key a structured findings list, or ``None`` when absent.
+
+    Mirrors :func:`finding_fingerprints` so the two lists stay index-aligned
+    with each other and with the findings they describe.
+    """
+    if not isinstance(findings, list):
+        return None
+    return tuple(
+        finding_repeat_key(finding) for finding in findings if isinstance(finding, dict)
     )

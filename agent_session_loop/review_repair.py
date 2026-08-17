@@ -23,6 +23,10 @@ Planning is read-only, and materialization is deterministic and atomic:
   execution).
 - Every child carries the versioned review-repair marker so later cycles can
   recognize generated repair sessions.
+- Before anything is staged, the rendered children are judged against the bound
+  repository root; a child whose repair targets reach a repository the plan does
+  not register is refused while the plan is still untouched, rather than being
+  committed and then rejected by the post-authoring gate.
 - All child files, the manifest table/count refresh, and any predecessor
   reference repoint are staged in a single
   :class:`~agent_session_loop.authoring.PlanTransaction` and committed
@@ -54,6 +58,8 @@ from . import (
     contracts,
     plans,
     preflight,
+    progress_repair,
+    repository_scope,
     review,
     state,
     workspaces,
@@ -112,6 +118,11 @@ class ReviewRepairResult:
     when the plan could not yet be marked loop-ready). ``ok`` is ``False`` only
     when no safe sessions could be produced; in that case ``reason`` is
     :data:`REVIEW_REPAIR_REASON_MALFORMED` and ``error`` explains why.
+
+    ``children`` is empty with ``reason``
+    :data:`REVIEW_REPAIR_REASON_NOT_LOOP_READY` when the pre-authoring
+    footprint gate refused the rendered children: the refusal is a gate
+    verdict rather than a malformed artifact, and the plan is untouched.
     """
 
     ok: bool
@@ -760,6 +771,66 @@ def _strip_self_lock_findings(
     )
 
 
+def _child_footprint_targets(
+    group_plan: RepairGroupPlan,
+) -> tuple[repository_scope.PathTarget, ...]:
+    """Collect the path evidence a rendered child carries, contract included."""
+    return (
+        *repository_scope.targets_from_contract(group_plan.contract),
+        *repository_scope.extract_path_targets(group_plan.rendered_text),
+    )
+
+
+def _validate_children_footprint(
+    plan_dir: Path,
+    cwd: str | Path,
+    group_plans: Sequence[RepairGroupPlan],
+) -> dict[str, Any]:
+    """Judge the rendered children against the bound root before anything is written.
+
+    The post-commit gate applies the same footprint rule through preflight, but
+    by then the children are on disk and no rollback exists, so a child that
+    reaches an unregistered external root leaves a half-authored plan behind. A
+    registered plan is skipped: its registry already governs where it may reach.
+    """
+    clean: dict[str, Any] = {
+        "loop_ready": True,
+        "blockers": [],
+        "non_bypassable_blockers": [],
+        "baseline_summary": None,
+    }
+    if plans.read_repository_registry(plan_dir) is not None:
+        return clean
+    blockers: list[str] = []
+    for group_plan in group_plans:
+        child = group_plan.proposed_child_id.value
+        footprint = repository_scope.resolve_footprint(
+            _child_footprint_targets(group_plan), cwd, plan_dir=plan_dir
+        )
+        for target in footprint.out_of_root:
+            blockers.append(
+                f"repository-footprint: repair group {group_plan.repair_group!r} "
+                f"would author session {child} with a {target.kind} target that "
+                f"escapes the bound root: {target.value} is outside "
+                f"{footprint.root}"
+            )
+        if len(footprint.repo_roots) > 1:
+            blockers.append(
+                f"repository-footprint: repair group {group_plan.repair_group!r} "
+                f"would author session {child} spanning "
+                f"{len(footprint.repo_roots)} git repositories but manifest.md "
+                "declares no `## Repositories` registry"
+            )
+    if not blockers:
+        return clean
+    return {
+        "loop_ready": False,
+        "blockers": blockers,
+        "non_bypassable_blockers": ["repository-footprint"],
+        "baseline_summary": None,
+    }
+
+
 def _make_children_executable(
     plan_dir: Path,
     cwd: str | Path,
@@ -796,6 +867,24 @@ def _make_children_executable(
     report = preflight.run_preflight(plan_dir, cwd=canonical_cwd, state_dir=state_dir)
     report = _strip_self_lock_findings(report, lock_info)
     mark_blockers = preflight._mark_loop_ready_blockers(report)
+    if mark_blockers and all(
+        blocker.category == "progress-journal-missing" for blocker in mark_blockers
+    ):
+        # Same auto-repair `asl preflight --mark-loop-ready` performs: the
+        # journal is derivable from the completed handoffs, so a stale one must
+        # not be the reason a run pauses.
+        try:
+            progress_repair.repair_progress_journal(plan_dir)
+        except PlanError, OSError:
+            pass
+        else:
+            report = _strip_self_lock_findings(
+                preflight.run_preflight(
+                    plan_dir, cwd=canonical_cwd, state_dir=state_dir
+                ),
+                lock_info,
+            )
+            mark_blockers = preflight._mark_loop_ready_blockers(report)
     if mark_blockers:
         blockers = [
             f"{finding.category}: {finding.message}" for finding in mark_blockers
@@ -1122,6 +1211,26 @@ def _materialize(
             reason=REVIEW_REPAIR_REASON_NO_FINDINGS,
             review_session_id=review_id,
         )
+
+    if cwd is not None:
+        footprint_gate = _validate_children_footprint(
+            canonical_dir, cwd, repair_plan.repair_groups
+        )
+        if not footprint_gate["loop_ready"]:
+            return ReviewRepairResult(
+                ok=True,
+                reason=REVIEW_REPAIR_REASON_NOT_LOOP_READY,
+                review_session_id=review_id,
+                error=(
+                    "review repair children were refused before authoring: "
+                    "their repair targets need a repository the plan does not "
+                    "register"
+                ),
+                blockers=tuple(footprint_gate["blockers"]),
+                non_bypassable_blockers=tuple(
+                    footprint_gate["non_bypassable_blockers"]
+                ),
+            )
 
     sessions = plans.discover_session_files(canonical_dir)
 

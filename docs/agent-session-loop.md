@@ -2785,10 +2785,13 @@ some other issue already owns is reported as blocked with the projection's own
 `identity-key-conflict` reason rather than quietly skipped. Pairs come from the
 catalog's semantic candidates — shared invariant key, shared localization, or
 summaries at least `0.60` similar — and each pair is asked about once rather
-than from both sides. At most 200 pairs are offered at a time; weaker ones are
-counted in `truncated_pairs` and shown by reconciling again after the first
-manifest lands, so a large backlog is worked through in reviewable batches
-instead of arriving as one unreadable document.
+than from both sides. A pair a previous review already ruled two defects is not
+offered again; those are counted in `suppressed_pairs` so the difference between
+a settled inbox and matching that stopped working stays visible. At most 200
+pairs are offered at a time; weaker ones are counted in `truncated_pairs` and
+shown by reconciling again after the first manifest lands, so a large backlog is
+worked through in reviewable batches instead of arriving as one unreadable
+document.
 
 The preview's `manifest` key is that document: schema
 `assurance-reconciliation-manifest` version 1, carrying the catalog digest it
@@ -2825,10 +2828,20 @@ afterwards. Decisions are also checked against each other rather than against a
 frozen snapshot, so a manifest binding one key twice or merging one issue into
 two targets is refused instead of having its last decision silently win. A
 refused decision takes the whole manifest with it: nothing partial is ever
-appended. `keep-distinct` writes no record at all, because "these are two
-defects" is the absence of a merge and the ledger has no kind for it; a manifest
-of nothing but `keep-distinct` therefore succeeds having written nothing. A
-manifest containing merges asks for confirmation when a person is watching,
+appended. `keep-distinct` writes an `issue_kept_distinct` ruling of its own,
+between the bindings and the merges, because a review nobody stored is a review
+the next preview asks for again. The ruling carries the identity digest each
+named issue was reviewed at, so it suppresses that pair only while both issues
+still read the way they did: an issue that absorbs a materially different
+sighting is a different question and gets asked again, and a ruling naming an
+issue that has since merged away is refused with `issue-not-canonical` rather
+than answering a question the merge already answered the other way. A stored
+ruling counts as already recorded only when the projection accepted it, so a
+record the replay reported as an anomaly — one naming an issue nothing had
+observed when it landed — cannot make apply skip the fresh verdict the preview
+is still asking for; the anomaly stays on the ledger as evidence either way. A
+manifest
+containing merges asks for confirmation when a person is watching,
 takes `--yes` for scripts, and is never prompted under `--json`; declining exits
 `1` with `reason: cancelled`. A manifest that cannot be read or parsed exits `1`
 with `reason: manifest-read-failed` before the ledger is touched.
@@ -3227,11 +3240,12 @@ Three assurance files sit one level up, directly under the state root rather
 than inside any plan's directory, because the inbox spans the whole corpus:
 
 - `assurance-inbox.jsonl`: the append-only assurance ledger. New records are
-  written at schema v2, which adds the identity-binding kind and changes nothing
-  else, so every v1 line already on disk still means exactly what it meant when
-  it was written. Both versions are read; a line claiming a version this build
-  does not know, or a kind its own version predates, is preserved in place as
-  rejected history rather than guessed at.
+  written at schema v3, which adds the keep-distinct ruling to the v2 that added
+  the identity binding and changes nothing else, so every older line already on
+  disk still means exactly what it meant when it was written. All three versions
+  are read; a line claiming a version this build does not know, or a kind its own
+  version predates, is preserved in place as rejected history rather than guessed
+  at.
 - `assurance-inbox.lock`: the exclusive-append lock; writers never lock the
   data file itself.
 - `assurance-index.json`: a disposable cache, rebuilt whenever it is missing,
@@ -3358,10 +3372,15 @@ checks remain observable in `tail` and the live status snapshot. Verification
 check argv is captured in the `verification_check_started` payload and not
 streamed to a log file; command stdout and stderr remain captured in the
 underlying `asl verify` invocation and in the turn `result.json` under the
-`verification` key. A conditional diagnostic whose gates all pass emits
-`verification_check_skipped` with its name, kind, dependencies, and stable
-`condition-not-met` reason. `verification_finished` reports configured,
-executed, gate, diagnostic, and skipped counts.
+`verification` key. Every `verification_check_finished` payload carries a
+`role` of `gate` or `diagnostic`, so a reader grading executed checks one at a
+time knows which of them could not have gated the result; the recipe-level
+counts alone cannot say which check that was. A conditional diagnostic whose
+gates all pass emits `verification_check_skipped` with its name, kind,
+dependencies, and stable `condition-not-met` reason. `verification_finished`
+reports configured, executed, gate, diagnostic, and skipped counts, where the
+diagnostic count is configured rather than executed — subtract the skipped
+count to bound how many failures the recipe could have absorbed.
 A `"parallel": true` recipe adds that same additive key to
 `verification_started`; its `verification_check_started` /
 `verification_check_finished` records interleave by real completion order while
@@ -3961,6 +3980,25 @@ Common pause reasons:
   for a per-path failure, and the git `returncode`/`stderr` when there is one). A failure on the post-turn capture
   reverts the review session to pending so a resume re-runs it under a working
   guard.
+- `plan-artifact-tampered`: the turn changed a `session-<id>.md` or
+  `session-<id>.expand.md` belonging to a session its task packet did not
+  select. Every session artifact except the selected session's is hashed before
+  the harness launches and re-hashed after it returns; `manifest.md` and
+  `context.md` are excluded because the runner rewrites them itself, and the
+  review-handoff files the runner normalizes after the turn are re-baselined
+  rather than blamed on the turn. A turn that ends on a result branch — a
+  timeout, an interruption, an abort, a structured pause, a nonzero exit, or a
+  plan the runner could not inspect — is compared before that branch runs, and
+  the guard outranks it: those outcomes either retry or loop straight into
+  another turn, which would adopt the tampered packet as the new baseline. The
+  `plan_artifact_guard` block then names the outcome it outranked in
+  `result_disposition`. A turn that reaches the status-change guards is
+  compared behind them instead, so completing the wrong session still reports
+  `unexpected-status-change`. The pause details and the turn's `result.json`
+  carry a `plan_artifact_guard` block with `changed_artifacts`,
+  `digests_before`, `digests_after`, and `runner_written`. The selected session
+  is reverted to pending, so a resume cannot bank a completion earned against a
+  plan the turn rewrote underneath itself.
 - `interrupted`: the run was interrupted by Ctrl+C.
 
 ## Autopilot Skill (`$asl`)

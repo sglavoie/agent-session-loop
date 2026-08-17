@@ -866,6 +866,64 @@ class ParserAndStateTests(unittest.TestCase):
             with self.assertRaisesRegex(plans.PlanError, "Alias:path"):
                 plans.read_session_handoff(self._session_file(plan_dir))
 
+    def test_completed_handoff_omits_files_modified_only_when_writes_are_empty(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+            (plan_dir / "manifest.md").write_text(
+                "# Manifest\n\n## Repositories\n\n"
+                "| Alias | Path | Origin |\n"
+                "| --- | --- | --- |\n"
+                "| SVC | svc | https://example.com/svc.git |\n",
+                encoding="utf-8",
+            )
+            session_path = plan_dir / "session-1.md"
+            template = (
+                "# Session 1\n\n"
+                "**Reads repositories**: SVC\n"
+                "**Writes repositories**: {writes}\n\n"
+                "Do work.\n\n## Handoff\n\n"
+                "- **Status**: complete\n"
+                "{files}"
+                "- **Key decisions**: none\n"
+                "- **Blockers for next session**: none\n"
+                "- **Notes**:\n"
+            )
+            for files in ("", "- **Files modified**:\n"):
+                with self.subTest(files=files):
+                    session_path.write_text(
+                        template.format(writes="(none)", files=files),
+                        encoding="utf-8",
+                    )
+
+                    handoff = plans.read_session_handoff(self._session_file(plan_dir))
+
+                    self.assertEqual("complete", handoff.status)
+                    self.assertEqual((), handoff.files_modified)
+                    self.assertIsNone(
+                        plans.completed_handoff_registry_blocker(
+                            handoff,
+                            scope=plans.parse_session_scope(
+                                "**Reads repositories**: SVC\n"
+                                "**Writes repositories**: (none)\n",
+                                ("SVC",),
+                            ),
+                            registry_aliases=("SVC",),
+                        )
+                    )
+
+                    session_path.write_text(
+                        template.format(writes="SVC", files=files),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        plans.PlanError, "missing Files modified"
+                    ):
+                        plans.read_session_handoff(self._session_file(plan_dir))
+
     def test_session_scope_participates_in_readiness_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             roots = (Path(tmp) / "left", Path(tmp) / "right")
@@ -5325,6 +5383,85 @@ class ParserAndStateTests(unittest.TestCase):
         )
         # Serialized event carries no embedded verification output.
         self.assertNotIn("x" * 8192, json.dumps(record))
+
+    def test_run_finished_event_carries_observed_model_beside_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / "events.jsonl"
+            payload = self._base_state_payload(Path(tmp) / "state.json")
+            payload["events_path"] = str(event_path)
+            payload["model"] = "native CLI default"
+            payload["model_source"] = "unresolved"
+            payload["observed_model"] = "claude-opus-5"
+            payload["observed_model_source"] = "harness_reported"
+            persistence = runner._RunPersistence(write_state=False)
+            runner._finish_run(event_path, payload, persistence=persistence)
+
+            records = [
+                json.loads(line)
+                for line in event_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        finished = [r for r in records if r["name"] == "run_finished"]
+        event_payload = finished[0]["payload"]
+        self.assertEqual("native CLI default", event_payload["model"])
+        self.assertEqual("unresolved", event_payload["model_source"])
+        self.assertEqual("claude-opus-5", event_payload["observed_model"])
+        self.assertEqual("harness_reported", event_payload["observed_model_source"])
+
+    def _live_action_required(self) -> dict[str, object]:
+        return {
+            "run_id": "run-1",
+            "turn_index": 1,
+            "session": 1,
+            "reason": "runner-pause",
+            "message": "RUNNER_PAUSE: blocked - needs a decision",
+            "source": "stdout",
+            "matched": events.RUNNER_PAUSE_PREFIX,
+        }
+
+    def test_action_required_clears_when_an_unpaused_run_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / "events.jsonl"
+            payload = self._base_state_payload(Path(tmp) / "state.json")
+            payload["events_path"] = str(event_path)
+            payload["action_required"] = self._live_action_required()
+            persistence = runner._RunPersistence(write_state=False)
+
+            runner._finish_run(event_path, payload, persistence=persistence)
+
+        self.assertIsNone(payload["action_required"])
+
+    def test_action_required_survives_a_run_that_finishes_paused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / "events.jsonl"
+            payload = self._base_state_payload(Path(tmp) / "state.json")
+            payload["events_path"] = str(event_path)
+            payload["paused"] = True
+            signal = self._live_action_required()
+            payload["action_required"] = signal
+            persistence = runner._RunPersistence(write_state=False)
+
+            runner._finish_run(event_path, payload, persistence=persistence)
+
+        self.assertEqual(signal, payload["action_required"])
+
+    def test_unresolved_review_findings_survive_an_unpaused_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / "events.jsonl"
+            payload = self._base_state_payload(Path(tmp) / "state.json")
+            payload["events_path"] = str(event_path)
+            payload["review_fix_disposition"] = "exhausted"
+            payload["review_verdict"] = {"outcome": "changes-requested"}
+            persistence = runner._RunPersistence(write_state=False)
+
+            reason = runner._terminal_review_reason(payload)
+            runner._finish_run(event_path, payload, persistence=persistence)
+
+        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, reason)
+        self.assertEqual(
+            runner.REVIEW_FINDINGS_UNRESOLVED_REASON,
+            payload["action_required"]["reason"],
+        )
 
     def test_run_paused_event_and_state_bound_verification_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

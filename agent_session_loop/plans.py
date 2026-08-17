@@ -93,6 +93,7 @@ PROGRESS_HEADER = (
     "Auto-maintained by agent_session_loop. Append-only. Treat as the running\n"
     "summary of completed sessions; defer to session files for full detail.\n"
 )
+UNREADABLE_ARTIFACT_DIGEST = "unreadable"
 READINESS_PREFIX = "**Readiness**:"
 READINESS_SHA_PREFIX = "**Readiness SHA-256**:"
 READINESS_CHECKED_PREFIX = "**Readiness checked at**:"
@@ -1587,6 +1588,11 @@ def validate_completed_handoff_paths(
         return ()
     inline = handoff.files_modified[0].strip() if handoff.files_modified else ""
     if not inline:
+        if not scope.writes:
+            # A session that declares no writable repository had nothing it was
+            # allowed to change, so an omitted bullet asserts what the ``(none)``
+            # in a generated repair child asserts explicitly.
+            return ()
         raise PlanError(
             f"{handoff.session.filename} completed handoff is missing Files modified"
         )
@@ -1867,6 +1873,49 @@ def plan_content_sha256(
         digest.update(normalized.encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def session_artifact_digests(
+    plan_dir: str | Path,
+    sessions: tuple[SessionFile, ...] | None = None,
+    *,
+    exclude_session_id: str | None = None,
+) -> dict[str, str]:
+    """Digest each session artifact on its own, keyed by plan-relative name.
+
+    Mirrors the `plan_content_sha256` file set minus `context.md` and
+    `manifest.md`, which the runner itself rewrites when it syncs derived
+    status tables. Raw bytes are hashed rather than the normalized text so a
+    whitespace-only edit still registers. An unreadable file maps to
+    `UNREADABLE_ARTIFACT_DIGEST` instead of raising, so a file that vanishes
+    mid-turn compares unequal against a readable capture rather than
+    collapsing the comparison.
+    """
+    canonical_dir = canonicalize_path(plan_dir)
+    selected_sessions = (
+        discover_session_files(canonical_dir) if sessions is None else sessions
+    )
+    digests: dict[str, str] = {}
+    for session in sorted(
+        selected_sessions, key=lambda session: session.session_id.sort_key
+    ):
+        if exclude_session_id is not None and session.id == exclude_session_id:
+            continue
+        relative_names = [session.filename]
+        expansion_name = session.expansion_filename
+        if _is_file(canonical_dir / expansion_name):
+            relative_names.append(expansion_name)
+        for relative_name in relative_names:
+            digests[relative_name] = _artifact_digest(canonical_dir / relative_name)
+    return digests
+
+
+def _artifact_digest(path: Path) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return UNREADABLE_ARTIFACT_DIGEST
+    return hashlib.sha256(data).hexdigest()
 
 
 def plan_fingerprint(plan_dir: str | Path, content_hash: str) -> str:

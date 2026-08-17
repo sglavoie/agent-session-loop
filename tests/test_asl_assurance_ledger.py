@@ -24,6 +24,7 @@ OTHER_RUN_ID = "20260810T101112999999Z-4243"
 TIMESTAMP = "2026-08-10T10:11:12+00:00"
 LATER_TIMESTAMP = "2026-08-10T11:11:12+00:00"
 DIGEST = "a" * 64
+OTHER_DIGEST = "b" * 64
 
 
 _WORKER_SOURCE = f"""
@@ -203,6 +204,14 @@ class AppendTests(LedgerTestCase):
                 models.IssueMerge(
                     source_issue_id="ASI-1",
                     target_issue_id="ASI-2",
+                    recorded_at=TIMESTAMP,
+                ),
+            ),
+            (
+                ledger.KIND_ISSUE_KEPT_DISTINCT,
+                models.IssueKeptDistinct(
+                    issue_ids=("ASI-1", "ASI-2"),
+                    identity_digests=(DIGEST, OTHER_DIGEST),
                     recorded_at=TIMESTAMP,
                 ),
             ),
@@ -592,9 +601,14 @@ class IssueIdTests(LedgerTestCase):
 
 class SchemaVersionTests(LedgerTestCase):
     def _v1_line(self, kind: str, payload, issue_id: str | None = None) -> str:
+        return self._line(1, kind, payload, issue_id)
+
+    def _line(
+        self, version: int, kind: str, payload, issue_id: str | None = None
+    ) -> str:
         return json.dumps(
             {
-                "version": 1,
+                "version": version,
                 "kind": kind,
                 "recorded_at": TIMESTAMP,
                 "issue_id": issue_id,
@@ -602,12 +616,12 @@ class SchemaVersionTests(LedgerTestCase):
             }
         )
 
-    def test_new_writes_use_v2(self) -> None:
+    def test_new_writes_use_v3(self) -> None:
         ledger.append_issue_observation(_observation(), state_dir=self.state_dir)
         envelope = json.loads(self.ledger_path.read_text(encoding="utf-8"))
-        self.assertEqual(2, ledger.LEDGER_SCHEMA_VERSION)
-        self.assertEqual(2, envelope["version"])
-        self.assertEqual(2, self.read().records[0].version)
+        self.assertEqual(3, ledger.LEDGER_SCHEMA_VERSION)
+        self.assertEqual(3, envelope["version"])
+        self.assertEqual(3, self.read().records[0].version)
 
     def test_a_complete_v1_history_reads_back_unchanged(self) -> None:
         observation = _observation()
@@ -638,26 +652,27 @@ class SchemaVersionTests(LedgerTestCase):
         self.assertEqual(observation.to_dict(), view.records[0].payload.to_dict())
         self.assertEqual({"ASI-2": "ASI-1"}, view.merge_edges)
 
-    def test_a_v1_line_claiming_the_v2_kind_is_an_unknown_kind(self) -> None:
-        self.write_ledger_text(self._v1_line("issue_identity_bound", _binding()) + "\n")
-        view = self.read()
-        self.assertEqual((), view.records)
-        self.assertEqual(ledger.REJECT_UNKNOWN_KIND, view.rejected[0].reason)
-        self.assertIn("v1", view.rejected[0].detail or "")
+    def test_a_line_claiming_a_kind_its_version_predates_is_an_unknown_kind(
+        self,
+    ) -> None:
+        ruling = models.IssueKeptDistinct(
+            issue_ids=("ASI-1", "ASI-2"),
+            identity_digests=(DIGEST, OTHER_DIGEST),
+            recorded_at=TIMESTAMP,
+        )
+        for version, kind, payload in (
+            (1, "issue_identity_bound", _binding()),
+            (2, "issue_kept_distinct", ruling),
+        ):
+            with self.subTest(version=version):
+                self.write_ledger_text(self._line(version, kind, payload) + "\n")
+                view = self.read()
+                self.assertEqual((), view.records)
+                self.assertEqual(ledger.REJECT_UNKNOWN_KIND, view.rejected[0].reason)
+                self.assertIn(f"v{version}", view.rejected[0].detail or "")
 
     def test_a_version_this_build_cannot_read_is_still_rejected(self) -> None:
-        self.write_ledger_text(
-            json.dumps(
-                {
-                    "version": 3,
-                    "kind": "audit_pending",
-                    "recorded_at": TIMESTAMP,
-                    "issue_id": None,
-                    "payload": _summary().to_dict(),
-                }
-            )
-            + "\n"
-        )
+        self.write_ledger_text(self._line(4, "audit_pending", _summary()) + "\n")
         self.assertEqual(
             ledger.REJECT_UNSUPPORTED_VERSION, self.read().rejected[0].reason
         )
@@ -670,7 +685,7 @@ class SchemaVersionTests(LedgerTestCase):
         ledger.append_identity_binding(_binding(), state_dir=self.state_dir)
         data = self.ledger_path.read_bytes()
         self.assertTrue(data.startswith(original))
-        self.assertEqual([1, 2], [record.version for record in self.read().records])
+        self.assertEqual([1, 3], [record.version for record in self.read().records])
 
 
 class IdentityBindingTests(LedgerTestCase):

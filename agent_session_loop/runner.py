@@ -1931,6 +1931,7 @@ class SessionTaskPacket:
     resolution_block: tuple[str, ...] = field(default_factory=tuple)
     workspace: workspaces.ResolvedWorkspace | None = None
     session_scope: plans.SessionScope | None = None
+    session_kind: str = SESSION_KIND_IMPLEMENTATION
 
     @property
     def has_reply_context(self) -> bool:
@@ -1940,15 +1941,30 @@ class SessionTaskPacket:
     def has_resolution_context(self) -> bool:
         return bool(self.resolution_block)
 
+    @property
+    def is_review(self) -> bool:
+        return self.session_kind == SESSION_KIND_REVIEW
+
     def render(self) -> str:
         lines: list[str] = [f"{TASK_PACKET_HEADING_PREFIX} — session {self.session_id}"]
         lines.append("")
-        lines.append(
-            "You are an autonomous ASL worker. Implement exactly this one "
-            "session, then stop. The Python runner owns readiness, locking, "
-            "and session selection. The runner owns authoritative final "
-            "verification; you own focused validation during implementation."
-        )
+        if self.is_review:
+            lines.append(
+                "You are an autonomous ASL reviewer. Review the work of this "
+                "plan's prior sessions exactly as this one review session "
+                "specifies, then stop. Do not implement anything and do not "
+                "modify any file in the repository under review. The Python "
+                "runner owns readiness, locking, and session selection. The "
+                "runner owns authoritative final verification of your review "
+                "artifacts; you own focused validation while writing them."
+            )
+        else:
+            lines.append(
+                "You are an autonomous ASL worker. Implement exactly this one "
+                "session, then stop. The Python runner owns readiness, locking, "
+                "and session selection. The runner owns authoritative final "
+                "verification; you own focused validation during implementation."
+            )
         lines.append("")
 
         lines.append("## Selected session (fixed — do not reinterpret)")
@@ -1961,7 +1977,11 @@ class SessionTaskPacket:
             )
         lines.append("")
 
-        lines.append("## Read before implementing (open these paths; not embedded)")
+        lines.append(
+            "## Read before reviewing (open these paths; not embedded)"
+            if self.is_review
+            else "## Read before implementing (open these paths; not embedded)"
+        )
         lines.append(f"- Shared context: {self.context_path}")
         if self.progress_path is not None:
             lines.append(
@@ -2000,39 +2020,96 @@ class SessionTaskPacket:
             )
             lines.append("")
 
-        lines.append("## Implement")
-        lines.append(
-            "Execute the instructions above the `## Handoff` section of "
-            f"{self.session_path}. Make real changes. During implementation, "
-            "run focused checks that help you iterate. Do not rerun the full "
-            "Completion Contract solely as a final gate: after you signal "
-            "completion, the runner executes it authoritatively. If it fails, "
-            "the runner restores this session to pending and supplies the "
-            "failed-check evidence for repair."
-        )
-        lines.append("")
+        if self.is_review:
+            lines.append("## Review")
+            lines.append(
+                "Execute the instructions above the `## Handoff` section of "
+                f"{self.session_path}. Judge the work; do not repair it. "
+                "During the review, run focused read-only checks that help "
+                "you substantiate a finding. Do not rerun the full Completion "
+                "Contract solely as a final gate: after you signal "
+                "completion, the runner executes it authoritatively. If it "
+                "fails, the runner restores this session to pending and "
+                "supplies the failed-check evidence for repair."
+            )
+            lines.append("")
 
-        lines.append("## Allowed mutation (the only write that completes this session)")
-        lines.append(
-            f"- In {self.session_path}, set `- **Status**: complete` and fill "
-            "the `## Handoff` fields for this session only."
-        )
-        lines.append(
-            f"- Record new facts under `{plans.DISCOVERED_FACTS_HEADING}` and "
-            f"open uncertainties under `{plans.OPEN_QUESTIONS_HEADING}` "
-            "(flat, top-level bullets)."
-        )
-        lines.append(
-            "- Do not edit progress.md, manifest readiness metadata, or any lock file."
-        )
-        lines.append("")
+            lines.append("## Allowed mutation (the only writes this session may make)")
+            lines.append(
+                f"- Write the review verdict `{FINAL_REVIEW_FILENAME}` and the "
+                f"structured artifact `{FINAL_REVIEW_ARTIFACT_FILENAME}` into "
+                f"{self.plan_dir}, exactly as the session file specifies."
+            )
+            lines.append(
+                f"- In {self.session_path}, set `- **Status**: complete` and "
+                "fill the `## Handoff` fields for this session only."
+            )
+            lines.append(
+                f"- Record new facts under `{plans.DISCOVERED_FACTS_HEADING}` "
+                f"and open uncertainties under `{plans.OPEN_QUESTIONS_HEADING}` "
+                "(flat, top-level bullets)."
+            )
+            lines.append(
+                "- Do not edit any file in the repository under review, any "
+                "other session file, progress.md, manifest readiness "
+                "metadata, or any lock file. A finding is how you report a "
+                "defect; a fix is not yours to write."
+            )
+            lines.append("")
+        else:
+            lines.append("## Implement")
+            lines.append(
+                "Execute the instructions above the `## Handoff` section of "
+                f"{self.session_path}. Make real changes. During implementation, "
+                "run focused checks that help you iterate. Do not rerun the full "
+                "Completion Contract solely as a final gate: after you signal "
+                "completion, the runner executes it authoritatively. If it fails, "
+                "the runner restores this session to pending and supplies the "
+                "failed-check evidence for repair."
+            )
+            lines.append("")
 
-        lines.append("## Notes for future sessions")
-        lines.append(
-            "- Write guidance for a later session into that session's "
-            "`.expand.md` (or above its `## Handoff`), never inline in chat."
-        )
-        lines.append("")
+            lines.append(
+                "## Allowed mutation (the only write that completes this session)"
+            )
+            lines.append(
+                f"- In {self.session_path}, set `- **Status**: complete` and fill "
+                "the `## Handoff` fields for this session only."
+            )
+            lines.append(
+                f"- Record new facts under `{plans.DISCOVERED_FACTS_HEADING}` and "
+                f"open uncertainties under `{plans.OPEN_QUESTIONS_HEADING}` "
+                "(flat, top-level bullets)."
+            )
+            lines.append(
+                "- Do not edit progress.md, manifest readiness metadata, or any "
+                "lock file."
+            )
+            lines.append(
+                "- Do not edit any other session's `session-<id>.md` or "
+                "`session-<id>.expand.md`; the runner hashes them before the "
+                "turn and pauses the run if any of them changes."
+            )
+            lines.append("")
+
+        if self.is_review:
+            lines.append("## Notes for future sessions")
+            lines.append(
+                "- Every defect worth acting on belongs in the review verdict "
+                "as a finding with its own repair group; do not write "
+                "guidance into another session's file and do not leave it "
+                "inline in chat."
+            )
+            lines.append("")
+        else:
+            lines.append("## Notes for future sessions")
+            lines.append(
+                "- Write guidance for a later session into this session's "
+                "`## Handoff`, which the next session reads as its predecessor "
+                "handoff; never inline in chat and never in another session's "
+                "file."
+            )
+            lines.append("")
 
         lines.append("## Runner signal protocol")
         lines.append(
@@ -2073,6 +2150,7 @@ def build_task_packet(
     pending_guidance: Sequence[mailbox.MailboxMessage] = (),
     workspace: workspaces.ResolvedWorkspace | None = None,
     session_scope: plans.SessionScope | None = None,
+    session_kind: str = SESSION_KIND_IMPLEMENTATION,
 ) -> SessionTaskPacket:
     """Build the compact autonomous-worker packet for one selected session.
 
@@ -2094,6 +2172,9 @@ def build_task_packet(
     - ``resolution_action`` + ``resolution_context`` append a distinct
       answerless-resolution block. ``resolution_note`` preserves omitted and
       empty notes without ever sharing the operator-reply representation.
+    - ``session_kind`` selects the worker role: a ``review`` session renders
+      reviewer duties and read-only mutation rules instead of the
+      implementation-worker text.
 
     The returned :class:`SessionTaskPacket` carries structured data and a
     :meth:`~SessionTaskPacket.render` method producing the prompt string.
@@ -2102,6 +2183,8 @@ def build_task_packet(
     # unknown harness fails fast the same way the other prompt builders do.
     harnesses.get_adapter(harness)
 
+    if session_kind not in SESSION_KINDS:
+        raise ValueError(f"unknown session kind: {session_kind!r}")
     canonical_dir = plans.canonicalize_path(plan_dir)
     selected = plans.parse_session_id(session_id)
     if (workspace is None) != (session_scope is None):
@@ -2193,6 +2276,7 @@ def build_task_packet(
         resolution_block=resolution_block,
         workspace=workspace,
         session_scope=session_scope,
+        session_kind=session_kind,
     )
 
 
@@ -3151,6 +3235,34 @@ def _live_action_signal(
     return None
 
 
+#: The reasons :func:`_live_action_signal` can produce. Each names an
+#: intervention the agent asked for mid-turn, so each is only current while the
+#: run is still stopped on it. A reason the runner itself declared — review
+#: findings above all — is not a live signal and is never cleared here.
+_LIVE_ACTION_REQUIRED_REASONS = frozenset(
+    {"runner-pause", "runner-status-paused", "approval-required"}
+)
+
+
+def _clear_live_action_required(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Drop a live action signal the run has already moved past.
+
+    ``action_required`` on the run root is the current unresolved intervention,
+    not the run's history: the turn result keeps the historical record. Starting
+    another turn or finishing unpaused both prove the signal was answered, so
+    leaving it set would make a terminal, unpaused run report a pending ask.
+    Returns the cleared record, or ``None`` when nothing was cleared.
+    """
+
+    current = payload.get("action_required")
+    if not isinstance(current, Mapping):
+        return None
+    if current.get("reason") not in _LIVE_ACTION_REQUIRED_REASONS:
+        return None
+    payload["action_required"] = None
+    return dict(current)
+
+
 def _all_sessions_complete(snapshot: plans.PlanSnapshot) -> bool:
     return all(session.status == "complete" for session in snapshot.sessions)
 
@@ -3709,13 +3821,21 @@ def _append_text(path: Path, text: str) -> None:
 
 
 def _prepare_stream_logs(paths: dict[str, Path]) -> harnesses.StreamCallback:
-    _write_text(paths["stdout"], "")
-    _write_text(paths["stderr"], "")
-
     def stream_callback(stream_name: harnesses.StreamName, text: str) -> None:
         _append_text(paths[stream_name], text)
 
     return stream_callback
+
+
+def _create_turn_logs(paths: dict[str, Path]) -> None:
+    """Materialize the turn's empty logs at the launch boundary.
+
+    Created any earlier, a pause from one of the pre-launch guards leaves
+    behind a turn directory holding nothing but two empty logs, which reads
+    downstream as a turn that ran and wrote no `result.json`.
+    """
+    _write_text(paths["stdout"], "")
+    _write_text(paths["stderr"], "")
 
 
 def _live_stream_callback(
@@ -4558,6 +4678,12 @@ def _run_finished_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "run_started_at": payload.get("run_started_at"),
         "run_finished_at": payload.get("run_finished_at"),
         "duration_seconds": payload.get("duration_seconds"),
+        # `run_started` can only carry the configured model, since no harness
+        # has reported one yet. The terminal record is where both fit.
+        "model": payload.get("model"),
+        "model_source": payload.get("model_source"),
+        "observed_model": payload.get("observed_model"),
+        "observed_model_source": payload.get("observed_model_source"),
         "counts": counts,
         "completed_sessions": payload.get("completed_sessions"),
         "completed_session_ids": payload.get("completed_session_ids"),
@@ -7089,6 +7215,9 @@ class _LiveTurn:
 
     def start(self) -> None:
         with self._lock, self._persistence.lock:
+            # This turn is the resolution of whatever the last one asked for:
+            # the run would not have reached another turn otherwise.
+            _clear_live_action_required(self._payload)
             self._payload["active_turn"] = dict(self._active_turn)
             self._persistence.write_state(self._payload)
         self._progress.turn_started(self._active_turn)
@@ -7700,6 +7829,7 @@ class _LiveVerification:
         check_index: int,
         name: str,
         kind: str,
+        role: str,
         status: str,
         duration_seconds: float,
         failure_reason: str | None,
@@ -7729,6 +7859,7 @@ class _LiveVerification:
                 "check_count": self._check_count,
                 "name": name,
                 "kind": kind,
+                "role": role,
                 "repo": repo,
                 "status": status,
                 "duration_seconds": duration_seconds,
@@ -8386,6 +8517,8 @@ def _finish_run(
         )
         payload["active_turn"] = None
         payload["active_verification"] = None
+        if not payload.get("paused"):
+            _clear_live_action_required(payload)
         _finalize_readiness_lifecycle(payload)
         persistence.append_event(
             event_path,
@@ -9321,6 +9454,86 @@ def _resume_gate_passed(report: preflight.PreflightReport) -> bool:
     if readiness is None:
         return False
     return readiness.state in preflight.RESUME_READINESS_STATES
+
+
+def _reopened_plan_gate_payload(
+    snapshot: plans.PlanSnapshot,
+    *,
+    max_pending_sessions: int | None,
+    repair_session_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Re-evaluate the plan-size half of the readiness gate after a reopen."""
+    findings = preflight.check_env_turn_budget(
+        snapshot, max_pending_sessions=max_pending_sessions
+    )
+    blocking = [finding for finding in findings if finding.severity != "green"]
+    return {
+        "trigger": events.REVIEW_REPAIR_REOPENED_EVENT,
+        "ok": not blocking,
+        "total_sessions": len(snapshot.sessions),
+        "pending_sessions": sum(
+            1 for status in snapshot.sessions if status.status == "pending"
+        ),
+        "repair_session_ids": list(repair_session_ids),
+        "findings": [
+            {
+                "severity": finding.severity,
+                "category": finding.category,
+                "message": finding.message,
+                "detail": finding.detail,
+            }
+            for finding in findings
+        ],
+    }
+
+
+def _regate_reopened_plan(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    args: argparse.Namespace,
+    snapshot: plans.PlanSnapshot,
+    repair_session_ids: Sequence[str],
+    details: Mapping[str, Any],
+) -> bool:
+    """Re-gate a plan that review repairs just grew; True when it may proceed.
+
+    The startup readiness gate runs once, against the plan as authored. Review
+    repairs reopen sessions while the run is live, so a run authorized by "all
+    sessions complete; no turns required" can go on to execute a plan several
+    times the size that gate saw. Turn budget and session inventory are the two
+    findings plan growth invalidates, so they are recomputed here and honour
+    the same ``--allow-not-loop-ready`` escape hatch as the startup gate.
+    """
+    gate = _reopened_plan_gate_payload(
+        snapshot,
+        max_pending_sessions=getattr(args, "max_pending_sessions", None),
+        repair_session_ids=repair_session_ids,
+    )
+    with persistence.lock:
+        payload["readiness_gate_reopened"] = gate
+        persistence.write_state(payload)
+    if gate["ok"] or _allow_not_loop_ready(args):
+        return True
+    blocking = next(
+        finding for finding in gate["findings"] if finding["severity"] != "green"
+    )
+    with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(snapshot)
+    _pause_run(
+        event_path,
+        payload,
+        reason="not-loop-ready",
+        message=(
+            f"review repairs reopened {len(gate['repair_session_ids'])} session(s); "
+            f"the reopened plan no longer passes the readiness gate: "
+            f"{blocking['message']}"
+        ),
+        details={**details, "readiness_gate_reopened": gate},
+        persistence=persistence,
+    )
+    return False
 
 
 def _review_only_complete_start(
@@ -10430,6 +10643,11 @@ def _review_reopen_record(
             if resume.current_fingerprints is not None
             else None
         ),
+        "current_repeat_keys": (
+            list(resume.current_repeat_keys)
+            if resume.current_repeat_keys is not None
+            else None
+        ),
         "source_review_output_sha256": resume.source_review_output_sha256,
         "source_review_artifact_sha256": (resume.source_review_artifact_sha256),
         "current_review_output_sha256": resume.current_review_output_sha256,
@@ -10623,9 +10841,19 @@ def _advance_review_cycle(
     verdict = verdict if isinstance(verdict, dict) else {}
     outcome = verdict.get("outcome")
     fingerprints = review.finding_fingerprints(verdict.get("findings"))
+    repeat_keys = review.finding_repeat_keys(verdict.get("findings"))
     cycle_state = _review_cycle_state(event_path, snapshot)
     previous = cycle_state["previous_fingerprints"]
+    previous_keys = cycle_state["previous_repeat_keys"]
     current = () if fingerprints is None else fingerprints
+    current_keys = () if repeat_keys is None else repeat_keys
+    repeated_positions = review_continuation.repeated_finding_positions(
+        fingerprints=current,
+        repeat_keys=current_keys,
+        previous_fingerprints=previous,
+        previous_repeat_keys=previous_keys,
+    )
+    repeated = [current[position] for position in repeated_positions]
     cycle_record: dict[str, Any] = {
         "run_id": payload.get("run_id"),
         "cycle": cycle_state["cycle"],
@@ -10633,9 +10861,27 @@ def _advance_review_cycle(
         "outcome": outcome,
         "total_findings": verdict.get("total_findings"),
         "fingerprints": list(current),
-        "introduced_findings": [fp for fp in current if fp not in previous],
-        "closed_findings": [fp for fp in previous if fp not in current],
-        "repeated_findings": [fp for fp in current if fp in previous],
+        "repeat_keys": list(current_keys),
+        "introduced_findings": [
+            fingerprint
+            for position, fingerprint in enumerate(current)
+            if position not in set(repeated_positions)
+        ],
+        "closed_findings": [
+            fingerprint
+            for position, fingerprint in enumerate(previous)
+            if fingerprint not in current
+            and not (
+                position < len(previous_keys)
+                and previous_keys[position] in current_keys
+            )
+        ],
+        "repeated_findings": repeated,
+        "repeated_finding_keys": [
+            current_keys[position]
+            for position in repeated_positions
+            if position < len(current_keys)
+        ],
         "repair_session_ids": [],
         "max_repair_group_attempts": _max_repair_group_attempts(args),
         "max_review_fix_cycles": max_review_fix_cycles,
@@ -10803,9 +11049,16 @@ def _advance_review_cycle(
             payload,
             reason="not-loop-ready",
             message=(
-                "repair sessions were materialized after "
-                f"{session_label} but the plan could not be marked "
-                "loop-ready"
+                (
+                    "repair sessions were materialized after "
+                    f"{session_label} but the plan could not be marked "
+                    "loop-ready"
+                )
+                if cycle_record["repair_session_ids"]
+                else (
+                    "review repair children were refused before authoring "
+                    f"after {session_label}: {repair_result.error}"
+                )
             ),
             details={
                 **session_details,
@@ -10842,6 +11095,16 @@ def _advance_review_cycle(
             persistence=persistence,
         )
         return "paused", materialized
+    if not _regate_reopened_plan(
+        event_path=event_path,
+        payload=payload,
+        persistence=persistence,
+        args=args,
+        snapshot=refreshed,
+        repair_session_ids=cycle_record["repair_session_ids"],
+        details={**session_details, "cycle": cycle_record["cycle"]},
+    ):
+        return "paused", refreshed
     running_success, running_error = _write_readiness_state(
         refreshed.plan_dir, "running"
     )
@@ -11224,6 +11487,149 @@ def _enforce_review_mutation_guard(
             **session_details,
             **evidence,
             "review_mutation_guard": guard_record,
+        },
+        persistence=persistence,
+    )
+    return True
+
+
+def _terminating_result_disposition(
+    result: harnesses.HarnessResult,
+    after: plans.PlanSnapshot | None,
+    turn_payload: Mapping[str, Any],
+) -> str | None:
+    """Name the result branch that ends this turn before the status guards.
+
+    Mirrors the dispatch order of those branches. ``None`` means the turn
+    reaches the status guards, which own the sharper diagnosis for a turn that
+    moved the wrong session.
+    """
+    if result.interrupted:
+        return "interrupted"
+    if result.timed_out:
+        return "timeout"
+    if result.aborted:
+        return "aborted"
+    if after is None:
+        return "malformed-plan"
+    if turn_payload.get("runner_pause") is not None:
+        return "runner-pause"
+    if result.returncode != 0:
+        return "nonzero-exit"
+    return None
+
+
+def _enforce_plan_artifact_guard(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    before: plans.PlanSnapshot,
+    after: plans.PlanSnapshot | None,
+    digests_before: Mapping[str, str],
+    runner_written: tuple[str, ...],
+    session_id: str,
+    session_label: str,
+    session_details: dict[str, Any],
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+    plan_cache: plans.PlanSnapshotCache,
+    result_disposition: str | None = None,
+) -> bool:
+    """Refuse a turn that changed a session artifact it did not select.
+
+    A task packet fixes exactly one writable session file, so every other
+    `session-<id>.md` and `session-<id>.expand.md` must survive the turn
+    byte-for-byte. ``result_disposition`` names the result branch that would
+    otherwise have ended the turn: those branches run this guard first, because
+    a retryable pause or a mid-turn ``continue`` would relaunch against the
+    tampered packet and adopt it as the new baseline. Returns ``True`` when the
+    run must pause (the caller must ``break``).
+    """
+    digests_after = plans.session_artifact_digests(
+        before.plan_dir, exclude_session_id=session_id
+    )
+    baseline = dict(digests_before)
+    for relative_name in runner_written:
+        # The runner's own bounded review-handoff normalization runs after the
+        # harness, so re-baseline what it wrote rather than blame the worker.
+        if relative_name in digests_after:
+            baseline[relative_name] = digests_after[relative_name]
+        else:
+            baseline.pop(relative_name, None)
+    changed_artifacts = sorted(
+        name
+        for name in set(baseline) | set(digests_after)
+        if baseline.get(name) != digests_after.get(name)
+    )
+    disposition = (
+        {} if result_disposition is None else {"result_disposition": result_disposition}
+    )
+    if not changed_artifacts:
+        with persistence.lock:
+            turn_payload["plan_artifact_guard"] = {
+                "passed": True,
+                "artifact_count": len(digests_after),
+                "runner_written": list(runner_written),
+                **disposition,
+            }
+            _write_json_file(paths["result"], turn_payload)
+        return False
+
+    reason = events.PAUSE_REASON_PLAN_ARTIFACT_TAMPERED
+    evidence = {
+        "changed_artifacts": changed_artifacts,
+        "digests_before": baseline,
+        "digests_after": digests_after,
+        "runner_written": list(runner_written),
+        **disposition,
+    }
+    # Leaving the session complete would make the tampered packet permanent
+    # across a resume, so a failed guard always puts it back to pending.
+    revert_target = after if after is not None else before
+    reverted = _revert_session_status_to_pending(
+        revert_target,
+        session_id,
+        failure_note=(
+            "plan artifact guard failed: session artifacts outside the "
+            "selected session changed during the turn"
+        ),
+    )
+    snapshot_after = _reinspect_after_revert(
+        before.plan_dir, revert_target, reverted, plan_cache
+    )
+    guard_record = {
+        "passed": False,
+        "reason": reason,
+        "reverted_to_pending": reverted is not None,
+        **evidence,
+    }
+    with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(snapshot_after)
+        turn_payload["plan_artifact_guard"] = guard_record
+        _write_json_file(paths["result"], turn_payload)
+    _record_turn_rejected(
+        event_path=event_path,
+        payload=payload,
+        persistence=persistence,
+        turn_payload=turn_payload,
+        session_id=session_id,
+        guard="plan-artifact-guard",
+        reason=reason,
+        reopened=reverted is not None,
+    )
+    _pause_run(
+        event_path,
+        payload,
+        reason=reason,
+        message=(
+            f"{session_label} changed session artifacts it did not select: "
+            + ", ".join(changed_artifacts)
+        ),
+        details={
+            **session_details,
+            **evidence,
+            "plan_artifact_guard": guard_record,
         },
         persistence=persistence,
     )
@@ -12236,6 +12642,7 @@ def _enforce_session_verification(
             check_index=event.check_index,
             name=event.name,
             kind=event.kind,
+            role=event.role,
             status=event.result.status,
             duration_seconds=event.result.duration_seconds,
             failure_reason=event.result.failure_reason,
@@ -12733,6 +13140,154 @@ def _correct_malformed_handoff(
     return corrected, evidence
 
 
+def _uninspectable_handoff_note(plan_error: str) -> str:
+    return (
+        "the plan could not be inspected with this completed handoff in place: "
+        f"{plan_error}. The status was reset to pending so the handoff can be "
+        "rewritten; the session's work is already done, so repair the reported "
+        "defect and change nothing else."
+    )
+
+
+def _reopen_uninspectable_handoff(
+    *,
+    plan_cache: plans.PlanSnapshotCache,
+    before: plans.PlanSnapshot,
+    session_id: str,
+    plan_error: str | None,
+    correction_exhausted: bool,
+) -> tuple[plans.PlanSnapshot | None, dict[str, Any] | None]:
+    """Return a completed handoff the plan cannot be read with to pending.
+
+    The bounded correction turn covers the ``Files modified`` shapes a worker
+    can be told how to fix. Everything else used to pause on a plan still
+    claiming the session is complete, which leaves nothing a relaunch could
+    pick up. Resetting the pre-turn session identity to pending and recording
+    the parse failure as a repair note leaves a plan that parses again and a
+    session a later turn can rewrite, so the pause reports whether the defect
+    is repairable rather than only that the plan would not parse.
+    """
+    session_path = _session_path_in_snapshot(before, session_id)
+    if session_path is None or plan_error is None:
+        return None, None
+    if session_path.name not in plan_error:
+        # The plan is unreadable for a reason this session's handoff does not
+        # own, so reopening it repairs nothing.
+        return None, None
+    session_status = next(
+        (item for item in before.sessions if item.id == session_id),
+        None,
+    )
+    if session_status is None:
+        return None, None
+    try:
+        handoff = plans.read_session_handoff(
+            session_status.session, repository_registry=None
+        )
+    except plans.PlanError:
+        return None, None
+    if handoff.status != "complete":
+        return None, None
+    evidence: dict[str, Any] = {
+        **_session_identity_payload(session_id),
+        "session_path": str(session_path),
+        "plan_error": plan_error,
+        "reopened": False,
+        "repairable": False,
+    }
+    reverted = _revert_session_status_to_pending(
+        before,
+        session_id,
+        failure_note=_uninspectable_handoff_note(plan_error),
+    )
+    if reverted is None:
+        return None, evidence
+    evidence["reopened"] = True
+    try:
+        reinspected = plan_cache.get_fresh(before.plan_dir)
+    except plans.PlanError as error:
+        evidence["reinspect_error"] = str(error)
+        return None, evidence
+    # A defect the bounded correction already failed to fix once is reopened
+    # for the operator's benefit, not as a promise that a rerun would converge.
+    evidence["repairable"] = not correction_exhausted
+    return reinspected, evidence
+
+
+def _paused_handoff_status_note(pause_reason: str) -> str:
+    return (
+        f"the runner recorded this turn's structured pause ({pause_reason}) and "
+        "reset the handoff status to pending, because a session that stopped "
+        "without finishing is pending; there is no paused status value. Leave "
+        "the status pending and answer the pause instead."
+    )
+
+
+def _repair_paused_handoff_status(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    plan_cache: plans.PlanSnapshotCache,
+    after: plans.PlanSnapshot,
+    session_id: str,
+    turn_index: int,
+    runner_pause: object,
+) -> tuple[plans.PlanSnapshot, dict[str, Any] | None]:
+    """Repair the selected session's handoff when its turn paused on purpose.
+
+    A worker that emits a structured ``RUNNER_PAUSE`` and also writes a status
+    the plan vocabulary has no value for (``paused``) is judged by the generic
+    invalid-status branch first, which terminates the run as ``unknown-status``
+    and discards the reason the worker gave. The status line is the only thing
+    wrong, so it is returned to pending here and the structured pause keeps the
+    run's cause. ``unknown-status`` stays the fallback: a pause message naming
+    no known reason, and any invalid status outside the selected session, are
+    both left to it.
+    """
+    if runner_pause is None:
+        return after, None
+    pause_reason = _runner_pause_reason(str(runner_pause))
+    if pause_reason == "runner-pause":
+        return after, None
+    invalid = _invalid_status_pause(after)
+    if invalid is None:
+        return after, None
+    sessions = invalid[2].get("sessions") or []
+    if len(sessions) != 1 or sessions[0].get("id") != session_id:
+        return after, None
+    from_status = sessions[0].get("raw_value")
+    reverted = _revert_session_status_to_pending(
+        after,
+        session_id,
+        failure_note=_paused_handoff_status_note(pause_reason),
+    )
+    if reverted is None:
+        return after, None
+    repaired = _reinspect_after_revert(after.plan_dir, after, reverted, plan_cache)
+    evidence: dict[str, Any] = {
+        **_session_identity_payload(session_id),
+        "session_path": str(reverted),
+        "from_status": from_status,
+        "to_status": "pending",
+        "pause_reason": pause_reason,
+    }
+    persistence.append_event(
+        event_path,
+        events.SESSION_REOPENED_EVENT,
+        {
+            "run_id": payload.get("run_id"),
+            "turn_index": turn_index,
+            **_session_identity_payload(session_id),
+            "from_status": from_status,
+            "to_status": "pending",
+            "guard": "plan-status-validity",
+            "reason": pause_reason,
+        },
+    )
+    return repaired, evidence
+
+
 def _append_handoff_note(
     lines: list[str],
     *,
@@ -13002,6 +13557,11 @@ def _dry_run_payload(
             )
         packet_kwargs = {
             "session_id": next_pending.id,
+            "session_kind": (
+                SESSION_KIND_REVIEW
+                if is_review_session
+                else SESSION_KIND_IMPLEMENTATION
+            ),
             "predecessor_id": _predecessor_session_id(snapshot, next_pending.id),
             "has_expansion": _session_has_expansion(snapshot.plan_dir, next_pending.id),
             "has_progress": (snapshot.plan_dir / plans.PROGRESS_FILE_NAME).is_file(),
@@ -13811,7 +14371,11 @@ def _run_locked(
         wakeup = threading.Event()
 
     completed_count = 0
-    previous_turn_finished_at: datetime | None = None
+    # Stamped when the runner stops working on a turn, not when the harness
+    # exits: verification and finalization are runner-owned work, so counting
+    # them as idle time would report the previous turn's own cost as a gap.
+    runner_work_finished_at: datetime | None = None
+    all_complete_work_ran = False
     commit_at_end_attempted = False
     review_appended = False
     last_session_details: dict[str, Any] = {}
@@ -13848,9 +14412,19 @@ def _run_locked(
     pending_exception_guard: dict[str, Any] | None = None
     try:
         while True:
+            if all_complete_work_ran:
+                # Everything the all-complete branch does — the final commit,
+                # repair materialization, re-gating, readiness writes, review
+                # creation — is runner-owned work that can continue into
+                # another turn. Refreshing the baseline here rather than at
+                # each of the branch's exits covers every path out of it,
+                # including ones added later.
+                runner_work_finished_at = _utc_now()
+                all_complete_work_ran = False
             pending_session = snapshot.next_pending
 
             if pending_session is None:
+                all_complete_work_ran = True
                 if not _all_sessions_complete(snapshot):
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(snapshot)
@@ -14060,6 +14634,37 @@ def _run_locked(
                             record=reopen_record,
                         )
 
+                        if (
+                            not repair_session_ids
+                            and repair_result.reason
+                            == review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY
+                        ):
+                            # The pre-authoring footprint gate refused: nothing
+                            # was written, so there is no reopened plan to
+                            # proceed into even with --allow-not-loop-ready.
+                            with persistence.lock:
+                                payload["final_snapshot"] = _snapshot_payload(snapshot)
+                            _pause_run(
+                                event_path,
+                                payload,
+                                reason="not-loop-ready",
+                                message=(
+                                    "review repair children were refused before "
+                                    "authoring for session "
+                                    f"{repair_result.review_session_id}: "
+                                    f"{repair_result.error}"
+                                ),
+                                details={
+                                    "review_resume": review_resume.to_payload(),
+                                    "blockers": list(repair_result.blockers),
+                                    "blocker": list(
+                                        repair_result.non_bypassable_blockers
+                                    ),
+                                },
+                                persistence=persistence,
+                            )
+                            break
+
                         if not repair_result.ok or not repair_session_ids:
                             reopen_error = (
                                 repair_result.error
@@ -14139,6 +14744,17 @@ def _run_locked(
                                 },
                                 persistence=persistence,
                             )
+                            break
+
+                        if not _regate_reopened_plan(
+                            event_path=event_path,
+                            payload=payload,
+                            persistence=persistence,
+                            args=args,
+                            snapshot=snapshot,
+                            repair_session_ids=repair_session_ids,
+                            details={"review_resume": review_resume.to_payload()},
+                        ):
                             break
 
                         running_success, running_error = _write_readiness_state(
@@ -14368,6 +14984,11 @@ def _run_locked(
                 break
 
             is_review_session = is_generated_review_session_file(pending_session.path)
+            session_kind = (
+                SESSION_KIND_REVIEW
+                if is_review_session
+                else SESSION_KIND_IMPLEMENTATION
+            )
             prepared_review_workspace_snapshot: (
                 repository_evidence.WorkspaceSnapshot | None
             ) = None
@@ -14647,6 +15268,7 @@ def _run_locked(
                         turn_harness,
                         before.plan_dir,
                         session_id=session_id,
+                        session_kind=session_kind,
                         predecessor_id=predecessor_id,
                         has_expansion=has_expansion,
                         has_progress=has_progress,
@@ -14697,6 +15319,7 @@ def _run_locked(
                         turn_harness,
                         before.plan_dir,
                         session_id=session_id,
+                        session_kind=session_kind,
                         predecessor_id=predecessor_id,
                         has_expansion=has_expansion,
                         has_progress=has_progress,
@@ -14733,6 +15356,7 @@ def _run_locked(
                         turn_harness,
                         before.plan_dir,
                         session_id=session_id,
+                        session_kind=session_kind,
                         predecessor_id=predecessor_id,
                         has_expansion=has_expansion,
                         has_progress=has_progress,
@@ -14783,13 +15407,8 @@ def _run_locked(
             turn_started_at_text = _isoformat(turn_started_at)
             idle_seconds_since_previous_turn = (
                 0.0
-                if previous_turn_finished_at is None
-                else _duration_seconds(previous_turn_finished_at, turn_started_at)
-            )
-            session_kind = (
-                SESSION_KIND_REVIEW
-                if is_review_session
-                else SESSION_KIND_IMPLEMENTATION
+                if runner_work_finished_at is None
+                else _duration_seconds(runner_work_finished_at, turn_started_at)
             )
             total_sessions = sum(_status_counts(before).values())
             active_turn = {
@@ -15146,6 +15765,9 @@ def _run_locked(
                         persistence=persistence,
                     )
                     break
+            plan_artifacts_before = plans.session_artifact_digests(
+                before.plan_dir, exclude_session_id=session_id
+            )
             if use_reply_prompt:
                 assert reply_source_meta is not None and turn_reply is not None
                 # Consumption is explicit rather than positional: a mailbox
@@ -15198,6 +15820,7 @@ def _run_locked(
                         "source": resolution_source_meta,
                     },
                 )
+            _create_turn_logs(paths)
             persistence.append_event(event_path, "turn_started", active_turn)
             live_turn.start()
             _notify_agent_mux_loop_turn_started(payload, active_turn, persistence)
@@ -15256,13 +15879,16 @@ def _run_locked(
                 )
             with run_control_lock:
                 run_control_context = None
-            previous_turn_finished_at = turn_finished_at
+            plan_artifacts_written_by_runner: tuple[str, ...] = ()
             if is_review_session:
                 normalized_after_review = (
                     plans.normalize_generated_review_handoff_artifacts(before.plan_dir)
                 )
                 if normalized_after_review:
                     normalized_review_handoffs.extend(normalized_after_review)
+                    plan_artifacts_written_by_runner = tuple(
+                        path.name for path in normalized_after_review
+                    )
                     with persistence.lock:
                         payload["normalized_review_handoffs"] = [
                             str(path) for path in normalized_review_handoffs
@@ -15424,6 +16050,34 @@ def _run_locked(
             ):
                 break
 
+            # Every branch below can end the turn — by pausing, by recording a
+            # clean stop, or by looping straight into another turn — and a
+            # relaunch that starts from a tampered packet adopts it as the new
+            # baseline. So the digests are compared here, before any of them
+            # runs. A turn that reaches the status guards instead is left to
+            # the call site below them, which keeps the sharper wrong-session
+            # diagnosis for a tamper that moved a status.
+            terminating_disposition = _terminating_result_disposition(
+                result, after, turn_payload
+            )
+            if terminating_disposition is not None and _enforce_plan_artifact_guard(
+                event_path=event_path,
+                payload=payload,
+                persistence=persistence,
+                before=before,
+                after=after,
+                digests_before=plan_artifacts_before,
+                runner_written=plan_artifacts_written_by_runner,
+                session_id=session_id,
+                session_label=session_label,
+                session_details=session_details,
+                turn_payload=turn_payload,
+                paths=paths,
+                plan_cache=plan_cache,
+                result_disposition=terminating_disposition,
+            ):
+                break
+
             if result.interrupted:
                 with persistence.lock:
                     payload["final_snapshot"] = (
@@ -15491,6 +16145,7 @@ def _run_locked(
                 )
                 if corrected is not None:
                     snapshot = corrected
+                    runner_work_finished_at = _utc_now()
                     continue
                 malformed_details: dict[str, Any] = {
                     "error": plan_error,
@@ -15498,8 +16153,22 @@ def _run_locked(
                 }
                 if correction_evidence is not None:
                     malformed_details["handoff_correction"] = correction_evidence
+                reopened_snapshot, reopen_evidence = _reopen_uninspectable_handoff(
+                    plan_cache=plan_cache,
+                    before=before,
+                    session_id=session_id,
+                    plan_error=plan_error,
+                    correction_exhausted=bool(
+                        correction_evidence is not None
+                        and correction_evidence.get("exhausted")
+                    ),
+                )
+                if reopen_evidence is not None:
+                    malformed_details["handoff_reopen"] = reopen_evidence
                 with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(before)
+                    payload["final_snapshot"] = _snapshot_payload(
+                        before if reopened_snapshot is None else reopened_snapshot
+                    )
                 _record_turn_rejected(
                     event_path=event_path,
                     payload=payload,
@@ -15508,6 +16177,9 @@ def _run_locked(
                     session_id=session_id,
                     guard="plan-inspection",
                     reason="malformed-plan",
+                    reopened=bool(
+                        reopen_evidence is not None and reopen_evidence["reopened"]
+                    ),
                     detail={"error": plan_error},
                 )
                 _pause_run(
@@ -15520,6 +16192,16 @@ def _run_locked(
                 )
                 break
 
+            after, paused_status_repair = _repair_paused_handoff_status(
+                event_path=event_path,
+                payload=payload,
+                persistence=persistence,
+                plan_cache=plan_cache,
+                after=after,
+                session_id=session_id,
+                turn_index=turn_index,
+                runner_pause=turn_payload.get("runner_pause"),
+            )
             invalid_pause = _invalid_status_pause(after)
             if invalid_pause is not None:
                 reason, message, details = invalid_pause
@@ -15579,6 +16261,8 @@ def _run_locked(
                     **session_details,
                     "source": turn_payload.get("runner_pause_source"),
                 }
+                if paused_status_repair is not None:
+                    pause_details["handoff_status_repair"] = paused_status_repair
                 worker_pause_resolution = (
                     _worker_pause_resolution_for_turn(
                         plan_dir=after.plan_dir,
@@ -15643,6 +16327,10 @@ def _run_locked(
                         prepared_wait = None
 
                     if prepared_wait is not None:
+                        # The wait that follows is genuine idle time: the
+                        # runner has no work left for this turn until a human
+                        # answers, so the clock starts before the wait.
+                        runner_work_finished_at = _utc_now()
                         _set_waiting_for_reply(
                             event_path,
                             payload,
@@ -15875,6 +16563,7 @@ def _run_locked(
                         )
                         persistence.write_state(payload)
                     snapshot = after
+                    runner_work_finished_at = _utc_now()
                     continue
                 if classification.reason == events.PAUSE_REASON_NONZERO_EXIT:
                     pause_message = (
@@ -16011,6 +16700,28 @@ def _run_locked(
                 )
                 break
 
+            # The turn survived every result branch, so nothing terminated it
+            # early and the comparison above was deferred to here. Behind the
+            # status guards, a turn that completed the wrong session keeps
+            # their sharper diagnosis; what is left is the tampering they
+            # cannot see, an edit that moves no status at all.
+            if _enforce_plan_artifact_guard(
+                event_path=event_path,
+                payload=payload,
+                persistence=persistence,
+                before=before,
+                after=after,
+                digests_before=plan_artifacts_before,
+                runner_written=plan_artifacts_written_by_runner,
+                session_id=session_id,
+                session_label=session_label,
+                session_details=session_details,
+                turn_payload=turn_payload,
+                paths=paths,
+                plan_cache=plan_cache,
+            ):
+                break
+
             if _enforce_session_verification(
                 event_path=event_path,
                 payload=payload,
@@ -16079,6 +16790,7 @@ def _run_locked(
                 if verdict_action == "retry":
                     assert verdict_snapshot is not None
                     snapshot = verdict_snapshot
+                    runner_work_finished_at = _utc_now()
                     continue
 
             completed_at = _utc_iso_now()
@@ -16320,6 +17032,7 @@ def _run_locked(
                 # so operator stop requests are honored between cycles.
                 review_appended = False
 
+            runner_work_finished_at = _utc_now()
             _drain_external_control_queue(
                 plan_dir=snapshot.plan_dir,
                 state_dir_arg=args.state_dir,
@@ -17432,6 +18145,11 @@ def doctor_from_args(args: argparse.Namespace) -> int:
             args.harness,
             snapshot.plan_dir,
             session_id=snapshot.next_pending.id,
+            session_kind=(
+                SESSION_KIND_REVIEW
+                if is_generated_review_session_file(snapshot.next_pending.path)
+                else SESSION_KIND_IMPLEMENTATION
+            ),
             predecessor_id=_predecessor_session_id(snapshot, snapshot.next_pending.id),
             has_expansion=_session_has_expansion(
                 snapshot.plan_dir, snapshot.next_pending.id
