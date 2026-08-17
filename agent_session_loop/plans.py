@@ -2126,7 +2126,14 @@ def _normalize_for_content_hash(filename: str, text: str) -> str:
     if SESSION_FILE_RE.fullmatch(filename):
         return _strip_markdown_sections(text, LEGACY_PARALLEL_SESSION_SECTIONS)
     if filename == "manifest.md":
-        return _strip_markdown_sections(text, LEGACY_PARALLEL_MANIFEST_SECTIONS)
+        # Readiness lines are runner bookkeeping rewritten with a fresh
+        # `checked_at` on every turn; hashing them lets the runner move plan
+        # identity by observing it. Status cells are *not* stripped here, unlike
+        # `_normalize_for_readiness`: a session completing must still move the
+        # content hash.
+        return _strip_markdown_sections(
+            _strip_readiness_lines(text), LEGACY_PARALLEL_MANIFEST_SECTIONS
+        )
     return text
 
 

@@ -2035,6 +2035,56 @@ class ParserAndStateTests(unittest.TestCase):
             session_path.write_text(with_parallel_session, encoding="utf-8")
             self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
 
+    def test_plan_content_sha256_ignores_readiness_bookkeeping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            baseline = plans.plan_content_sha256(plan_dir)
+
+            for state, checked_at in (
+                ("loop-ready", "2026-06-19T00:00:00Z"),
+                ("running", "2026-06-19T00:00:01Z"),
+                ("complete", "2026-06-19T00:00:02Z"),
+            ):
+                plans.write_readiness_metadata(
+                    plan_dir,
+                    plans.ReadinessMetadata(
+                        state=state,
+                        readiness_sha256=plans.stable_readiness_sha256(plan_dir),
+                        checked_at=checked_at,
+                    ),
+                )
+                self.assertEqual(baseline, plans.plan_content_sha256(plan_dir))
+
+    def test_plan_content_sha256_still_moves_on_a_manifest_status_change(self) -> None:
+        manifest = "\n".join(
+            [
+                "# Manifest",
+                "",
+                "| Session | Status |",
+                "| --- | --- |",
+                "| 1 | {status} |",
+                "",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_plan(plan_dir, ("pending",))
+            manifest_path = plan_dir / "manifest.md"
+            manifest_path.write_text(
+                manifest.format(status="pending"), encoding="utf-8"
+            )
+            baseline = plans.plan_content_sha256(plan_dir)
+            readiness_baseline = plans.stable_readiness_sha256(plan_dir)
+
+            manifest_path.write_text(
+                manifest.format(status="complete"), encoding="utf-8"
+            )
+            self.assertNotEqual(baseline, plans.plan_content_sha256(plan_dir))
+            self.assertEqual(
+                readiness_baseline, plans.stable_readiness_sha256(plan_dir)
+            )
+
     def test_parse_completion_contract_returns_none_when_section_absent(self) -> None:
         text = "\n".join(
             [

@@ -3316,11 +3316,16 @@ the turn was accepted.
 and only after every post-execution guard has passed: the workspace and review
 mutation guards, the mailbox completion guard, session verification, the
 progress journal append, the derived status ledger sync, and any per-session
-commit. The committed payload is built once from the plan snapshot those guards
-actually accepted, and `result.json` and `state.json` are both written before
-the event names them, so a reader that has the event always has the artifacts
-it points at. Progress output and the AgentMux `turn-finish` notification
-follow the durable event rather than preceding it, which is why an AgentMux
+commit. The committed payload names a snapshot re-read once at that point, so
+the digest it publishes is the plan as it stands after the runner's own
+bookkeeping — the readiness refresh rewrites `manifest.md` every turn — rather
+than the plan as it stood when the guards ran. Session statuses must not have
+moved in that window: the guards passed on the accepted snapshot, so drift is
+refused as a `ledger-sync` rejection with an `unexpected-status-change` pause
+instead of being published. `result.json` and `state.json` are both written
+before the event names them, so a reader that has the event always has the
+artifacts it points at. Progress output and the AgentMux `turn-finish`
+notification follow the durable event rather than preceding it, which is why an AgentMux
 stream shows `turn-finish` after `verification-finish` — verification is a
 guard that can still refuse the turn. The committed payload is returned as a
 read-only mapping and is never rewritten afterwards.

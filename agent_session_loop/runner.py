@@ -4065,6 +4065,52 @@ def _replace_turn_record(payload: dict[str, Any], committed: dict[str, Any]) -> 
     turns.append(committed)
 
 
+class _TurnCommitRejected(Exception):
+    """The plan stopped agreeing with the accepted snapshot before publication."""
+
+    def __init__(self, *, reason: str, message: str, detail: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+        self.detail = detail
+
+
+def _publication_snapshot(
+    plan_cache: plans.PlanSnapshotCache,
+    accepted: plans.PlanSnapshot,
+) -> plans.PlanSnapshot:
+    """Re-read the plan so the published snapshot describes it as it now is.
+
+    Runner bookkeeping between the last guard and the commit point — the
+    readiness refresh above all — rewrites plan files, so ``accepted`` was
+    hashed before the plan reached the state the turn is about to be published
+    against. The statuses must not have moved: the guards passed on
+    ``accepted``, so a different status mapping is drift rather than
+    bookkeeping, and the turn is refused instead of silently republished.
+    """
+    try:
+        recomputed = plan_cache.get_fresh(accepted.plan_dir)
+    except plans.PlanError as error:
+        raise _TurnCommitRejected(
+            reason="malformed-plan",
+            message="the plan could not be re-read before publishing the turn",
+            detail={"error": str(error)},
+        ) from error
+    if _status_map(recomputed) != _status_map(accepted):
+        raise _TurnCommitRejected(
+            reason="unexpected-status-change",
+            message=(
+                "session statuses moved between acceptance and publication of the turn"
+            ),
+            detail={
+                "accepted_content_sha256": accepted.content_sha256,
+                "recomputed_content_sha256": recomputed.content_sha256,
+                "status_changes": list(_status_changes(accepted, recomputed)),
+            },
+        )
+    return recomputed
+
+
 def _commit_turn(
     *,
     event_path: Path,
@@ -4074,24 +4120,30 @@ def _commit_turn(
     turn_payload: dict[str, Any],
     live_turn: dict[str, Any],
     accepted: plans.PlanSnapshot,
+    plan_cache: plans.PlanSnapshotCache,
     paths: dict[str, Path],
 ) -> Mapping[str, Any]:
     """Publish the single immutable statement that a turn was accepted.
 
     This is the only place ``turn_finished`` is emitted. Every guard able to
     reject the turn, and every runner-owned plan mutation the turn's result
-    describes, has already run, so the payload is built once from ``accepted``
-    — the snapshot the guards actually passed — rather than from the snapshot
-    read when the harness exited. ``result.json`` and the run state are written
-    first so the event can never name a result that disagrees with them, and
-    downstream consumers hear about the turn only once that event is durable.
+    describes, has already run, so the published snapshot is recomputed here,
+    once, from a fresh read — the guards passed on ``accepted``, but the plan
+    on disk has moved on since it was hashed. ``result.json`` and the run state
+    are written first so the event can never name a result that disagrees with
+    them, and downstream consumers hear about the turn only once that event is
+    durable.
+
+    The re-read happens before the persistence lock is entered, and this
+    function never takes ``_LiveTurn._lock``, so lock ordering is unchanged.
 
     The returned mapping is read-only: a later phase that tried to amend a
     published turn would be rewriting a statement operators and audits have
     already read.
     """
+    published = _publication_snapshot(plan_cache, accepted)
     committed = dict(turn_payload)
-    committed["after"] = _snapshot_payload(accepted)
+    committed["after"] = _snapshot_payload(published)
     committed["committed"] = True
     with persistence.lock:
         _write_json_file(paths["result"], committed, durable=True)
@@ -16176,16 +16228,40 @@ def _run_locked(
                     )
                     break
 
-            committed_turn = _commit_turn(
-                event_path=event_path,
-                payload=payload,
-                persistence=persistence,
-                progress=progress,
-                turn_payload=turn_payload,
-                live_turn=live_turn_payload,
-                accepted=after,
-                paths=paths,
-            )
+            try:
+                committed_turn = _commit_turn(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    progress=progress,
+                    turn_payload=turn_payload,
+                    live_turn=live_turn_payload,
+                    accepted=after,
+                    plan_cache=plan_cache,
+                    paths=paths,
+                )
+            except _TurnCommitRejected as rejection:
+                with persistence.lock:
+                    payload["final_snapshot"] = _snapshot_payload(after)
+                _record_turn_rejected(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    turn_payload=turn_payload,
+                    session_id=session_id,
+                    guard="ledger-sync",
+                    reason=rejection.reason,
+                    detail=rejection.detail,
+                )
+                _pause_run(
+                    event_path,
+                    payload,
+                    reason=rejection.reason,
+                    message=rejection.message,
+                    details={**session_details, **rejection.detail},
+                    persistence=persistence,
+                )
+                break
 
             with persistence.lock:
                 payload["completed_sessions"].append(_session_compat_value(session_id))
@@ -16206,7 +16282,7 @@ def _run_locked(
                 completed_count += 1
             snapshot = after
             with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(snapshot)
+                payload["final_snapshot"] = dict(committed_turn["after"])
 
             if is_review_session:
                 cycle_action, snapshot = _advance_review_cycle(

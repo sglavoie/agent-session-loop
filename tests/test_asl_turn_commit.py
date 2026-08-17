@@ -112,6 +112,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
             turn_payload=turn_payload,
             live_turn=dict(turn_payload),
             accepted=self.snapshot,
+            plan_cache=plans.PlanSnapshotCache(),
             paths={"result": self.tmp_path / "result.json"},
         ), payload
 
@@ -171,6 +172,15 @@ class TurnCommitRunTests(unittest.TestCase):
         assert registry is not None
         plans.save_workspace_plan_metadata(
             self.plan_dir, self.workspace_root, registry.digest
+        )
+        # Real runs carry readiness metadata, so every turn rewrites manifest.md.
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
         )
         self.context = verification_module.VerificationContext.from_plan(
             self.plan_dir, self.workspace_root
@@ -297,6 +307,20 @@ class TurnCommitRunTests(unittest.TestCase):
             finished["after"],
         )
 
+    def test_turn_finished_digest_matches_stored_result_json(self) -> None:
+        payload = self._run_accepted()
+        self.assertTrue(payload["readiness_state_active"])
+        finished = self._payloads(events.TURN_FINISHED_EVENT)[0]
+        stored = json.loads(
+            Path(str(finished["result_path"])).read_text(encoding="utf-8")
+        )
+        self.assertEqual(stored["after"], finished["after"])
+        self.assertEqual(
+            plans.plan_content_sha256(self.plan_dir),
+            finished["after"]["content_sha256"],
+        )
+        self.assertEqual(finished["after"], payload["final_snapshot"])
+
     def test_scope_violation_is_rejected_and_reopened_without_acceptance(self) -> None:
         with mock.patch.object(
             runner.harnesses,
@@ -358,6 +382,32 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertTrue(rejections[0]["reopened"])
         self.assertEqual(1, len(self._payloads(events.SESSION_REOPENED_EVENT)))
 
+    def test_publication_drift_pauses_instead_of_crashing_the_loop(self) -> None:
+        rejection = runner._TurnCommitRejected(
+            reason="unexpected-status-change",
+            message="session statuses moved",
+            detail={"status_changes": []},
+        )
+        with (
+            mock.patch.object(
+                runner.harnesses,
+                "run_harness",
+                side_effect=self._harness(
+                    writes="SVC:README.md", declares="SVC:README.md"
+                ),
+            ),
+            mock.patch.object(runner, "_publication_snapshot", side_effect=rejection),
+        ):
+            exit_code, payload = self._invoke("drift-run")
+
+        self.assertNotEqual(0, exit_code)
+        self.assertEqual("unexpected-status-change", payload["pause_reason"])
+        self.assertNotIn(events.TURN_FINISHED_EVENT, self._names())
+        rejections = self._payloads(events.TURN_REJECTED_EVENT)
+        self.assertEqual(1, len(rejections))
+        self.assertEqual("ledger-sync", rejections[0]["guard"])
+        self.assertEqual("unexpected-status-change", rejections[0]["reason"])
+
     def test_untouched_session_is_rejected_without_a_reopen(self) -> None:
         def idle(*_args: object, **_kwargs: object) -> harnesses.HarnessResult:
             return harnesses.HarnessResult(
@@ -376,6 +426,60 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertEqual("no-status-change", rejections[0]["reason"])
         self.assertFalse(rejections[0]["reopened"])
         self.assertEqual([], self._payloads(events.SESSION_REOPENED_EVENT))
+
+
+class PublicationSnapshotTests(unittest.TestCase):
+    """The snapshot a turn is published against is re-read, and must still agree."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.plan_dir = Path(self._tmp.name) / "plan"
+        write_multi_repo_plan(self.plan_dir, ("pending",), specs=SPECS)
+        self.snapshot = plans.inspect_plan(self.plan_dir)
+
+    def publish(self) -> plans.PlanSnapshot:
+        return runner._publication_snapshot(plans.PlanSnapshotCache(), self.snapshot)
+
+    def test_readiness_bookkeeping_is_republished_without_moving_identity(self) -> None:
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="running",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        published = self.publish()
+        self.assertEqual(
+            plans.plan_content_sha256(self.plan_dir), published.content_sha256
+        )
+        self.assertEqual(self.snapshot.content_sha256, published.content_sha256)
+
+    def test_status_drift_refuses_the_turn(self) -> None:
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            session_path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete"
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(runner._TurnCommitRejected) as caught:
+            self.publish()
+        self.assertEqual("unexpected-status-change", caught.exception.reason)
+        self.assertEqual(
+            [{"number": 1, "before": "pending", "after": "complete"}],
+            caught.exception.detail["status_changes"],
+        )
+
+    def test_unreadable_plan_refuses_the_turn_rather_than_raising_plan_error(
+        self,
+    ) -> None:
+        (self.plan_dir / "session-1.md").write_text("no handoff\n", encoding="utf-8")
+        with self.assertRaises(runner._TurnCommitRejected) as caught:
+            self.publish()
+        self.assertEqual("malformed-plan", caught.exception.reason)
+        self.assertTrue(caught.exception.detail["error"])
 
 
 class PlanMutationReinspectionTests(unittest.TestCase):
