@@ -35,6 +35,27 @@ _WHITESPACE_RE = re.compile(r"\s+")
 #: recognizes it here rather than by re-reading the harness text.
 MODEL_CAPACITY_MARKER = "model-capacity"
 
+#: Marker of the launch-time transport-degradation rule, mirroring
+#: :data:`MODEL_CAPACITY_MARKER` so a caller records the degradation without
+#: re-matching the harness text.
+TRANSPORT_DEGRADATION_MARKER = "transport-degradation"
+
+# How much of stderr counts as launch time. The closure is a diagnostic the
+# harness prints before it starts the turn; everything after it is the turn's
+# own transcript, which can quote any text — including this very message — so
+# scanning the whole stream would classify a turn by what it talked about.
+_DEGRADATION_SCAN_MAX_CHARS = 2000
+
+# A structured harness log line reporting that an auxiliary transport died —
+# today codex's MCP client. Anchored to the log-line shape (level, then a
+# transport-named module) rather than to the prose, for the same reason the
+# scan is bounded.
+_TRANSPORT_DEGRADATION_RE = re.compile(
+    r"^\S*\s*(?:ERROR|FATAL)\s+\S*transport\S*[^\n]*?"
+    r"(?:transport channel closed|quit with fatal)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 # Ordered (marker, reason, retryable, pattern) rules. First match wins, so more
 # specific / higher-priority categories (quota, auth, invalid model) precede the
 # broader transient-transport rule. Markers are stable slugs used to build the
@@ -185,6 +206,48 @@ def _bounded_evidence(text: str, match: re.Match[str] | None) -> str:
 def _parse_retry_at(text: str) -> str | None:
     """Extract a best-effort reset/retry hint, or ``None`` when absent."""
     return retry_hints.extract_retry_hint(text)
+
+
+@dataclass(frozen=True)
+class DegradationClassification:
+    """A harness that lost an auxiliary transport and ran the turn anyway.
+
+    Deliberately not a :class:`FailureClassification`: a degradation carries no
+    pause reason and no retryability, so it can never decide what happens to the
+    turn. ``affected_turn`` says whether the turn also failed, which is the
+    difference between a lost capability and a lost turn.
+    """
+
+    marker: str
+    evidence: str
+    affected_turn: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "marker": self.marker,
+            "evidence": self.evidence,
+            "affected_turn": self.affected_turn,
+        }
+
+
+def classify_harness_degradation(
+    result: harnesses.HarnessResult,
+) -> DegradationClassification | None:
+    """Classify a launch-time auxiliary-transport closure, or ``None``.
+
+    Reads stderr as evidence only. The turn keeps whatever status its own output
+    and exit code earned; this states what the harness lost on the way up, so a
+    recurring closure is recorded rather than silently repeated.
+    """
+    text = (result.stderr or "")[:_DEGRADATION_SCAN_MAX_CHARS]
+    match = _TRANSPORT_DEGRADATION_RE.search(text)
+    if match is None:
+        return None
+    return DegradationClassification(
+        marker=TRANSPORT_DEGRADATION_MARKER,
+        evidence=_bounded_evidence(text, match),
+        affected_turn=result.returncode != 0 or result.timed_out,
+    )
 
 
 def classify_harness_failure(

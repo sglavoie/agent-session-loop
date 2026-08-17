@@ -3900,6 +3900,9 @@ def _write_turn_artifacts(
         and runner_signals.get("runner_pause") is None
     ):
         payload["failure_classification"] = classify_harness_failure(result).to_dict()
+    degradation = harness_failures.classify_harness_degradation(result)
+    if degradation is not None:
+        payload["harness_degradation"] = degradation.to_dict()
     if live_turn.get("action_required") is not None:
         payload["action_required"] = live_turn["action_required"]
     if plan_error is not None:
@@ -4880,6 +4883,28 @@ def _append_process_sweep_event(
             "survivors_after": list(report.get("survivors_after") or []),
             "enumeration": report.get("enumeration") or {},
         },
+    )
+
+
+def _append_harness_degradation_event(
+    *,
+    event_path: Path,
+    persistence: _RunPersistence,
+    degradation: dict[str, Any] | None,
+    identity: dict[str, Any],
+) -> None:
+    """Record a harness that lost an auxiliary transport and ran the turn anyway.
+
+    The payload deliberately carries no failure or pause reason: the turn keeps
+    whatever status it earned, and this is the only record that the capability
+    was lost at all.
+    """
+    if not degradation:
+        return
+    persistence.append_event(
+        event_path,
+        events.HARNESS_DEGRADED_EVENT,
+        {**identity, **degradation},
     )
 
 
@@ -15186,16 +15211,23 @@ def _run_locked(
                     payload.update(
                         _observed_model_payload(turn_payload["observed_model"])
                     )
+                turn_identity = {
+                    "run_id": run_id,
+                    "turn_index": turn_index,
+                    **_session_identity_payload(session_id),
+                }
                 _append_process_sweep_event(
                     event_path=event_path,
                     persistence=persistence,
                     report=result.process_sweep,
                     phase="turn",
-                    identity={
-                        "run_id": run_id,
-                        "turn_index": turn_index,
-                        **_session_identity_payload(session_id),
-                    },
+                    identity=turn_identity,
+                )
+                _append_harness_degradation_event(
+                    event_path=event_path,
+                    persistence=persistence,
+                    degradation=turn_payload.get("harness_degradation"),
+                    identity=turn_identity,
                 )
                 persistence.write_state(payload)
 

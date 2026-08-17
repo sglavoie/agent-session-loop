@@ -71,6 +71,15 @@ OBSERVED_SOCKET_CLOSURE = (
     "information, pass `verbose: true` in the second argument to fetch()"
 )
 
+# The launch-time diagnostic every observed Codex turn opens with: its MCP
+# client dies, the turn runs to completion anyway (ASI-1).
+OBSERVED_LAUNCH_CLOSURE = (
+    "2026-08-16T02:38:52.929927Z ERROR rmcp::transport::worker: worker quit "
+    "with fatal: Transport channel closed, when "
+    'Client(HttpRequest(HttpRequest("http/request failed: error sending '
+    'request for url (http://127.0.0.1:8765/mcp)")))'
+)
+
 
 class _PythonScriptCopilotAdapter(harnesses.CopilotAdapter):
     """Run a synthetic Copilot harness through Python instead of direct exec.
@@ -1292,6 +1301,37 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "| S2 | Two | pending |",
             (plan_dir / "context.md").read_text(encoding="utf-8"),
         )
+
+    def test_launch_transport_closure_records_a_degradation_not_a_failure(
+        self,
+    ) -> None:
+        completed, payload, plan_dir, state_dir, _fake_codex = self.run_loop(
+            mode="success",
+            statuses=("pending",),
+            extra_env={"FAKE_CODEX_STDERR_TEXT": f"{OBSERVED_LAUNCH_CLOSURE}\n"},
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        turn = payload["turns"][0]
+        self.assertEqual("complete", turn["status_result"])
+        self.assertNotIn("failure_classification", turn)
+        self.assertEqual(
+            harness_failures.TRANSPORT_DEGRADATION_MARKER,
+            turn["harness_degradation"]["marker"],
+        )
+        self.assertFalse(turn["harness_degradation"]["affected_turn"])
+        records = read_jsonl(
+            state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
+        )
+        degraded = [
+            record
+            for record in records
+            if record.get("name") == events.HARNESS_DEGRADED_EVENT
+        ]
+        self.assertEqual(1, len(degraded))
+        self.assertFalse(degraded[0]["payload"]["affected_turn"])
+        self.assertEqual(1, degraded[0]["payload"]["turn_index"])
 
     def test_text_run_pty_p_stops_after_current_session(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
@@ -7103,6 +7143,47 @@ class HarnessTransportClassificationTests(unittest.TestCase):
             self._result(stderr="model is at capacity; the connection was closed")
         )
         self.assertEqual(harness_failures.MODEL_CAPACITY_MARKER, capacity.marker)
+
+    def test_launch_transport_closure_is_a_degradation_not_a_failure(self) -> None:
+        result = self._result(
+            returncode=0,
+            stderr=f"{OBSERVED_LAUNCH_CLOSURE}\nOpenAI Codex v0.147.0\n",
+        )
+
+        degradation = harness_failures.classify_harness_degradation(result)
+
+        assert degradation is not None
+        self.assertEqual(
+            harness_failures.TRANSPORT_DEGRADATION_MARKER, degradation.marker
+        )
+        self.assertFalse(degradation.affected_turn)
+        self.assertIn("Transport channel closed", degradation.evidence)
+
+    def test_degradation_records_whether_the_turn_also_failed(self) -> None:
+        degradation = harness_failures.classify_harness_degradation(
+            self._result(returncode=7, stderr=OBSERVED_LAUNCH_CLOSURE)
+        )
+
+        assert degradation is not None
+        self.assertTrue(degradation.affected_turn)
+
+    def test_a_transcript_quoting_the_closure_is_not_a_degradation(self) -> None:
+        transcript = f"OpenAI Codex v0.147.0\n{'session transcript ' * 400}"
+
+        self.assertIsNone(
+            harness_failures.classify_harness_degradation(
+                self._result(
+                    returncode=0, stderr=f"{transcript}\n{OBSERVED_LAUNCH_CLOSURE}\n"
+                )
+            )
+        )
+
+    def test_clean_stderr_records_no_degradation(self) -> None:
+        self.assertIsNone(
+            harness_failures.classify_harness_degradation(
+                self._result(returncode=0, stderr="OpenAI Codex v0.147.0\n")
+            )
+        )
 
 
 if __name__ == "__main__":

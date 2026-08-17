@@ -90,6 +90,11 @@ AGENT_MUX_DELIVERY_EVENT = "agent_mux_delivery"
 # sweep actually killed something (or failed to). A sweep that found nothing is
 # the normal case and is not recorded.
 PROCESS_SWEEP_EVENT = "process_sweep"
+# Appended when a harness lost an auxiliary transport on the way up and ran the
+# turn anyway. It states a degradation, not a failure: the payload carries no
+# pause or failure reason, so the turn keeps the status its own exit code
+# earned, and a closure that recurs every launch is recorded instead of silent.
+HARNESS_DEGRADED_EVENT = "harness_degraded"
 STATE_FILE_NAME = "state.json"
 EVENTS_FILE_NAME = "events.jsonl"
 RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED = "stop-after-current-requested"

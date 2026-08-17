@@ -1623,10 +1623,15 @@ def _turn_section(collector: _Collector, directory: Path) -> dict[str, Any]:
     if isinstance(result, Mapping):
         turn["result"] = collector.redact(result)
         turn["anomalous"] = _turn_shows_failure(result)
+        # Beside ``anomalous``, never folded into it: a harness that lost an
+        # auxiliary transport and still produced a usable turn is degraded, and
+        # counting that as an anomaly would contradict every successful run.
+        turn["degraded"] = bool(result.get("harness_degradation"))
     else:
         collector.omissions.record("turns", reason or REASON_MALFORMED, str(directory))
         turn["result"] = {"available": False, "reason": reason or REASON_MALFORMED}
         turn["anomalous"] = True
+        turn["degraded"] = False
     turn["logs"] = {
         "stdout": collector.file_preview(directory / "stdout.log", kind="harness"),
         "stderr": collector.file_preview(directory / "stderr.log", kind="harness"),
