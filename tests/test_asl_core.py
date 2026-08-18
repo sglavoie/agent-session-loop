@@ -10,6 +10,7 @@ import errno
 import io
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from agent_session_loop import (
     mailbox_rendering,
     pause_policy,
     plans,
+    preflight,
     responses,
     review,
     runner,
@@ -5442,6 +5444,99 @@ class ParserAndStateTests(unittest.TestCase):
             persistence = runner._RunPersistence(write_state=False)
 
             runner._finish_run(event_path, payload, persistence=persistence)
+
+        self.assertEqual(signal, payload["action_required"])
+
+    def _baseline_missing_gate(self, plan_dir: Path, cwd: Path) -> dict[str, Any]:
+        report = preflight.PreflightReport(
+            plan_dir=plan_dir,
+            findings=(
+                preflight.PreflightFinding(
+                    severity="red",
+                    category="baseline-missing",
+                    message="session 1 declares a baseline expectation",
+                    session_id="1",
+                    detail="no baseline evidence recorded",
+                ),
+            ),
+        )
+        return runner._readiness_gate_payload(report, cwd=cwd)
+
+    def test_a_blocking_pause_names_the_command_that_clears_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            repo_root = Path(tmp) / "repo"
+            payload = self._base_state_payload(Path(tmp) / "state.json")
+            runner._set_pause(
+                payload,
+                reason="not-loop-ready",
+                message="plan is not loop-ready",
+                details=self._baseline_missing_gate(plan_dir, repo_root),
+            )
+
+        action = payload["action_required"]
+        self.assertEqual("not-loop-ready", action["reason"])
+        self.assertEqual("pause", action["source"])
+        self.assertEqual(pause_policy.USER_ACTION_REPLY, action["user_action"])
+        hint = action["remediation"][0]
+        self.assertEqual("baseline-missing.refresh", hint["check_id"])
+        self.assertIn(
+            f"`asl baseline {shlex.quote(str(plan_dir))} "
+            f"--cwd {shlex.quote(str(repo_root))}`",
+            hint["message"],
+        )
+
+    def test_a_nested_gate_payload_still_yields_its_remediation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            repo_root = Path(tmp) / "repo"
+            payload = self._base_state_payload(Path(tmp) / "state.json")
+            runner._set_pause(
+                payload,
+                reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+                message="session 1 wrote outside its declared aliases",
+                details={
+                    "readiness_gate": self._baseline_missing_gate(plan_dir, repo_root),
+                    "workspace_write_guard": {"violations": ["other-repo"]},
+                },
+            )
+
+        remediation = payload["action_required"]["remediation"]
+        self.assertEqual("baseline-missing.refresh", remediation[0]["check_id"])
+
+    def test_a_pause_without_a_command_still_records_the_ask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._base_state_payload(Path(tmp) / "state.json")
+            runner._set_pause(
+                payload,
+                reason="blocked",
+                message="RUNNER_PAUSE: blocked - needs a decision",
+            )
+
+        self.assertEqual("blocked", payload["action_required"]["reason"])
+        self.assertEqual([], payload["action_required"]["remediation"])
+
+    def test_a_retryable_pause_records_no_ask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._base_state_payload(Path(tmp) / "state.json")
+            runner._set_pause(
+                payload,
+                reason="verify-failed",
+                message="verification failed",
+            )
+
+        self.assertIsNone(payload.get("action_required"))
+
+    def test_a_live_signal_outranks_the_pause_derived_ask(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._base_state_payload(Path(tmp) / "state.json")
+            signal = self._live_action_required()
+            payload["action_required"] = signal
+            runner._set_pause(
+                payload,
+                reason="blocked",
+                message="RUNNER_PAUSE: blocked - needs a decision",
+            )
 
         self.assertEqual(signal, payload["action_required"])
 

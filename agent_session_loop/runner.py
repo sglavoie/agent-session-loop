@@ -8790,6 +8790,27 @@ def _finalize_readiness_lifecycle(payload: dict[str, Any]) -> None:
         payload["readiness_state_write_error"] = error
 
 
+#: Where a pause's remediation hints sit inside its details payload. A
+#: readiness pause carries the gate payload as its details; the workspace-scope
+#: pause nests that same payload under its own key.
+_PAUSE_REMEDIATION_PATHS: tuple[tuple[str, ...], ...] = (
+    ("repair_hints",),
+    ("readiness_gate", "repair_hints"),
+)
+
+
+def _pause_remediation(details: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Remediation hints a pause's own details already carry."""
+
+    for path in _PAUSE_REMEDIATION_PATHS:
+        current: Any = details
+        for key in path:
+            current = current.get(key) if isinstance(current, Mapping) else None
+        if isinstance(current, list) and current:
+            return [entry for entry in current if isinstance(entry, Mapping)]
+    return []
+
+
 def _set_pause(
     payload: dict[str, Any],
     *,
@@ -8807,7 +8828,23 @@ def _set_pause(
     # Carry the single-source-of-truth pause classification so consumers
     # (the supervisor helper, `asl status`, `asl questions`) stop hardcoding
     # the recoverable/user-required reason sets.
-    payload["pause_policy"] = pause_policy.classify_pause(reason)
+    policy = pause_policy.classify_pause(reason)
+    payload["pause_policy"] = policy
+    # A pause a machine cannot retry is by definition waiting on a human, so the
+    # terminal state names that ask rather than leaving an operator to infer it
+    # from the reason. A signal the turn already raised is the more specific
+    # record of the same ask and is left standing. Remediation is whatever the
+    # pause evidence carries: a reason with no command still gets a record.
+    if policy["requires_user"] and not isinstance(
+        payload.get("action_required"), Mapping
+    ):
+        payload["action_required"] = {
+            "reason": reason,
+            "message": message,
+            "source": "pause",
+            "user_action": policy["user_action"],
+            "remediation": _pause_remediation(payload["pause_details"]),
+        }
 
 
 def _pause_run(
@@ -9398,8 +9435,42 @@ def _allow_not_loop_ready(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "allow_not_loop_ready", False))
 
 
+def _readiness_repair_hints(
+    report: preflight.PreflightReport, *, cwd: Path | None
+) -> list[dict[str, Any]]:
+    """Substituted remediation for each blocking finding, deduped by check id.
+
+    Preflight already resolves every finding to a repair hint and can substitute
+    the plan directory and repository root into the command it embeds. Carrying
+    the substituted form here is what lets a pause name the exact command to run
+    instead of leaving an operator to reconstruct it from the finding text.
+    """
+
+    hints: dict[str, dict[str, Any]] = {}
+    for finding in report.findings:
+        if finding.severity not in {"red", "yellow"}:
+            continue
+        hint = preflight.repair_hint_for_finding(finding)
+        if hint.check_id in hints:
+            continue
+        substituted = preflight.repair_hint_payload(
+            hint,
+            plan_dir=str(report.plan_dir),
+            cwd=None if cwd is None else str(cwd),
+        )
+        hints[hint.check_id] = {
+            "check_id": hint.check_id,
+            "category": hint.category,
+            "fix_category": hint.fix_category,
+            "message": substituted["message"],
+        }
+    return list(hints.values())
+
+
 def _readiness_gate_payload(
     report: preflight.PreflightReport,
+    *,
+    cwd: Path | None = None,
 ) -> dict[str, Any]:
     readiness = report.readiness
     return {
@@ -9427,6 +9498,7 @@ def _readiness_gate_payload(
             }
             for finding in report.findings
         ],
+        "repair_hints": _readiness_repair_hints(report, cwd=cwd),
     }
 
 
@@ -14194,7 +14266,7 @@ def _run_locked(
             preflight.run_preflight(snapshot.plan_dir, **preflight_kwargs),
             lock_info=lock_info,
         )
-    gate_payload = _readiness_gate_payload(preflight_report)
+    gate_payload = _readiness_gate_payload(preflight_report, cwd=cwd)
     if core_skipped:
         gate_payload["core_skipped"] = True
     gate_passed = gate_payload["ok"]
@@ -14269,7 +14341,7 @@ def _run_locked(
             core_skipped=core_skipped,
         )
         core_skipped = bool(repair_payload["core_skipped"])
-        gate_payload = _readiness_gate_payload(preflight_report)
+        gate_payload = _readiness_gate_payload(preflight_report, cwd=cwd)
         if core_skipped:
             gate_payload["core_skipped"] = True
         gate_passed = gate_payload["ok"]

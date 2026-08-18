@@ -3889,8 +3889,9 @@ Common pause reasons:
 - `not-loop-ready`: the plan's `manifest.md` `**Readiness**` is not
   `loop-ready` after the runner attempted any eligible derived repair, and the
   run did not pass `--allow-not-loop-ready`. The pause payload includes the
-  readiness state, preflight finding summary, and `readiness_gate_repair` when
-  a repair was attempted. The same reason also covers the non-bypassable case:
+  readiness state, preflight finding summary, a `repair_hints` list carrying the
+  substituted command for each blocking finding, and `readiness_gate_repair`
+  when a repair was attempted. The same reason also covers the non-bypassable case:
   when any red finding is in a non-bypassable category the run pauses even with
   `--allow-not-loop-ready`, and `pause_details.blocker` lists those categories
   (currently `repository-footprint` and `repository-registry-required`).
@@ -4131,6 +4132,18 @@ recoverable pauses that need no human at all. The helper escalates `inspect`
 pauses immediately and routes `reply` pauses through the mailbox wait. The block
 also carries `policy_version`, which lets a consumer diffing a persisted block
 against a fresh classification tell a schema change from a real contradiction.
+
+Every pause with `requires_user` also populates the state payload's
+`action_required` block (`source: pause`), echoing the pause reason, message,
+and `user_action` alongside a `remediation` list. Each remediation entry is a
+preflight repair hint (`check_id`, `category`, `fix_category`, `message`) with
+its plan-directory and repository-root placeholders already substituted, so a
+readiness pause names the exact command that clears it — for example
+`asl baseline <plan-dir> --cwd <repo-root>` for missing baseline evidence. A
+pause whose evidence carries no such hint still gets the block, with an empty
+`remediation` list; a live intervention signal the turn already raised is the
+more specific record of the same ask and is left in place.
+
 When a pause genuinely needs an answer, the result carries `needs_agent_reply`
 with a `questions` block (resolver prompt, the paused agent's last message, pause
 metadata, artifact paths). The driving agent either infers a clearly defensible reply
