@@ -3527,6 +3527,158 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("unavailable", verdict.status)
             self.assertIn("recorded no pause policy", verdict.detail)
 
+    def _aborted_a_turn(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        *,
+        session: Any = 9,
+        turn_index: int = 4,
+        reason: str | None = "Operator requested immediate stop",
+        requested: bool = True,
+        requested_turn_index: int | None = None,
+        also_failed: tuple[tuple[Any, int], ...] = (),
+    ) -> None:
+        """Rewrite the run as one whose turn an operator killed mid-session.
+
+        ``requested`` false drops the request record the honored abort should
+        trace back to; ``requested_turn_index`` points the request at another
+        turn. ``also_failed`` names further session/turn pairs that failed and
+        which no abort accounts for.
+        """
+
+        state_dir = history[2]
+        payload = self._read_state(state_dir)
+        payload["ok"] = False
+        payload["reason"] = "abandoned"
+        self._write_state(state_dir, payload)
+        control = {
+            "run_id": RUN_ID,
+            "session": session,
+            "abort_reason": reason,
+            "abort_requested": True,
+        }
+        records: list[tuple[str, dict[str, Any]]] = [
+            ("run_started", {"run_id": RUN_ID})
+        ]
+        if requested:
+            records.append(
+                (
+                    events.RUN_CONTROL_EVENT,
+                    {
+                        **control,
+                        "action": events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
+                        "turn_index": (
+                            turn_index
+                            if requested_turn_index is None
+                            else requested_turn_index
+                        ),
+                    },
+                )
+            )
+        records.append(
+            (
+                events.RUN_CONTROL_EVENT,
+                {
+                    **control,
+                    "action": events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
+                    "turn_index": turn_index,
+                },
+            )
+        )
+        records.extend(
+            (
+                events.TURN_FINISHED_EVENT,
+                {
+                    "run_id": RUN_ID,
+                    "session": failed_session,
+                    "turn_index": failed_turn,
+                    "returncode": 137,
+                },
+            )
+            for failed_session, failed_turn in ((session, turn_index), *also_failed)
+        )
+        records.append(
+            ("run_finished", {"run_id": RUN_ID, "ok": False, "reason": "abandoned"})
+        )
+        self._write_events(state_dir, records)
+
+    def test_a_killed_turn_is_accounted_for_by_the_abort_that_asked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._aborted_a_turn(history)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["operator-abort"].status)
+            self.assertIn("1 turn(s) were killed", results["operator-abort"].detail)
+            # The killed turn is explained by the abort, so it must not fall
+            # through to the catch-all that reports unknown failures.
+            self.assertEqual("pass", results["unclassified-anomalies"].status)
+
+    def test_a_run_that_killed_nothing_owes_no_abort_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+
+            _, results = self._audit(history)
+
+            verdict = results["operator-abort"]
+            self.assertEqual("pass", verdict.status)
+            self.assertIn("killed no turn", verdict.detail)
+
+    def test_another_turns_failure_is_not_excused_by_the_abort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._aborted_a_turn(history, also_failed=((9, 5),))
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["operator-abort"].status)
+            self.assertEqual("fail", results["unclassified-anomalies"].status)
+            self.assertIn(
+                events.TURN_FINISHED_EVENT,
+                results["unclassified-anomalies"].detail,
+            )
+
+    def test_a_kill_no_request_asked_for_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._aborted_a_turn(history, requested=False)
+
+            _, results = self._audit(history)
+            findings = supervisor_audit.findings_from_results(results.values())
+
+            verdict = results["operator-abort"]
+            self.assertEqual("fail", verdict.status)
+            self.assertIn("no recorded request asked for", verdict.detail)
+            self.assertIn(
+                "lifecycle.operator-abort",
+                [item.invariant_key for item in findings],
+            )
+
+    def test_a_request_naming_another_turn_does_not_cover_this_kill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._aborted_a_turn(history, requested_turn_index=3)
+
+            _, results = self._audit(history)
+
+            verdict = results["operator-abort"]
+            self.assertEqual("fail", verdict.status)
+            self.assertIn("no recorded request asked for", verdict.detail)
+
+    def test_a_kill_that_names_no_reason_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._aborted_a_turn(history, reason=None)
+
+            _, results = self._audit(history)
+
+            verdict = results["operator-abort"]
+            self.assertEqual("fail", verdict.status)
+            self.assertIn("names no reason", verdict.detail)
+            # An abort with no reason on it explains nothing either.
+            self.assertEqual("fail", results["unclassified-anomalies"].status)
+
     def test_a_damaged_event_log_lands_in_the_unknown_lane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))

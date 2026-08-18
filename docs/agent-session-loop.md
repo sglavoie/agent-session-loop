@@ -1466,6 +1466,17 @@ type from the same session, a stale classification on a run that has resumed
 past it, and a pause that named no reason at all are all still anomalies
 nothing explains.
 
+A turn an operator killed is accounted for the same way. Every
+`abort-turn-honored` run-control record has to trace back to an
+`abort-turn-requested` naming the same session and turn index, and has to carry
+the `abort_reason` the request gave; a turn the run killed with neither behind
+it is a finding, because nothing then says who asked. When the trace holds, that
+one turn's records are exempt from the unknown-anomaly catch-all — keyed on
+session and turn index together, so a later turn of the same session that failed
+on its own is still reported. Without this the deliberate kill read as a failure
+nothing could explain, since the run never paused and so recorded no pause
+classification to grade.
+
 The semantic auditor answers in a versioned JSON contract, and its second
 version replaced implicit identity with explicit selection. Every finding
 carries exactly one `identity` object with no default: `{"decision":

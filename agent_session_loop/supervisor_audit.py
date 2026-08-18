@@ -3158,6 +3158,79 @@ def _classified_failure_sessions(context: _CheckContext) -> set[Any]:
     return set() if session is None else {session}
 
 
+def _abort_turn_records(context: _CheckContext, action: str) -> list[dict[str, Any]]:
+    """The run-control payloads carrying one turn-abort action, in order."""
+    payloads: list[dict[str, Any]] = []
+    for record in context.records:
+        if record.get("name") != events.RUN_CONTROL_EVENT:
+            continue
+        payload = _mapping(record.get("payload"))
+        if payload.get("action") == action:
+            payloads.append(payload)
+    return payloads
+
+
+def _aborted_turns(context: _CheckContext) -> set[tuple[Any, Any]]:
+    """The turns the run killed because an operator asked it to.
+
+    Keyed by session and turn index together, so the exemption covers the one
+    turn the abort named rather than every turn that session ever ran.
+    """
+    return {
+        (payload.get("session"), payload.get("turn_index"))
+        for payload in _abort_turn_records(
+            context, events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED
+        )
+        if payload.get("abort_reason")
+    }
+
+
+def _check_operator_abort(context: _CheckContext) -> _Verdict:
+    evidence = context.evidence(
+        context.event_summary.get("reference"),
+        context.section("state").get("reference"),
+    )
+    honored = _abort_turn_records(context, events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED)
+    if not honored:
+        return _Verdict(
+            "pass",
+            "the run killed no turn on an operator abort",
+            evidence,
+        )
+    requested = {
+        (payload.get("session"), payload.get("turn_index"))
+        for payload in _abort_turn_records(
+            context, events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED
+        )
+    }
+    contradictions: list[str] = []
+    for payload in honored:
+        turn = (payload.get("session"), payload.get("turn_index"))
+        if turn not in requested:
+            contradictions.append(
+                f"session {turn[0]!r} turn {turn[1]!r} was killed on an abort no "
+                "recorded request asked for"
+            )
+        elif not payload.get("abort_reason"):
+            contradictions.append(
+                f"session {turn[0]!r} turn {turn[1]!r} was killed on an abort "
+                "that names no reason"
+            )
+    if contradictions:
+        return _Verdict(
+            "fail",
+            f"the run killed a turn without an accountable abort behind it: "
+            f"{_joined(contradictions)}",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"{len(honored)} turn(s) were killed on an operator abort the run "
+        "recorded a request and a reason for",
+        evidence,
+    )
+
+
 def _check_retryable_transport_failure(context: _CheckContext) -> _Verdict:
     status = context.section("status")
     evidence = context.evidence(
@@ -3658,6 +3731,7 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
             )
     unclassified: dict[str, int] = {}
     classified = _classified_failure_sessions(context)
+    aborted = _aborted_turns(context)
     for record in context.records:
         name = str(record.get("name") or "")
         if name in _CLASSIFIED_EVENT_NAMES:
@@ -3667,6 +3741,15 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
         # outcome of every session it ran and only one of them is the failure
         # the pause classified.
         if name in _PAUSED_TURN_EVENT_NAMES and payload.get("session") in classified:
+            continue
+        if (
+            name in _PAUSED_TURN_EVENT_NAMES
+            and (
+                payload.get("session"),
+                payload.get("turn_index"),
+            )
+            in aborted
+        ):
             continue
         if _payload_shows_failure(payload):
             unclassified[name] = unclassified.get(name, 0) + 1
@@ -3792,6 +3875,22 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             ),
         ),
         _check_retryable_transport_failure,
+    ),
+    (
+        CheckSpec(
+            check="operator-abort",
+            lane="lifecycle-retry-resume",
+            category="lifecycle",
+            component="run-control",
+            invariant_key="lifecycle.operator-abort",
+            severity="high",
+            recommendation=(
+                "Record the request and the reason behind every turn the run "
+                "kills, so a killed turn traces to the operator who asked for "
+                "it rather than reading as an unexplained failure."
+            ),
+        ),
+        _check_operator_abort,
     ),
     (
         CheckSpec(
