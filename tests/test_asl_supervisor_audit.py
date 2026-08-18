@@ -2827,6 +2827,84 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 [item.invariant_key for item in findings],
             )
 
+    def _write_retry_pair(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        *,
+        first: dict[str, Any] | None = None,
+    ) -> None:
+        """One session attempted twice: a bad turn, then a clean completion."""
+
+        workspace, _, _, run_dir = history
+        failed = self._read_result(run_dir)
+        failed.update({"session_id": "01", "turn_index": 1, "status_result": "blocked"})
+        failed.update(first or {})
+        self._write_result(run_dir / "turn-0001-01", failed)
+
+        retry_dir = run_dir / "turn-0002-01"
+        retry_dir.mkdir()
+        retry = self._clean_result(workspace, retry_dir)
+        retry.update({"session_id": "01", "turn_index": 2, "status_result": "complete"})
+        self._write_result(retry_dir, retry)
+        (retry_dir / "stdout.log").write_text("session complete\n", encoding="utf-8")
+        (retry_dir / "stderr.log").write_text("no warnings\n", encoding="utf-8")
+        (retry_dir / "last-message.txt").write_text("Session done.\n", encoding="utf-8")
+
+    def test_a_retried_turn_does_not_contradict_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_retry_pair(history)
+
+            bundle, results = self._audit(history)
+            findings = supervisor_audit.findings_from_results(results.values())
+
+            self.assertTrue(bundle.payload["turns"][0]["anomalous"])
+            self.assertEqual("pass", results["misleading-success"].status)
+            self.assertNotIn(
+                "observability.success-is-earned",
+                [item.invariant_key for item in findings],
+            )
+
+    def test_an_unretried_anomalous_turn_still_contradicts_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_result(history[3])
+            payload.update(
+                {"session_id": "01", "turn_index": 1, "status_result": "blocked"}
+            )
+            self._write_result(history[3] / "turn-0001-01", payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["misleading-success"].status)
+            self.assertIn(
+                "recorded an anomalous result", results["misleading-success"].detail
+            )
+
+    def test_a_retry_does_not_excuse_a_write_scope_breach(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_retry_pair(
+                history,
+                first={
+                    "workspace_write_guard": {
+                        "passed": False,
+                        "write_aliases": ["app", "other"],
+                        "authorized_aliases": ["app"],
+                        "violations": [{"alias": "other"}],
+                        "unavailable": {},
+                    }
+                },
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["misleading-success"].status)
+            self.assertIn(
+                "exceeded its declared write scope",
+                results["misleading-success"].detail,
+            )
+
     def test_an_expected_conditional_skip_does_not_contradict_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))

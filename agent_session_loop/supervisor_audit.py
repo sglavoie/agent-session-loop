@@ -2706,6 +2706,45 @@ def _verification_covered_the_turn(session_verification: Mapping[str, Any]) -> b
     return bool(_sequence(session_verification.get("checks")))
 
 
+def _superseded_turn_names(turns: Sequence[Mapping[str, Any]]) -> frozenset[str]:
+    """Turns a later clean completion of the same session replaced.
+
+    The loop retries a session in place, so a turn that ended badly is
+    counter-evidence only while it is still the last word on that session. Once
+    a later turn completed the same session cleanly, counting the earlier
+    attempt against the run's success claim would report every recovered run as
+    a false success. A turn whose index or session cannot be read is never
+    treated as superseded, so an unreadable projection keeps the finding.
+    """
+
+    completed: dict[str, int] = {}
+    for turn in turns:
+        if turn.get("anomalous") is True:
+            continue
+        result = _mapping(turn.get("result"))
+        session_id = result.get("session_id")
+        index = result.get("turn_index")
+        if not isinstance(session_id, str) or not isinstance(index, int):
+            continue
+        if result.get("status_result") != "complete":
+            continue
+        completed[session_id] = max(completed.get(session_id, index), index)
+    superseded: set[str] = set()
+    for turn in turns:
+        result = _mapping(turn.get("result"))
+        session_id = result.get("session_id")
+        index = result.get("turn_index")
+        name = turn.get("name")
+        if not isinstance(session_id, str) or not isinstance(index, int):
+            continue
+        if not isinstance(name, str):
+            continue
+        latest = completed.get(session_id)
+        if latest is not None and latest > index:
+            superseded.add(name)
+    return frozenset(superseded)
+
+
 def _check_misleading_success(context: _CheckContext) -> _Verdict:
     status = context.section("status")
     finished = [
@@ -2719,13 +2758,16 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
 
     counter: list[str] = []
     references: list[str] = []
+    superseded = _superseded_turn_names(context.turns)
     for turn in context.turns:
         result = _mapping(turn.get("result"))
         guard = _mapping(result.get("workspace_write_guard"))
-        contradicts = turn.get("anomalous") is True or bool(
-            _sequence(guard.get("violations"))
-        )
-        if turn.get("anomalous") is True:
+        # A retry replaces the attempt, never the breach: a turn that wrote
+        # outside its declared scope stays counter-evidence however cleanly the
+        # session finished afterwards.
+        anomalous = turn.get("anomalous") is True and turn.get("name") not in superseded
+        contradicts = anomalous or bool(_sequence(guard.get("violations")))
+        if anomalous:
             counter.append(f"{turn.get('name')} recorded an anomalous result")
         if _sequence(guard.get("violations")):
             counter.append(f"{turn.get('name')} exceeded its declared write scope")
@@ -2733,6 +2775,10 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
             references.append(turn["directory"])
     for session in _sequence(context.section("verification").get("sessions")):
         session_verification = _mapping(_mapping(session).get("verification"))
+        # The whole entry, not just its failure: a coverage gap in a superseded
+        # turn's recipe reappears on the turn that replaced it.
+        if _mapping(session).get("turn") in superseded:
+            continue
         if session_verification.get("passed") is False:
             counter.append(f"verification failed for {_mapping(session).get('turn')}")
         skipped = _sequence(session_verification.get("skipped_checks"))
