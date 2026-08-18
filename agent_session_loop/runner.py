@@ -11500,9 +11500,11 @@ def _terminating_result_disposition(
 ) -> str | None:
     """Name the result branch that ends this turn before the status guards.
 
-    Mirrors the dispatch order of those branches. ``None`` means the turn
-    reaches the status guards, which own the sharper diagnosis for a turn that
-    moved the wrong session.
+    The dispatch selects its terminating branch by the name returned here, so a
+    branch this function cannot name is unreachable and a new one has to be
+    added here to exist at all. ``None`` means the turn reaches the status
+    guards, which own the sharper diagnosis for a turn that moved the wrong
+    session.
     """
     if result.interrupted:
         return "interrupted"
@@ -14375,7 +14377,8 @@ def _run_locked(
     # exits: verification and finalization are runner-owned work, so counting
     # them as idle time would report the previous turn's own cost as a gap.
     runner_work_finished_at: datetime | None = None
-    all_complete_work_ran = False
+    first_loop_pass = True
+    idle_baseline_pinned = False
     commit_at_end_attempted = False
     review_appended = False
     last_session_details: dict[str, Any] = {}
@@ -14412,19 +14415,24 @@ def _run_locked(
     pending_exception_guard: dict[str, Any] | None = None
     try:
         while True:
-            if all_complete_work_ran:
-                # Everything the all-complete branch does — the final commit,
-                # repair materialization, re-gating, readiness writes, review
-                # creation — is runner-owned work that can continue into
-                # another turn. Refreshing the baseline here rather than at
-                # each of the branch's exits covers every path out of it,
-                # including ones added later.
+            if idle_baseline_pinned:
+                # A path that reached here after deliberately establishing its
+                # own baseline opts out by pinning it. Refreshing would
+                # overwrite that earlier instant with this one and charge the
+                # gap it was measuring to the runner.
+                idle_baseline_pinned = False
+            elif not first_loop_pass:
+                # Every path back to the top got here by finishing
+                # runner-owned work — a turn and its verification and
+                # finalization, or the all-complete branch's final commit,
+                # repair materialization, re-gating, readiness writes and
+                # review creation. Refreshing the baseline in this one place
+                # covers every path, including ones added later.
                 runner_work_finished_at = _utc_now()
-                all_complete_work_ran = False
+            first_loop_pass = False
             pending_session = snapshot.next_pending
 
             if pending_session is None:
-                all_complete_work_ran = True
                 if not _all_sessions_complete(snapshot):
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(snapshot)
@@ -16054,9 +16062,13 @@ def _run_locked(
             # clean stop, or by looping straight into another turn — and a
             # relaunch that starts from a tampered packet adopts it as the new
             # baseline. So the digests are compared here, before any of them
-            # runs. A turn that reaches the status guards instead is left to
-            # the call site below them, which keeps the sharper wrong-session
-            # diagnosis for a tamper that moved a status.
+            # runs, and each of those branches is then selected by the name
+            # computed here rather than by re-testing the result: a branch the
+            # disposition cannot name is unreachable, so none can be added
+            # below without this guard having run for it. A turn that reaches
+            # the status guards instead is left to the call site below them,
+            # which keeps the sharper wrong-session diagnosis for a tamper that
+            # moved a status.
             terminating_disposition = _terminating_result_disposition(
                 result, after, turn_payload
             )
@@ -16078,7 +16090,7 @@ def _run_locked(
             ):
                 break
 
-            if result.interrupted:
+            if terminating_disposition == "interrupted":
                 with persistence.lock:
                     payload["final_snapshot"] = (
                         _snapshot_payload(after)
@@ -16095,7 +16107,7 @@ def _run_locked(
                 )
                 break
 
-            if result.timed_out:
+            if terminating_disposition == "timeout":
                 with persistence.lock:
                     payload["final_snapshot"] = (
                         _snapshot_payload(after)
@@ -16112,7 +16124,7 @@ def _run_locked(
                 )
                 break
 
-            if result.aborted:
+            if terminating_disposition == "aborted":
                 # Beside the timeout branch, but not a pause: the operator asked
                 # for this stop, so it is recorded as one.
                 with run_control_lock:
@@ -16128,7 +16140,7 @@ def _run_locked(
                         persistence=persistence,
                     )
                 break
-            if after is None:
+            if terminating_disposition == "malformed-plan":
                 corrected, correction_evidence = _correct_malformed_handoff(
                     event_path=event_path,
                     payload=payload,
@@ -16145,7 +16157,6 @@ def _run_locked(
                 )
                 if corrected is not None:
                     snapshot = corrected
-                    runner_work_finished_at = _utc_now()
                     continue
                 malformed_details: dict[str, Any] = {
                     "error": plan_error,
@@ -16192,6 +16203,10 @@ def _run_locked(
                 )
                 break
 
+            # Every disposition that survives the branches above names a turn
+            # the plan could be inspected after, so the malformed-plan branch
+            # owns the only `after is None` turn that reaches here.
+            assert after is not None
             after, paused_status_repair = _repair_paused_handoff_status(
                 event_path=event_path,
                 payload=payload,
@@ -16253,7 +16268,7 @@ def _run_locked(
                 break
 
             runner_pause = turn_payload.get("runner_pause")
-            if runner_pause is not None:
+            if terminating_disposition == "runner-pause":
                 pause_reason = _runner_pause_reason(str(runner_pause))
                 with persistence.lock:
                     payload["final_snapshot"] = _snapshot_payload(after)
@@ -16329,8 +16344,11 @@ def _run_locked(
                     if prepared_wait is not None:
                         # The wait that follows is genuine idle time: the
                         # runner has no work left for this turn until a human
-                        # answers, so the clock starts before the wait.
+                        # answers, so the clock starts before the wait. Pinning
+                        # it is this path's explicit opt-out from the
+                        # structural refresh at the top of the loop.
                         runner_work_finished_at = _utc_now()
+                        idle_baseline_pinned = True
                         _set_waiting_for_reply(
                             event_path,
                             payload,
@@ -16495,7 +16513,7 @@ def _run_locked(
                     persistence=persistence,
                 )
                 break
-            if result.returncode != 0:
+            if terminating_disposition == "nonzero-exit":
                 classification = classify_harness_failure(result)
                 spark_failure = spark_route[
                     "decision"
@@ -16563,7 +16581,6 @@ def _run_locked(
                         )
                         persistence.write_state(payload)
                     snapshot = after
-                    runner_work_finished_at = _utc_now()
                     continue
                 if classification.reason == events.PAUSE_REASON_NONZERO_EXIT:
                     pause_message = (
@@ -16790,7 +16807,6 @@ def _run_locked(
                 if verdict_action == "retry":
                     assert verdict_snapshot is not None
                     snapshot = verdict_snapshot
-                    runner_work_finished_at = _utc_now()
                     continue
 
             completed_at = _utc_iso_now()
@@ -17032,7 +17048,6 @@ def _run_locked(
                 # so operator stop requests are honored between cycles.
                 review_appended = False
 
-            runner_work_finished_at = _utc_now()
             _drain_external_control_queue(
                 plan_dir=snapshot.plan_dir,
                 state_dir_arg=args.state_dir,

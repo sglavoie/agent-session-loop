@@ -5,6 +5,7 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
+import ast
 import errno
 import io
 import json
@@ -5487,6 +5488,195 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         # refreshing readiness are all runner-owned work, so the repair turn's
         # idle clock cannot start back at the previous turn's finalization.
         self.assertGreaterEqual(self.idle_started_at(turns[1]), reopened_at)
+
+    def test_idle_time_excludes_review_verdict_retry(self) -> None:
+        plan_dir, state_dir, config_home, fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        self.enable_fake_review_harness(config_home, fake_codex)
+
+        exit_code, payload = self.run_locked_review_run(
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            run_id="verdict-retry-idle",
+            review_outcomes="invalid-artifact,all-clear",
+            max_review_fix_cycles=0,
+        )
+
+        self.assertEqual(0, exit_code, payload)
+        turns = payload["turns"]
+        self.assertEqual(["1", "2", "2"], [turn["session_id"] for turn in turns])
+        retried_at = self.last_event_created_at(
+            Path(payload["events_path"]),
+            events.REVIEW_VERDICT_RETRY_EVENT,
+        )
+        # Rejecting the verdict and reverting the review session is
+        # runner-owned work on a path that returns to the loop top with a
+        # bare `continue`, so the retried turn's idle clock starts after it.
+        self.assertGreaterEqual(self.idle_started_at(turns[2]), retried_at)
+
+    def runner_source(self) -> str:
+        return Path(runner.__file__).read_text(encoding="utf-8")
+
+    def session_loop_node(self, tree: ast.Module | None = None) -> ast.While:
+        if tree is None:
+            tree = ast.parse(self.runner_source())
+        loops = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.While)
+            and any(
+                isinstance(name, ast.Name) and name.id == "runner_work_finished_at"
+                for statement in node.body
+                for name in ast.walk(statement)
+            )
+        ]
+        self.assertEqual(1, len(loops), "expected exactly one session loop")
+        return loops[0]
+
+    def idle_baseline_assignments(self, node: ast.AST) -> list[ast.Assign]:
+        return [
+            statement
+            for statement in ast.walk(node)
+            if isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "runner_work_finished_at"
+                for target in statement.targets
+            )
+        ]
+
+    def assigns_idle_baseline_pin(self, statement: ast.AST, value: bool) -> bool:
+        return (
+            isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "idle_baseline_pinned"
+                for target in statement.targets
+            )
+            and isinstance(statement.value, ast.Constant)
+            and statement.value.value is value
+        )
+
+    def pins_idle_baseline(self, statement: ast.stmt) -> bool:
+        return self.assigns_idle_baseline_pin(statement, True)
+
+    def clears_idle_baseline_pin(self, statement: ast.AST) -> bool:
+        return self.assigns_idle_baseline_pin(statement, False)
+
+    def pinned_loop_head_arm(self, loop: ast.While) -> ast.If:
+        arm: ast.stmt | None = loop.body[0]
+        while isinstance(arm, ast.If):
+            if isinstance(arm.test, ast.Name) and arm.test.id == "idle_baseline_pinned":
+                return arm
+            arm = arm.orelse[0] if len(arm.orelse) == 1 else None
+        self.fail(
+            "the session loop's first statement must branch on "
+            "idle_baseline_pinned alone; an arm selected by anything else "
+            "leaves paths where the pin is neither honoured nor cleared"
+        )
+
+    def followed_by_pin(self, loop: ast.While, assignment: ast.Assign) -> bool:
+        for node in ast.walk(loop):
+            for field in ("body", "orelse", "finalbody"):
+                block = getattr(node, field, None)
+                if not isinstance(block, list):
+                    continue
+                for index, statement in enumerate(block):
+                    if statement is not assignment:
+                        continue
+                    following = block[index + 1 :]
+                    return bool(following) and self.pins_idle_baseline(following[0])
+        return False
+
+    def check_the_pinned_arm_clears_the_pin(self, tree: ast.Module) -> None:
+        arm = self.pinned_loop_head_arm(self.session_loop_node(tree))
+        for statement in arm.body:
+            if self.clears_idle_baseline_pin(statement):
+                return
+            self.assertFalse(
+                any(
+                    self.clears_idle_baseline_pin(node) for node in ast.walk(statement)
+                ),
+                "the pinned arm clears idle_baseline_pinned only on some "
+                "branch; a pass that leaves it set suppresses every later "
+                "loop-top refresh, so the baseline stays at the pinning "
+                f"path's instant (agent_session_loop/runner.py:{statement.lineno})",
+            )
+            self.assertFalse(
+                any(
+                    isinstance(node, ast.Break | ast.Continue | ast.Return | ast.Raise)
+                    for node in ast.walk(statement)
+                ),
+                "the pinned arm can leave the loop head before clearing "
+                "idle_baseline_pinned, which strands the pin for every later "
+                f"pass (agent_session_loop/runner.py:{statement.lineno})",
+            )
+        self.fail(
+            "the pinned arm of the session loop's first statement must reset "
+            "idle_baseline_pinned to False: the pin is a one-shot opt-out, and "
+            "leaving it set turns the single structural refresh into a "
+            "baseline that never moves again"
+        )
+
+    def tree_with_pinned_arm_body(self, body: tuple[str, ...]) -> ast.Module:
+        source = self.runner_source()
+        arm = self.pinned_loop_head_arm(self.session_loop_node(ast.parse(source)))
+        first, last = arm.body[0], arm.body[-1]
+        assert last.end_lineno is not None
+        lines = source.splitlines()
+        lines[first.lineno - 1 : last.end_lineno] = [
+            " " * first.col_offset + line for line in body
+        ]
+        return ast.parse("\n".join(lines))
+
+    def test_idle_baseline_is_refreshed_where_the_loop_cannot_bypass_it(self) -> None:
+        tree = ast.parse(self.runner_source())
+        self.check_the_pinned_arm_clears_the_pin(tree)
+        for mutation in (
+            ("pass",),
+            ("if first_loop_pass:", "    idle_baseline_pinned = False"),
+        ):
+            with (
+                self.subTest(mutation=mutation),
+                self.assertRaises(AssertionError),
+            ):
+                self.check_the_pinned_arm_clears_the_pin(
+                    self.tree_with_pinned_arm_body(mutation)
+                )
+
+        loop = self.session_loop_node(tree)
+        head = loop.body[0]
+        structural = self.idle_baseline_assignments(head)
+        self.assertEqual(
+            1,
+            len(structural),
+            "the idle baseline must be refreshed by the session loop's first "
+            "statement, so no path back to the loop top can bypass it",
+        )
+
+        pins = [
+            statement
+            for statement in ast.walk(loop)
+            if self.pins_idle_baseline(statement)
+        ]
+        self.assertEqual(
+            1,
+            len(pins),
+            "only the mailbox reply wait may opt out of the structural "
+            "refresh; a second opt-out is a path whose idle clock silently "
+            "stops tracking runner work",
+        )
+
+        for assignment in self.idle_baseline_assignments(loop):
+            if assignment in structural:
+                continue
+            self.assertTrue(
+                self.followed_by_pin(loop, assignment),
+                "a hand-stamped idle baseline outside the loop top must pin "
+                "itself, otherwise the next pass overwrites it and the "
+                "per-path stamping this replaced is back "
+                f"(agent_session_loop/runner.py:{assignment.lineno})",
+            )
 
     def test_a_new_turn_supersedes_the_previous_turns_action_required(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

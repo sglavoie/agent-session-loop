@@ -5,6 +5,7 @@ Split from tests/test_agent_session_loop.py."""
 from __future__ import annotations
 
 import argparse
+import ast
 import io
 import json
 import os
@@ -1210,6 +1211,485 @@ class RunReadinessGateTests(unittest.TestCase):
             finding["category"] for finding in payload["readiness_gate"]["findings"]
         }
         self.assertNotIn("baseline-missing", categories)
+
+
+class TerminatingDispositionSourceTests(unittest.TestCase):
+    """The plan-artifact guard cannot be skipped by a new terminating branch.
+
+    The guard runs once, gated on the disposition, ahead of every branch that
+    can end the turn. These tests hold the dispatch to that disposition so a
+    branch added later is either named there — and therefore guarded — or is
+    unreachable.
+    """
+
+    DISPOSITION_NAMES = (
+        "interrupted",
+        "timeout",
+        "aborted",
+        "malformed-plan",
+        "runner-pause",
+        "nonzero-exit",
+    )
+
+    RAW_CONDITIONS = (
+        "result.interrupted",
+        "result.timed_out",
+        "result.aborted",
+        "result.returncode",
+        "after is None",
+    )
+
+    # A break or continue inside one of these binds to that construct, not to
+    # the session loop, so it cannot end the turn.
+    INNER_LOOPS = (
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+    )
+
+    # Every edge inside one of these — including a return — belongs to that
+    # callable rather than to _run_locked.
+    INNER_CALLABLES = (
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.Lambda,
+    )
+
+    def setUp(self) -> None:
+        self.source = Path(runner.__file__).read_text(encoding="utf-8")
+        self.tree = ast.parse(self.source)
+
+    def disposition_names(self, tree: ast.Module) -> list[str]:
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_terminating_result_disposition"
+        ]
+        self.assertEqual(1, len(functions), "expected one disposition function")
+        return [
+            node.value.value
+            for node in ast.walk(functions[0])
+            if isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ]
+
+    def session_loop(self, tree: ast.Module) -> ast.While:
+        loops = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.While)
+            and any(
+                isinstance(name, ast.Name) and name.id == "terminating_disposition"
+                for statement in node.body
+                for name in ast.walk(statement)
+            )
+        ]
+        self.assertEqual(1, len(loops), "expected exactly one session loop")
+        return loops[0]
+
+    def gated_guard(self, loop: ast.While) -> ast.If:
+        gated = [
+            node
+            for node in ast.walk(loop)
+            if isinstance(node, ast.If)
+            and "_enforce_plan_artifact_guard(" in ast.unparse(node.test)
+            and "terminating_disposition is not None" in ast.unparse(node.test)
+        ]
+        self.assertEqual(
+            1,
+            len(gated),
+            "the terminating dispositions must reach the plan-artifact guard "
+            "through exactly one gated call",
+        )
+        return gated[0]
+
+    def unconditional_guard_ends(self, loop: ast.While) -> list[int]:
+        """Lines after which the plan-artifact guard has run on every path."""
+        return [
+            statement.end_lineno
+            for statement in loop.body
+            if isinstance(statement, ast.If)
+            and "_enforce_plan_artifact_guard(" in ast.unparse(statement.test)
+            and "terminating_disposition" not in ast.unparse(statement.test)
+        ]
+
+    def status_guard_line(self, loop: ast.While) -> int:
+        """The line where the status guards take over the diagnosis."""
+        calls = [
+            node.lineno
+            for node in ast.walk(loop)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_repair_paused_handoff_status"
+        ]
+        self.assertEqual(
+            1,
+            len(calls),
+            "expected one paused-status repair call to open the status guards",
+        )
+        return calls[0]
+
+    def dispatch_branches(self, loop: ast.While) -> list[tuple[ast.If, str]]:
+        branches: list[tuple[ast.If, str]] = []
+        for node in ast.walk(loop):
+            if not isinstance(node, ast.If):
+                continue
+            test = node.test
+            if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+                continue
+            if not isinstance(test.ops[0], ast.Eq):
+                continue
+            left = test.left
+            if not isinstance(left, ast.Name) or left.id != "terminating_disposition":
+                continue
+            comparator = test.comparators[0]
+            if not isinstance(comparator, ast.Constant):
+                continue
+            if not isinstance(comparator.value, str):
+                continue
+            branches.append((node, comparator.value))
+        branches.sort(key=lambda branch: branch[0].lineno)
+        return branches
+
+    def turn_edges(
+        self, node: ast.AST, *, in_inner_loop: bool = False
+    ) -> list[ast.Break | ast.Continue | ast.Return]:
+        """Every edge under ``node`` that ends or relaunches the current turn.
+
+        A return leaves ``_run_locked`` outright, so it ends the turn from
+        inside a nested loop just as a top-level one does; only a nested
+        callable takes ownership of it. A break or continue is claimed by the
+        nearest enclosing loop instead, which for a nested loop's else suite is
+        the loop around it: the suite runs once that nested loop is already
+        finished. Callers that start below a nested loop must say so through
+        ``in_inner_loop``, because the node alone cannot show what encloses it.
+        """
+        edges: list[ast.Break | ast.Continue | ast.Return] = []
+
+        def visit(current: ast.AST, *, in_inner_loop: bool) -> None:
+            if isinstance(current, self.INNER_CALLABLES):
+                return
+            if isinstance(current, ast.Return):
+                edges.append(current)
+                return
+            if isinstance(current, ast.Break | ast.Continue):
+                if not in_inner_loop:
+                    edges.append(current)
+                return
+            if isinstance(current, self.INNER_LOOPS):
+                for child in current.body:
+                    visit(child, in_inner_loop=True)
+                for child in current.orelse:
+                    visit(child, in_inner_loop=in_inner_loop)
+                return
+            for child in ast.iter_child_nodes(current):
+                visit(child, in_inner_loop=in_inner_loop)
+
+        for child in ast.iter_child_nodes(node):
+            visit(child, in_inner_loop=in_inner_loop)
+        return edges
+
+    def loop_ifs(self, loop: ast.While) -> list[tuple[ast.If, bool]]:
+        """Every if in the loop that the turn itself runs, with its context.
+
+        The flag says whether a nested loop owns the branch's break and
+        continue edges, which the branch's own subtree cannot tell.
+        """
+        found: list[tuple[ast.If, bool]] = []
+
+        def visit(current: ast.AST, *, in_inner_loop: bool) -> None:
+            if isinstance(current, self.INNER_CALLABLES):
+                return
+            if isinstance(current, ast.If):
+                found.append((current, in_inner_loop))
+            if isinstance(current, self.INNER_LOOPS):
+                for child in current.body:
+                    visit(child, in_inner_loop=True)
+                for child in current.orelse:
+                    visit(child, in_inner_loop=in_inner_loop)
+                return
+            for child in ast.iter_child_nodes(current):
+                visit(child, in_inner_loop=in_inner_loop)
+
+        for child in ast.iter_child_nodes(loop):
+            visit(child, in_inner_loop=False)
+        return found
+
+    def retested_conditions(self, test: ast.expr) -> list[str]:
+        condition = ast.unparse(test)
+        retested = [marker for marker in self.RAW_CONDITIONS if marker in condition]
+        if not retested and any(
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "result"
+            for node in ast.walk(test)
+        ):
+            retested.append("the raw harness result")
+        return retested
+
+    def check_every_terminating_branch_is_selected_by_the_disposition(
+        self, tree: ast.Module
+    ) -> None:
+        names = self.disposition_names(tree)
+        self.assertEqual(
+            list(self.DISPOSITION_NAMES),
+            names,
+            "the disposition names and their order are the dispatch's contract",
+        )
+        branches = self.dispatch_branches(self.session_loop(tree))
+        self.assertEqual(
+            names,
+            [name for _, name in branches],
+            "the terminating branches must be selected by the names "
+            "_terminating_result_disposition returns, in the order it returns "
+            "them: a branch it cannot name is unreachable, and a name it "
+            "returns with no branch is a terminating condition the dispatch "
+            "drops",
+        )
+
+    def check_the_plan_artifact_guard_runs_before_every_terminating_branch(
+        self, tree: ast.Module
+    ) -> None:
+        loop = self.session_loop(tree)
+        guard_line = self.gated_guard(loop).lineno
+        assignments = [
+            node.lineno
+            for node in ast.walk(loop)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "terminating_disposition"
+                for target in node.targets
+            )
+        ]
+
+        self.assertEqual(
+            1,
+            len(assignments),
+            "the disposition must be computed once, so the guard and the "
+            "dispatch cannot disagree about which branch ends the turn",
+        )
+        self.assertLess(assignments[0], guard_line)
+        branches = self.dispatch_branches(loop)
+        self.assertTrue(branches, "expected the dispatch to name its branches")
+        for node, name in branches:
+            self.assertLess(
+                guard_line,
+                node.lineno,
+                f"the {name} branch runs before the plan-artifact guard, so a "
+                "turn that tampered with another session's packet would end "
+                "there unguarded",
+            )
+
+    def check_the_dispatch_owns_every_edge_before_the_status_guards(
+        self, tree: ast.Module
+    ) -> None:
+        loop = self.session_loop(tree)
+        guard = self.gated_guard(loop)
+        status_line = self.status_guard_line(loop)
+        self.assertLess(
+            guard.end_lineno,
+            status_line,
+            "the gated guard must run before the status guards take over",
+        )
+        selected = [
+            (node.lineno, node.end_lineno) for node, _ in self.dispatch_branches(loop)
+        ]
+        guarded_after = self.unconditional_guard_ends(loop)
+
+        for edge in self.turn_edges(loop):
+            if not guard.end_lineno < edge.lineno < status_line:
+                continue
+            if any(start <= edge.lineno <= end for start, end in selected):
+                continue
+            if any(end < edge.lineno for end in guarded_after):
+                continue
+            self.fail(
+                f"a {type(edge).__name__.lower()} at agent_session_loop/"
+                f"runner.py:{edge.lineno} ends or relaunches the turn between "
+                "the plan-artifact guard and the status guards without being "
+                "selected by terminating_disposition; the guard is gated on a "
+                "disposition this edge does not have, so a turn that tampered "
+                "with another session's packet would leave here unguarded",
+            )
+
+    def check_no_terminating_branch_re_tests_the_raw_result(
+        self, tree: ast.Module
+    ) -> None:
+        loop = self.session_loop(tree)
+        guard_line = self.gated_guard(loop).lineno
+
+        for node, in_inner_loop in self.loop_ifs(loop):
+            if node.lineno < guard_line:
+                continue
+            named = self.retested_conditions(node.test)
+            ends_turn = bool(self.turn_edges(node, in_inner_loop=in_inner_loop))
+            self.assertFalse(
+                named and ends_turn,
+                "a branch that ends the turn must be selected by "
+                f"terminating_disposition rather than by re-testing "
+                f"{', '.join(named)} (agent_session_loop/runner.py:"
+                f"{node.lineno}); stating the condition twice is how a "
+                "branch ends up outside the disposition and past the guard",
+            )
+
+    def mutated_tree(
+        self, *, after_line: int, column: int, body: tuple[str, ...]
+    ) -> ast.Module:
+        lines = self.source.splitlines()
+        lines[after_line:after_line] = [" " * column + line for line in body]
+        return ast.parse("\n".join(lines))
+
+    def test_every_terminating_branch_is_selected_by_the_disposition(self) -> None:
+        self.check_every_terminating_branch_is_selected_by_the_disposition(self.tree)
+
+    def test_the_plan_artifact_guard_runs_before_every_terminating_branch(self) -> None:
+        self.check_the_plan_artifact_guard_runs_before_every_terminating_branch(
+            self.tree
+        )
+
+    def test_the_dispatch_owns_every_edge_before_the_status_guards(self) -> None:
+        self.check_the_dispatch_owns_every_edge_before_the_status_guards(self.tree)
+
+    def test_no_terminating_branch_re_tests_the_raw_result(self) -> None:
+        self.check_no_terminating_branch_re_tests_the_raw_result(self.tree)
+
+    def test_a_top_level_turn_payload_relaunch_is_rejected(self) -> None:
+        guard = self.gated_guard(self.session_loop(self.tree))
+
+        for edge in ("continue", "break", "return"):
+            with self.subTest(edge=edge):
+                mutated = self.mutated_tree(
+                    after_line=guard.end_lineno,
+                    column=guard.col_offset,
+                    body=('if turn_payload.get("future_retry"):', f"    {edge}"),
+                )
+
+                with self.assertRaises(AssertionError):
+                    self.check_the_dispatch_owns_every_edge_before_the_status_guards(
+                        mutated
+                    )
+
+    def test_a_nested_raw_result_branch_is_rejected(self) -> None:
+        loop = self.session_loop(self.tree)
+        branch = next(
+            node
+            for node, name in self.dispatch_branches(loop)
+            if name == "malformed-plan"
+        )
+        anchor = branch.body[0]
+
+        for edge in ("break", "continue", "return"):
+            with self.subTest(edge=edge):
+                mutated = self.mutated_tree(
+                    after_line=anchor.lineno - 1,
+                    column=anchor.col_offset,
+                    body=("if result.returncode:", f"    {edge}"),
+                )
+
+                with self.assertRaises(AssertionError):
+                    self.check_no_terminating_branch_re_tests_the_raw_result(mutated)
+
+    def test_a_return_is_owned_by_its_callable_not_by_its_loop(self) -> None:
+        guard = self.gated_guard(self.session_loop(self.tree))
+        # A helper defined here returns from itself, so neither check may claim
+        # its edge; a loop body runs inside the turn, so its return still ends
+        # the turn and both checks must.
+        owned_by_a_callable = self.mutated_tree(
+            after_line=guard.end_lineno,
+            column=guard.col_offset,
+            body=(
+                "def _future_helper() -> None:",
+                "    if result.returncode:",
+                "        return",
+            ),
+        )
+
+        self.check_the_dispatch_owns_every_edge_before_the_status_guards(
+            owned_by_a_callable
+        )
+        self.check_no_terminating_branch_re_tests_the_raw_result(owned_by_a_callable)
+
+        owned_by_the_turn = self.mutated_tree(
+            after_line=guard.end_lineno,
+            column=guard.col_offset,
+            body=(
+                "for _ in ():",
+                '    if turn_payload.get("future_retry"):',
+                "        return",
+            ),
+        )
+
+        with self.assertRaises(AssertionError):
+            self.check_the_dispatch_owns_every_edge_before_the_status_guards(
+                owned_by_the_turn
+            )
+
+    def test_a_nested_loop_else_relaunch_is_rejected(self) -> None:
+        guard = self.gated_guard(self.session_loop(self.tree))
+        # The else suite runs after the nested loop has finished, so Python
+        # binds these to the session loop and they end the turn past the guard.
+        for edge in ("break", "continue"):
+            with self.subTest(edge=edge):
+                mutated = self.mutated_tree(
+                    after_line=guard.end_lineno,
+                    column=guard.col_offset,
+                    body=(
+                        "for _ in ():",
+                        "    pass",
+                        "else:",
+                        '    if turn_payload.get("future_retry"):',
+                        f"        {edge}",
+                    ),
+                )
+
+                with self.assertRaises(AssertionError):
+                    self.check_the_dispatch_owns_every_edge_before_the_status_guards(
+                        mutated
+                    )
+
+    def test_a_nested_loop_edge_belongs_to_the_suite_that_owns_it(self) -> None:
+        loop = self.session_loop(self.tree)
+        branch = next(
+            node
+            for node, name in self.dispatch_branches(loop)
+            if name == "malformed-plan"
+        )
+        anchor = branch.body[0]
+
+        for edge in ("break", "continue"):
+            with self.subTest(edge=edge):
+                owned_by_the_nested_loop = self.mutated_tree(
+                    after_line=anchor.lineno - 1,
+                    column=anchor.col_offset,
+                    body=(
+                        "for _ in ():",
+                        "    if result.returncode:",
+                        f"        {edge}",
+                    ),
+                )
+
+                self.check_no_terminating_branch_re_tests_the_raw_result(
+                    owned_by_the_nested_loop
+                )
+
+                owned_by_the_session_loop = self.mutated_tree(
+                    after_line=anchor.lineno - 1,
+                    column=anchor.col_offset,
+                    body=(
+                        "for _ in ():",
+                        "    pass",
+                        "else:",
+                        "    if result.returncode:",
+                        f"        {edge}",
+                    ),
+                )
+
+                with self.assertRaises(AssertionError):
+                    self.check_no_terminating_branch_re_tests_the_raw_result(
+                        owned_by_the_session_loop
+                    )
 
 
 class ResumeGateTests(unittest.TestCase):

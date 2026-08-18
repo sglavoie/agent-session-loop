@@ -559,6 +559,131 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 [record.get("name") for record in records],
             )
 
+    def test_mailbox_wait_counts_the_human_answer_as_idle(self) -> None:
+        human_answer_seconds = 0.5
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            init_git_repo(tmp_dir)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            # A second session is what proves the pin is one-shot: the turn
+            # after the continuation must be back on the loop-top baseline.
+            write_plan(plan_dir, ("pending", "pending"))
+            mailbox.append_guidance(
+                plan_dir,
+                "Keep working after the answer.",
+                state_dir=state_dir,
+            )
+            mailbox.write_lease(
+                plan_dir,
+                "00000000-0000-0000-0000-000000000001",
+                state_dir=state_dir,
+            )
+            calls = 0
+
+            def fake_run_harness(name, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    last_message = (
+                        "Choose option 1a or 1b.\n"
+                        "RUNNER_PAUSE: blocked - need operator answer\n"
+                    )
+                    return harnesses.HarnessResult(
+                        name=name,
+                        argv=[name],
+                        returncode=0,
+                        stdout="waiting\n",
+                        stderr="",
+                        last_message=last_message,
+                    )
+                session_path = plan_dir / f"session-{calls - 1}.md"
+                session_path.write_text(
+                    session_path.read_text(encoding="utf-8").replace(
+                        "- **Status**: pending",
+                        "- **Status**: complete",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                return harnesses.HarnessResult(
+                    name=name,
+                    argv=[name],
+                    returncode=0,
+                    stdout="complete\n",
+                    stderr="",
+                    last_message="Runner status: complete\n",
+                )
+
+            responder_error: list[BaseException] = []
+
+            def respond() -> None:
+                try:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+                        if view.unanswered_questions:
+                            time.sleep(human_answer_seconds)
+                            mailbox.append_reply(
+                                plan_dir,
+                                view.unanswered_questions[0].id,
+                                "Use 1a.",
+                                state_dir=state_dir,
+                            )
+                            return
+                        time.sleep(0.01)
+                    raise AssertionError("runner did not publish a question")
+                except BaseException as error:
+                    responder_error.append(error)
+
+            responder = threading.Thread(target=respond, daemon=True)
+            responder.start()
+            args = self._build_args(
+                plan_dir,
+                state_dir,
+                reply=None,
+                cwd=tmp_dir,
+            )
+            env = {
+                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+            }
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(
+                    runner.harnesses,
+                    "run_harness",
+                    side_effect=fake_run_harness,
+                ),
+            ):
+                code, out, _err = self._run_capture(args)
+            responder.join(timeout=10)
+
+            self.assertEqual([], responder_error)
+            self.assertFalse(responder.is_alive())
+            self.assertEqual(0, code, out)
+            payload = json.loads(out)
+            turns = payload["turns"]
+            self.assertEqual(3, len(turns))
+            # The runner has no work of its own while it waits for an answer,
+            # so the continuation turn's idle clock has to start before the
+            # wait and cover the whole of it.
+            self.assertGreaterEqual(
+                turns[1]["idle_seconds_since_previous_turn"],
+                human_answer_seconds,
+            )
+            # The pin the wait set is spent on that one continuation. The next
+            # turn is back on the loop-top refresh, so its idle clock starts
+            # after the continuation turn instead of before the human answer.
+            continuation_finished_at = runner._parse_datetime(turns[1]["finished_at"])
+            later_started_at = runner._parse_datetime(turns[2]["started_at"])
+            assert continuation_finished_at is not None
+            assert later_started_at is not None
+            later_idle_started_at = later_started_at - timedelta(
+                seconds=turns[2]["idle_seconds_since_previous_turn"]
+            )
+            self.assertGreaterEqual(later_idle_started_at, continuation_finished_at)
+
     def test_answered_mailbox_wait_emits_wait_lifecycle_notifications(
         self,
     ) -> None:
