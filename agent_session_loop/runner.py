@@ -648,6 +648,57 @@ _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE = "\n".join(
 )
 
 
+#: Prefix distinguishing a gate replayed from another session's contract from
+#: the review's own artifact validators.
+BROAD_REVIEW_CHECK_PREFIX = "broad"
+
+
+def _broad_review_verification_checks(plan_dir: Path) -> list[dict[str, Any]]:
+    """Every gate the plan's own sessions declare, as one deduplicated recipe.
+
+    A repair session's contract covers only the findings it was created for, so
+    an all-clear review that follows the last repair otherwise rests on nothing
+    broader than the review's own artifact validators. Replaying the plan's
+    gates over the workspace those repairs produced is what makes the all-clear
+    a claim about the whole plan rather than about the last patch.
+
+    Diagnostics are left out because they never decide whether verification
+    passes, and each surviving check is renamed by its source session so two
+    sessions cannot collide on a bare name.
+    """
+    collected: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for session in plans.discover_session_files(plan_dir):
+        if is_generated_review_session_file(session.path):
+            continue
+        contract = contracts.read_completion_contract(plan_dir, session.session_id)
+        if contract is None:
+            continue
+        for check in contract.verify.checks:
+            if check.on_failure_of:
+                continue
+            payload = contracts.check_payload(check)
+            # A baseline expectation describes what the check did before the
+            # plan started, which says nothing about the workspace it is being
+            # replayed against.
+            payload.pop("baseline_expectation", None)
+            identity = (
+                payload.get("repo"),
+                payload["type"],
+                tuple(payload.get("argv", ())),
+                payload.get("cwd"),
+                payload.get("path"),
+                payload.get("pattern"),
+            )
+            if identity in collected:
+                continue
+            payload["name"] = (
+                f"{BROAD_REVIEW_CHECK_PREFIX}:"
+                f"{session.session_id.value}:{payload['name']}"
+            )
+            collected[identity] = payload
+    return list(collected.values())
+
+
 def _generated_review_contract_payload(
     session_id: plans.SessionId,
     *,
@@ -725,6 +776,10 @@ def _generated_review_contract_payload(
         "checks": [
             command_check("final-review-output-evidence-based", verify_source),
             command_check("final-review-artifact-consistent", artifact_source),
+            # The artifact validators supplement this gate rather than standing
+            # in for it. They run first only because rejecting a malformed
+            # review is cheap and replaying the plan's whole recipe is not.
+            *_broad_review_verification_checks(plan_dir),
         ],
     }
 

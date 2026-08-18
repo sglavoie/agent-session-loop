@@ -8,13 +8,15 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
-from agent_session_loop import events, plans, review, runner, verification
+from agent_session_loop import contracts, events, plans, review, runner, verification
 
 from .support import (
     DEFAULT_MULTI_REPO_SPECS,
     write_completed_review_plan,
     write_multi_repo_plan,
+    write_plan_with_ids,
 )
 
 ALIASES = tuple(alias for alias, _path, _origin in DEFAULT_MULTI_REPO_SPECS)
@@ -436,6 +438,195 @@ class GeneratedReviewValidatorDiagnosticTests(unittest.TestCase):
             self.assertNotIn(
                 f"EXPECTED_VERSION = {review.REVIEW_ARTIFACT_VERSION}", source
             )
+
+
+class BroadReviewGateTests(unittest.TestCase):
+    def contract(self, session: str, *checks: dict[str, object]) -> str:
+        return "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- the work is done",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                json.dumps({"session": session, "checks": list(checks)}),
+                "```",
+            ]
+        )
+
+    def write_plan(
+        self,
+        plan_dir: Path,
+        contracts_by_id: dict[str, str],
+        *,
+        prior_review: bool,
+    ) -> plans.SessionId:
+        write_plan_with_ids(
+            plan_dir,
+            tuple((session, "complete") for session in sorted(contracts_by_id)),
+            contracts_by_id=contracts_by_id,
+        )
+        if prior_review:
+            prior_id = plans.next_top_level_session_id(plan_dir)
+            (plan_dir / prior_id.filename).write_text(
+                runner.build_generated_review_session_body(
+                    prior_id, review_harness="codex", plan_dir=plan_dir
+                ),
+                encoding="utf-8",
+            )
+        return plans.next_top_level_session_id(plan_dir)
+
+    def review_checks(
+        self,
+        contracts_by_id: dict[str, str],
+        *,
+        prior_review: bool = False,
+    ) -> list[dict[str, Any]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            review_id = self.write_plan(
+                plan_dir, contracts_by_id, prior_review=prior_review
+            )
+            payload = runner._generated_review_contract_payload(
+                review_id, plan_dir=plan_dir
+            )
+        return list(payload["checks"])
+
+    def replayed(self, checks: list[dict[str, Any]]) -> list[str]:
+        return [
+            str(check["name"])
+            for check in checks
+            if str(check["name"]).startswith(
+                f"{runner.BROAD_REVIEW_CHECK_PREFIX}:",
+            )
+        ]
+
+    def test_the_plans_own_gates_are_replayed_after_the_validators(self) -> None:
+        checks = self.review_checks(
+            {
+                "1": self.contract(
+                    "1",
+                    {"type": "command", "name": "lint", "argv": ["true"]},
+                    {"type": "file_exists", "name": "readme", "path": "README.md"},
+                )
+            }
+        )
+
+        self.assertEqual(
+            [
+                "final-review-output-evidence-based",
+                "final-review-artifact-consistent",
+                "broad:1:lint",
+                "broad:1:readme",
+            ],
+            [check["name"] for check in checks],
+        )
+        self.assertEqual(["true"], checks[2]["argv"])
+        self.assertEqual("README.md", checks[3]["path"])
+
+    def test_one_command_declared_twice_is_replayed_once(self) -> None:
+        recipe: dict[str, object] = {
+            "type": "command",
+            "argv": ["python3", "-c", "pass"],
+        }
+        checks = self.review_checks(
+            {
+                "1": self.contract("1", {**recipe, "name": "suite"}),
+                "2": self.contract("2", {**recipe, "name": "suite-again"}),
+            }
+        )
+
+        self.assertEqual(["broad:1:suite"], self.replayed(checks))
+
+    def test_a_diagnostic_is_not_replayed_as_a_gate(self) -> None:
+        checks = self.review_checks(
+            {
+                "1": self.contract(
+                    "1",
+                    {"type": "command", "name": "suite", "argv": ["true"]},
+                    {
+                        "type": "command",
+                        "name": "suite-detail",
+                        "argv": ["false"],
+                        "on_failure_of": ["suite"],
+                    },
+                )
+            }
+        )
+
+        # A diagnostic never decides whether verification passed, so replaying
+        # it would buy cost without buying a gate.
+        self.assertEqual(["broad:1:suite"], self.replayed(checks))
+
+    def test_a_prior_reviews_own_validators_are_not_replayed(self) -> None:
+        checks = self.review_checks(
+            {
+                "1": self.contract(
+                    "1", {"type": "command", "name": "suite", "argv": ["true"]}
+                )
+            },
+            prior_review=True,
+        )
+
+        self.assertEqual(["broad:1:suite"], self.replayed(checks))
+
+    def test_a_baseline_expectation_does_not_travel_with_the_replay(self) -> None:
+        checks = self.review_checks(
+            {
+                "1": self.contract(
+                    "1",
+                    {
+                        "type": "command",
+                        "name": "suite",
+                        "argv": ["true"],
+                        "baseline_expectation": "fail",
+                    },
+                )
+            }
+        )
+
+        # The expectation describes the workspace the plan started from, which
+        # says nothing about the one the repairs produced.
+        self.assertNotIn("baseline_expectation", checks[-1])
+
+    def test_the_replayed_recipe_is_a_readable_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            review_id = self.write_plan(
+                plan_dir,
+                {
+                    "1": self.contract(
+                        "1", {"type": "command", "name": "suite", "argv": ["true"]}
+                    ),
+                    "2": self.contract(
+                        "2", {"type": "command", "name": "suite", "argv": ["false"]}
+                    ),
+                },
+                prior_review=False,
+            )
+            (plan_dir / review_id.filename).write_text(
+                runner.build_generated_review_session_body(
+                    review_id, review_harness="codex", plan_dir=plan_dir
+                ),
+                encoding="utf-8",
+            )
+            contract = contracts.read_completion_contract(plan_dir, review_id)
+
+        assert contract is not None
+        # Two sessions declaring the same check name still parse: the source
+        # session qualifies each replayed name, so the recipe has no duplicate.
+        self.assertEqual(
+            [
+                "final-review-output-evidence-based",
+                "final-review-artifact-consistent",
+                "broad:1:suite",
+                "broad:2:suite",
+            ],
+            [check.name for check in contract.verify.checks],
+        )
 
 
 class ReviewArtifactProjectionTests(unittest.TestCase):

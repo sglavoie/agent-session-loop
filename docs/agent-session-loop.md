@@ -1219,6 +1219,24 @@ failures (nonzero exit, timeout, verification failure on missing or empty
 `final-review.md`) or repo mutations outside the plan directory also fail
 the run.
 
+Those two gates read the review's own artifacts, so on their own they say
+nothing about the workspace the run produced — a repair session verifies only
+the findings it was created for, which would leave an all-clear review after
+the last repair resting on no broad check at all. The generated review
+contract therefore also replays every gate the plan's own sessions declare.
+Each check is copied from its source session's completion contract, renamed
+`broad:<session>:<name>` so two sessions cannot collide on a bare name,
+deduplicated across sessions by repository, kind, argv, cwd, path, and
+pattern, and stripped of its `baseline_expectation` (which describes the
+workspace the plan started from, not the one the repairs produced). Diagnostic
+checks — those naming an `on_failure_of` gate — are left out because they never
+decide whether verification passes. Prior generated review sessions contribute
+nothing, so the validators are not replayed onto themselves. The replayed gates
+run after the two validators, since rejecting a malformed review is cheap and
+replaying the plan's whole recipe is not, but all of them must pass before the
+review verdict is read: the artifact validators supplement the workspace gate
+rather than standing in for it.
+
 Registered plans generate review session version 4 and structured artifact
 version 3 while legacy plans continue to generate the exact v3/v2 form above.
 The repository-aware session reads every registry alias, writes none, and

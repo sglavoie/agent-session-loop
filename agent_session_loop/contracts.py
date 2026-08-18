@@ -18,7 +18,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Literal
+from typing import Any, Literal
 
 from .plans import (
     HANDOFF_HEADING,
@@ -569,6 +569,33 @@ def _parse_regex_in_file_check(
         on_failure_of=on_failure_of,
         repo=repo,
     )
+
+
+def check_payload(check: VerificationCheck) -> dict[str, Any]:
+    """Serialize a parsed check back into the payload a contract declares.
+
+    The inverse of :func:`_parse_check`, so a check read from one session can be
+    re-emitted into another session's recipe without the caller reconstructing
+    the payload shape by hand. Defaulted fields are omitted, which keeps a
+    round trip byte-identical for the common case.
+    """
+    payload: dict[str, Any] = {"type": check.kind, "name": check.name}
+    if isinstance(check, CommandCheck):
+        payload["argv"] = list(check.argv)
+        payload["timeout_seconds"] = check.timeout_seconds
+        if check.cwd is not None:
+            payload["cwd"] = check.cwd
+    else:
+        payload["path"] = check.path
+        if isinstance(check, RegexInFileCheck):
+            payload["pattern"] = check.pattern
+    if check.baseline_expectation != DEFAULT_BASELINE_EXPECTATION:
+        payload["baseline_expectation"] = check.baseline_expectation
+    if check.on_failure_of:
+        payload["on_failure_of"] = list(check.on_failure_of)
+    if check.repo is not None:
+        payload["repo"] = check.repo
+    return payload
 
 
 CHECK_PARSERS: dict[str, Callable[..., VerificationCheck]] = {

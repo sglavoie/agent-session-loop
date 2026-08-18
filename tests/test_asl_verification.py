@@ -3088,6 +3088,50 @@ class ArtifactStorageTests(unittest.TestCase):
         self.assertFalse(spool_path.exists())
 
 
+class ContractPayloadRoundTripTests(unittest.TestCase):
+    """`contracts.check_payload` is the inverse of check parsing."""
+
+    def round_trip(self, payload: dict[str, Any]) -> dict[str, Any]:
+        parsed = contracts._parse_check(
+            payload, index=0, session_id=plans.parse_session_id("1")
+        )
+        return contracts.check_payload(parsed)
+
+    def test_a_command_check_round_trips(self) -> None:
+        payload = {
+            "type": "command",
+            "name": "suite",
+            "argv": ["just", "test-all"],
+            "timeout_seconds": 900.0,
+            "cwd": "sub",
+            "baseline_expectation": "fail",
+            "on_failure_of": ["lint"],
+        }
+
+        self.assertEqual(payload, self.round_trip(payload))
+
+    def test_a_regex_check_round_trips(self) -> None:
+        payload = {
+            "type": "regex_in_file",
+            "name": "documented",
+            "path": "docs/agent-session-loop.md",
+            "pattern": "broad:",
+        }
+
+        self.assertEqual(payload, self.round_trip(payload))
+
+    def test_defaulted_fields_are_not_re_emitted(self) -> None:
+        # A payload that omits a field parses to its default, and re-emitting
+        # that default would make an unchanged check look edited.
+        emitted = self.round_trip(
+            {"type": "file_exists", "name": "readme", "path": "README.md"}
+        )
+
+        self.assertEqual(
+            {"type": "file_exists", "name": "readme", "path": "README.md"}, emitted
+        )
+
+
 class ContractCheckCliTests(unittest.TestCase):
     """`asl contract-check` static per-check contract diagnosis."""
 
