@@ -3101,6 +3101,21 @@ instead of silently reported as the request. Harnesses that name no model leave
 both fields `null`. `observed_model_source` is observed, never selected, so it
 never appears as a `model_source`.
 
+`state.json` also carries `model_projection`, where the two are reconciled per
+role. Every turn folds into one record keyed by its session kind and harness,
+so implementation and review keep separate provenance and one harness's model is
+never attributed to the other. Each record keeps `requested_model`,
+`requested_model_source`, the sorted `observed_models`, and a `turns` count, and
+resolves a `model`/`model_source` pair from them: a requested model is the run's
+own answer and an observation cannot outrank it, while an `unresolved` request
+resolves to the observation when every turn of that role reported the same
+model, with source `harness_reported`. Disagreeing observations resolve to
+nothing and leave the unresolved request standing, because two answers are not
+an answer. The projection accumulates turn by turn rather than being recomputed
+from the retained turn list, so trimming old turns cannot erase what the run
+already observed. The supervisor audit reads it in the `state` section beside
+`model` and `observed_model`.
+
 ## Safety Modes
 
 By default, `run` and `doctor` use harness-specific bypass modes for every
@@ -3521,8 +3536,8 @@ error fields are `ok`, `command`, `reason`, `error`, `paused`, and `details`.
 `run --json` preserves its existing fields and adds the common `command` and
 `details` fields; important run fields include `paused`, `reason`,
 `pause_reason`, `pause_details`, `harness`, `harness_config`, `model`,
-`model_source`, `observed_model`, `observed_model_source`, `effort`,
-`effort_source`, `commit_mode`, `note`, `commits`,
+`model_source`, `observed_model`, `observed_model_source`, `model_projection`,
+`effort`, `effort_source`, `commit_mode`, `note`, `commits`,
 `control`, `no_mailbox`, `mailbox_enabled`, `mailbox_activation`,
 `completed_sessions`, `completed_session_ids`, `turns`, `initial_snapshot`,
 `final_snapshot`, `state_path`, and `events_path`. Runs without commit flags

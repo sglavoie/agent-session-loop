@@ -1843,6 +1843,47 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual("claude-opus-5", section["observed_model"])
             self.assertEqual("harness_reported", section["observed_model_source"])
 
+    def test_the_per_role_model_projection_reaches_the_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._rewrite_state(
+                state_dir,
+                model="native CLI default",
+                model_source="unresolved",
+                model_projection=[
+                    {
+                        "session_kind": "implementation",
+                        "harness": "claude",
+                        "requested_model": "native CLI default",
+                        "requested_model_source": "unresolved",
+                        "observed_models": ["claude-opus-5"],
+                        "turns": 3,
+                        "model": "claude-opus-5",
+                        "model_source": "harness_reported",
+                    }
+                ],
+            )
+
+            section = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "state"
+            ]
+
+            # An audit that saw only the unresolved request could not tell that
+            # the run's own turns had already answered the question.
+            self.assertEqual(
+                [("implementation", "claude-opus-5", "harness_reported")],
+                [
+                    (record["session_kind"], record["model"], record["model_source"])
+                    for record in section["model_projection"]
+                ],
+            )
+
+    def test_a_run_without_a_projection_records_an_empty_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            section = self._collect(*self._history(Path(tmp))).payload["state"]
+
+            self.assertEqual([], section["model_projection"])
+
 
 class _RunHistoryFixture:
     """One recorded run, shared by the deterministic and agent audit tests."""

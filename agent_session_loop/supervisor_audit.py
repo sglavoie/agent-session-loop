@@ -2005,6 +2005,12 @@ def collect_audit_input(
                 state_payload.get("observed_model"), key="observed_model"
             ),
             "observed_model_source": state_payload.get("observed_model_source"),
+            # Where the two are reconciled per role: an unresolved request that
+            # every turn of a role answered the same way resolves here, and a
+            # review harness keeps its own record.
+            "model_projection": collector.redact(
+                state_payload.get("model_projection") or [], key="model_projection"
+            ),
             "effort": state_payload.get("effort"),
             "turn_count": len(turns),
         },

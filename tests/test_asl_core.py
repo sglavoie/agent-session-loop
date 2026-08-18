@@ -5410,6 +5410,89 @@ class ParserAndStateTests(unittest.TestCase):
         self.assertEqual("claude-opus-5", event_payload["observed_model"])
         self.assertEqual("harness_reported", event_payload["observed_model_source"])
 
+    def _turn(
+        self,
+        *,
+        harness: str = "claude",
+        session_kind: str = "implementation",
+        model: str = "native CLI default",
+        model_source: str = "unresolved",
+        observed_model: str | None = "claude-opus-5",
+    ) -> dict[str, object]:
+        return {
+            "harness": harness,
+            "session_kind": session_kind,
+            "model": model,
+            "model_source": model_source,
+            "observed_model": observed_model,
+        }
+
+    def _fold(self, *turns: dict[str, object]) -> list[dict[str, Any]]:
+        projection: list[dict[str, Any]] = []
+        for turn in turns:
+            projection = runner._merged_model_projection(projection, turn)
+        return projection
+
+    def test_an_unresolved_request_resolves_to_what_every_turn_reported(self) -> None:
+        projection = self._fold(self._turn(), self._turn())
+
+        self.assertEqual(1, len(projection))
+        record = projection[0]
+        self.assertEqual("claude-opus-5", record["model"])
+        self.assertEqual("harness_reported", record["model_source"])
+        # The request itself is preserved: resolving it is not rewriting it.
+        self.assertEqual("native CLI default", record["requested_model"])
+        self.assertEqual("unresolved", record["requested_model_source"])
+        self.assertEqual(2, record["turns"])
+
+    def test_a_requested_model_outranks_what_the_harness_reported(self) -> None:
+        projection = self._fold(
+            self._turn(model="claude-opus-4-7", model_source="flag")
+        )
+
+        self.assertEqual("claude-opus-4-7", projection[0]["model"])
+        self.assertEqual("flag", projection[0]["model_source"])
+        self.assertEqual(["claude-opus-5"], projection[0]["observed_models"])
+
+    def test_disagreeing_observations_leave_the_request_standing(self) -> None:
+        projection = self._fold(
+            self._turn(), self._turn(observed_model="claude-opus-4-7")
+        )
+
+        # Two answers are not an answer, so the role keeps its unresolved request.
+        self.assertEqual("native CLI default", projection[0]["model"])
+        self.assertEqual("unresolved", projection[0]["model_source"])
+        self.assertEqual(
+            ["claude-opus-4-7", "claude-opus-5"], projection[0]["observed_models"]
+        )
+
+    def test_a_review_harness_keeps_its_own_record(self) -> None:
+        projection = self._fold(
+            self._turn(),
+            self._turn(
+                harness="codex",
+                session_kind="review",
+                observed_model="gpt-5-codex",
+            ),
+        )
+
+        self.assertEqual(
+            [
+                ("implementation", "claude", "claude-opus-5"),
+                ("review", "codex", "gpt-5-codex"),
+            ],
+            [
+                (record["session_kind"], record["harness"], record["model"])
+                for record in projection
+            ],
+        )
+
+    def test_a_turn_that_reported_nothing_cannot_erase_an_observation(self) -> None:
+        projection = self._fold(self._turn(), self._turn(observed_model=None))
+
+        self.assertEqual("claude-opus-5", projection[0]["model"])
+        self.assertEqual(2, projection[0]["turns"])
+
     def _live_action_required(self) -> dict[str, object]:
         return {
             "run_id": "run-1",
