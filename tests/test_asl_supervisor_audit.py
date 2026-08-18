@@ -26,6 +26,7 @@ from agent_session_loop import (
     harness_failures,
     harnesses,
     model_availability,
+    pause_policy,
     plans,
     repository_evidence,
     run_flags,
@@ -3293,6 +3294,186 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn(
                 "nothing gated the changes", results["misleading-success"].detail
             )
+
+    def _paused_on_harness_failure(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        *,
+        reason: str = events.PAUSE_REASON_TRANSPORT_FAILED,
+        classification: dict[str, Any] | None = None,
+        policy: dict[str, Any] | None = None,
+        session: Any = 12,
+        also_failed: tuple[Any, ...] = (),
+        also_recorded: tuple[tuple[str, dict[str, Any]], ...] = (),
+    ) -> None:
+        """Rewrite the run as one that paused mid-session on a harness failure.
+
+        ``also_failed`` names further sessions whose turn failed and which the
+        pause says nothing about; ``also_recorded`` adds arbitrary records
+        before the pause.
+        """
+
+        state_dir = history[2]
+        payload = self._read_state(state_dir)
+        payload["ok"] = False
+        payload["paused"] = True
+        payload["pause_reason"] = reason
+        payload["pause_details"] = {
+            "session": session,
+            "returncode": 1,
+            "failure_classification": {
+                "reason": reason,
+                "fingerprint": f"{reason}:model-capacity",
+                "retryable": reason in events.RETRYABLE_HARNESS_FAILURE_REASONS,
+                "retry_at": None,
+                "returncode": 1,
+                **(classification or {}),
+            },
+        }
+        recorded = dict(pause_policy.classify_pause(reason))
+        recorded.update(policy or {})
+        payload["pause_policy"] = recorded
+        self._write_state(state_dir, payload)
+        self._write_events(
+            state_dir,
+            [("run_started", {"run_id": RUN_ID})]
+            + [
+                (
+                    events.TURN_EXECUTION_FINISHED_EVENT,
+                    {"run_id": RUN_ID, "session": failed, "returncode": 1},
+                )
+                for failed in (session, *also_failed)
+            ]
+            + list(also_recorded)
+            + [(events.RUN_PAUSED_EVENT, {"run_id": RUN_ID, "reason": reason})],
+        )
+
+    def test_a_retryable_pause_accounts_for_the_turn_it_failed_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_on_harness_failure(history)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["retryable-transport-failure"].status)
+            self.assertIn(
+                "transport-failed:model-capacity",
+                results["retryable-transport-failure"].detail,
+            )
+            # The turn the run paused on is explained by the pause, so it must
+            # not fall through to the catch-all that reports unknown failures.
+            self.assertEqual("pass", results["unclassified-anomalies"].status)
+
+    def test_another_sessions_failure_is_not_excused_by_the_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_on_harness_failure(history, also_failed=(9,))
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["retryable-transport-failure"].status)
+            self.assertEqual("fail", results["unclassified-anomalies"].status)
+            self.assertIn(
+                events.TURN_EXECUTION_FINISHED_EVENT,
+                results["unclassified-anomalies"].detail,
+            )
+
+    def test_a_non_turn_failure_is_not_excused_by_the_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_on_harness_failure(
+                history,
+                also_recorded=(
+                    (
+                        events.COMMIT_FINISHED_EVENT,
+                        {"run_id": RUN_ID, "session": 12, "ok": False},
+                    ),
+                ),
+            )
+
+            _, results = self._audit(history)
+
+            # The pause explains one failed turn, not everything the same
+            # session touched on its way there.
+            self.assertEqual("fail", results["unclassified-anomalies"].status)
+            self.assertIn(
+                events.COMMIT_FINISHED_EVENT,
+                results["unclassified-anomalies"].detail,
+            )
+
+    def test_a_final_failure_stays_unexplained_by_the_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_on_harness_failure(history, reason="harness-missing")
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["retryable-transport-failure"].status)
+            self.assertIn(
+                "non-retryable", results["retryable-transport-failure"].detail
+            )
+            # Nothing will relaunch this session, so its failed turn is still an
+            # anomaly the audit has to surface.
+            self.assertEqual("fail", results["unclassified-anomalies"].status)
+
+    def test_a_retryable_failure_nothing_will_relaunch_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_on_harness_failure(
+                history,
+                policy={
+                    "recoverable": False,
+                    "requires_user": True,
+                    "max_retries": 0,
+                },
+            )
+
+            _, results = self._audit(history)
+            findings = supervisor_audit.findings_from_results(results.values())
+
+            verdict = results["retryable-transport-failure"]
+            self.assertEqual("fail", verdict.status)
+            self.assertIn("nothing will relaunch it", verdict.detail)
+            self.assertIn("waits on a person no reply can help", verdict.detail)
+            self.assertIn("grants max_retries=0", verdict.detail)
+            self.assertIn(
+                "lifecycle.retryable-transport-failure",
+                [item.invariant_key for item in findings],
+            )
+            self.assertEqual(
+                "fail",
+                supervisor_audit.lane_rollup(results.values())[
+                    "lifecycle-retry-resume"
+                ],
+            )
+
+    def test_a_retryable_flag_the_reason_denies_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_on_harness_failure(
+                history, classification={"reason": "harness-missing"}
+            )
+
+            _, results = self._audit(history)
+
+            verdict = results["retryable-transport-failure"]
+            self.assertEqual("fail", verdict.status)
+            self.assertIn("retryable=True", verdict.detail)
+            self.assertIn("not one the classifier marks retryable", verdict.detail)
+
+    def test_a_classification_with_no_policy_cannot_be_judged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_on_harness_failure(history)
+            payload = self._read_state(history[2])
+            payload["pause_policy"] = {}
+            self._write_state(history[2], payload)
+
+            _, results = self._audit(history)
+
+            verdict = results["retryable-transport-failure"]
+            self.assertEqual("unavailable", verdict.status)
+            self.assertIn("recorded no pause policy", verdict.detail)
 
     def test_a_damaged_event_log_lands_in_the_unknown_lane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

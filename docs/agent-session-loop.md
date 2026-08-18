@@ -1445,6 +1445,22 @@ not read its evidence, the lane takes the auditor's judgement, and where any
 check did answer, the worse of the two verdicts wins. That is what lets a legacy
 plan with no registry binding still earn a clean audit.
 
+A run that paused on a harness failure is graded on whether its own records
+agree with each other, not on whether it retried. The lifecycle lane reads
+`pause_details.failure_classification` against the persisted `pause_policy`:
+the `retryable` flag has to match what the reason itself classifies as
+retryable, and a failure marked retryable has to sit under a policy that is
+`recoverable`, sets `requires_user` false, and grants at least one relaunch —
+with any of those missing, nothing will ever pick the session back up. The
+retry is deliberately not looked for inside the run, because the supervisor
+performs it by launching a fresh run, and a bundle is a single run that can
+never contain it. A run whose classification and policy agree also stops the
+paused session's failed `turn_execution_finished` record from reaching the
+unknown-anomaly catch-all, which otherwise reported every transport pause as a
+failure no deterministic check classifies. That exemption covers one event name
+for the one paused session: another session's failed turn, or another record
+type from the same session, is still an anomaly nothing explains.
+
 The semantic auditor answers in a versioned JSON contract, and its second
 version replaced implicit identity with explicit selection. Every finding
 carries exactly one `identity` object with no default: `{"decision":

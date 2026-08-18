@@ -3121,6 +3121,118 @@ def _check_retry_resume(context: _CheckContext) -> _Verdict:
     )
 
 
+def _harness_failure_classification(context: _CheckContext) -> dict[str, Any]:
+    """The classification the run attached to the harness failure it paused on.
+
+    Empty when the run did not pause on a harness failure, which is every pause
+    this invariant has nothing to say about.
+    """
+    status = context.section("status")
+    if status.get("paused") is not True:
+        return {}
+    details = _mapping(status.get("pause_details"))
+    return _mapping(details.get("failure_classification"))
+
+
+def _supervisor_owned_retry_sessions(context: _CheckContext) -> set[Any]:
+    """Sessions whose turn failure the pause hands to the supervisor to relaunch.
+
+    The runner does not retry a harness failure in place. It classifies the
+    failure, pauses, and records a policy the supervisor reads to decide whether
+    to relaunch the same session — so a turn that failed this way is explained
+    evidence, not an anomaly, even though this run's own event stream stops at
+    the pause.
+    """
+    classification = _harness_failure_classification(context)
+    if classification.get("retryable") is not True:
+        return set()
+    session = _mapping(context.section("status").get("pause_details")).get("session")
+    return set() if session is None else {session}
+
+
+def _check_retryable_transport_failure(context: _CheckContext) -> _Verdict:
+    status = context.section("status")
+    evidence = context.evidence(
+        context.event_summary.get("reference"),
+        context.section("state").get("reference"),
+    )
+    classification = _harness_failure_classification(context)
+    if not classification:
+        return _Verdict(
+            "pass",
+            "the run did not pause on a harness failure, so no retry was owed "
+            "to any classification",
+            evidence,
+        )
+
+    reason = classification.get("reason")
+    retryable = classification.get("retryable")
+    policy = _mapping(status.get("pause_policy"))
+    if not policy:
+        return _Verdict(
+            "unavailable",
+            f"the run classified its harness failure as {reason!r} but recorded "
+            "no pause policy to judge that classification against",
+            evidence,
+        )
+
+    contradictions: list[str] = []
+    expected_retryable = reason in events.RETRYABLE_HARNESS_FAILURE_REASONS
+    if isinstance(retryable, bool) and retryable is not expected_retryable:
+        contradictions.append(
+            f"the failure is classified retryable={retryable!r} while its reason "
+            f"{reason!r} is {'' if expected_retryable else 'not '}one the "
+            "classifier marks retryable"
+        )
+    if retryable is True:
+        # A retryable failure is one the supervisor may relaunch unattended.
+        # Either half of that going missing strands the run: a policy that
+        # refuses the relaunch, or one that sends it to a human who has no
+        # answer to give.
+        if policy.get("recoverable") is not True:
+            contradictions.append(
+                "the failure is classified retryable while its pause policy "
+                f"gives recoverable={policy.get('recoverable')!r}, so nothing "
+                "will relaunch it"
+            )
+        if policy.get("requires_user") is not False:
+            contradictions.append(
+                "the failure is classified retryable while its pause policy "
+                f"gives requires_user={policy.get('requires_user')!r}, so it "
+                "waits on a person no reply can help"
+            )
+        budget = policy.get("max_retries")
+        if not isinstance(budget, int) or budget <= 0:
+            contradictions.append(
+                f"the failure is classified retryable while its pause policy "
+                f"grants max_retries={budget!r}"
+            )
+
+    if contradictions:
+        return _Verdict(
+            "fail",
+            f"the run's harness-failure classification contradicts the policy it "
+            f"paused under: {_joined(contradictions)}",
+            evidence,
+        )
+    if retryable is True:
+        fingerprint = classification.get("fingerprint") or reason
+        return _Verdict(
+            "pass",
+            f"the turn failed with the retryable {fingerprint} "
+            f"classification and the run paused under a policy granting "
+            f"{policy.get('max_retries')} supervisor relaunch(es), which is where "
+            "the retry is owed rather than inside this run",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"the turn failed with the non-retryable {reason!r} classification and "
+        "the run paused rather than relaunching it",
+        evidence,
+    )
+
+
 def _check_review_independence(context: _CheckContext) -> _Verdict:
     review = context.section("review")
     run_state = context.section("state")
@@ -3537,11 +3649,21 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
                 f"{omission.get('reason')}"
             )
     unclassified: dict[str, int] = {}
+    retried = _supervisor_owned_retry_sessions(context)
     for record in context.records:
         name = str(record.get("name") or "")
         if name in _CLASSIFIED_EVENT_NAMES:
             continue
-        if _payload_shows_failure(_mapping(record.get("payload"))):
+        payload = _mapping(record.get("payload"))
+        # Named by session rather than by event name: the harness-failure check
+        # accounts for the turn the run paused on, and widening the exemption to
+        # every turn record would hide the failures nothing explains.
+        if (
+            name == events.TURN_EXECUTION_FINISHED_EVENT
+            and payload.get("session") in retried
+        ):
+            continue
+        if _payload_shows_failure(payload):
             unclassified[name] = unclassified.get(name, 0) + 1
     for name in sorted(unclassified):
         unread.append(
@@ -3647,6 +3769,24 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             ),
         ),
         _check_retry_resume,
+    ),
+    (
+        CheckSpec(
+            check="retryable-transport-failure",
+            lane="lifecycle-retry-resume",
+            category="lifecycle",
+            component="harness-failure-classifier",
+            invariant_key="lifecycle.retryable-transport-failure",
+            severity="high",
+            recommendation=(
+                "Keep the harness-failure classification and the pause policy "
+                "telling the same story: a failure marked retryable must pause "
+                "under a recoverable policy that needs no user and grants at "
+                "least one relaunch, since the supervisor performs the retry "
+                "rather than the run itself."
+            ),
+        ),
+        _check_retryable_transport_failure,
     ),
     (
         CheckSpec(
