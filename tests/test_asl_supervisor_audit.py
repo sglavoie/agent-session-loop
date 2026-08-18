@@ -2017,6 +2017,204 @@ class _RunHistoryFixture:
         )
 
 
+class TurnAnomalyClassificationTests(_RunHistoryFixture, unittest.TestCase):
+    """A clean harness exit cannot conceal a failed gate or a refused turn."""
+
+    def _turn(self, history: tuple[Path, Path, Path, Path]) -> dict[str, Any]:
+        return self._bundle(history).payload["turns"][0]
+
+    def test_a_failed_gate_under_a_zero_exit_is_anomalous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            workspace, _, _, run_dir = history
+            turn_dir = run_dir / "turn-0001-01"
+            result = self._clean_result(workspace, turn_dir)
+            result["verification"] = {
+                "passed": False,
+                "checks": [{"name": "types", "passed": False, "returncode": 1}],
+                "skipped_checks": [],
+            }
+            self._write_result(turn_dir, result)
+
+            turn = self._turn(history)
+
+            self.assertEqual(0, turn["result"]["returncode"])
+            self.assertTrue(turn["anomalous"])
+
+    def test_a_turn_the_guard_refused_is_anomalous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            workspace, _, state_dir, run_dir = history
+            turn_dir = run_dir / "turn-0001-01"
+            result = self._clean_result(workspace, turn_dir)
+            result["turn_index"] = 1
+            result["status_result"] = "complete"
+            self._write_result(turn_dir, result)
+            self._write_events(
+                state_dir,
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.TURN_REJECTED_EVENT,
+                        {"run_id": RUN_ID, "turn_index": 1, "reopened": True},
+                    ),
+                    (
+                        events.SESSION_REOPENED_EVENT,
+                        {"run_id": RUN_ID, "turn_index": 1},
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            turn = self._turn(history)
+
+            self.assertEqual("complete", turn["result"]["status_result"])
+            self.assertTrue(turn["anomalous"])
+            self.assertTrue(turn["rejected"])
+
+    def test_a_rejection_naming_another_turn_leaves_this_one_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            workspace, _, state_dir, run_dir = history
+            turn_dir = run_dir / "turn-0001-01"
+            result = self._clean_result(workspace, turn_dir)
+            result["turn_index"] = 1
+            self._write_result(turn_dir, result)
+            self._write_events(
+                state_dir,
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.TURN_REJECTED_EVENT,
+                        {"run_id": RUN_ID, "turn_index": 7, "reopened": True},
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            turn = self._turn(history)
+
+            self.assertFalse(turn["anomalous"])
+            self.assertNotIn("rejected", turn)
+
+    def test_a_clean_turn_stays_unremarkable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            turn = self._turn(self._history(Path(tmp)))
+
+            self.assertFalse(turn["anomalous"])
+            self.assertNotIn("rejected", turn)
+
+
+class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
+    """A commit the guard saw is projected even when the runner made none."""
+
+    def _worker_committed(self, tmp: str) -> dict[str, Any]:
+        history = self._history(Path(tmp))
+        workspace, _, state_dir, run_dir = history
+        state_payload = self._read_state(state_dir)
+        state_payload["commit_mode"] = None
+        self._write_state(state_dir, state_payload)
+
+        turn_dir = run_dir / "turn-0001-01"
+        result = self._clean_result(workspace, turn_dir)
+        result["workspace_write_guard"]["changed"] = {
+            "app": {
+                "head_changed": True,
+                "head_transition": {
+                    "before": "ab503cce84cf73bcaadb3c5e09f395f370ca5bc0",
+                    "after": "ede6829cedf2d8e91d1aaf91c0a8cc401dfdbe8d",
+                    "relation": "fast-forward",
+                    "commits_added": 1,
+                    "commits_removed": 0,
+                    "history_rewrite": False,
+                },
+            }
+        }
+        self._write_result(turn_dir, result)
+        return self._bundle(history).payload["commits"]
+
+    def test_a_worker_commit_under_a_null_commit_mode_is_projected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            commits = self._worker_committed(tmp)
+
+            self.assertIsNone(commits["commit_mode"])
+            self.assertEqual([], commits["attempts"])
+            observed = commits["observed_head_transitions"]
+            self.assertEqual(1, len(observed))
+            self.assertEqual("app", observed[0]["repository"])
+            self.assertEqual("turn-0001-01", observed[0]["turn"])
+            transition = observed[0]["transition"]
+            self.assertEqual("fast-forward", transition["relation"])
+            self.assertEqual(1, transition["commits_added"])
+            self.assertEqual(
+                "ab503cce84cf73bcaadb3c5e09f395f370ca5bc0", transition["before"]
+            )
+            self.assertEqual(
+                "ede6829cedf2d8e91d1aaf91c0a8cc401dfdbe8d", transition["after"]
+            )
+
+    def test_a_run_whose_head_never_moved_projects_no_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            commits = self._bundle(self._history(Path(tmp))).payload["commits"]
+
+            self.assertEqual([], commits["observed_head_transitions"])
+
+    def test_a_head_move_without_a_transition_is_projected_as_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            workspace, _, _, run_dir = history
+            turn_dir = run_dir / "turn-0001-01"
+            result = self._clean_result(workspace, turn_dir)
+            result["workspace_write_guard"]["changed"] = {"app": {"head_changed": True}}
+            self._write_result(turn_dir, result)
+
+            observed = self._bundle(history).payload["commits"][
+                "observed_head_transitions"
+            ]
+
+            self.assertEqual(1, len(observed))
+            self.assertIsNone(observed[0]["transition"])
+
+
+class ReopenedReadinessProjectionTests(_RunHistoryFixture, unittest.TestCase):
+    """The re-gate verdict that licenses a grown plan has to reach the audit."""
+
+    def _regated_bundle(self, tmp: str) -> dict[str, Any]:
+        history = self._history(Path(tmp))
+        payload = self._read_state(history[2])
+        payload["readiness_gate"] = {"ok": True, "core_skipped": True, "findings": []}
+        payload["readiness_gate_reopened"] = {
+            "trigger": events.REVIEW_REPAIR_REOPENED_EVENT,
+            "ok": True,
+            "total_sessions": 20,
+            "pending_sessions": 3,
+            "repair_session_ids": ["7.1", "7.2", "7.3"],
+            "findings": [],
+        }
+        self._write_state(history[2], payload)
+        return self._bundle(history).payload
+
+    def test_the_reopen_regate_verdict_reaches_the_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            status = self._regated_bundle(tmp)["status"]
+
+            gate = status["readiness_gate_reopened"]
+            self.assertTrue(gate["ok"])
+            self.assertEqual(20, gate["total_sessions"])
+            self.assertEqual(["7.1", "7.2", "7.3"], gate["repair_session_ids"])
+            # The stale gate stays visible beside it: an auditor that sees only
+            # core_skipped cannot tell a re-gated plan from an unauthorized one.
+            self.assertTrue(status["readiness_gate"]["core_skipped"])
+
+    def test_a_run_that_never_reopened_projects_no_regate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+
+            self.assertNotIn(
+                "readiness_gate_reopened", self._bundle(history).payload["status"]
+            )
+
+
 class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
     """Known failure modes reproduce as findings; a clean run passes every lane."""
 

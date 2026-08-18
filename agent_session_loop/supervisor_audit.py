@@ -902,6 +902,7 @@ _STATUS_STATE_KEYS = (
     "pause_policy",
     "paused",
     "readiness_gate",
+    "readiness_gate_reopened",
     "readiness_state_active",
     "readiness_state_current",
     "readiness_state_final",
@@ -1432,8 +1433,40 @@ def _turn_shows_failure(result: Mapping[str, Any]) -> bool:
         return True
     if _guard_shows_failure(result.get("workspace_write_guard")):
         return True
+    # Verification is the authoritative gate, and it runs after the harness has
+    # already exited. A turn whose gate failed therefore looks healthy at every
+    # top-level signal, so the nested result is the only place the failure is.
+    verification = result.get("verification")
+    if isinstance(verification, Mapping) and verification.get("passed") is False:
+        return True
     status_result = result.get("status_result")
     return status_result is not None and status_result != "complete"
+
+
+def _mark_rejected_turns(
+    turns: list[dict[str, Any]], event_records: Sequence[Mapping[str, Any]]
+) -> None:
+    """Mark turns a post-execution guard refused after they had already run.
+
+    A refusal is recorded in the event stream, not on the turn result the
+    harness left behind, so the turn keeps claiming the clean exit it made
+    before the guard reverted it. Correlating by turn index is what stops a
+    refused turn from being projected as healthy.
+    """
+    rejected: set[int] = set()
+    for record in event_records:
+        if record.get("name") != events.TURN_REJECTED_EVENT:
+            continue
+        index = _mapping(record.get("payload")).get("turn_index")
+        if isinstance(index, int):
+            rejected.add(index)
+    if not rejected:
+        return
+    for turn in turns:
+        index = _mapping(turn.get("result")).get("turn_index")
+        if isinstance(index, int) and index in rejected:
+            turn["anomalous"] = True
+            turn["rejected"] = True
 
 
 def _guard_shows_failure(guard: Any) -> bool:
@@ -1467,11 +1500,44 @@ def _turn_directories(run_dir: Path) -> list[Path]:
     return sorted(entries, key=lambda entry: entry.name)
 
 
+def _observed_head_transitions(
+    turns: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """HEAD moves the write guard saw, whoever made them.
+
+    ``commit_mode`` describes only the commits the runner itself was asked to
+    make, so a worker that commits under a null commit mode leaves the commit
+    projection empty while the guard records the move. Harvesting the guard
+    here means the projection answers "what landed" rather than "what the
+    runner intended", which is the question an auditor is asking.
+    """
+    observed: list[dict[str, Any]] = []
+    for turn in turns:
+        result = _mapping(turn.get("result"))
+        guard = _mapping(result.get("workspace_write_guard"))
+        for alias, raw_changes in _mapping(guard.get("changed")).items():
+            changes = _mapping(raw_changes)
+            if changes.get("head_changed") is not True:
+                continue
+            entry: dict[str, Any] = {
+                "turn": turn.get("name"),
+                "repository": alias,
+                "transition": _mapping(changes.get("head_transition")) or None,
+            }
+            observed.append(entry)
+    return observed
+
+
 def _commit_section(
-    collector: _Collector, *, run_dir: Path, state_payload: Mapping[str, Any]
+    collector: _Collector,
+    *,
+    run_dir: Path,
+    state_payload: Mapping[str, Any],
+    turns: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """What the run committed, from state projection plus per-commit results."""
     section = _projection(collector, state_payload, _COMMIT_STATE_KEYS)
+    section["observed_head_transitions"] = _observed_head_transitions(turns)
     attempts: list[dict[str, Any]] = []
     try:
         directories = sorted(
@@ -1912,6 +1978,7 @@ def collect_audit_input(
     turns = [
         _turn_section(collector, directory) for directory in _turn_directories(run_dir)
     ]
+    _mark_rejected_turns(turns, event_records)
 
     payload: dict[str, Any] = {
         "schema_version": AUDIT_INPUT_SCHEMA_VERSION,
@@ -1949,7 +2016,7 @@ def collect_audit_input(
         "review": _projection(collector, state_payload, _REVIEW_STATE_KEYS),
         "repair": _projection(collector, state_payload, _REPAIR_STATE_KEYS),
         "commits": _commit_section(
-            collector, run_dir=run_dir, state_payload=state_payload
+            collector, run_dir=run_dir, state_payload=state_payload, turns=turns
         ),
         "status": _projection(collector, state_payload, _STATUS_STATE_KEYS),
         "repository": _repository_section(collector, workspace_snapshot),
