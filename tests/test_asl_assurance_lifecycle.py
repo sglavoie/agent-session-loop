@@ -50,6 +50,16 @@ FIXED_CLOCK = datetime(2026, 8, 10, 10, 11, 12, tzinfo=UTC)
 #: Identity of the issue the audit's own read-only guard opens.
 MUTATION_INVARIANT_KEY = "audit-read-only-mutation"
 
+#: A run other than the one under test, so a seeded ledger issue is never
+#: mistaken for the audit that run still owes.
+SEED_RUN_ID = "20260810T101112999999Z-4243"
+SEED_TIMESTAMP = "2026-08-09T00:00:00+00:00"
+
+#: The moment a defect was declared fixed, and records either side of it.
+FIX_TIMESTAMP = "2026-08-10T00:00:00+00:00"
+BEFORE_FIX_TIMESTAMP = "2026-08-09T12:00:00+00:00"
+AFTER_FIX_TIMESTAMP = "2026-08-11T00:00:00+00:00"
+
 
 def _summary(state_name: str = "all-clear", **overrides: object):
     values: dict[str, object] = {
@@ -1696,6 +1706,147 @@ class PendingAuditCatchupTests(_RunHistory, unittest.TestCase):
             self._abandon(history, assurance=None)
 
             report = self._process(history, run_id=RUN_ID)
+
+            self.assertEqual(
+                assurance_catchup.OUTCOME_AUDITED, report.results[0].outcome
+            )
+
+    def _dispose(self, root: Path, kind: str, recorded_at: str) -> None:
+        """Put one disposed issue in the ledger, decided at ``recorded_at``.
+
+        Published under a run of its own so that seeding a generation boundary
+        never doubles as the audit the run under test still owes.
+        """
+        assurance_projection.publish_audit(
+            assurance_projection.AuditPublication(
+                run_id=SEED_RUN_ID,
+                state="findings",
+                eligible=True,
+                findings=(
+                    assurance_models.Finding(
+                        category="lifecycle",
+                        component="agent_session_loop/runner.py",
+                        invariant_key="retry.budget-respected",
+                        lane="lifecycle-retry-resume",
+                        severity="high",
+                        summary="A retry ran after the budget was exhausted.",
+                        recommendation="Clamp the retry counter before relaunching.",
+                        evidence=("events.jsonl",),
+                    ),
+                ),
+                artifacts=(
+                    assurance_models.EvidenceRef(
+                        kind="artifact",
+                        locator="supervisor-audit-input.json",
+                        digest="a" * 64,
+                    ),
+                ),
+                completed_at=SEED_TIMESTAMP,
+            ),
+            state_dir=root,
+            recorded_at=SEED_TIMESTAMP,
+        )
+        assurance_ledger.append_record(
+            assurance_ledger.KIND_ISSUE_DISPOSITION,
+            assurance_models.Disposition(
+                issue_id="ASI-1", kind=kind, recorded_at=recorded_at
+            ),
+            state_dir=root,
+        )
+
+    def _date_record(self, history: tuple[Path, Path, Path, Path], when: str) -> None:
+        """Date the pending record, which is otherwise stamped as the run dies."""
+        path = assurance_catchup.record_path(history[3])
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["recorded_at"] = when
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_a_run_older_than_the_newest_fix_is_left_to_the_backlog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            root = history[2].parent
+            self._abandon(history)
+            self._date_record(history, BEFORE_FIX_TIMESTAMP)
+            self._dispose(root, "resolve", FIX_TIMESTAMP)
+
+            report = self._process(history)
+
+            result = report.results[0]
+            self.assertEqual(assurance_catchup.OUTCOME_SKIPPED, result.outcome)
+            self.assertEqual(
+                assurance_catchup.REASON_SUPERSEDED_GENERATION, result.reason
+            )
+            inbox = assurance_projection.read_projection(state_dir=root)
+            self.assertIsNone(inbox.run(RUN_ID))
+
+    def test_naming_a_superseded_run_audits_it_anyway(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            root = history[2].parent
+            self._abandon(history)
+            self._date_record(history, BEFORE_FIX_TIMESTAMP)
+            self._dispose(root, "resolve", FIX_TIMESTAMP)
+
+            report = self._process(history, run_id=RUN_ID)
+
+            self.assertEqual(
+                assurance_catchup.OUTCOME_AUDITED, report.results[0].outcome
+            )
+
+    def test_a_run_newer_than_the_fix_is_still_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            root = history[2].parent
+            self._abandon(history)
+            self._date_record(history, AFTER_FIX_TIMESTAMP)
+            self._dispose(root, "resolve", FIX_TIMESTAMP)
+
+            report = self._process(history)
+
+            self.assertEqual(
+                assurance_catchup.OUTCOME_AUDITED, report.results[0].outcome
+            )
+
+    def test_a_dismissal_does_not_start_a_new_generation(self) -> None:
+        """Dismissing a defect leaves the code exactly as the audits found it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            root = history[2].parent
+            self._abandon(history)
+            self._date_record(history, BEFORE_FIX_TIMESTAMP)
+            self._dispose(root, "dismiss", FIX_TIMESTAMP)
+
+            report = self._process(history)
+
+            self.assertEqual(
+                assurance_catchup.OUTCOME_AUDITED, report.results[0].outcome
+            )
+
+    def test_a_ledger_that_resolved_nothing_leaves_every_run_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._abandon(history)
+            self._date_record(history, BEFORE_FIX_TIMESTAMP)
+
+            report = self._process(history)
+
+            self.assertEqual(
+                assurance_catchup.OUTCOME_AUDITED, report.results[0].outcome
+            )
+
+    def test_an_undated_record_is_not_dropped_as_old(self) -> None:
+        """A run that cannot be placed in a generation stays in the current one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            root = history[2].parent
+            self._abandon(history)
+            path = assurance_catchup.record_path(history[3])
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.pop("recorded_at")
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self._dispose(root, "resolve", FIX_TIMESTAMP)
+
+            report = self._process(history)
 
             self.assertEqual(
                 assurance_catchup.OUTCOME_AUDITED, report.results[0].outcome

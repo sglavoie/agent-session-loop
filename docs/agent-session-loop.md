@@ -2944,6 +2944,19 @@ processed in bulk. Naming `--run-id RUN_ID` processes that run anyway, which is
 the only way an audit is ever run for old state, and it is one run at a time by
 a person who asked for it.
 
+A bulk pass is also bounded to the current code generation. The boundary is the
+ledger's own newest `resolve` disposition: resolving an issue is the operator's
+statement that a defect is fixed, and it is the only decision that claims the
+code moved, since dismissing an issue or accepting its risk both leave the
+behavior exactly as the audits found it. A pending record dated before that
+moment describes a run of code the fix has since replaced, so grading it can only
+re-report the defect the resolution already answered — which is how a backlog
+reopens issues an operator closed. Such a record is reported as `skipped` with
+`reason: superseded-generation`; it is never deleted, and `--run-id RUN_ID` still
+audits it. A ledger that has resolved nothing sets no boundary and leaves every
+record current, and a record carrying no timestamp is left current too, because
+dropping a run over a missing field would hide it rather than date it.
+
 Processing is serial and single-winner. Each run is claimed with a nonblocking
 `flock` on `assurance-catchup.lock` in its own run directory, so two catch-up
 passes divide the backlog instead of racing on it and a run another pass holds

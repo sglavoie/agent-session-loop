@@ -13,6 +13,13 @@ selection, workspace binding, and plan directory are copied into the record,
 because the next run of the same plan overwrites ``state.json`` and would
 otherwise take them with it.
 
+A bulk pass is also bounded to the current code generation. A run recorded
+before the newest issue resolution ran under code the fix has since replaced, so
+grading it can only re-report the defect that resolution already answered — and
+that is precisely how a backlog reopens issues an operator closed. Those records
+are reported as skipped rather than deleted, and naming one by run id still
+audits it.
+
 Processing is serial and single-winner. Each run is claimed with a nonblocking
 ``flock`` in its own run directory, so two catch-up processes divide the work
 instead of racing on it, and the ledger is consulted inside that claim, so a
@@ -30,6 +37,7 @@ import os
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +73,9 @@ REASON_EVIDENCE_SUPERSEDED = "evidence-superseded"
 REASON_MALFORMED_RECORD = "malformed-record"
 #: The recorded run configuration cannot resolve an audit role.
 REASON_AUDIT_CONFIG_UNAVAILABLE = "audit-config-unavailable"
+#: The run ended before the newest issue resolution, so its evidence was
+#: produced by code that predates the fix a bulk pass would re-grade it against.
+REASON_SUPERSEDED_GENERATION = "superseded-generation"
 
 REASON_UNKNOWN_RUN = "unknown-run"
 REASON_AMBIGUOUS_RUN = "ambiguous-run"
@@ -314,6 +325,50 @@ def _state_still_describes(pending: PendingRun) -> bool:
     return isinstance(parsed, dict) and parsed.get("run_id") == pending.run_id
 
 
+def generation_watermark(inbox: projection.AssuranceProjection) -> str | None:
+    """When the code these audits grade last changed, per the ledger itself.
+
+    A resolution is the operator's statement that a defect is fixed, which is
+    the only disposition that claims the code moved: dismissing an issue or
+    accepting its risk both leave the behavior exactly as the audits found it.
+    ``None`` when nothing has ever been resolved, which puts every record in the
+    current generation rather than inventing a boundary.
+    """
+    resolved = [
+        disposition.recorded_at
+        for issue in inbox.issues
+        for disposition in issue.dispositions
+        if disposition.kind == "resolve"
+    ]
+    return max(resolved, key=_moment, default=None)
+
+
+def _moment(timestamp: str) -> datetime:
+    """Order two ledger timestamps by instant rather than by spelling."""
+    try:
+        return datetime.fromisoformat(timestamp)
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+
+
+def _predates_generation(
+    pending: PendingRun, inbox: projection.AssuranceProjection
+) -> bool:
+    """Report whether a bulk pass should leave this run to the older backlog.
+
+    A run recorded before the newest resolution ran under code that no longer
+    exists, so auditing it can only re-report the behavior that resolution
+    already answered — which is how a resolved issue gets reopened by history.
+    A record carrying no timestamp cannot be placed in any generation and is
+    left in the current one, because dropping a run over a missing field would
+    hide it rather than date it.
+    """
+    watermark = generation_watermark(inbox)
+    if watermark is None or pending.recorded_at is None:
+        return False
+    return _moment(pending.recorded_at) < _moment(watermark)
+
+
 def _registered_repositories(pending: PendingRun) -> tuple[tuple[str, ...], bool]:
     """Rebuild the dead run's registry, and say whether it recorded one at all.
 
@@ -399,6 +454,8 @@ def process_run(
             return result(OUTCOME_UNUSABLE, reason=str(error))
         if inbox.run(pending.run_id) is not None:
             return result(OUTCOME_ALREADY_AUDITED)
+        if not force and _predates_generation(pending, inbox):
+            return result(OUTCOME_SKIPPED, reason=REASON_SUPERSEDED_GENERATION)
         if not _state_still_describes(pending):
             return result(OUTCOME_UNUSABLE, reason=REASON_EVIDENCE_SUPERSEDED)
         # Only reachable once the ledger has shown nothing was published for
@@ -451,8 +508,9 @@ def process_pending(
     ``limit`` bounds the audits this pass launches, not the records it looks
     at: a run already published or deliberately skipped costs nothing and must
     not crowd out a run that still owes real work. Naming a ``run_id``
-    processes that run even when its record carries a skip, which is the only
-    way an audit that predates this feature is ever run — never in bulk.
+    processes that run even when its record carries a skip or predates the
+    current code generation, which is the only way an audit that predates this
+    feature, or the newest resolution, is ever run — never in bulk.
     """
     if limit < 1:
         raise CatchupError(
