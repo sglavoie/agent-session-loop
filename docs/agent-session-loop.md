@@ -1388,6 +1388,25 @@ immediately, and `--dry-run` persists `skipped` with reason `dry-run` while
 still reporting the role, timeout, and attempt budget a real run would have used
 under `planned.audit`. Text runs print a `Supervisor audit: STATE` summary line.
 
+The bundle carries the run's slice of `mailbox.jsonl` beside its slice of the
+event log, under `mailbox` with `records` and a `summary` reporting
+`available`, `rejected_count`, `unscoped_count`, and a count per kind. Only a
+question, a notice, a resolution and a supervision end name a run outright; a
+reply, a receipt and the wait records join their exchange through `to`,
+`wait_id` or `closure_id`, so ownership is seeded from the named records and
+walked forward, and a record that joins nothing is another run's or the plan's
+and is counted rather than reported as withheld. Message prose never reaches
+the bundle: `text` is application content, replaced by its digest and byte
+length like any other, so the audit can see that an operator ruled and when,
+not what was said. Without this an authorized mid-run narrowing — an operator
+answering a question by striking two checks a session could never pass — reads
+as a gate the run evaded, because the bundle held the contract the session was
+materialized with and the recipe it actually ran and nothing between them.
+`state/mailbox.jsonl` is registered in the evidence index so a finding can cite
+it. Under the size cap the exchange gives up its lifecycle records
+(`wait-start`, `wait-end`, `receipt`, `ack`) before ordinary events; the
+question, the ruling on it, and the notice are never shed.
+
 Opting out is the only way to run no checks at all. A run that stays enabled but
 resolves no independent role, spends either attempt budget, draws a harness that
 cannot enforce the read-only profile, or catches its auditor mutating the
@@ -2775,7 +2794,10 @@ questions, replies, and notices for a run that is still going, is enabled per
 run, and is written under its own mailbox locking with a separate
 `mailbox-lease.json` supervisor lease. They share no file, no lock, no id
 space, and no lifetime; `asl inbox ...` never reads or writes the assurance
-ledger, and `asl assurance ...` never reads or writes a mailbox.
+ledger, and no `asl assurance ...` command writes a mailbox. The one crossing is
+one-way and read-only: collecting a run's audit evidence bundle reads that run's
+slice of `mailbox.jsonl` directly, without the mailbox's lock, so an
+operator's ruling is visible to the audit that grades the run it ruled on.
 
 `list` answers the default triage question — what is still open — by printing
 the 50 most recently observed open issues, newest sighting first, with the
@@ -3340,7 +3362,8 @@ Runtime files include:
   result, including argv, cwd, return code, HEAD before/after, status result,
   commit SHA when one was created, and artifact paths.
 - `runs/<run_id>/supervisor-audit-input.json`: the bounded operational evidence
-  bundle the audit read.
+  bundle the audit read, including the run's slice of the plan's `mailbox.jsonl`
+  with every message body replaced by its digest.
 - `runs/<run_id>/supervisor-audit.json`: the validated audit record.
 - `runs/<run_id>/supervisor-audit.md`: the operator-readable audit report.
 - `runs/<run_id>/supervisor-audit-attempt-N/`: per-attempt prompt, returned

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import shutil
@@ -25,6 +26,7 @@ from agent_session_loop import (
     events,
     harness_failures,
     harnesses,
+    mailbox,
     model_availability,
     pause_policy,
     plans,
@@ -1578,6 +1580,97 @@ class EvidenceBundleTests(unittest.TestCase):
     SECRET_PASSWORD = "correct-horse-battery"
     APPLICATION_SOURCE = "def transfer_funds(amount):\n    return amount * 2\n"
 
+    QUESTION_ID = "11111111-1111-4111-8111-111111111111"
+    WAIT_ID = "22222222-2222-4222-8222-222222222222"
+    REPLY_ID = "33333333-3333-4333-8333-333333333333"
+    RECEIPT_ID = "44444444-4444-4444-8444-444444444444"
+    WAIT_END_ID = "55555555-5555-4555-8555-555555555555"
+    NOTICE_ID = "66666666-6666-4666-8666-666666666666"
+    FOREIGN_QUESTION_ID = "77777777-7777-4777-8777-777777777777"
+    FOREIGN_REPLY_ID = "88888888-8888-4888-8888-888888888888"
+    FOREIGN_RUN_ID = "20260810T101112123456Z-9999"
+    QUESTION_TEXT = "Two checks print `unknown flag: --docs`. Remove them?"
+    REPLY_TEXT = "Option (a), done — removed both from session-15.1.md."
+
+    def _mailbox_records(self) -> list[dict[str, Any]]:
+        """One full exchange for this run, plus another run's question."""
+        return [
+            {
+                "created_at": "2026-08-10T10:11:12Z",
+                "id": self.QUESTION_ID,
+                "kind": mailbox.KIND_QUESTION,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "text": self.QUESTION_TEXT,
+                "delivery_mode": mailbox.DELIVERY_MODE_WAIT,
+                "run_id": RUN_ID,
+                "session_id": "01",
+                "turn_index": 1,
+            },
+            {
+                "created_at": "2026-08-10T10:11:13Z",
+                "id": self.WAIT_ID,
+                "kind": mailbox.KIND_WAIT_START,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "to": self.QUESTION_ID,
+            },
+            {
+                "created_at": "2026-08-10T10:11:14Z",
+                "id": self.FOREIGN_QUESTION_ID,
+                "kind": mailbox.KIND_QUESTION,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "text": "Another run asks something else.",
+                "delivery_mode": mailbox.DELIVERY_MODE_ASYNC,
+                "run_id": self.FOREIGN_RUN_ID,
+                "session_id": "01",
+                "turn_index": 1,
+            },
+            {
+                "created_at": "2026-08-10T10:11:15Z",
+                "id": self.REPLY_ID,
+                "kind": mailbox.KIND_REPLY,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "text": self.REPLY_TEXT,
+                "to": self.QUESTION_ID,
+            },
+            {
+                "created_at": "2026-08-10T10:11:16Z",
+                "id": self.FOREIGN_REPLY_ID,
+                "kind": mailbox.KIND_REPLY,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "text": "Answering the other run.",
+                "to": self.FOREIGN_QUESTION_ID,
+            },
+            {
+                "created_at": "2026-08-10T10:11:17Z",
+                "id": self.RECEIPT_ID,
+                "kind": mailbox.KIND_RECEIPT,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "to": self.QUESTION_ID,
+                "closure_id": self.REPLY_ID,
+                "wait_id": self.WAIT_ID,
+            },
+            {
+                "created_at": "2026-08-10T10:11:18Z",
+                "id": self.WAIT_END_ID,
+                "kind": mailbox.KIND_WAIT_END,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "to": self.QUESTION_ID,
+                "wait_id": self.WAIT_ID,
+                "reason": mailbox.WAIT_END_REASON_CLOSURE,
+                "closure_id": self.REPLY_ID,
+            },
+            {
+                "created_at": "2026-08-10T10:11:19Z",
+                "id": self.NOTICE_ID,
+                "kind": mailbox.KIND_NOTICE,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "text": "Session 01 resumed with the narrowed contract.",
+                "run_id": RUN_ID,
+                "session_id": "01",
+                "turn_index": 1,
+            },
+        ]
+
     def _history(
         self,
         tmp: Path,
@@ -1689,6 +1782,10 @@ class EvidenceBundleTests(unittest.TestCase):
                 )
                 + "\n"
             )
+        (state_dir / mailbox.MAILBOX_FILE_NAME).write_text(
+            "".join(json.dumps(record) + "\n" for record in self._mailbox_records()),
+            encoding="utf-8",
+        )
         return workspace, plan_dir, state_dir, run_dir
 
     def _collect(
@@ -1731,6 +1828,7 @@ class EvidenceBundleTests(unittest.TestCase):
             for section in (
                 "turns",
                 "events",
+                "mailbox",
                 "scopes",
                 "review",
                 "status",
@@ -1837,6 +1935,117 @@ class EvidenceBundleTests(unittest.TestCase):
                     and entry["reason"] == supervisor_audit.REASON_MALFORMED
                     for entry in payload["omissions"]
                 )
+            )
+
+    def test_the_operator_exchange_reaches_the_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._collect(*self._history(Path(tmp))).payload
+            section = payload["mailbox"]
+
+            self.assertTrue(section["summary"]["available"])
+            self.assertEqual(
+                [
+                    (self.QUESTION_ID, mailbox.KIND_QUESTION),
+                    (self.WAIT_ID, mailbox.KIND_WAIT_START),
+                    (self.REPLY_ID, mailbox.KIND_REPLY),
+                    (self.RECEIPT_ID, mailbox.KIND_RECEIPT),
+                    (self.WAIT_END_ID, mailbox.KIND_WAIT_END),
+                    (self.NOTICE_ID, mailbox.KIND_NOTICE),
+                ],
+                [(record["id"], record["kind"]) for record in section["records"]],
+            )
+            self.assertEqual(
+                [1, 2, 4, 6, 7, 8],
+                [record["sequence"] for record in section["records"]],
+            )
+            self.assertEqual("01", section["records"][0]["session_id"])
+            self.assertEqual(1, section["records"][0]["turn_index"])
+
+    def test_the_reply_prose_is_withheld_while_its_digest_survives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self._collect(*self._history(Path(tmp)))
+            text = bundle.to_bytes().decode("utf-8")
+
+            self.assertNotIn(self.REPLY_TEXT, text)
+            self.assertNotIn(self.QUESTION_TEXT, text)
+            self.assertIn(
+                hashlib.sha256(self.REPLY_TEXT.encode("utf-8")).hexdigest()[:16], text
+            )
+
+    def test_another_runs_exchange_is_counted_rather_than_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self._collect(*self._history(Path(tmp)))
+            text = bundle.to_bytes().decode("utf-8")
+
+            self.assertEqual(2, bundle.payload["mailbox"]["summary"]["unscoped_count"])
+            self.assertNotIn(self.FOREIGN_QUESTION_ID, text)
+            self.assertNotIn(self.FOREIGN_REPLY_ID, text)
+
+    def test_a_missing_mailbox_is_explicit_rather_than_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            (state_dir / mailbox.MAILBOX_FILE_NAME).unlink()
+
+            payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+            summary = payload["mailbox"]["summary"]
+
+            self.assertEqual([], payload["mailbox"]["records"])
+            self.assertFalse(summary["available"])
+            self.assertEqual(supervisor_audit.REASON_MISSING, summary["reason"])
+            self.assertTrue(
+                any(
+                    entry["section"] == "mailbox"
+                    and entry["reason"] == supervisor_audit.REASON_MISSING
+                    for entry in payload["omissions"]
+                )
+            )
+
+    def test_a_damaged_mailbox_line_is_counted_and_digested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            with (state_dir / mailbox.MAILBOX_FILE_NAME).open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write("{not json\n")
+
+            payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+
+            self.assertEqual(1, payload["mailbox"]["summary"]["rejected_count"])
+            self.assertEqual(6, len(payload["mailbox"]["records"]))
+            self.assertTrue(
+                any(
+                    entry["section"] == "mailbox"
+                    and entry["reason"] == supervisor_audit.REASON_MALFORMED
+                    and len(entry["sha256"]) == 64
+                    for entry in payload["omissions"]
+                )
+            )
+
+    def test_the_size_cap_sheds_lifecycle_records_and_keeps_the_ruling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp), event_count=20000)
+
+            payload = self._collect(*history, max_bytes=4 * 1024).payload
+            kinds = [record["kind"] for record in payload["mailbox"]["records"]]
+
+            self.assertEqual(
+                [mailbox.KIND_QUESTION, mailbox.KIND_REPLY, mailbox.KIND_NOTICE], kinds
+            )
+            self.assertTrue(
+                any(
+                    entry["section"] == "mailbox"
+                    and entry["reason"] == supervisor_audit.REASON_SIZE_CAP
+                    for entry in payload["omissions"]
+                )
+            )
+
+    def test_the_mailbox_is_named_in_the_evidence_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self._collect(*self._history(Path(tmp)))
+
+            self.assertIn(
+                f"state/{mailbox.MAILBOX_FILE_NAME}",
+                {reference.locator for reference in bundle.evidence},
             )
 
     def test_every_reference_resolves_inside_an_approved_root(self) -> None:

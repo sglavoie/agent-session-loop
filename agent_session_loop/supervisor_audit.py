@@ -61,6 +61,7 @@ from . import (
     events,
     harness_failures,
     harnesses,
+    mailbox,
     model_availability,
     pause_policy,
     plans,
@@ -940,6 +941,15 @@ _CONTENT_KEYS = frozenset(
     }
 )
 
+#: Mailbox kinds the bundle gives up first under the size cap. They time-stamp
+#: an exchange; the question, the ruling on it, and the notice never go.
+_SHEDDABLE_MAILBOX_KINDS = frozenset(mailbox.LIFECYCLE_KINDS) | {mailbox.KIND_ACK}
+
+#: Fields through which a mailbox record joins an exchange it does not name a
+#: run for: a reply and a resolution point at their question, a receipt at the
+#: closure it acknowledges, and a wait record at the wait it opened.
+_MAILBOX_JOIN_KEYS = ("to", "wait_id", "closure_id")
+
 #: Keys naming a Git origin, which is canonicalized rather than copied so a
 #: credential embedded in a remote URL cannot reach the bundle.
 _ORIGIN_KEYS = frozenset({"origin", "origins", "remote", "remote_url", "url"})
@@ -1789,6 +1799,91 @@ def _read_events(
     return records, summary
 
 
+def _read_mailbox(
+    path: Path, run_id: str, collector: _Collector
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Read the run's slice of the shared operator mailbox.
+
+    Without it an audit sees the contract a session was materialized with and
+    the recipe it actually ran, but nothing saying a human ruled between the
+    two, and reads an authorized narrowing as an evaded gate.
+
+    Only a record that names a run outright can be claimed by run ID; a reply,
+    a receipt and the wait records join their exchange through ``to``,
+    ``wait_id`` or ``closure_id``, so ownership is seeded from the named
+    records and walked forward. A record that never joins belongs to another
+    run or to the plan, and is counted rather than reported as withheld: an
+    omission means evidence was kept back, not that it was someone else's.
+
+    The file is read directly rather than through :mod:`mailbox`, which is
+    addressed by plan directory and takes a shared lock that a live supervisor
+    could stall collection behind.
+    """
+    summary: dict[str, Any] = {
+        "available": False,
+        "rejected_count": 0,
+        "unscoped_count": 0,
+        "counts": {},
+    }
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        summary["reason"] = REASON_MISSING
+        collector.omissions.record("mailbox", REASON_MISSING, str(path))
+        return [], summary
+    except OSError:
+        summary["reason"] = REASON_UNREADABLE
+        collector.omissions.record("mailbox", REASON_UNREADABLE, str(path))
+        return [], summary
+
+    summary["available"] = True
+    parsed_lines: list[tuple[int, Mapping[str, Any]]] = []
+    rejected = 0
+    for index, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError, ValueError:
+            rejected += 1
+            collector.omissions.record("mailbox", REASON_MALFORMED, line[:2000])
+            continue
+        if not isinstance(parsed, Mapping):
+            rejected += 1
+            collector.omissions.record("mailbox", REASON_MALFORMED, line[:2000])
+            continue
+        parsed_lines.append((index, parsed))
+
+    owned = {
+        str(parsed["id"])
+        for _, parsed in parsed_lines
+        if parsed.get("run_id") == run_id and parsed.get("id") is not None
+    }
+    records: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    unscoped = 0
+    for index, parsed in parsed_lines:
+        joined = any(parsed.get(key) in owned for key in _MAILBOX_JOIN_KEYS)
+        if not joined and parsed.get("run_id") != run_id:
+            unscoped += 1
+            continue
+        if parsed.get("id") is not None:
+            owned.add(str(parsed["id"]))
+        kind = str(parsed.get("kind") or "")
+        counts[kind] = counts.get(kind, 0) + 1
+        # The prose lives under ``text``, which redaction already treats as
+        # application content, so the ruling's digest and length survive and
+        # its bytes do not.
+        record = dict(collector.redact(parsed))
+        record["sequence"] = index
+        records.append(record)
+    summary["rejected_count"] = rejected
+    summary["unscoped_count"] = unscoped
+    summary["counts"] = counts
+    summary["reference"] = collector.reference(path, kind="event")
+    return records, summary
+
+
 def _plan_section(
     collector: _Collector,
     *,
@@ -1994,6 +2089,7 @@ def _shed(
     something still explains how the run ended.
     """
     records: list[dict[str, Any]] = payload["events"]["records"]
+    messages: list[dict[str, Any]] = payload["mailbox"]["records"]
     turns: list[dict[str, Any]] = payload["turns"]
     protected = {
         id(turn)
@@ -2014,6 +2110,17 @@ def _shed(
         for index in reversed(doomed):
             collector.omissions.record("events", REASON_SIZE_CAP, records[index])
             del records[index]
+        return bool(doomed)
+
+    def drop_mailbox(batch: int) -> bool:
+        doomed = [
+            index
+            for index, message in enumerate(messages)
+            if message.get("kind") in _SHEDDABLE_MAILBOX_KINDS
+        ][:batch]
+        for index in reversed(doomed):
+            collector.omissions.record("mailbox", REASON_SIZE_CAP, messages[index])
+            del messages[index]
         return bool(doomed)
 
     def drop_turn(only_unprotected: bool, batch: int) -> bool:
@@ -2040,6 +2147,7 @@ def _shed(
             ],
         ),
         lambda batch: drop_events(2, batch),
+        drop_mailbox,
         lambda batch: drop_events(1, batch),
         lambda batch: drop_turn(True, batch),
         lambda batch: collector.shrink_previews(MIN_PREVIEW_BYTES),
@@ -2132,6 +2240,9 @@ def collect_audit_input(
     event_records, event_summary = _read_events(
         state_dir / events.EVENTS_FILE_NAME, run_id, collector
     )
+    mailbox_records, mailbox_summary = _read_mailbox(
+        state_dir / mailbox.MAILBOX_FILE_NAME, run_id, collector
+    )
     turns = [
         _turn_section(collector, directory) for directory in _turn_directories(run_dir)
     ]
@@ -2175,6 +2286,7 @@ def collect_audit_input(
             "counts": _event_counts(event_records),
             "terminal_pending": bool(terminal_pending),
         },
+        "mailbox": {"records": mailbox_records, "summary": mailbox_summary},
         "verification": _verification_section(turns),
         "review": _projection(collector, state_payload, _REVIEW_STATE_KEYS),
         "repair": _projection(collector, state_payload, _REPAIR_STATE_KEYS),
