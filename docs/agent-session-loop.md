@@ -1454,12 +1454,17 @@ retryable, and a failure marked retryable has to sit under a policy that is
 with any of those missing, nothing will ever pick the session back up. The
 retry is deliberately not looked for inside the run, because the supervisor
 performs it by launching a fresh run, and a bundle is a single run that can
-never contain it. A run whose classification and policy agree also stops the
-paused session's failed `turn_execution_finished` record from reaching the
-unknown-anomaly catch-all, which otherwise reported every transport pause as a
-failure no deterministic check classifies. That exemption covers one event name
-for the one paused session: another session's failed turn, or another record
-type from the same session, is still an anomaly nothing explains.
+never contain it.
+
+Naming a reason also stops that session's `turn_finished` and
+`turn_execution_finished` records from reaching the unknown-anomaly catch-all,
+which otherwise reported every classified harness failure a second time as a
+failure no deterministic check classifies. The exemption is deliberately narrow:
+it covers those two record names for the one session `pause_details` names,
+while the run is actually paused. Another session's failed turn, another record
+type from the same session, a stale classification on a run that has resumed
+past it, and a pause that named no reason at all are all still anomalies
+nothing explains.
 
 The semantic auditor answers in a versioned JSON contract, and its second
 version replaced implicit identity with explicit selection. Every finding

@@ -2234,6 +2234,16 @@ _CLASSIFIED_EVENT_NAMES = frozenset(
     }
 )
 
+#: The records that report one session's turn outcome. A pause names the
+#: session it died on, so these are the only names its classification can
+#: account for.
+_PAUSED_TURN_EVENT_NAMES = frozenset(
+    {
+        events.TURN_EXECUTION_FINISHED_EVENT,
+        events.TURN_FINISHED_EVENT,
+    }
+)
+
 #: Records that describe work in progress. One of these after a run's terminal
 #: record means the run kept working after it declared itself over.
 _POST_TERMINAL_WORK_EVENTS = frozenset(
@@ -3134,17 +3144,15 @@ def _harness_failure_classification(context: _CheckContext) -> dict[str, Any]:
     return _mapping(details.get("failure_classification"))
 
 
-def _supervisor_owned_retry_sessions(context: _CheckContext) -> set[Any]:
-    """Sessions whose turn failure the pause hands to the supervisor to relaunch.
+def _classified_failure_sessions(context: _CheckContext) -> set[Any]:
+    """Sessions whose turn failure the run named a reason for when it paused.
 
-    The runner does not retry a harness failure in place. It classifies the
-    failure, pauses, and records a policy the supervisor reads to decide whether
-    to relaunch the same session — so a turn that failed this way is explained
-    evidence, not an anomaly, even though this run's own event stream stops at
-    the pause.
+    The pause carries the classification for the turn it died on, and that
+    classification is what the harness-failure check grades. Counting the same
+    turn again as evidence nothing looked at reports a named failure as an
+    unknown one, whether or not anything will relaunch it.
     """
-    classification = _harness_failure_classification(context)
-    if classification.get("retryable") is not True:
+    if not _harness_failure_classification(context).get("reason"):
         return set()
     session = _mapping(context.section("status").get("pause_details")).get("session")
     return set() if session is None else {session}
@@ -3649,19 +3657,16 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
                 f"{omission.get('reason')}"
             )
     unclassified: dict[str, int] = {}
-    retried = _supervisor_owned_retry_sessions(context)
+    classified = _classified_failure_sessions(context)
     for record in context.records:
         name = str(record.get("name") or "")
         if name in _CLASSIFIED_EVENT_NAMES:
             continue
         payload = _mapping(record.get("payload"))
-        # Named by session rather than by event name: the harness-failure check
-        # accounts for the turn the run paused on, and widening the exemption to
-        # every turn record would hide the failures nothing explains.
-        if (
-            name == events.TURN_EXECUTION_FINISHED_EVENT
-            and payload.get("session") in retried
-        ):
+        # Narrowed to the session the pause names, because a run reports the
+        # outcome of every session it ran and only one of them is the failure
+        # the pause classified.
+        if name in _PAUSED_TURN_EVENT_NAMES and payload.get("session") in classified:
             continue
         if _payload_shows_failure(payload):
             unclassified[name] = unclassified.get(name, 0) + 1

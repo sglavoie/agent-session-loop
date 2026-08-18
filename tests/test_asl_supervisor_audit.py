@@ -3305,18 +3305,20 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
         session: Any = 12,
         also_failed: tuple[Any, ...] = (),
         also_recorded: tuple[tuple[str, dict[str, Any]], ...] = (),
+        paused: bool = True,
     ) -> None:
         """Rewrite the run as one that paused mid-session on a harness failure.
 
         ``also_failed`` names further sessions whose turn failed and which the
         pause says nothing about; ``also_recorded`` adds arbitrary records
-        before the pause.
+        before the pause. ``paused`` false leaves the classification behind on
+        a run that is no longer paused.
         """
 
         state_dir = history[2]
         payload = self._read_state(state_dir)
         payload["ok"] = False
-        payload["paused"] = True
+        payload["paused"] = paused
         payload["pause_reason"] = reason
         payload["pause_details"] = {
             "session": session,
@@ -3378,6 +3380,23 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 results["unclassified-anomalies"].detail,
             )
 
+    def test_both_records_for_the_paused_turn_are_accounted_for(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_on_harness_failure(
+                history,
+                also_recorded=(
+                    (
+                        events.TURN_FINISHED_EVENT,
+                        {"run_id": RUN_ID, "session": 12, "returncode": 1},
+                    ),
+                ),
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["unclassified-anomalies"].status)
+
     def test_a_non_turn_failure_is_not_excused_by_the_pause(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
@@ -3401,7 +3420,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 results["unclassified-anomalies"].detail,
             )
 
-    def test_a_final_failure_stays_unexplained_by_the_pause(self) -> None:
+    def test_a_final_failure_is_accounted_for_by_its_classification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             self._paused_on_harness_failure(history, reason="harness-missing")
@@ -3412,9 +3431,42 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn(
                 "non-retryable", results["retryable-transport-failure"].detail
             )
-            # Nothing will relaunch this session, so its failed turn is still an
-            # anomaly the audit has to surface.
+            # Nothing will relaunch this session, but the run still named why
+            # the turn failed, so it is not a failure nothing classified.
+            self.assertEqual("pass", results["unclassified-anomalies"].status)
+
+    def test_a_classification_the_run_is_no_longer_paused_on_explains_nothing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_on_harness_failure(history, paused=False)
+
+            _, results = self._audit(history)
+
+            # A run that resumed past its pause carries the old classification
+            # in state; reading it would excuse a turn nothing is holding.
             self.assertEqual("fail", results["unclassified-anomalies"].status)
+            self.assertEqual("pass", results["retryable-transport-failure"].status)
+            self.assertIn(
+                "did not pause on a harness failure",
+                results["retryable-transport-failure"].detail,
+            )
+
+    def test_a_pause_that_named_no_reason_explains_no_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_on_harness_failure(
+                history, classification={"reason": None, "retryable": None}
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["unclassified-anomalies"].status)
+            self.assertIn(
+                events.TURN_EXECUTION_FINISHED_EVENT,
+                results["unclassified-anomalies"].detail,
+            )
 
     def test_a_retryable_failure_nothing_will_relaunch_is_a_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
