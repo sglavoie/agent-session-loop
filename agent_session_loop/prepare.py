@@ -4688,10 +4688,17 @@ def expand_ingest_from_args(args: Any) -> int:
     already = sum(1 for o in outcomes if o.status == CORRECTION_ALREADY_APPLIED)
     blocked = sum(1 for o in outcomes if o.status == CORRECTION_BLOCKED)
     corrections = [outcome.to_dict() for outcome in outcomes]
+    spark_missing = sorted(
+        session_id
+        for session_id in batch_session_ids
+        if (session := result.aggregate.session(session_id)) is not None
+        and not session.spark.reported
+    )
     payload_fields = {
         "sessions": list(batch_session_ids),
         "files": [str(path) for path in files],
         "corrections": corrections,
+        "spark_missing": spark_missing,
         "correction_summary": {
             "applied": applied,
             "already_applied": already,
@@ -4716,6 +4723,11 @@ def expand_ingest_from_args(args: Any) -> int:
             f"Corrections: {applied} applied, {already} already applied, "
             f"{blocked} blocked"
         )
+        if spark_missing:
+            print(
+                "Spark eligibility marker missing for sessions: "
+                f"{', '.join(spark_missing)}"
+            )
         for outcome in outcomes:
             if outcome.status == CORRECTION_BLOCKED:
                 print(

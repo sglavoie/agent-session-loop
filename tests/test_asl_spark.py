@@ -26,6 +26,7 @@ from agent_session_loop import (
 )
 from tests.support import (
     _validator_payload,
+    _write_prepare_plan,
     init_git_repo,
     install_fake_codex,
     patched_env,
@@ -159,6 +160,50 @@ class SparkSuitabilityTests(unittest.TestCase):
         malformed = prepare.parse_validator_output(malformed_payload).sessions[0]
         self.assertFalse(malformed.spark.eligible)
         self.assertIn("malformed", malformed.spark.reason)
+
+
+class SparkExpandIngestTests(unittest.TestCase):
+    def _ingest(self, plan_dir: Path, batch: Path) -> dict:
+        args = cli.build_parser().parse_args(
+            ["expand-ingest", str(plan_dir), "--batch-file", str(batch), "--json"]
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = cli.resolve_handler(args)(args)
+        self.assertEqual(0, code)
+        return json.loads(stdout.getvalue())
+
+    def test_marker_reaches_the_stored_aggregate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "plan"
+            _write_prepare_plan(plan_dir, ("1",))
+            payload = _validator_payload(
+                spark={"eligible": True, "reason": "single-file change, settled scope"}
+            )
+            batch = tmp_path / "batch.json"
+            batch.write_text(json.dumps(payload), encoding="utf-8")
+
+            body = self._ingest(plan_dir, batch)
+
+            self.assertEqual([], body["spark_missing"])
+            stored = prepare.load_prepare_validation(plan_dir)
+            assert stored is not None
+            session = stored.session("1")
+            assert session is not None
+            self.assertTrue(session.spark.eligible)
+
+    def test_dropped_marker_is_reported_per_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = tmp_path / "plan"
+            _write_prepare_plan(plan_dir, ("1",))
+            batch = tmp_path / "batch.json"
+            batch.write_text(json.dumps(_validator_payload()), encoding="utf-8")
+
+            body = self._ingest(plan_dir, batch)
+
+            self.assertEqual(["1"], body["spark_missing"])
 
 
 class SparkRoutingTests(unittest.TestCase):

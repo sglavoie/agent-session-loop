@@ -154,7 +154,8 @@ Assemble the findings for each session into a validator result JSON payload. Leg
       "dependencies": [{"direction": "requires|provides", "session_id": "<ID>", "description": "..."}],
       "contract_checked": true,
       "contract_problems": [{"message": "<verbatim detail from Step 3 asl contract-check>", "suggested_fix": "..."}],
-      "corrections": [{"expected_text": "<exact original text>", "replacement_text": "<exact corrected text>", "reason": "..."}]
+      "corrections": [{"expected_text": "<exact original text>", "replacement_text": "<exact corrected text>", "reason": "..."}],
+      "spark": {"eligible": false, "reason": "<concise, evidence-based>"}
     }
   ]
 }
@@ -184,7 +185,8 @@ Registered top-level shape:
       "dependencies": [],
       "contract_checked": false,
       "contract_problems": [],
-      "corrections": []
+      "corrections": [],
+      "spark": {"eligible": true, "reason": "single-file removal with a settled decision and an exact completion contract"}
     }
   ]
 }
@@ -206,6 +208,8 @@ state before removing it. Both values are accepted by
 `prepare.CLAIM_TYPES` / `prepare.ISSUE_TYPES`; anything outside those tuples is
 rejected fail-closed with nothing written.
 
+Every session entry carries `spark: {eligible, reason}` in both versions. Set `eligible: true` only for a small explicit scope with settled decisions, sufficient local context, and a clear completion contract; set it `false` for broad refactors, public API or schema changes, migrations, high-risk work, or unresolved uncertainty. The `reason` must be concise and evidence-based. Emit this marker for every session, whether or not the run will use `--spark`: an omitted marker is accepted silently and degrades that session to baseline routing forever, so omission is indistinguishable from a deliberate "ineligible" verdict. `asl expand-ingest --json` reports `spark_missing`, the ingested session ids whose marker was dropped; a non-empty list means that payload must be re-ingested carrying it.
+
 The parser rejects (fail-closed, `PlanError`, nothing written) unknown keys, empty required strings, unknown `claim_type`/`issue_type`/`direction`, invalid/duplicate session ids, and more than 3 `patterns` per session. Claims about code to be _created_ set `"to_be_created": true` (no `line`) and render as "N/A — to be created" instead of being flagged as issues. `contract_problems` requires `contract_checked: true` and takes the Step 3 findings verbatim. `corrections` are exact factual text replacements only (`expected_text != replacement_text`) — never design changes, plan restructuring, or contract-body edits; report those as `issues` or `contract_problems`.
 
 Process sessions in bounded batches (`prepare.DEFAULT_VALIDATION_BATCH_SIZE` = 4 sessions per payload; `prepare.batch_sessions` semantics). Write each batch payload to a JSON file and ingest it:
@@ -214,7 +218,7 @@ Process sessions in bounded batches (`prepare.DEFAULT_VALIDATION_BATCH_SIZE` = 4
 asl expand-ingest <plan-dir> --batch-file <batch-payload>.json --json
 ```
 
-`asl expand-ingest` parses the payload fail-closed **before** any disk write, merges it into `prepare-validation.json` (the derived aggregate, excluded from the stable readiness hash by construction), renders every validated session's `session-<ID>.expand.md`, idempotently inserts the `> **Expansion notes**:` reference line into `session-<ID>.md`, and applies each proposed correction — all in one atomic transaction. Re-running a batch is a no-op for already-rendered content. Its `--json` payload reports `sessions`, `files`, `corrections`, and `correction_summary` (`applied` / `already_applied` / `blocked`). A correction applies only when its `expected_text` matches exactly once outside the `## Completion Contract` and `## Handoff` sections; every other outcome is `blocked` with a stable reason (`not-found`, `ambiguous`, `contract-body`, `handoff-body`, `structural`) and left unapplied. Collect the `applied` fixes and surface every `blocked` outcome to the user as a blocker requiring manual judgment. A malformed payload fails with `reason: "validator-schema"` and the `PlanError` message verbatim, before any correction reaches disk.
+`asl expand-ingest` parses the payload fail-closed **before** any disk write, merges it into `prepare-validation.json` (the derived aggregate, excluded from the stable readiness hash by construction), renders every validated session's `session-<ID>.expand.md`, idempotently inserts the `> **Expansion notes**:` reference line into `session-<ID>.md`, and applies each proposed correction — all in one atomic transaction. Re-running a batch is a no-op for already-rendered content. Its `--json` payload reports `sessions`, `files`, `corrections`, `spark_missing`, and `correction_summary` (`applied` / `already_applied` / `blocked`). A correction applies only when its `expected_text` matches exactly once outside the `## Completion Contract` and `## Handoff` sections; every other outcome is `blocked` with a stable reason (`not-found`, `ambiguous`, `contract-body`, `handoff-body`, `structural`) and left unapplied. Collect the `applied` fixes and surface every `blocked` outcome to the user as a blocker requiring manual judgment. A malformed payload fails with `reason: "validator-schema"` and the `PlanError` message verbatim, before any correction reaches disk.
 
 The renderer emits one bullet per contract problem as `<session-id>: <issue>: <suggested fix>`; when `contract_checked` is true and `contract_problems` is empty it emits the literal `_no contract issues found_` (distinguishing "checked and clean" from "not checked"), and omits the section entirely when `contract_checked` is false. Supply empty lists rather than placeholder content — empty sections are omitted automatically. Do not emit a `## Parallel Safety` section or write `parallel-validation.md`; leave any pre-existing copy untouched.
 

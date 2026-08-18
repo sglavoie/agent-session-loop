@@ -2582,7 +2582,9 @@ payload reports the ingested `sessions`, the written `files`, and per-correction
 `corrections` outcomes — `applied`/`already-applied`/`blocked`, where a blocked
 correction carries a stable `blocker` (`not-found`, `ambiguous`,
 `contract-body`, `handoff-body`, or `structural`) — plus a `correction_summary`
-count. A malformed payload exits 1 with `reason: validator-schema` and the
+count and `spark_missing`, the ingested session ids whose Spark eligibility
+marker was absent and therefore pinned to baseline routing. A malformed payload
+exits 1 with `reason: validator-schema` and the
 `PlanError` message verbatim before any correction reaches disk; an unreadable
 batch file exits 1 with `reason: input-error`.
 
