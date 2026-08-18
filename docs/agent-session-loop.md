@@ -3591,12 +3591,23 @@ canonical ID of the generated review session once it has been appended or
 resumed, otherwise `null`. `review_output_path` is the absolute path to
 `PLAN_DIR/final-review.md` whenever review was requested, otherwise `null`.
 `review_completed` is `true` only after the review turn finished successfully.
-`review_verdict` is `null` until a review completes successfully; then it
-contains `status_line`, `outcome` (`"all-clear"` or `"findings"`),
-`total_findings`, and `findings_by_severity` (`high`, `med`, `low`).
-`review_skipped_reason` is `null` for clean review completions and for
-implementation-only runs; for review-requested runs that did not complete it
-records the terminal reason (`max-sessions`, `stopped`, a pause reason, etc.).
+`review_session_executed` is the canonical ID of the review session whose turn
+actually ran, stamped when that turn returns rather than when it commits, and
+`null` when no review turn ran at all. `review_verdict` is `null` until a review
+completes successfully; then it contains `status_line`, `outcome`
+(`"all-clear"` or `"findings"`), `total_findings`, and `findings_by_severity`
+(`high`, `med`, `low`). A review that ran without reaching its commit — because
+its handoff failed plan inspection, say — is attested from the artifact it left
+on disk instead: `review_verdict` is read back from `final-review.md`, and
+`review_output_sha256` / `review_artifact_sha256` record the digests of the two
+review artifacts. That read-back applies the same artifact requirement the run
+itself enforced, so a generated v2 review missing its `final-review.json` keeps
+`review_verdict: null` — the digests still describe what landed on disk, but a
+verdict the run refused as invalid is never projected back as if it stood.
+`review_skipped_reason` is `null` for clean review
+completions, for implementation-only runs, and for any run whose review turn
+executed; for review-requested runs whose review never ran it records the
+terminal reason (`max-sessions`, `stopped`, a pause reason, etc.).
 `completed_sessions` and `completed_session_ids` continue to include every
 completed turn for backward compatibility; consumers that need to distinguish
 review from implementation turns read `turns[*].session_kind`, which is either
@@ -3611,11 +3622,16 @@ Both `status --json` and `run --json` expose the same additive
 may ignore this block. `action` is one of `initial-review`,
 `materialize-repairs`, `run-repairs`, `rereview`, or `terminal`; `eligible`
 describes the persisted/effective-cap evaluation, and `blocker` is `null`,
-`review-harness-required`, `higher-cap-required`, `artifact-invalid`, a
-terminal disposition (`all-clear`, `repair-group-exhausted`,
-`findings-repeated`, or `unstructured-findings`), or a non-disposition terminal blocker
-(`repair-sessions-missing`, `repair-sessions-not-runnable`, or
-`unknown-disposition`). An unrecognized recorded disposition is retained in
+`review-harness-required`, `higher-cap-required`, `artifact-invalid`,
+`not-loop-ready`, a terminal disposition (`all-clear`,
+`repair-group-exhausted`, `findings-repeated`, or `unstructured-findings`), or
+a non-disposition terminal blocker (`repair-sessions-missing`,
+`repair-sessions-not-runnable`, or `unknown-disposition`). Repair children are
+written to disk before the executability gate judges them, so a materialization
+the gate refused leaves pending sessions that look runnable. A `run-repairs`
+continuation for such a plan reports `eligible: false` with blocker
+`not-loop-ready` until the plan is marked loop-ready again, rather than
+claiming the refused children are ready to run. An unrecognized recorded disposition is retained in
 `source_disposition` for diagnosis and maps to the stable
 `unknown-disposition` blocker. The projection includes source lineage,
 historical/required/selected cap values, pending and completed repair IDs,

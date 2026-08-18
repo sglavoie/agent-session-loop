@@ -809,6 +809,12 @@ def main() -> int:
                         (plan_dir / "final-review.json").write_text(
                             review_json, encoding="utf-8"
                         )
+                if os.environ.get("FAKE_CODEX_REVIEW_BREAK_PLAN"):
+                    # The review artifacts stay on disk while the plan itself
+                    # becomes uninspectable, so the turn ends at the
+                    # malformed-plan branch instead of at the commit that
+                    # would otherwise be the only record of the verdict.
+                    (plan_dir / "context.md").unlink(missing_ok=True)
         _write_last_message(
             "Runner status: complete\nNext command: $session-run plan/\n"
         )

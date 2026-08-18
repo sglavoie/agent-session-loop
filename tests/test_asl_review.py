@@ -2347,7 +2347,10 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             plans.inspect_plan(self.plan_dir), event_path
         )
         self.assertEqual("run-repairs", pending.action)
-        self.assertTrue(pending.eligible)
+        # The children exist and look runnable, but the gate that refused them
+        # has not been cleared, so they are not eligible yet.
+        self.assertFalse(pending.eligible)
+        self.assertEqual("not-loop-ready", pending.blocker)
         self.assertEqual(1, pending.historical_materializations)
         self.assertEqual(("2.1",), pending.pending_repair_session_ids)
         self.assertIsNone(pending.artifact_valid)
@@ -2396,6 +2399,81 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         self.assertTrue(rereview.eligible)
         self.assertIsNone(rereview.artifact_valid)
         self.assertIsNone(rereview.artifact_error)
+
+    def test_clearing_the_refusal_makes_the_repairs_eligible_again(self) -> None:
+        self._write_plan([self._finding("F1", "runner")])
+        self.assertTrue(self._materialize().ok)
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "disposition": "not-loop-ready",
+                "repair_session_ids": ["2.1"],
+                "max_review_fix_cycles": 1,
+            }
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-08-17T00:00:00Z",
+            ),
+        )
+
+        resume = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+
+        self.assertEqual("run-repairs", resume.action)
+        self.assertTrue(resume.eligible)
+        self.assertIsNone(resume.blocker)
+
+    def test_a_stale_loop_ready_stamp_does_not_clear_the_refusal(self) -> None:
+        self._write_plan([self._finding("F1", "runner")])
+        self.assertTrue(self._materialize().ok)
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "disposition": "not-loop-ready",
+                "repair_session_ids": ["2.1"],
+                "max_review_fix_cycles": 1,
+            }
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256="0" * 64,
+                checked_at="2026-08-17T00:00:00Z",
+            ),
+        )
+
+        resume = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+
+        self.assertFalse(resume.eligible)
+        self.assertEqual("not-loop-ready", resume.blocker)
+
+    def test_materialized_repairs_stay_eligible_without_a_refusal(self) -> None:
+        self._write_plan([self._finding("F1", "runner")])
+        self.assertTrue(self._materialize().ok)
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "disposition": "repairs-materialized",
+                "repair_session_ids": ["2.1"],
+                "max_review_fix_cycles": 1,
+            }
+        )
+
+        resume = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+
+        self.assertEqual("run-repairs", resume.action)
+        self.assertTrue(resume.eligible)
+        self.assertIsNone(resume.blocker)
 
     def test_continuation_projects_group_exhausted_from_run_config(
         self,

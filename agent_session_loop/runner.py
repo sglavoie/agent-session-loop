@@ -10792,10 +10792,12 @@ def _terminal_review_reason(payload: dict[str, Any]) -> str:
     return REVIEW_FINDINGS_UNRESOLVED_REASON
 
 
-def _set_existing_review_verdict(payload: dict[str, Any], plan_dir: Path) -> None:
+def _set_existing_review_verdict(
+    payload: dict[str, Any], plan_dir: Path, *, require_artifact: bool = False
+) -> None:
     """Project the persisted verdict when a continuation stops before a turn."""
 
-    verdict = _read_review_verdict(plan_dir)
+    verdict = _read_review_verdict(plan_dir, require_artifact=require_artifact)
     if not verdict.get("ok"):
         return
     payload["review_verdict"] = {
@@ -10807,6 +10809,32 @@ def _set_existing_review_verdict(payload: dict[str, Any], plan_dir: Path) -> Non
             "findings_by_severity",
         )
     }
+
+
+def _attest_executed_review(
+    payload: dict[str, Any], plan_dir: Path, *, require_artifact: bool
+) -> None:
+    """Attest a review that ran but never reached the commit that records it.
+
+    ``review_verdict`` is stamped on the commit path, so a review session whose
+    handoff fails plan inspection leaves the run reporting that no review
+    happened at all — while the artifact that session wrote sits on disk.
+    Reading it back here keeps the run's only independent review attestable from
+    its own output rather than from bookkeeping that never got to run.
+
+    `require_artifact` mirrors what the run itself enforced, so a verdict the
+    run refused as invalid is never re-projected here as if it stood. The
+    digests are recorded either way: they describe what the session left on
+    disk, which stays honest evidence even when the verdict does not hold.
+    """
+
+    if payload.get("review_verdict") is None:
+        _set_existing_review_verdict(
+            payload, plan_dir, require_artifact=require_artifact
+        )
+    output_sha256, artifact_sha256 = _review_artifact_digests(plan_dir)
+    payload["review_output_sha256"] = output_sha256
+    payload["review_artifact_sha256"] = artifact_sha256
 
 
 def _record_review_cycle(
@@ -13475,6 +13503,7 @@ def _initial_payload(
         review_requested=review_requested,
         review_harness=review_harness,
         review_session_id=None,
+        review_session_executed=None,
         review_output_path=review_output_path,
         review_completed=False,
         review_verdict=None,
@@ -13704,6 +13733,7 @@ def _run_locked(
     normalized_review_handoffs = list(
         plans.normalize_generated_review_handoff_artifacts(args.plan_dir)
     )
+    executed_review_requires_artifact = False
     snapshot = plan_cache.get(args.plan_dir)
     if not args.dry_run:
         _ensure_legacy_run_metadata(snapshot.plan_dir, verification_context)
@@ -15908,6 +15938,16 @@ def _run_locked(
                 run_control_context = None
             plan_artifacts_written_by_runner: tuple[str, ...] = ()
             if is_review_session:
+                # Stamped from the turn's own completion rather than from the
+                # commit, because every guard and terminating branch below can
+                # end the run before the commit that would otherwise be the
+                # only record that an independent review happened at all.
+                executed_review_requires_artifact = (
+                    review_session_version is not None
+                    and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
+                )
+                with persistence.lock:
+                    payload["review_session_executed"] = session_id
                 normalized_after_review = (
                     plans.normalize_generated_review_handoff_artifacts(before.plan_dir)
                 )
@@ -17216,8 +17256,16 @@ def _run_locked(
     with persistence.lock:
         if payload["ok"] and payload["reason"] == "":
             payload["reason"] = "stopped"
+        review_executed = payload.get("review_session_executed") is not None
+        if review_requested and review_executed and not payload.get("review_completed"):
+            _attest_executed_review(
+                payload,
+                snapshot.plan_dir,
+                require_artifact=executed_review_requires_artifact,
+            )
         if (
             review_requested
+            and not review_executed
             and not payload.get("review_completed")
             and payload.get("review_skipped_reason") is None
         ):

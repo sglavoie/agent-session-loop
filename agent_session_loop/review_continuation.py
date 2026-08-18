@@ -1321,6 +1321,30 @@ def review_resume_guidance(
     return None
 
 
+def _unresolved_materialization_blocker(
+    plan_dir: Path, disposition: str | None
+) -> str | None:
+    """Whether the gate that refused the last materialization still stands.
+
+    Repair children are written to disk before the executability gate judges
+    them, so a refused materialization leaves runnable-looking pending sessions
+    behind and the continuation would call them eligible while the run is still
+    paused on the refusal. Readiness is the resolution signal: the refusal left
+    the plan at ``draft``, and clearing it is what re-marks it loop-ready.
+    """
+    if disposition != REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY:
+        return None
+    try:
+        readiness = plans.read_readiness_metadata(plan_dir)
+        if readiness is None or readiness.state != "loop-ready":
+            return REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
+        if readiness.readiness_sha256 != plans.stable_readiness_sha256(plan_dir):
+            return REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
+    except plans.PlanError:
+        return REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
+    return None
+
+
 def evaluate_review_continuation(
     snapshot_or_plan_dir: plans.PlanSnapshot | str | Path,
     event_path: str | Path,
@@ -1521,6 +1545,9 @@ def evaluate_review_continuation(
         )
 
     if pending_ids:
+        blocker = _unresolved_materialization_blocker(snapshot.plan_dir, disposition)
+        if blocker is not None:
+            return result("run-repairs", False, blocker, planning=planning)
         return result("run-repairs", True, None, planning=planning)
     if generated_for_source and len(completed_ids) == len(generated_for_source):
         return result("rereview", True, None, planning=planning)

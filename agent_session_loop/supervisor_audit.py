@@ -869,11 +869,14 @@ _TERMINAL_EVENT_NAMES = frozenset({events.RUN_FINISHED_EVENT, events.RUN_PAUSED_
 
 #: State keys copied verbatim (after redaction) into each projection.
 _REVIEW_STATE_KEYS = (
+    "review_artifact_sha256",
     "review_completed",
     "review_cycles",
     "review_harness",
     "review_output_path",
+    "review_output_sha256",
     "review_requested",
+    "review_session_executed",
     "review_session_id",
     "review_skipped_reason",
     "review_verdict",

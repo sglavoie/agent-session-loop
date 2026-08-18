@@ -2215,6 +2215,37 @@ class ReopenedReadinessProjectionTests(_RunHistoryFixture, unittest.TestCase):
             )
 
 
+class ReviewAttestationProjectionTests(_RunHistoryFixture, unittest.TestCase):
+    """A review that ran without committing must still be auditable."""
+
+    def test_the_attested_review_reaches_the_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_state(history[2])
+            payload["review_requested"] = True
+            payload["review_completed"] = False
+            payload["review_skipped_reason"] = None
+            payload["review_session_executed"] = "11"
+            payload["review_verdict"] = {
+                "status_line": "Status: 3 findings",
+                "outcome": "findings",
+                "total_findings": 3,
+                "findings_by_severity": {"medium": 3},
+            }
+            payload["review_output_sha256"] = "a" * 64
+            payload["review_artifact_sha256"] = "b" * 64
+            self._write_state(history[2], payload)
+
+            review = self._bundle(history).payload["review"]
+
+            self.assertEqual("11", review["review_session_executed"])
+            self.assertFalse(review["review_completed"])
+            self.assertIsNone(review["review_skipped_reason"])
+            self.assertEqual(3, review["review_verdict"]["total_findings"])
+            self.assertEqual("a" * 64, review["review_output_sha256"])
+            self.assertEqual("b" * 64, review["review_artifact_sha256"])
+
+
 class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
     """Known failure modes reproduce as findings; a clean run passes every lane."""
 

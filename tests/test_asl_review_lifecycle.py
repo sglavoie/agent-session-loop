@@ -744,6 +744,41 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         ]
         self.assertEqual([], review_candidates)
 
+    def test_review_that_ran_is_attested_even_when_the_plan_breaks(self) -> None:
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_BREAK_PLAN": "1"},
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("malformed-plan", payload["pause_reason"])
+        # The review turn ran to completion; only the commit that records it
+        # was never reached.
+        self.assertEqual("2", payload["review_session_executed"])
+        self.assertFalse(payload["review_completed"])
+        self.assertIsNone(payload["review_skipped_reason"])
+        verdict = payload["review_verdict"]
+        self.assertEqual("all-clear", verdict["outcome"])
+        self.assertEqual(0, verdict["total_findings"])
+        self.assertIsNotNone(payload["review_output_sha256"])
+        self.assertIsNotNone(payload["review_artifact_sha256"])
+
+    def test_review_that_never_ran_is_still_reported_as_skipped(self) -> None:
+        self._write_plan(("pending", "pending"), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+
+        completed, payload = self._run(review_harness="claude", max_sessions=1)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIsNone(payload["review_session_executed"])
+        self.assertEqual("max-sessions", payload["review_skipped_reason"])
+        self.assertIsNone(payload["review_verdict"])
+
     def test_review_session_created_event_is_emitted(self) -> None:
         self._write_plan(("pending",), readiness="loop-ready")
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
@@ -1576,7 +1611,12 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertTrue(payload["paused"])
         self.assertEqual("verify-failed", payload["pause_reason"])
         self.assertFalse(payload["review_completed"])
+        # The turn ran, so the run attests it — but attestation reads the
+        # verdict under the same artifact requirement the run enforced, so a
+        # verdict already refused as invalid is never projected back.
+        self.assertEqual(review_session.id, payload["review_session_executed"])
         self.assertIsNone(payload["review_verdict"])
+        self.assertIsNone(payload["review_artifact_sha256"])
         review_text = review_session.path.read_text(encoding="utf-8")
         self.assertIn("- **Status**: pending", review_text)
 
