@@ -474,6 +474,43 @@ class CommandAndConfigTests(unittest.TestCase):
             )
         )
 
+    def test_approval_phrase_the_agent_wrote_is_not_a_live_ask(self) -> None:
+        # The literal line that opened ASI-24: a session editing
+        # approval-handling code streamed its own diff, and the substring match
+        # read it as the run stopping for a human.
+        self.assertIsNone(
+            runner._live_action_signal(
+                "stderr",
+                '+    "message": "approval required before continuing",\n',
+            )
+        )
+        self.assertIsNone(
+            runner._live_action_signal(
+                "stderr",
+                '-    "message": "needs approval",\n',
+            )
+        )
+        self.assertIsNone(
+            runner._live_action_signal(
+                "stderr",
+                '     "detail": "requires approval"\n',
+            )
+        )
+
+    def test_a_prompt_on_its_own_line_still_asks(self) -> None:
+        self.assertIsNotNone(
+            runner._live_action_signal(
+                "stderr",
+                "Approval required: run npm install?\n",
+            )
+        )
+        self.assertIsNotNone(
+            runner._live_action_signal(
+                "stderr",
+                "building the bundle\nwaiting for approval\nstill waiting\n",
+            )
+        )
+
     def test_runner_signals_ignore_noop_pause_when_final_status_complete(
         self,
     ) -> None:

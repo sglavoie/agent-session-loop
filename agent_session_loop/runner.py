@@ -3197,6 +3197,22 @@ def _preview_text(text: str, *, limit: int = 160) -> str:
     return f"{collapsed[: limit - 3]}..."
 
 
+def _approval_match_is_content(line: str, position: int) -> bool:
+    """Whether an approval phrase is text the agent wrote, not a prompt to it.
+
+    Workers are launched unable to ask: codex gets ``-s workspace-write`` and
+    claude ``--permission-mode dontAsk``. So a session editing approval-handling
+    code streams the phrase far more often than a harness ever asks for one, and
+    a bare substring match reads the agent's own diff as an interrupted run. A
+    real prompt stands on its own line; a phrase inside a string literal or
+    behind a diff marker is content the turn produced.
+    """
+    if line.lstrip()[:1] in {"+", "-", ">"}:
+        return True
+    prefix = line[:position]
+    return prefix.count('"') % 2 == 1 or prefix.count("'") % 2 == 1
+
+
 def _live_action_signal(
     stream_name: harnesses.StreamName,
     text: str,
@@ -3222,9 +3238,12 @@ def _live_action_signal(
                 "matched": events.RUNNER_STATUS_PREFIX,
             }
 
-    lowered = text.lower()
-    for pattern in APPROVAL_SIGNAL_PATTERNS:
-        if pattern in lowered:
+    for line in text.splitlines():
+        lowered = line.lower()
+        for pattern in APPROVAL_SIGNAL_PATTERNS:
+            position = lowered.find(pattern)
+            if position < 0 or _approval_match_is_content(line, position):
+                continue
             return {
                 "reason": "approval-required",
                 "message": _preview_text(text),
