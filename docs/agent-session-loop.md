@@ -3350,7 +3350,10 @@ was `reopened`, and any guard-specific `detail`. When the guard also returned a
 session the worker had marked complete back to `pending`, a `session_reopened`
 event follows it with `from_status` / `to_status`, so the reverse transition is
 replayable from the event stream instead of being visible only by comparing the
-final plan against the last turn record.
+final plan against the last turn record. That event also carries the
+`content_sha256` and `counts` of the plan as reinspected after the rewrite, so a
+consumer replaying the stream lands on the run's own authoritative projection
+rather than on a state it has to re-read the plan to confirm.
 `turn_handoff_correction` is appended when a completed handoff was
 mechanically malformed — no `Files modified` line, the `(none yet)`
 placeholder left in place, or an entry that is not `Alias:path` — and the

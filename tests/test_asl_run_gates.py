@@ -3918,6 +3918,10 @@ class HandoffCorrectionTests(unittest.TestCase):
         self.assertEqual("complete", reopenings[0]["from_status"])
         self.assertEqual("pending", reopenings[0]["to_status"])
         self.assertEqual("plan-inspection", reopenings[0]["guard"])
+        # Replaying the stream lands on the projection the run reports, not on
+        # a state the consumer has to re-read the plan to confirm.
+        self.assertEqual(snapshot.content_sha256, reopenings[0]["content_sha256"])
+        self.assertEqual(payload["final_snapshot"]["counts"], reopenings[0]["counts"])
 
     def test_correction_turn_preserves_review_artifacts(self) -> None:
         (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
@@ -4061,6 +4065,11 @@ class PausedHandoffStatusTests(unittest.TestCase):
         self.assertEqual("pending", reopenings[0]["to_status"])
         self.assertEqual("plan-status-validity", reopenings[0]["guard"])
         self.assertEqual("blocked", reopenings[0]["reason"])
+        self.assertEqual(
+            plans.inspect_plan(self.plan_dir).content_sha256,
+            reopenings[0]["content_sha256"],
+        )
+        self.assertEqual(payload["final_snapshot"]["counts"], reopenings[0]["counts"])
 
     def test_unstructured_pause_leaves_an_invalid_status_terminal(self) -> None:
         with mock.patch.object(

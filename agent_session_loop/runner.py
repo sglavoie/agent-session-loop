@@ -4294,6 +4294,21 @@ def _commit_turn(
     return MappingProxyType(committed)
 
 
+def _reopened_snapshot_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """The projection a status reversion left behind.
+
+    A reversion that names only the transition leaves a replaying consumer
+    holding a state it cannot check; the digest and counts of the plan as
+    reinspected after the rewrite are what make the replay land on the run's
+    own authoritative projection.
+    """
+
+    return {
+        "content_sha256": snapshot.get("content_sha256"),
+        "counts": snapshot.get("counts"),
+    }
+
+
 def _record_turn_rejected(
     *,
     event_path: Path,
@@ -4312,6 +4327,13 @@ def _record_turn_rejected(
     silently disagrees with the last turn record. ``session_reopened`` is
     appended beside it when the guard also returned the session to pending, so
     the reverse transition the plan made is replayable from the event stream.
+
+    That event carries the plan digest and status counts the revert produced, so
+    a consumer replaying the stream lands on the same projection the run
+    reports rather than on a state it has to trust the plan file to confirm.
+    Every reopening guard refreshes ``final_snapshot`` from the reinspected plan
+    before recording the rejection, so it is the resulting snapshot by
+    construction.
     """
     rejection: dict[str, Any] = {
         "run_id": payload.get("run_id"),
@@ -4326,6 +4348,7 @@ def _record_turn_rejected(
     persistence.append_event(event_path, events.TURN_REJECTED_EVENT, rejection)
     if not reopened:
         return
+    final_snapshot = payload.get("final_snapshot")
     persistence.append_event(
         event_path,
         events.SESSION_REOPENED_EVENT,
@@ -4337,6 +4360,9 @@ def _record_turn_rejected(
             "to_status": "pending",
             "guard": guard,
             "reason": reason,
+            **_reopened_snapshot_identity(
+                final_snapshot if isinstance(final_snapshot, Mapping) else {}
+            ),
         },
     )
 
@@ -13404,6 +13430,7 @@ def _repair_paused_handoff_status(
             "to_status": "pending",
             "guard": "plan-status-validity",
             "reason": pause_reason,
+            **_reopened_snapshot_identity(_snapshot_payload(repaired)),
         },
     )
     return repaired, evidence
