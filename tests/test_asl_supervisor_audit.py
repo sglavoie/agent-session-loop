@@ -55,7 +55,7 @@ from agent_session_loop.assurance_models import (
     issue_id_number,
 )
 from agent_session_loop.assurance_projection import CatalogEntry, IdentityCatalog
-from tests.support import init_git_repo, write_plan
+from tests.support import git_stdout, init_git_repo, write_plan
 
 RUN_ID = "20260810T101112123456Z-4242"
 
@@ -1327,6 +1327,246 @@ class RestrictedAuditTests(unittest.TestCase):
             self.assertEqual("unavailable", result.outcome)
             self.assertEqual("profile-unenforceable", result.reason)
             self.assertEqual([], fake.calls)
+
+
+class PinnedAuditWorkspaceTests(unittest.TestCase):
+    """The boundary check is judged on a tree only the audit turn can change."""
+
+    def _role(self) -> AuditRole:
+        return AuditRole(
+            harness="claude",
+            implementation_harness="codex",
+            source="explicit",
+            timeout_seconds=30.0,
+        )
+
+    def _workspace(self, tmp: Path) -> tuple[Path, Path, Path, Path]:
+        workspace = tmp / "workspace"
+        init_git_repo(workspace / "app")
+        plan_dir = tmp / "plan"
+        plan_dir.mkdir()
+        state_dir = tmp / "state"
+        run_dir = state_dir / "runs" / RUN_ID
+        run_dir.mkdir(parents=True)
+        return workspace, plan_dir, state_dir, run_dir
+
+    def _record_commit(
+        self,
+        run_dir: Path,
+        *,
+        index: int,
+        repository_path: str,
+        head_after: str,
+    ) -> None:
+        directory = run_dir / f"commit-{index}"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / state.RESULT_FILE_NAME).write_text(
+            json.dumps(
+                {
+                    "commit_index": index,
+                    "repository_path": repository_path,
+                    "head_after": head_after,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _head(self, repository: Path) -> str:
+        return git_stdout(repository, "rev-parse", "HEAD").strip()
+
+    def _pin(self, workspace: Path, run_dir: Path, repositories: tuple[str, ...]):
+        return supervisor_audit.pinned_audit_workspace(
+            workspace, repositories, supervisor_audit.run_commits(run_dir, repositories)
+        )
+
+    def test_the_checkout_holds_the_commit_the_run_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, run_dir = self._workspace(Path(tmp))
+            recorded = self._head(workspace / "app")
+            (workspace / "app" / "later.txt").write_text("later\n", encoding="utf-8")
+            for argv in (["add", "later.txt"], ["commit", "-m", "later"]):
+                subprocess.run(
+                    ["git", *argv],
+                    cwd=workspace / "app",
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+            self._record_commit(
+                run_dir, index=1, repository_path="app", head_after=recorded
+            )
+
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                self.assertTrue(pinned.pinned)
+                self.assertNotEqual(workspace.resolve(), pinned.root.resolve())
+                self.assertEqual(recorded, self._head(pinned.root / "app"))
+                self.assertFalse((pinned.root / "app" / "later.txt").exists())
+                self.assertEqual({"app": recorded}, dict(pinned.commits))
+
+    def test_a_concurrent_write_to_the_live_workspace_is_not_the_auditors_doing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            self._record_commit(
+                run_dir,
+                index=1,
+                repository_path="app",
+                head_after=self._head(workspace / "app"),
+            )
+            fake = _RecordingHarness(writes=workspace / "app" / "concurrent.txt")
+
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                result = supervisor_audit.run_restricted_audit(
+                    self._role(),
+                    run_dir=run_dir,
+                    run_id=RUN_ID,
+                    workspace_root=workspace,
+                    plan_dir=plan_dir,
+                    prompt="Audit this run.",
+                    repositories=("app",),
+                    pinned=pinned,
+                    state_dir=state_dir,
+                    _run_harness_fn=fake,
+                )
+
+            self.assertEqual("ok", result.outcome)
+            self.assertIsNone(result.mutation)
+
+    def test_a_write_inside_the_pinned_checkout_is_still_a_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            self._record_commit(
+                run_dir,
+                index=1,
+                repository_path="app",
+                head_after=self._head(workspace / "app"),
+            )
+
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                fake = _RecordingHarness(writes=pinned.root / "app" / "escaped.txt")
+                result = supervisor_audit.run_restricted_audit(
+                    self._role(),
+                    run_dir=run_dir,
+                    run_id=RUN_ID,
+                    workspace_root=workspace,
+                    plan_dir=plan_dir,
+                    prompt="Audit this run.",
+                    repositories=("app",),
+                    pinned=pinned,
+                    state_dir=state_dir,
+                    _run_harness_fn=fake,
+                )
+
+            self.assertEqual("mutation-detected", result.outcome)
+            self.assertEqual(supervisor_audit.REASON_WORKSPACE_MUTATED, result.reason)
+            mutation = result.mutation or {}
+            self.assertIn("app", mutation["changed"])
+            self.assertTrue(mutation["workspace"]["pinned"])
+
+    def test_the_live_workspaces_other_checkouts_stay_out_of_the_comparison(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            head = self._head(workspace / "app")
+            self._record_commit(
+                run_dir, index=1, repository_path="app", head_after=head
+            )
+            sibling = Path(tmp) / "sibling"
+            repository_evidence.add_detached_worktree(workspace / "app", sibling, head)
+            self.addCleanup(
+                repository_evidence.remove_worktree, workspace / "app", sibling
+            )
+            fake = _RecordingHarness(writes=sibling / "escaped.txt")
+
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                result = supervisor_audit.run_restricted_audit(
+                    self._role(),
+                    run_dir=run_dir,
+                    run_id=RUN_ID,
+                    workspace_root=workspace,
+                    plan_dir=plan_dir,
+                    prompt="Audit this run.",
+                    repositories=("app",),
+                    pinned=pinned,
+                    state_dir=state_dir,
+                    _run_harness_fn=fake,
+                )
+
+            self.assertEqual("ok", result.outcome)
+
+    def test_the_checkout_and_its_registration_are_dropped_afterwards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, run_dir = self._workspace(Path(tmp))
+            self._record_commit(
+                run_dir,
+                index=1,
+                repository_path="app",
+                head_after=self._head(workspace / "app"),
+            )
+
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                root = pinned.root
+
+            self.assertFalse(root.exists())
+            listed = git_stdout(workspace / "app", "worktree", "list", "--porcelain")
+            self.assertEqual(1, listed.count("worktree "))
+
+    def test_a_run_that_recorded_no_commit_is_judged_on_the_live_workspace(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, run_dir = self._workspace(Path(tmp))
+
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                self.assertFalse(pinned.pinned)
+                self.assertEqual(
+                    supervisor_audit.PIN_REASON_NO_RECORDED_COMMIT, pinned.reason
+                )
+                self.assertEqual(workspace, pinned.root)
+
+    def test_one_repository_without_a_commit_abandons_the_whole_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, run_dir = self._workspace(Path(tmp))
+            init_git_repo(workspace / "lib")
+            self._record_commit(
+                run_dir,
+                index=1,
+                repository_path="app",
+                head_after=self._head(workspace / "app"),
+            )
+
+            self.assertIsNone(supervisor_audit.run_commits(run_dir, ("app", "lib")))
+
+    def test_a_commit_that_cannot_be_checked_out_falls_back_to_the_live_workspace(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, run_dir = self._workspace(Path(tmp))
+            self._record_commit(
+                run_dir, index=1, repository_path="app", head_after="0" * 40
+            )
+
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                self.assertEqual(
+                    supervisor_audit.PIN_REASON_CHECKOUT_FAILED, pinned.reason
+                )
+                self.assertEqual(workspace, pinned.root)
+            listed = git_stdout(workspace / "app", "worktree", "list", "--porcelain")
+            self.assertEqual(1, listed.count("worktree "))
+
+    def test_the_latest_commit_per_repository_is_the_one_pinned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, _, run_dir = self._workspace(Path(tmp))
+            self._record_commit(run_dir, index=9, repository_path="app", head_after="a")
+            self._record_commit(
+                run_dir, index=10, repository_path="app", head_after="b"
+            )
+
+            self.assertEqual(
+                {"app": "b"}, supervisor_audit.run_commits(run_dir, ("app",))
+            )
 
 
 class EvidenceBundleTests(unittest.TestCase):

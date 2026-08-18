@@ -42,8 +42,9 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -112,6 +113,18 @@ AUDIT_WORKDIR_NAME = "audit-workdir"
 #: Run-relative artifact naming the mutation a read-only audit was not supposed
 #: to be able to cause. It is the finding's only evidence reference.
 MUTATION_ARTIFACT_NAME = "supervisor-audit-mutation.json"
+
+#: Prefix of the private root the audited run's own commits are checked out
+#: under for the boundary check. It sits outside the run directory on purpose:
+#: the run directory is a read root for the auditor, and a checkout placed
+#: there would hand it the application source the bundle exists to withhold.
+PINNED_WORKSPACE_PREFIX = "asl-audit-pinned-"
+
+#: Why a boundary check was judged on the live workspace rather than on a
+#: checkout pinned to the audited run's own commits.
+PIN_REASON_NOT_REQUESTED = "not-requested"
+PIN_REASON_NO_RECORDED_COMMIT = "no-recorded-commit"
+PIN_REASON_CHECKOUT_FAILED = "checkout-failed"
 
 #: Run-relative artifact naming an audit that never reached an evidence bundle.
 #: An unavailable audit has to point a reader at something it can open, and a
@@ -462,6 +475,131 @@ def _observability_changed(
     )
 
 
+@dataclass(frozen=True)
+class PinnedWorkspace:
+    """The workspace tree one audit's read-only boundary check is judged on.
+
+    ``reason`` is set only when no pinned checkout could be made, in which case
+    ``root`` is the live workspace root and the check falls back to comparing
+    that across the turn.
+    """
+
+    root: Path
+    commits: Mapping[str, str] = field(default_factory=dict)
+    reason: str | None = None
+
+    @property
+    def pinned(self) -> bool:
+        return self.reason is None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pinned": self.pinned,
+            "root": str(self.root),
+            "commits": dict(self.commits),
+            "reason": self.reason,
+        }
+
+
+def run_commits(
+    run_dir: Path | str, repositories: Sequence[str]
+) -> dict[str, str] | None:
+    """Where the run left each registered repository's HEAD, or ``None``.
+
+    ``None`` when even one registered repository has no recorded commit result,
+    because a partial pin would leave the rest of the boundary check on the live
+    tree — the mixture the pin exists to avoid.
+
+    ``head_after`` rather than ``commit_sha`` is what a pinned checkout has to
+    reproduce: the latter is recorded only for a commit that succeeded, while
+    the former is where the repository was actually left either way.
+    """
+    latest: dict[str, tuple[int, str]] = {}
+    try:
+        directories = [
+            entry
+            for entry in Path(run_dir).iterdir()
+            if entry.is_dir() and entry.name.startswith(_COMMIT_DIR_PREFIX)
+        ]
+    except OSError:
+        return None
+    for directory in directories:
+        result, _ = _read_json_file(directory / state.RESULT_FILE_NAME)
+        if not isinstance(result, Mapping):
+            continue
+        relative = result.get("repository_path")
+        head = result.get("head_after")
+        if not isinstance(relative, str) or not isinstance(head, str) or not head:
+            continue
+        index = result.get("commit_index")
+        order = index if isinstance(index, int) else 0
+        if relative not in latest or latest[relative][0] <= order:
+            latest[relative] = (order, head)
+    if any(relative not in latest for relative in repositories):
+        return None
+    return {relative: latest[relative][1] for relative in repositories}
+
+
+def _pin_depth(relative: str) -> tuple[int, str]:
+    """Order registered paths so an ancestor is checked out before a descendant."""
+    return (0 if relative == "." else relative.count("/") + 1, relative)
+
+
+@contextlib.contextmanager
+def pinned_audit_workspace(
+    workspace_root: Path | str,
+    repositories: Sequence[str],
+    commits: Mapping[str, str] | None,
+) -> Iterator[PinnedWorkspace]:
+    """Check the run's own commits out privately for the boundary check.
+
+    The check asks whether the audit turn wrote to a registered repository, and
+    on the live workspace that question has no honest answer: a concurrent run,
+    or an operator with an editor open, changes the same tree for reasons this
+    audit had nothing to do with, and the comparison reports it as the auditor's
+    doing. A detached checkout of the commits this run itself produced is a tree
+    with no other writer, so a difference across the turn is evidence again
+    rather than a coincidence.
+
+    Pinning is all-or-nothing. A repository that cannot be checked out abandons
+    the whole pin and yields the live root, because half a pinned comparison
+    carries the false positive it was meant to remove while reading as though it
+    did not.
+
+    The checkouts are always removed, including their registration in the origin
+    repository, so an audit cannot leave the repositories it graded listing
+    worktrees that no longer exist.
+    """
+    live = Path(workspace_root)
+    if not repositories:
+        yield PinnedWorkspace(root=live, reason=PIN_REASON_NOT_REQUESTED)
+        return
+    if commits is None:
+        yield PinnedWorkspace(root=live, reason=PIN_REASON_NO_RECORDED_COMMIT)
+        return
+
+    root = Path(tempfile.mkdtemp(prefix=PINNED_WORKSPACE_PREFIX))
+    added: list[tuple[Path, Path]] = []
+    try:
+        try:
+            # Shallowest first, so a repository registered at "." is checked out
+            # into the still-empty root before anything nested lands under it.
+            for relative in sorted(repositories, key=_pin_depth):
+                origin = live / relative
+                destination = repository_evidence.add_detached_worktree(
+                    origin, root / relative, commits[relative]
+                )
+                added.append((origin, destination))
+        except repository_evidence.RepositoryEvidenceError, OSError:
+            yield PinnedWorkspace(root=live, reason=PIN_REASON_CHECKOUT_FAILED)
+            return
+        yield PinnedWorkspace(root=root, commits=dict(commits))
+    finally:
+        for origin, destination in reversed(added):
+            repository_evidence.remove_worktree(origin, destination)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _record_mutation_issue(
     mutation: Mapping[str, Any],
     *,
@@ -532,6 +670,7 @@ def run_restricted_audit(
     prompt: str,
     repositories: Sequence[str],
     registry_declared: bool = True,
+    pinned: PinnedWorkspace | None = None,
     state_dir: Path | str | None = None,
     timeout: int | None = None,
     stream_callback: harnesses.StreamCallback | None = None,
@@ -561,6 +700,14 @@ def run_restricted_audit(
     that compatibility case auditable without extending the same tolerance to a
     repository a plan really registered.
 
+    ``pinned`` names the tree the comparison is made over. A checkout pinned to
+    the run's own commits has no writer but this audit, so a difference across
+    the turn is the auditor's doing; the live workspace has other writers, and
+    falling back to it keeps the check running while widening what a reported
+    difference could mean. Its linked worktrees are enumerated only in that
+    fallback: from inside a pinned checkout, Git lists the live trees the pin
+    exists to stay out of.
+
     ``abort`` lets a supervisor cancel the attempt mid-turn; the cancel is
     raised as :class:`AuditCancelled` rather than returned, so no caller can
     mistake it for a failed attempt worth another try.
@@ -571,12 +718,18 @@ def run_restricted_audit(
         return AuditAttemptResult(
             outcome="unavailable", state="unavailable", reason=unavailable
         )
+    guard = (
+        PinnedWorkspace(root=Path(workspace_root), reason=PIN_REASON_NOT_REQUESTED)
+        if pinned is None
+        else pinned
+    )
 
     def snapshot() -> repository_evidence.WorkspaceSnapshot:
         return repository_evidence.capture_registered_snapshot(
-            workspace_root,
+            guard.root,
             plan_dir,
             tuple(repositories),
+            include_linked_worktrees=not guard.pinned,
         )
 
     try:
@@ -640,6 +793,7 @@ def run_restricted_audit(
         repository_evidence.compare_workspace_snapshots(before, after)
     )
     if mutation is not None:
+        mutation["workspace"] = guard.to_dict()
         clock = datetime.now(UTC) if now is None else now()
         return AuditAttemptResult(
             outcome="mutation-detected",
@@ -5211,6 +5365,7 @@ def run_agent_audit(
     plan_dir: Path | str,
     repositories: Sequence[str],
     registry_declared: bool = True,
+    pinned: PinnedWorkspace | None = None,
     state_dir: Path | str | None = None,
     results: Sequence[assurance_models.DeterministicResult] | None = None,
     stream_callback: harnesses.StreamCallback | None = None,
@@ -5246,6 +5401,11 @@ def run_agent_audit(
     ``abort`` cancels the whole audit rather than one attempt: it is checked
     before each launch, so a cancel that arrives during a transport backoff is
     honored at the end of that wait instead of buying another launch.
+
+    The pinned checkout the boundary check is judged on is made once and shared
+    by every attempt. Each attempt still fingerprints it on both sides of its
+    own turn, so an attempt is judged on what it did rather than on what an
+    earlier one left behind; what the attempts share is the tree, not a verdict.
     """
     run_dir = Path(run_dir)
     clock = datetime.now(UTC) if now is None else now()
@@ -5283,6 +5443,7 @@ def run_agent_audit(
             prompt=prompt,
             repositories=repositories,
             registry_declared=registry_declared,
+            pinned=pinned,
             state_dir=state_dir,
             stream_callback=stream_callback,
             abort=abort,
@@ -5573,28 +5734,34 @@ def audit_terminal_run(
 
     try:
         input_path = bundle.write(run_dir, durable=durable)
-        outcome = (
-            _deterministic_only_audit(
+        if role is None:
+            outcome = _deterministic_only_audit(
                 bundle, run_id=run_id, generated_at=clock().isoformat()
             )
-            if role is None
-            else run_agent_audit(
-                role,
-                bundle=bundle,
-                run_id=run_id,
-                run_dir=run_dir,
-                workspace_root=workspace_root,
-                plan_dir=plan_dir,
-                repositories=repositories,
-                registry_declared=registry_declared,
-                state_dir=ledger_state_dir,
-                stream_callback=stream_callback,
-                abort=abort,
-                durable=durable,
-                now=now,
-                _run_harness_fn=_run_harness_fn,
-            )
-        )
+        else:
+            # Pinned after the bundle is written: collecting the evidence reads
+            # the live workspace the run actually left behind, while grading it
+            # is judged on a checkout no concurrent run can touch.
+            with pinned_audit_workspace(
+                workspace_root, repositories, run_commits(run_dir, repositories)
+            ) as pinned:
+                outcome = run_agent_audit(
+                    role,
+                    bundle=bundle,
+                    run_id=run_id,
+                    run_dir=run_dir,
+                    workspace_root=workspace_root,
+                    plan_dir=plan_dir,
+                    repositories=repositories,
+                    registry_declared=registry_declared,
+                    pinned=pinned,
+                    state_dir=ledger_state_dir,
+                    stream_callback=stream_callback,
+                    abort=abort,
+                    durable=durable,
+                    now=now,
+                    _run_harness_fn=_run_harness_fn,
+                )
         staged = stage_audit_reports(run_dir, outcome.audit, durable=durable)
         input_reference = _artifact_reference(input_path, run_dir, bundle.sha256)
         audit_artifacts = (input_reference, *staged.references)

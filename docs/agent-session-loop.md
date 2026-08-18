@@ -1394,6 +1394,28 @@ cannot enforce the read-only profile, or catches its auditor mutating the
 workspace still publishes whatever the deterministic checks proved, under an
 `unavailable` verdict for the semantic half that went missing.
 
+"Mutating the workspace" is judged on a private checkout, not on the live tree.
+Before the first audit turn ASL reads the `head_after` each registered
+repository's `commit-*/result.json` recorded (the highest `commit_index` wins),
+checks each of those commits out with `git worktree add --detach` under a
+temporary root outside the run directory, and fingerprints *that* on both sides
+of every turn. The live workspace has other writers — a concurrent `asl run`, or
+an operator with an editor open — and a comparison over it reports their work as
+the auditor's, which is the false `audit-read-only-mutation` this replaces. A
+pinned checkout has no writer but the audit turn, so a difference across it is
+evidence again. Linked worktrees are not enumerated for a pinned root, because
+from inside one Git lists the very live trees the pin exists to stay out of. The
+checkouts and their registrations in the origin repositories are always removed
+afterwards. Pinning is all-or-nothing and fails open: if any registered
+repository has no recorded commit, or its commit cannot be checked out, the
+whole pin is abandoned and the check falls back to comparing the live workspace
+exactly as before. `supervisor-audit-mutation.json` records which tree the
+verdict was reached over under `comparison.workspace` (`pinned`, `root`,
+`commits`, and a `reason` of `not-requested`, `no-recorded-commit`, or
+`checkout-failed`). The evidence bundle is still collected against the live
+workspace root, and the auditor's read roots are unchanged: it never had read
+access to either tree.
+
 Two budgets are spent, not one, because a bad answer and an undelivered request
 are different failures. At most two *answers* may be unusable: each retry is a
 fresh invocation told only which validation rule the previous one broke. A

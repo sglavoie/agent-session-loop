@@ -6,6 +6,7 @@ import ast
 import dataclasses
 import io
 import json
+import subprocess
 import tempfile
 import threading
 import time
@@ -710,6 +711,36 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                     for record in assurance_ledger.read_ledger(state_dir=root).records
                 ],
             )
+
+    def test_a_run_that_committed_is_audited_away_from_the_live_workspace(self) -> None:
+        """Writes the audit could not have caused are not charged to it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            workspace, _, _, run_dir = history
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=workspace / "app",
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            commit_dir = run_dir / "commit-1"
+            commit_dir.mkdir()
+            (commit_dir / state.RESULT_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "commit_index": 1,
+                        "repository_path": "app",
+                        "head_after": head,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = self._audit(history, self._mutating_auditor(history))
+
+            self.assertEqual("all-clear", summary.state, summary.reason)
+            self.assertTrue((workspace / "app" / "sneaked.txt").exists())
 
     def test_a_detected_mutation_is_named_by_the_summary_of_its_own_run(self) -> None:
         """The run's most severe issue has to be copyable from the run itself."""

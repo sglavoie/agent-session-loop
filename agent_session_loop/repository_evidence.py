@@ -1606,6 +1606,65 @@ def linked_worktrees(
     return tuple(dict.fromkeys(listed))
 
 
+def add_detached_worktree(
+    repository: str | Path,
+    destination: str | Path,
+    commit: str,
+    *,
+    _run_git_fn: GitRunner | None = None,
+) -> Path:
+    """Check ``commit`` out at ``destination`` as a detached worktree.
+
+    Detached on purpose: the checkout exists to hold one commit still, and a
+    branch would make it a second place that commit could move from.
+    """
+    root = Path(os.path.realpath(os.path.abspath(os.fspath(repository))))
+    target = Path(os.path.abspath(os.fspath(destination)))
+    token = _GIT_RUNNER.set(_run_git_fn)
+    try:
+        result = _run_git(root, ["worktree", "add", "--detach", str(target), commit])
+    except Exception as error:
+        raise RepositoryEvidenceError(
+            f"{commit} could not be checked out from {root}: {error}"
+        ) from error
+    finally:
+        _GIT_RUNNER.reset(token)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RepositoryEvidenceError(
+            f"{commit} could not be checked out from {root}: "
+            f"{detail or 'Git refused to add the worktree'}"
+        )
+    return target
+
+
+def remove_worktree(
+    repository: str | Path,
+    destination: str | Path,
+    *,
+    _run_git_fn: GitRunner | None = None,
+) -> bool:
+    """Drop a worktree added by :func:`add_detached_worktree`.
+
+    Reports whether Git let go of it, because a leftover registration keeps the
+    origin repository listing a checkout that is no longer there.
+    """
+    root = Path(os.path.realpath(os.path.abspath(os.fspath(repository))))
+    target = Path(os.path.abspath(os.fspath(destination)))
+    token = _GIT_RUNNER.set(_run_git_fn)
+    try:
+        removed = _run_git(root, ["worktree", "remove", "--force", str(target)])
+        # Pruning regardless: `remove` failing on a directory that is already
+        # gone still leaves the registration behind, and that is the half that
+        # would otherwise outlive the audit.
+        _run_git(root, ["worktree", "prune"])
+    except Exception:
+        return False
+    finally:
+        _GIT_RUNNER.reset(token)
+    return removed.returncode == 0
+
+
 def _is_exact_worktree_root(repository: Path) -> bool:
     """Report whether Git calls `repository` its own worktree root."""
     try:
@@ -1632,6 +1691,7 @@ def capture_registered_snapshot(
     exclude: Mapping[str, tuple[str, ...]] | None = None,
     default_exclude: tuple[str, ...] = (),
     include_ignored: bool = False,
+    include_linked_worktrees: bool = True,
     _run_git_fn: GitRunner | None = None,
     _run_git_bytes_fn: GitBytesRunner | None = None,
 ) -> WorkspaceSnapshot:
@@ -1654,7 +1714,11 @@ def capture_registered_snapshot(
     :func:`linked_worktree_key`, because a second checkout of a registered
     repository is a place a turn can move HEAD and the index without touching
     any registered root. A sibling that is itself registered keeps its own key
-    rather than being recorded twice.
+    rather than being recorded twice. ``include_linked_worktrees=False`` stops
+    that enumeration, which is what a caller wants when the roots it passed are
+    themselves a private checkout: from inside one, Git lists the very trees the
+    caller isolated itself from, and fingerprinting them would put the traffic
+    of every other checkout back into the evidence.
     """
     root = Path(os.path.realpath(os.path.abspath(os.fspath(workspace_root))))
     git_token = _GIT_RUNNER.set(_run_git_fn)
@@ -1696,7 +1760,7 @@ def capture_registered_snapshot(
                     },
                 }
             snapshot[relative] = fingerprint
-            if not is_worktree_root:
+            if not is_worktree_root or not include_linked_worktrees:
                 continue
             snapshot.update(
                 _capture_linked_worktrees(
