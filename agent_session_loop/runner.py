@@ -11985,7 +11985,12 @@ def _workspace_write_guard_evidence(
         for repository in sorted(raw_changed):
             raw_changes = raw_changed[repository]
             changes = dict(raw_changes) if isinstance(raw_changes, Mapping) else {}
-            alias = registered.get(repository)
+            linked = repository_evidence.split_linked_worktree_key(repository)
+            if linked is not None:
+                changes["worktree_of"] = linked[0]
+            # A linked worktree is another checkout of the repository that owns
+            # it, so it answers to that repository's alias rather than to none.
+            alias = registered.get(repository if linked is None else linked[0])
             qualifier = alias or repository
             qualified_paths = [
                 f"{qualifier}:{path.split(':', 1)[1]}"
@@ -12021,7 +12026,13 @@ def _workspace_write_guard_evidence(
         if not isinstance(roots, Sequence) or isinstance(roots, (str, bytes)):
             continue
         for repository in sorted(str(root) for root in roots):
-            alias = registered.get(repository)
+            linked = repository_evidence.split_linked_worktree_key(repository)
+            alias = registered.get(repository if linked is None else linked[0])
+            # Adding or removing a checkout of a repository the session may
+            # write is work it was authorized to do; the topology change is
+            # still recorded, it just is not a breach on its own.
+            if linked is not None and alias in scope.writes:
+                continue
             violations.append(
                 {
                     "kind": f"repository-{topology_kind}",

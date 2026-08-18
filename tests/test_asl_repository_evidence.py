@@ -404,6 +404,73 @@ class RegisteredSnapshotTests(unittest.TestCase):
         self.plan_dir = self.root / "plan"
         self.plan_dir.mkdir()
 
+    def _git(self, cwd: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+    def test_snapshot_covers_a_linked_worktree_of_a_registered_repository(
+        self,
+    ) -> None:
+        alpha = self.workspace / "alpha"
+        init_git_repo(alpha)
+        linked = self.root / "alpha-hardening"
+        self._git(alpha, "worktree", "add", "-b", "hardening", str(linked))
+
+        snapshot = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        key = repository_evidence.linked_worktree_key("alpha", linked.resolve())
+        self.assertEqual(["alpha", key], list(snapshot))
+        self.assertEqual(
+            ("alpha", linked.resolve().as_posix()),
+            (repository_evidence.split_linked_worktree_key(key)),
+        )
+        self.assertRegex(snapshot[key]["head"], r"^[0-9a-f]{40,64}$")
+
+    def test_a_moved_linked_worktree_head_is_evidence(self) -> None:
+        alpha = self.workspace / "alpha"
+        init_git_repo(alpha)
+        linked = self.root / "alpha-hardening"
+        self._git(alpha, "worktree", "add", "-b", "hardening", str(linked))
+        before = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        (linked / "README.md").write_text("hardened\n", encoding="utf-8")
+        self._git(linked, "commit", "-am", "harden")
+        after = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        comparison = repository_evidence.compare_workspace_snapshots(before, after)
+        key = repository_evidence.linked_worktree_key("alpha", linked.resolve())
+        moved = comparison["changed"][key]
+        self.assertNotEqual(moved["head_before"], moved["head_after"])
+        # The registered root shares the object store, so it sees the ref move
+        # but not the checkout the commit actually landed on.
+        self.assertEqual(
+            comparison["changed"]["alpha"]["head_before"],
+            comparison["changed"]["alpha"]["head_after"],
+        )
+
+    def test_a_registered_sibling_worktree_keeps_its_own_key(self) -> None:
+        alpha = self.workspace / "alpha"
+        init_git_repo(alpha)
+        sibling = self.workspace / "alpha-hardening"
+        self._git(alpha, "worktree", "add", "-b", "hardening", str(sibling))
+
+        snapshot = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha", "alpha-hardening"]
+        )
+
+        self.assertEqual(["alpha", "alpha-hardening"], list(snapshot))
+
     def test_snapshot_covers_registered_paths_only(self) -> None:
         alpha = self.workspace / "alpha"
         beta = self.workspace / "group" / "beta"
@@ -590,6 +657,50 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         self.assertEqual(
             ["OAK:readonly.py"],
             evidence["violations"][0]["qualified_paths"],
+        )
+
+    def test_guard_judges_a_linked_worktree_by_its_owners_alias(self) -> None:
+        writable = repository_evidence.linked_worktree_key(
+            "tundra_svc", "/tmp/svc-hardening"
+        )
+        read_only = repository_evidence.linked_worktree_key(
+            "tundra_OAK", "/tmp/oak-hardening"
+        )
+        evidence = runner._workspace_write_guard_evidence(
+            workspace=self.workspace,
+            scope=plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",)),
+            comparison={
+                "changed": OrderedDict(
+                    (
+                        (writable, {"qualified_paths": ["allowed.py"]}),
+                        (read_only, {"qualified_paths": ["readonly.py"]}),
+                    )
+                ),
+                "added": [writable],
+                "removed": [read_only],
+                "unavailable": {},
+            },
+            exclude=(),
+            include_ignored=False,
+        )
+
+        self.assertEqual(["SVC"], evidence["authorized_aliases"])
+        self.assertEqual("tundra_svc", evidence["changed"][writable]["worktree_of"])
+        self.assertEqual(
+            ["SVC:allowed.py"], evidence["changed"][writable]["qualified_paths"]
+        )
+        # The owning alias decides: a checkout of a read-only repository is a
+        # breach however it was reached, and a checkout of a writable one is
+        # authorized work even when it is created or removed outright.
+        self.assertEqual(
+            [
+                ("read-only-repository", read_only),
+                ("repository-removed", read_only),
+            ],
+            [
+                (violation["kind"], violation["repository"])
+                for violation in evidence["violations"]
+            ],
         )
 
     def test_guard_fails_closed_for_unavailable_evidence(self) -> None:

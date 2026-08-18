@@ -15,6 +15,7 @@ import stat
 import subprocess
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1540,6 +1541,71 @@ def capture_workspace_snapshot(
         _GIT_RUNNER.reset(git_token)
 
 
+#: Separates a registered repository's snapshot key from one of its linked
+#: worktrees. Registered keys are workspace-relative POSIX paths, which never
+#: contain this marker, so a composed key stays unambiguous.
+LINKED_WORKTREE_KEY_MARKER = "::worktree::"
+
+
+def linked_worktree_key(repository: str, worktree: str | Path) -> str:
+    """Compose the snapshot key for one linked worktree of ``repository``."""
+    return f"{repository}{LINKED_WORKTREE_KEY_MARKER}{Path(worktree).as_posix()}"
+
+
+def split_linked_worktree_key(key: str) -> tuple[str, str] | None:
+    """Split a linked-worktree key into its owner and worktree path.
+
+    Returns ``None`` for an ordinary registered key, so a caller can tell the
+    two apart without knowing the marker.
+    """
+    owner, marker, worktree = key.partition(LINKED_WORKTREE_KEY_MARKER)
+    if not marker:
+        return None
+    return owner, worktree
+
+
+def linked_worktrees(
+    repository: str | Path,
+    *,
+    _run_git_fn: GitRunner | None = None,
+) -> tuple[Path, ...]:
+    """Every worktree sharing ``repository``'s object store, except itself.
+
+    A linked worktree is a second checkout of a repository the registry does
+    name, so a turn can move its HEAD and index without touching any registered
+    root. Enumerating them is what puts those checkouts inside the guard's field
+    of view instead of leaving the run to take a handoff's word for it.
+    """
+    token = _GIT_RUNNER.set(_run_git_fn)
+    root = Path(os.path.realpath(os.path.abspath(os.fspath(repository))))
+    try:
+        result = _run_git(root, ["worktree", "list", "--porcelain"])
+    except Exception as error:
+        raise RepositoryEvidenceError(
+            f"linked worktrees for {root} could not be listed: {error}"
+        ) from error
+    finally:
+        _GIT_RUNNER.reset(token)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RepositoryEvidenceError(
+            f"linked worktrees for {root} could not be listed: "
+            f"{detail or 'Git probe failed'}"
+        )
+    prefix = "worktree "
+    listed: list[Path] = []
+    for line in result.stdout.splitlines():
+        if not line.startswith(prefix):
+            continue
+        path = line[len(prefix) :].strip()
+        if not path:
+            continue
+        resolved = Path(os.path.realpath(os.path.abspath(path)))
+        if resolved != root:
+            listed.append(resolved)
+    return tuple(dict.fromkeys(listed))
+
+
 def _is_exact_worktree_root(repository: Path) -> bool:
     """Report whether Git calls `repository` its own worktree root."""
     try:
@@ -1583,6 +1649,12 @@ def capture_registered_snapshot(
     fail-closed ``repository-disappeared`` evidence
     :func:`capture_workspace_snapshot` uses, because losing that fact is a race
     rather than proof the guard stopped applying.
+
+    Each registered root's linked worktrees are captured beside it under a
+    :func:`linked_worktree_key`, because a second checkout of a registered
+    repository is a place a turn can move HEAD and the index without touching
+    any registered root. A sibling that is itself registered keeps its own key
+    rather than being recorded twice.
     """
     root = Path(os.path.realpath(os.path.abspath(os.fspath(workspace_root))))
     git_token = _GIT_RUNNER.set(_run_git_fn)
@@ -1590,7 +1662,11 @@ def capture_registered_snapshot(
     try:
         snapshot: WorkspaceSnapshot = OrderedDict()
         per_repository_excludes = exclude or {}
-        for relative in sorted(dict.fromkeys(repositories)):
+        ordered = sorted(dict.fromkeys(repositories))
+        registered_roots = {
+            Path(os.path.abspath(root / relative)) for relative in ordered
+        }
+        for relative in ordered:
             repository = Path(os.path.abspath(root / relative))
             # Canonicalizing here would fingerprint whatever a replacement
             # symlink points at under the declared key, so a checkout swapped
@@ -1599,14 +1675,16 @@ def capture_registered_snapshot(
                 continue
             if not repository.is_dir():
                 continue
+            repository_exclude = tuple(
+                per_repository_excludes.get(relative, default_exclude)
+            )
             fingerprint: RepositoryFingerprint = {"git": False}
-            if _is_exact_worktree_root(repository):
+            is_worktree_root = _is_exact_worktree_root(repository)
+            if is_worktree_root:
                 fingerprint = _capture_review_repo_fingerprint(
                     repository,
                     plan_dir,
-                    exclude=tuple(
-                        per_repository_excludes.get(relative, default_exclude)
-                    ),
+                    exclude=repository_exclude,
                     include_ignored=include_ignored,
                 )
             if not fingerprint.get("git"):
@@ -1618,10 +1696,74 @@ def capture_registered_snapshot(
                     },
                 }
             snapshot[relative] = fingerprint
+            if not is_worktree_root:
+                continue
+            snapshot.update(
+                _capture_linked_worktrees(
+                    repository,
+                    plan_dir,
+                    relative=relative,
+                    registered_roots=registered_roots,
+                    exclude=repository_exclude,
+                    include_ignored=include_ignored,
+                )
+            )
         return snapshot
     finally:
         _GIT_BYTES_RUNNER.reset(bytes_token)
         _GIT_RUNNER.reset(git_token)
+
+
+def _capture_linked_worktrees(
+    repository: Path,
+    plan_dir: str | Path,
+    *,
+    relative: str,
+    registered_roots: AbstractSet[Path],
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+) -> WorkspaceSnapshot:
+    """Fingerprint every linked worktree of one registered repository.
+
+    An enumeration that fails leaves a fail-closed entry rather than silence:
+    not knowing whether a repository has other checkouts is not evidence that
+    it has none.
+    """
+    captured: WorkspaceSnapshot = OrderedDict()
+    try:
+        worktrees = linked_worktrees(repository)
+    except RepositoryEvidenceError as error:
+        captured[linked_worktree_key(relative, "")] = {
+            "git": True,
+            "unavailable": {
+                "reason": "linked-worktrees-unlistable",
+                "error": str(error),
+                "argv": ["worktree", "list", "--porcelain"],
+            },
+        }
+        return captured
+    for worktree in worktrees:
+        if worktree in registered_roots:
+            continue
+        key = linked_worktree_key(relative, worktree)
+        fingerprint: RepositoryFingerprint = {"git": False}
+        if worktree.is_dir() and _is_exact_worktree_root(worktree):
+            fingerprint = _capture_review_repo_fingerprint(
+                worktree,
+                plan_dir,
+                exclude=exclude,
+                include_ignored=include_ignored,
+            )
+        if not fingerprint.get("git"):
+            fingerprint = {
+                "git": True,
+                "unavailable": {
+                    "reason": "repository-disappeared",
+                    "argv": ["rev-parse", "--show-toplevel"],
+                },
+            }
+        captured[key] = fingerprint
+    return captured
 
 
 def compare_workspace_snapshots(

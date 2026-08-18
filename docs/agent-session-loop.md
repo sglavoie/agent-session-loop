@@ -1124,11 +1124,28 @@ evidence pauses as
 `workspace-write-guard-unavailable`. Both post-turn failures retain repository
 contents, restore the handoff to pending, record qualified evidence, and run
 before verification or commit. Scope violations require a durable scope repair
-and fresh expansion/preflight before continuing. A worktree the plan never
+and fresh expansion/preflight before continuing. A repository the plan never
 registered is outside the guard's domain: another `asl run` process working in
-a sibling checkout beneath the same root cannot pause this run, and no
+an unrelated checkout beneath the same root cannot pause this run, and no
 exclusion policy is needed to keep it quiet. Git errors inside a registered
-repository remain fail-closed. Repo-content `excluded` paths supplied by
+repository remain fail-closed.
+
+Each registered repository is captured together with its linked worktrees. The
+runner enumerates `git worktree list` for the registered root and fingerprints
+every other checkout sharing its object store — HEAD, tracked content, and
+index — under a `<registered-path>::worktree::<absolute-path>` key, so a
+mutation reached through a second checkout is as visible as one made in the
+root. A linked worktree answers to its owning repository's alias: a write alias
+authorizes its changes, a read-only alias makes them a `read-only-repository`
+violation, and its `changed` entry names the owner under `worktree_of`.
+Creating or removing a linked worktree of a writable repository is authorized
+work rather than a topology breach. A worktree that is itself a registered root
+keeps its own key instead of being captured twice. If `git worktree list`
+fails, the repository gains a `linked-worktrees-unlistable` entry and the guard
+fails closed: not knowing whether a repository has other checkouts is not
+evidence that it has none. A concurrent `asl run` in a linked worktree of a
+registered repository is therefore inside the guard's domain and must work
+under a write alias. Repo-content `excluded` paths supplied by
 `--review-guard-exclude` apply to every registered repository. The guard
 shares the `--review-guard-include-ignored` setting with the review mutation
 guard. By default it cannot observe untracked paths hidden by Git ignore rules,
