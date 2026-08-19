@@ -4219,6 +4219,8 @@ def _write_turn_artifacts(
         "before": _snapshot_payload(before),
         "after": _snapshot_payload(after) if after is not None else None,
     }
+    if result.stream_io is not None:
+        payload["stream_io"] = dict(result.stream_io)
     if (
         result.returncode != 0
         and not result.timed_out
@@ -4330,6 +4332,8 @@ def _finalize_turn_execution(
         "result_path": str(paths["result"]),
         "plan_readable": after is not None,
     }
+    if result.stream_io is not None:
+        execution_payload["stream_io"] = dict(result.stream_io)
     if plan_error is not None:
         execution_payload["plan_error"] = plan_error
     persistence.append_event(
@@ -7445,9 +7449,10 @@ class _LiveTurn:
         signal_to_report: dict[str, Any] | None = None
         now = _utc_now()
         hang_retracted = self._hang_sentinel.note_activity()
+        hang_progress_cleared = False
         hang_cleared_payload: dict[str, Any] | None = None
         active_turn_snapshot: dict[str, Any] | None = None
-        with self._lock:
+        with self._lock, self._persistence.lock:
             self._last_activity_at = now
             self._active_turn["last_activity_at"] = _isoformat(now)
             self._active_turn["last_activity_stream"] = stream_name
@@ -7463,6 +7468,7 @@ class _LiveTurn:
             )
             # Resumed output resets the sentinel's CPU baseline, so whatever
             # was published is no longer a fresh sample.
+            hang_progress_cleared = "hang_cpu_progress" in self._active_turn
             self._active_turn.pop("hang_cpu_progress", None)
             if hang_retracted is not None:
                 self._active_turn.pop("hang_suspected", None)
@@ -7473,21 +7479,29 @@ class _LiveTurn:
                 signal_to_report = self._action_required_payload(signal, now)
                 self._active_turn["action_required"] = signal_to_report
             active_turn_snapshot = dict(self._active_turn)
-            with self._persistence.lock:
-                if signal_to_report is not None:
-                    self._payload["action_required"] = signal_to_report
-                    self._persistence.append_event(
-                        self._event_path,
-                        events.ACTION_REQUIRED_EVENT,
-                        signal_to_report,
-                    )
-                if hang_cleared_payload is not None:
-                    self._persistence.append_event(
-                        self._event_path,
-                        events.TURN_HANG_CLEARED_EVENT,
-                        hang_cleared_payload,
-                    )
-                self._payload["active_turn"] = active_turn_snapshot
+            # Ordinary output stays live in the shared payload and is durably
+            # coalesced by the next heartbeat. The whole callback mutation is
+            # under the persistence lock so a concurrent control write cannot
+            # serialize older counters or previews after this callback.
+            self._payload["active_turn"] = active_turn_snapshot
+            if signal_to_report is not None:
+                self._payload["action_required"] = signal_to_report
+                self._persistence.append_event(
+                    self._event_path,
+                    events.ACTION_REQUIRED_EVENT,
+                    signal_to_report,
+                )
+            if hang_cleared_payload is not None:
+                self._persistence.append_event(
+                    self._event_path,
+                    events.TURN_HANG_CLEARED_EVENT,
+                    hang_cleared_payload,
+                )
+            if (
+                signal_to_report is not None
+                or hang_cleared_payload is not None
+                or hang_progress_cleared
+            ):
                 self._persistence.write_state(self._payload)
 
         if signal_to_report is not None:

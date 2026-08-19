@@ -317,6 +317,7 @@ class HarnessResult:
     interrupted: bool = False
     process_sweep: dict[str, Any] | None = None
     observed_model: str | None = None
+    stream_io: dict[str, int | float] | None = None
 
 
 class _OutputProcessor:
@@ -711,6 +712,13 @@ class HarnessAdapter:
 
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
+        stream_io: dict[str, int | float] = {
+            "stdout_chunks": 0,
+            "stderr_chunks": 0,
+            "stdout_chars": 0,
+            "stderr_chars": 0,
+            "callback_seconds": 0.0,
+        }
         reader_errors: list[BaseException] = []
         output_processor = self.output_processor()
         final_result_fired = threading.Event()
@@ -768,11 +776,22 @@ class HarnessAdapter:
                         if not processed_chunk:
                             continue
                         chunks.append(processed_chunk)
+                        chunks_key = f"{stream_name}_chunks"
+                        chars_key = f"{stream_name}_chars"
+                        stream_io[chunks_key] = int(stream_io[chunks_key]) + 1
+                        stream_io[chars_key] = int(stream_io[chars_key]) + len(
+                            processed_chunk
+                        )
                         if stream_callback is not None:
+                            callback_started = time.monotonic()
                             try:
                                 stream_callback(stream_name, processed_chunk)
                             except Exception as error:
                                 reader_errors.append(error)
+                            finally:
+                                stream_io["callback_seconds"] = float(
+                                    stream_io["callback_seconds"]
+                                ) + (time.monotonic() - callback_started)
             except Exception as error:
                 reader_errors.append(error)
             finally:
@@ -846,6 +865,7 @@ class HarnessAdapter:
                 interrupted=True,
                 process_sweep=interrupt_sweep,
                 observed_model=output_processor.observed_model,
+                stream_io=dict(stream_io),
             )
 
         if reader_errors:
@@ -870,6 +890,7 @@ class HarnessAdapter:
                 aborted=True,
                 process_sweep=process_sweep,
                 observed_model=output_processor.observed_model,
+                stream_io=dict(stream_io),
             )
         if timed_out:
             return HarnessResult(
@@ -886,6 +907,7 @@ class HarnessAdapter:
                 timed_out=True,
                 process_sweep=process_sweep,
                 observed_model=output_processor.observed_model,
+                stream_io=dict(stream_io),
             )
 
         interrupted = process.returncode == -signal.SIGINT
@@ -903,6 +925,7 @@ class HarnessAdapter:
             interrupted=interrupted,
             process_sweep=process_sweep,
             observed_model=output_processor.observed_model,
+            stream_io=dict(stream_io),
         )
 
 

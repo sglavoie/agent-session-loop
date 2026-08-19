@@ -1881,10 +1881,6 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             active_turn = payload.get("active_turn")
             if not isinstance(active_turn, dict):
                 return None
-            if active_turn.get("stdout_chars", 0) <= 0:
-                return None
-            if active_turn.get("stderr_chars", 0) <= 0:
-                return None
             stdout_path = Path(active_turn["stdout_path"])
             stderr_path = Path(active_turn["stderr_path"])
             if not stdout_path.exists() or not stderr_path.exists():
@@ -3198,6 +3194,31 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         for key in ("stdout_path", "stderr_path", "last_message_path", "result_path"):
             self.assertEqual(turn[key], turn_finished["payload"][key])
             self.assertEqual(artifact_dir, Path(turn_finished["payload"][key]).parent)
+        stream_io = turn["stream_io"]
+        self.assertGreater(stream_io["stdout_chunks"], 0)
+        self.assertGreater(stream_io["stdout_chunks"] + stream_io["stderr_chunks"], 0)
+        self.assertEqual(
+            len(Path(turn["stdout_path"]).read_text(encoding="utf-8")),
+            stream_io["stdout_chars"],
+        )
+        self.assertEqual(
+            len(Path(turn["stderr_path"]).read_text(encoding="utf-8")),
+            stream_io["stderr_chars"],
+        )
+        self.assertGreaterEqual(stream_io["callback_seconds"], 0.0)
+        self.assertEqual(stream_io, turn_finished["payload"]["stream_io"])
+        self.assertEqual(
+            stream_io,
+            json.loads(Path(turn["result_path"]).read_text(encoding="utf-8"))[
+                "stream_io"
+            ],
+        )
+        turn_execution_finished = next(
+            event
+            for event in events_payloads
+            if event["name"] == events.TURN_EXECUTION_FINISHED_EVENT
+        )
+        self.assertEqual(stream_io, turn_execution_finished["payload"]["stream_io"])
         self.assertTrue(Path(payload["state_path"]).exists())
         self.assertTrue(Path(payload["events_path"]).exists())
         self.assertIn(
@@ -5332,10 +5353,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
             live_turn.start()
             live_turn.record_activity("stderr", "approval required before continuing")
+            # The exceptional transition is durable before the turn ends;
+            # ordinary activity waits for the heartbeat instead.
+            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
             live_turn.stop()
             live_turn.finish(runner._utc_now())
 
-            state_payload = json.loads(state_path.read_text(encoding="utf-8"))
             event_records = read_jsonl(event_path)
             action_events = [
                 record["payload"]
@@ -5738,7 +5761,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertIsNone(payload["action_required"])
         self.assertIsNone(state_payload["action_required"])
 
-    def test_run_persistence_serializes_live_turn_and_control_state_writes(
+    def test_burst_activity_is_coalesced_and_control_persists_latest_snapshot(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5786,11 +5809,15 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 persistence=persistence,
                 heartbeat_interval=60,
             )
-            activity_write_started = threading.Event()
-            release_activity_write = threading.Event()
+            control_write_started = threading.Event()
+            release_control_write = threading.Event()
+            preview_started = threading.Event()
+            release_preview = threading.Event()
             delayed_once = False
             thread_errors: list[BaseException] = []
             original_write_json = runner._write_json_file
+            original_preview_text = runner._preview_text
+            state_write_count = 0
 
             def delayed_write_json(
                 path: Path,
@@ -5798,36 +5825,32 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 *,
                 durable: bool = False,
             ) -> None:
-                nonlocal delayed_once
+                nonlocal delayed_once, state_write_count
                 path = Path(path)
                 active = payload_arg.get("active_turn")
                 control = payload_arg.get("control")
+                if path == state_path:
+                    state_write_count += 1
                 if (
                     path == state_path
                     and not delayed_once
                     and isinstance(active, dict)
                     and active.get("last_activity_stream") == "stdout"
                     and isinstance(control, dict)
-                    and control.get("next_harness") is None
+                    and control.get("next_harness") == "claude"
                 ):
                     delayed_once = True
                     serialized = (
                         json.dumps(payload_arg, sort_keys=True, indent=2) + "\n"
                     )
-                    activity_write_started.set()
-                    release_activity_write.wait(timeout=2)
+                    control_write_started.set()
+                    release_control_write.wait(timeout=2)
                     path.parent.mkdir(parents=True, exist_ok=True)
                     temporary_path = path.with_name(f".{path.name}.blocked.tmp")
                     temporary_path.write_text(serialized, encoding="utf-8")
                     os.replace(temporary_path, path)
                     return
                 original_write_json(path, payload_arg, durable=durable)
-
-            def record_activity() -> None:
-                try:
-                    live_turn.record_activity("stdout", "new output\n")
-                except BaseException as error:
-                    thread_errors.append(error)
 
             def record_control() -> None:
                 try:
@@ -5846,32 +5869,68 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 except BaseException as error:
                     thread_errors.append(error)
 
+            def record_latest_activity() -> None:
+                try:
+                    live_turn.record_activity("stdout", "latest output\n")
+                except BaseException as error:
+                    thread_errors.append(error)
+
+            def delayed_preview(text: str, *, limit: int = 160) -> str:
+                preview_started.set()
+                release_preview.wait(timeout=2)
+                return original_preview_text(text, limit=limit)
+
             with mock.patch.object(
                 runner,
                 "_write_json_file",
                 side_effect=delayed_write_json,
             ):
-                activity_thread = threading.Thread(target=record_activity)
-                activity_thread.start()
-                self.assertTrue(activity_write_started.wait(timeout=2))
+                for index in range(5_000):
+                    live_turn.record_activity("stdout", f"output {index}\n")
 
-                control_thread = threading.Thread(target=record_control)
-                control_thread.start()
-                time.sleep(0.1)
-                self.assertTrue(control_thread.is_alive())
+                self.assertEqual(0, state_write_count)
+                self.assertFalse(state_path.exists())
+                self.assertEqual(
+                    sum(len(f"output {index}\n") for index in range(5_000)),
+                    payload["active_turn"]["stdout_chars"],
+                )
+                self.assertEqual(
+                    "output 4999", payload["active_turn"]["last_activity_preview"]
+                )
 
-                release_activity_write.set()
-                activity_thread.join(timeout=2)
+                with mock.patch.object(
+                    runner, "_preview_text", side_effect=delayed_preview
+                ):
+                    activity_thread = threading.Thread(target=record_latest_activity)
+                    activity_thread.start()
+                    self.assertTrue(preview_started.wait(timeout=2))
+
+                    control_thread = threading.Thread(target=record_control)
+                    control_thread.start()
+                    time.sleep(0.05)
+                    self.assertTrue(control_thread.is_alive())
+                    self.assertFalse(control_write_started.is_set())
+
+                    release_preview.set()
+                    activity_thread.join(timeout=2)
+                self.assertTrue(control_write_started.wait(timeout=2))
+
+                release_control_write.set()
                 control_thread.join(timeout=2)
 
-            self.assertFalse(activity_thread.is_alive())
             self.assertFalse(control_thread.is_alive())
+            self.assertFalse(activity_thread.is_alive())
             if thread_errors:
                 raise thread_errors[0]
+            self.assertEqual(1, state_write_count)
 
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 "stdout", state_payload["active_turn"]["last_activity_stream"]
+            )
+            self.assertEqual(
+                "latest output",
+                state_payload["active_turn"]["last_activity_preview"],
             )
             self.assertEqual("claude", state_payload["control"]["next_harness"])
             self.assertEqual(
@@ -5885,6 +5944,57 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 ["harness-selected"], [event["action"] for event in control_events]
             )
+
+    def test_heartbeat_persists_accumulated_activity_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            event_path = tmp_dir / events.EVENTS_FILE_NAME
+            state_path = tmp_dir / events.STATE_FILE_NAME
+            payload = {"state_path": str(state_path), "active_turn": None}
+            started_at = runner._isoformat(runner._utc_now())
+            active_turn = {
+                "run_id": "run-1",
+                "turn_index": 1,
+                "session": 1,
+                "total_sessions": 1,
+                "artifact_dir": str(tmp_dir / "turn"),
+                "stdout_path": str(tmp_dir / "stdout.log"),
+                "stderr_path": str(tmp_dir / "stderr.log"),
+                "last_message_path": str(tmp_dir / "last-message.txt"),
+                "result_path": str(tmp_dir / "result.json"),
+                "started_at": started_at,
+                "last_activity_at": started_at,
+                "heartbeat_count": 0,
+                "stdout_chars": 0,
+                "stderr_chars": 0,
+            }
+            persistence = runner._RunPersistence()
+            live_turn = runner._LiveTurn(
+                payload=payload,
+                event_path=event_path,
+                progress=runner._ProgressReporter(enabled=False),
+                active_turn=active_turn,
+                persistence=persistence,
+                heartbeat_interval=60,
+            )
+            write_state = mock.Mock(wraps=persistence.write_state)
+
+            with mock.patch.object(persistence, "write_state", write_state):
+                live_turn.record_activity("stdout", "first\n")
+                live_turn.record_activity("stderr", "second\n")
+                self.assertEqual(0, write_state.call_count)
+
+                heartbeat = live_turn._record_heartbeat()
+
+            self.assertEqual(1, write_state.call_count)
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(6, persisted["active_turn"]["stdout_chars"])
+            self.assertEqual(7, persisted["active_turn"]["stderr_chars"])
+            self.assertEqual("stderr", persisted["active_turn"]["last_activity_stream"])
+            self.assertEqual(
+                "second", persisted["active_turn"]["last_activity_preview"]
+            )
+            self.assertEqual(1, heartbeat["heartbeat_count"])
 
     def test_retry_after_failed_turn_keeps_first_run_artifacts(self) -> None:
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
@@ -6279,6 +6389,131 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         path.write_text(source, encoding="utf-8")
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return path
+
+    def test_sixty_thousand_stream_lines_keep_exact_logs_and_bounded_writes(
+        self,
+    ) -> None:
+        line_count = 30_000
+        fake_harness = self._write_executable(
+            "fake-copilot-burst",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import sys, threading",
+                    f"line_count = {line_count}",
+                    "def emit(stream, prefix):",
+                    "    for index in range(line_count):",
+                    "        stream.write(f'{prefix}-{index:05d}\\n')",
+                    "    stream.flush()",
+                    "threads = [",
+                    "    threading.Thread(target=emit, args=(sys.stdout, 'out')) ,",
+                    "    threading.Thread(target=emit, args=(sys.stderr, 'err')) ,",
+                    "]",
+                    "for thread in threads:",
+                    "    thread.start()",
+                    "for thread in threads:",
+                    "    thread.join()",
+                    "",
+                ]
+            ),
+        )
+        state_path = self.tmp_dir / "state.json"
+        event_path = self.tmp_dir / "events.jsonl"
+        started_at = runner._isoformat(runner._utc_now())
+        payload: dict[str, Any] = {"state_path": str(state_path)}
+        active_turn = {
+            "run_id": "run-burst",
+            "turn_index": 1,
+            "session": 1,
+            "session_id": "1",
+            "total_sessions": 1,
+            "harness": "copilot",
+            "artifact_dir": str(self.tmp_dir / "turn"),
+            "stdout_path": str(self.tmp_dir / "stdout.log"),
+            "stderr_path": str(self.tmp_dir / "stderr.log"),
+            "last_message_path": str(self.tmp_dir / "last-message.txt"),
+            "result_path": str(self.tmp_dir / "result.json"),
+            "started_at": started_at,
+            "last_activity_at": started_at,
+            "heartbeat_count": 0,
+            "stdout_chars": 0,
+            "stderr_chars": 0,
+        }
+        persistence = runner._RunPersistence(write_state=False, append_events=False)
+        live_turn = runner._LiveTurn(
+            payload=payload,
+            event_path=event_path,
+            progress=runner._ProgressReporter(enabled=False),
+            active_turn=active_turn,
+            persistence=persistence,
+            heartbeat_interval=3600,
+        )
+        write_state = mock.Mock(wraps=persistence.write_state)
+
+        with mock.patch.object(persistence, "write_state", write_state):
+            live_turn.start()
+            result = _PythonScriptCopilotAdapter(fake_harness).run(
+                cwd=self.tmp_dir,
+                plan_dir=self.tmp_dir,
+                prompt="noop",
+                stream_callback=live_turn.record_activity,
+            )
+            active_snapshot = dict(payload["active_turn"])
+            live_turn.finish(runner._utc_now())
+
+        expected_stdout = "".join(f"out-{index:05d}\n" for index in range(line_count))
+        expected_stderr = "".join(f"err-{index:05d}\n" for index in range(line_count))
+        self.assertEqual(expected_stdout, result.stdout)
+        self.assertEqual(expected_stderr, result.stderr)
+        self.assertEqual(2, write_state.call_count)
+        self.assertEqual(len(expected_stdout), active_snapshot["stdout_chars"])
+        self.assertEqual(len(expected_stderr), active_snapshot["stderr_chars"])
+        self.assertIn(active_snapshot["last_activity_stream"], {"stdout", "stderr"})
+        assert result.stream_io is not None
+        self.assertEqual(line_count, result.stream_io["stdout_chunks"])
+        self.assertEqual(line_count, result.stream_io["stderr_chunks"])
+        self.assertEqual(len(expected_stdout), result.stream_io["stdout_chars"])
+        self.assertEqual(len(expected_stderr), result.stream_io["stderr_chars"])
+        self.assertGreater(result.stream_io["callback_seconds"], 0.0)
+
+    def test_callback_seconds_accumulates_across_both_reader_threads(self) -> None:
+        fake_harness = self._write_executable(
+            "fake-copilot-callback-timing",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import sys, threading",
+                    "def emit(stream, prefix):",
+                    "    stream.write(f'{prefix}-1\\n{prefix}-2\\n')",
+                    "    stream.flush()",
+                    "threads = [",
+                    "    threading.Thread(target=emit, args=(sys.stdout, 'out')) ,",
+                    "    threading.Thread(target=emit, args=(sys.stderr, 'err')) ,",
+                    "]",
+                    "for thread in threads:",
+                    "    thread.start()",
+                    "for thread in threads:",
+                    "    thread.join()",
+                    "",
+                ]
+            ),
+        )
+
+        def slow_callback(stream_name: harnesses.StreamName, text: str) -> None:
+            del stream_name, text
+            time.sleep(0.003)
+
+        result = _PythonScriptCopilotAdapter(fake_harness).run(
+            cwd=self.tmp_dir,
+            plan_dir=self.tmp_dir,
+            prompt="noop",
+            stream_callback=slow_callback,
+        )
+
+        assert result.stream_io is not None
+        self.assertEqual(2, result.stream_io["stdout_chunks"])
+        self.assertEqual(2, result.stream_io["stderr_chunks"])
+        self.assertGreaterEqual(result.stream_io["callback_seconds"], 0.01)
 
     def test_reader_join_bounded_despite_pipe_holding_grandchild(self) -> None:
         root = self.tmp_dir / "trees"
