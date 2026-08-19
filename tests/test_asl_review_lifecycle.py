@@ -1597,6 +1597,105 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         )
         return review_session
 
+    def _setup_review_with_broad_gate_waiting_for_repair(
+        self,
+    ) -> plans.SessionFile:
+        """Create a broad gate that fails until the first repair child exists."""
+        repair_path = self.plan_dir / "session-2.1.md"
+        check = {
+            "type": "command",
+            "name": "repair-child-exists",
+            "argv": [
+                sys.executable,
+                "-c",
+                (
+                    "import pathlib,sys; "
+                    "sys.exit(0 if pathlib.Path("
+                    f"{str(repair_path)!r}).is_file() else 1)"
+                ),
+            ],
+        }
+        write_plan(
+            self.plan_dir,
+            ("complete",),
+            contracts_by_id={"1": _contract_block(json.dumps(check), session="1")},
+        )
+        plans.append_progress_entry(
+            self.plan_dir,
+            plans.ProgressEntry(
+                session_id=plans.parse_session_id("1"),
+                status="complete",
+                completed_at="2026-06-19T15:00:01Z",
+                files_modified=(),
+                key_decisions=None,
+                discovered_facts=(),
+                open_questions=(),
+                blockers=None,
+            ),
+        )
+        review_session = self._write_pending_review_session()
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        return review_session
+
+    def test_findings_defer_broad_failure_until_repair_and_all_clear(self) -> None:
+        self._setup_review_with_broad_gate_waiting_for_repair()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear"},
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("all-complete", payload["reason"])
+        review_turns = [
+            turn
+            for turn in payload["turns"]
+            if turn["session_kind"] == runner.SESSION_KIND_REVIEW
+        ]
+        self.assertEqual(2, len(review_turns))
+        first_verification = review_turns[0]["verification"]
+        self.assertFalse(first_verification["passed"])
+        self.assertEqual(
+            runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
+            first_verification["acceptance"]["reason"],
+        )
+        self.assertEqual(
+            ["broad:1:repair-child-exists"],
+            [failure["name"] for failure in first_verification["deferred_failures"]],
+        )
+        finished = [
+            record["payload"]
+            for record in self._read_events()
+            if record["name"] == events.VERIFICATION_FINISHED_EVENT
+            and record["payload"].get("acceptance")
+        ]
+        self.assertEqual(1, len(finished))
+        self.assertFalse(finished[0]["passed"])
+
+    def test_all_clear_cannot_defer_a_broad_failure(self) -> None:
+        review_session = self._setup_review_with_broad_gate_waiting_for_repair()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "all-clear"},
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        verification_payload = payload["turns"][0]["verification"]
+        self.assertFalse(verification_payload["passed"])
+        self.assertNotIn("acceptance", verification_payload)
+        self.assertEqual("pending", plans.read_session_status(review_session).status)
+
     def test_v2_review_missing_structured_artifact_pauses_run(self) -> None:
         review_session = self._setup_complete_plan_with_pending_review()
         # Valid markdown review, but no final-review.json: the generated v2
@@ -1617,6 +1716,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual(review_session.id, payload["review_session_executed"])
         self.assertIsNone(payload["review_verdict"])
         self.assertIsNone(payload["review_artifact_sha256"])
+        self.assertNotIn("acceptance", payload["turns"][0]["verification"])
         review_text = review_session.path.read_text(encoding="utf-8")
         self.assertIn("- **Status**: pending", review_text)
 

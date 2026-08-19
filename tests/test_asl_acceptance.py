@@ -502,8 +502,9 @@ class AdvisoryVerdictTests(unittest.TestCase):
                     "repositories": [
                         {
                             "alias": "app",
-                            "path": str(workspace / "app"),
+                            "path": "app",
                             "origin": "https://example.invalid/app.git",
+                            "resolved_root": str(workspace / "app"),
                         }
                     ],
                     "run_config": {"cwd": str(workspace)},

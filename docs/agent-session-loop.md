@@ -1233,9 +1233,17 @@ checks — those naming an `on_failure_of` gate — are left out because they ne
 decide whether verification passes. Prior generated review sessions contribute
 nothing, so the validators are not replayed onto themselves. The replayed gates
 run after the two validators, since rejecting a malformed review is cheap and
-replaying the plan's whole recipe is not, but all of them must pass before the
-review verdict is read: the artifact validators supplement the workspace gate
-rather than standing in for it.
+replaying the plan's whole recipe is not. The two artifact validators and every
+non-`broad:*` gate must pass. A valid structured `findings` verdict may defer
+failures only when every failure is from a `broad:*` replay: the turn keeps
+`verification.passed: false`, records the raw failures under
+`deferred_failures`, and adds an acceptance reason of
+`findings-defer-broad-failures` before entering the ordinary repair/rereview
+cycle. An `all-clear` verdict can never defer a broad failure. Neither can a
+malformed artifact, a failed artifact validator, or a mixture containing any
+other failed gate; those paths reopen the review and retain the normal bounded
+retry/pause behavior. The supervisor considers a deferral accounted for only
+after repairs are materialized and a later review reaches all-clear.
 
 Registered plans generate review session version 4 and structured artifact
 version 3 while legacy plans continue to generate the exact v3/v2 form above.
@@ -1387,6 +1395,10 @@ directory); `--no-supervisor-audit` persists `skipped` with reason `opted-out`
 immediately, and `--dry-run` persists `skipped` with reason `dry-run` while
 still reporting the role, timeout, and attempt budget a real run would have used
 under `planned.audit`. Text runs print a `Supervisor audit: STATE` summary line.
+The persisted and audited role includes `source: explicit` or `source: review`
+so operators can distinguish those two provenance paths. Those validated enum
+values survive evidence redaction; arbitrary fields named `source` remain
+content-redacted.
 
 The bundle carries the run's slice of `mailbox.jsonl` beside its slice of the
 event log, under `mailbox` with `records` and a `summary` reporting
@@ -1434,6 +1446,13 @@ verdict was reached over under `comparison.workspace` (`pinned`, `root`,
 `checkout-failed`). The evidence bundle is still collected against the live
 workspace root, and the auditor's read roots are unchanged: it never had read
 access to either tree.
+
+Registry identity in the audit is anchored to the same resolved objects the
+runner used. A registry row's `path` remains the workspace-relative declaration
+for compatibility and display, but containment checks use only its canonical
+`resolved_root`. A missing root, a root outside the workspace, or a root the
+collector had to redact is non-contained evidence and fails closed; ASL never
+interprets the relative `path` against the auditor process's working directory.
 
 Two budgets are spent, not one, because a bad answer and an undelivered request
 are different failures. At most two *answers* may be unusable: each retry is a
@@ -3191,6 +3210,13 @@ overwriting each other, so an alias or a server-side substitution is visible
 instead of silently reported as the request. Harnesses that name no model leave
 both fields `null`. `observed_model_source` is observed, never selected, so it
 never appears as a `model_source`.
+
+The supervisor bundle spells that same request as `requested_model` and
+`requested_model_source`, while retaining `model` and `model_source` as
+compatibility aliases. These run-level fields are not an effective-model
+verdict: `model_projection` is authoritative per role. In particular,
+`requested_model_source: unresolved` beside a role whose projection resolved a
+harness-reported model is expected evidence, not a contradiction.
 
 `state.json` also carries `model_projection`, where the two are reconciled per
 role. Every turn folds into one record keyed by its session kind and harness,

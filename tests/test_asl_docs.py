@@ -3320,6 +3320,22 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         for flag in ("--supervisor-audit", "--audit-harness", "--audit-timeout"):
             self.assertIn(flag, self.asl_skill)
 
+    def test_assurance_docs_define_the_repaired_evidence_semantics(self) -> None:
+        for phrase in (
+            "`findings-defer-broad-failures`",
+            "`resolved_root`",
+            "`source: explicit` or `source: review`",
+            "`requested_model`",
+            "`requested_model_source`",
+            "`model_projection` is authoritative",
+        ):
+            self.assertIn(phrase, self.docs)
+        self.assertIn("containment checks use only its canonical", self.docs)
+        self.assertIn("canonical `resolved_root`", self.package_readme)
+        self.assertIn(
+            "per-role `model_projection` is authoritative", self.package_readme
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

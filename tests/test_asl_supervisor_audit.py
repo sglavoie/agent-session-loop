@@ -1733,8 +1733,9 @@ class EvidenceBundleTests(unittest.TestCase):
                     "repositories": [
                         {
                             "alias": "app",
-                            "path": str(workspace / "app"),
+                            "path": "app",
                             "origin": "https://user:pw@github.com/owner/repo.git",
+                            "resolved_root": str(workspace / "app"),
                         }
                     ],
                     "run_config": {
@@ -2186,6 +2187,30 @@ class EvidenceBundleTests(unittest.TestCase):
                     payload["registry"]["repositories"][0]["origin"],
                 )
 
+    def test_valid_audit_role_sources_survive_but_arbitrary_source_is_redacted(
+        self,
+    ) -> None:
+        for source in assurance_models.AUDIT_ROLE_SOURCES:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
+                workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+                self._rewrite_state(
+                    state_dir,
+                    assurance={
+                        "role": {"source": source},
+                        "source": "arbitrary application text",
+                    },
+                )
+
+                status = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                    "status"
+                ]
+
+                self.assertEqual(source, status["assurance"]["role"]["source"])
+                self.assertIn(
+                    supervisor_audit.REASON_APPLICATION_CONTENT,
+                    status["assurance"]["source"],
+                )
+
     def test_a_failed_write_guard_makes_its_turn_anomalous(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
@@ -2290,6 +2315,8 @@ class EvidenceBundleTests(unittest.TestCase):
 
             self.assertEqual("native CLI default", section["model"])
             self.assertEqual("unresolved", section["model_source"])
+            self.assertEqual("native CLI default", section["requested_model"])
+            self.assertEqual("unresolved", section["requested_model_source"])
             self.assertEqual("claude-opus-5", section["observed_model"])
             self.assertEqual("harness_reported", section["observed_model_source"])
 
@@ -2426,8 +2453,9 @@ class _RunHistoryFixture:
             "repositories": [
                 {
                     "alias": "app",
-                    "path": str(workspace / "app"),
+                    "path": "app",
                     "origin": "https://example.invalid/app.git",
+                    "resolved_root": str(workspace / "app"),
                 }
             ],
             "run_config": {"cwd": str(workspace)},
@@ -2792,6 +2820,16 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("legacy plan stays within", verdict.detail)
             self.assertNotIn("declares a repository registry", verdict.detail)
 
+    def test_a_workspace_relative_registry_path_uses_its_resolved_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            state_payload = self._read_state(history[2])
+
+            self.assertEqual("app", state_payload["repositories"][0]["path"])
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["root-registry-agreement"].status)
+
     def test_a_registry_reaching_outside_the_workspace_is_a_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2801,8 +2839,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             payload["repositories"].append(
                 {
                     "alias": "kiln",
-                    "path": str(root / "kiln"),
+                    "path": "../kiln",
                     "origin": "https://example.invalid/kiln.git",
+                    "resolved_root": str(root / "kiln"),
                 }
             )
             self._write_state(history[2], payload)
@@ -3117,6 +3156,103 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("pass", results["unclassified-anomalies"].status)
             self.assertEqual("pass", results["verification-outcomes"].status)
             self.assertIn("accounted for", results["verification-outcomes"].detail)
+
+    def test_deferred_broad_failure_is_accounted_only_after_later_all_clear(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            result = self._read_result(history[3])
+            result.update(session_id="2", turn_index=1, status_result="complete")
+            failure = {
+                "name": "broad:1:tests",
+                "kind": "command",
+                "status": "fail",
+                "returncode": 1,
+                "failure_reason": "command-failed",
+            }
+            result["verification"] = {
+                "session": "2",
+                "passed": False,
+                "checks": [failure],
+                "skipped_checks": [],
+                "diagnostic_failures": [],
+                "acceptance": {
+                    "accepted": True,
+                    "reason": runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
+                    "review_outcome": "findings",
+                    "deferred_failure_count": 1,
+                    "deferred_failure_names": ["broad:1:tests"],
+                },
+                "deferred_failures": [failure],
+            }
+            self._write_result(history[3] / "turn-0001-01", result)
+            state_payload = self._read_state(history[2])
+            state_payload["review_cycles"] = [
+                {
+                    "cycle": 1,
+                    "review_session_id": "2",
+                    "outcome": "findings",
+                    "disposition": "repairs-materialized",
+                },
+                {
+                    "cycle": 2,
+                    "review_session_id": "3",
+                    "outcome": "all-clear",
+                    "disposition": "all-clear",
+                },
+            ]
+            self._write_state(history[2], state_payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["verification-outcomes"].status)
+            self.assertEqual("pass", results["misleading-success"].status)
+
+    def test_deferred_broad_failure_without_later_all_clear_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            result = self._read_result(history[3])
+            result.update(session_id="2", turn_index=1, status_result="complete")
+            failure = {
+                "name": "broad:1:tests",
+                "kind": "command",
+                "status": "fail",
+                "returncode": 1,
+                "failure_reason": "command-failed",
+            }
+            result["verification"] = {
+                "session": "2",
+                "passed": False,
+                "checks": [failure],
+                "skipped_checks": [],
+                "diagnostic_failures": [],
+                "acceptance": {
+                    "accepted": True,
+                    "reason": runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
+                    "review_outcome": "findings",
+                    "deferred_failure_count": 1,
+                    "deferred_failure_names": ["broad:1:tests"],
+                },
+                "deferred_failures": [failure],
+            }
+            self._write_result(history[3] / "turn-0001-01", result)
+            state_payload = self._read_state(history[2])
+            state_payload["review_cycles"] = [
+                {
+                    "cycle": 1,
+                    "review_session_id": "2",
+                    "outcome": "findings",
+                    "disposition": "repairs-materialized",
+                }
+            ]
+            self._write_state(history[2], state_payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["verification-outcomes"].status)
+            self.assertIn("later all-clear", results["verification-outcomes"].detail)
+            self.assertEqual("fail", results["misleading-success"].status)
 
     def test_a_skipped_diagnostic_cannot_absorb_a_failed_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4632,6 +4768,11 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
                 "refused or paused before launching an unauthorized turn", prompt
             )
             self.assertIn("registry-free legacy plan confined", prompt)
+            self.assertIn("`model_projection` is authoritative", prompt)
+            self.assertIn("An unresolved", prompt)
+            self.assertIn("requested default beside a resolved", prompt)
+            self.assertIn("`findings-defer-broad-failures`", prompt)
+            self.assertIn("later review reaches all-clear", prompt)
             for lane in RUBRIC_LANES:
                 self.assertIn(f"- {lane}", prompt)
             for root in supervisor_audit.LOCALIZATION_ROOTS:

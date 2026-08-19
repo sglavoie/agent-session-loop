@@ -958,6 +958,11 @@ _ORIGIN_KEYS = frozenset({"origin", "origins", "remote", "remote_url", "url"})
 #: ``runner.REPLY_ORIGINS``. No Git remote can collide with these tokens.
 _REPLY_ORIGIN_VALUES = frozenset({"argv", "stdin", "mailbox"})
 
+#: The only values ``assurance.role.source`` may carry.  ``source`` is
+#: otherwise application content and remains withheld; these bounded enums are
+#: control-plane provenance validated by :class:`assurance_models.AuditRole`.
+_AUDIT_ROLE_SOURCE_VALUES = frozenset(assurance_models.AUDIT_ROLE_SOURCES)
+
 #: Field parents under which ``origin`` names how an operator reply reached the
 #: run rather than a repository. ``None`` covers the reply event, which carries
 #: the enum at its payload root.
@@ -1337,6 +1342,8 @@ class _Collector:
             if key in _ENVIRONMENT_KEYS:
                 return REDACTED
             if key in _CONTENT_KEYS:
+                if parent == "role" and text in _AUDIT_ROLE_SOURCE_VALUES:
+                    return text
                 return self._content_stub(text)
             if key in _ORIGIN_KEYS:
                 if _is_reply_origin(text, key=key, parent=parent):
@@ -1585,6 +1592,35 @@ def _payload_shows_failure(payload: Mapping[str, Any]) -> bool:
     return payload.get("ok") is False
 
 
+_REVIEW_BROAD_FAILURES_DEFERRED_REASON = "findings-defer-broad-failures"
+_BROAD_REVIEW_CHECK_PREFIX = "broad:"
+
+
+def _deferred_review_acceptance(
+    verification_payload: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Return a structurally valid broad-failure acceptance projection."""
+    acceptance = verification_payload.get("acceptance")
+    if not isinstance(acceptance, Mapping):
+        return None
+    names = acceptance.get("deferred_failure_names")
+    if not isinstance(names, (list, tuple)) or not names:
+        return None
+    if any(
+        not isinstance(name, str) or not name.startswith(_BROAD_REVIEW_CHECK_PREFIX)
+        for name in names
+    ):
+        return None
+    if not (
+        acceptance.get("accepted") is True
+        and acceptance.get("reason") == _REVIEW_BROAD_FAILURES_DEFERRED_REASON
+        and acceptance.get("review_outcome") == "findings"
+        and acceptance.get("deferred_failure_count") == len(names)
+    ):
+        return None
+    return acceptance
+
+
 def _turn_shows_failure(result: Mapping[str, Any]) -> bool:
     """Whether a turn result is an anomaly, including at exit code zero.
 
@@ -1605,7 +1641,7 @@ def _turn_shows_failure(result: Mapping[str, Any]) -> bool:
     # top-level signal, so the nested result is the only place the failure is.
     verification = result.get("verification")
     if isinstance(verification, Mapping) and verification.get("passed") is False:
-        return True
+        return _deferred_review_acceptance(verification) is None
     status_result = result.get("status_result")
     return status_result is not None and status_result != "complete"
 
@@ -2032,7 +2068,11 @@ def _verification_section(turns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if not isinstance(session_verification, Mapping):
             continue
         sessions.append(
-            {"turn": turn.get("name"), "verification": session_verification}
+            {
+                "turn": turn.get("name"),
+                "session_id": result.get("session_id"),
+                "verification": session_verification,
+            }
         )
     return {"sessions": sessions, "session_count": len(sessions)}
 
@@ -2261,9 +2301,13 @@ def collect_audit_input(
         "state": {
             "reference": state_reference,
             "harness": state_payload.get("harness"),
-            # Beside the configured model, never over it: `model` records what
-            # the run asked for and `observed_model` what a harness reported
-            # executing, and an audit that saw only one cannot tell them apart.
+            # Requested/effective semantics are explicit for the audit.  The
+            # historical ``model`` aliases remain for consumers of older
+            # bundles, while ``model_projection`` is authoritative per role.
+            "requested_model": collector.redact(
+                state_payload.get("model"), key="requested_model"
+            ),
+            "requested_model_source": state_payload.get("model_source"),
             "model": collector.redact(state_payload.get("model"), key="model"),
             "model_source": state_payload.get("model_source"),
             "observed_model": collector.redact(
@@ -2555,9 +2599,16 @@ def _check_root_registry_agreement(context: _CheckContext) -> _Verdict:
             bindings.append(("the run registry", registry.get("workspace_root")))
         for entry in _sequence(registry.get("repositories")):
             entry = _mapping(entry)
-            if entry.get("path") is not None:
-                alias = entry.get("alias") or "an unnamed repository"
-                bindings.append((f"registered repository {alias}", entry.get("path")))
+            alias = entry.get("alias") or "an unnamed repository"
+            # ``path`` is deliberately workspace-relative in current runner
+            # state.  Containment is about the repository ASL actually
+            # resolved, so only the canonical ``resolved_root`` can establish
+            # it.  Older, malformed, outside-root, or redacted entries fail
+            # closed instead of being made safe by resolving a relative path
+            # against the auditor process's cwd.
+            bindings.append(
+                (f"registered repository {alias}", entry.get("resolved_root"))
+            )
     if not bindings:
         return _Verdict(
             "unavailable",
@@ -2569,9 +2620,13 @@ def _check_root_registry_agreement(context: _CheckContext) -> _Verdict:
         )
 
     disagreeing = [
-        f"{source} resolves to {value}"
+        (
+            f"{source} records no resolved root"
+            if value is None
+            else f"{source} resolves to {value}"
+        )
         for source, value in bindings
-        if not _inside(value, EVIDENCE_ROOT_WORKSPACE)
+        if value is None or not _inside(value, EVIDENCE_ROOT_WORKSPACE)
     ]
     if disagreeing:
         return _Verdict(
@@ -3027,6 +3082,63 @@ def _superseded_turn_names(turns: Sequence[Mapping[str, Any]]) -> frozenset[str]
     return frozenset(superseded)
 
 
+def _recorded_review_cycles(context: _CheckContext) -> tuple[Mapping[str, Any], ...]:
+    """Return ordered cycle evidence, preferring the durable state projection."""
+    projected = _sequence(context.section("review").get("review_cycles"))
+    if projected:
+        return tuple(_mapping(item) for item in projected)
+    return tuple(
+        _mapping(record.get("payload"))
+        for record in context.records
+        if record.get("name") == events.REVIEW_CYCLE_EVENT
+    )
+
+
+def _deferred_review_reached_all_clear(context: _CheckContext, session_id: Any) -> bool:
+    """Whether one deferred findings review was repaired and later cleared."""
+    cycles = _recorded_review_cycles(context)
+    source_index = next(
+        (
+            index
+            for index, cycle in enumerate(cycles)
+            if str(cycle.get("review_session_id")) == str(session_id)
+            and cycle.get("outcome") == "findings"
+            and cycle.get("disposition") == "repairs-materialized"
+        ),
+        None,
+    )
+    if source_index is None:
+        return False
+    return any(
+        cycle.get("outcome") == "all-clear" and cycle.get("disposition") == "all-clear"
+        for cycle in cycles[source_index + 1 :]
+    )
+
+
+def _accepted_verification_is_accounted_for(
+    context: _CheckContext,
+    verification_payload: Mapping[str, Any],
+    *,
+    session_id: Any,
+) -> bool:
+    """Validate deferral identity, raw failures, and its later all-clear."""
+    acceptance = _deferred_review_acceptance(verification_payload)
+    if acceptance is None:
+        return False
+    deferred = verification_payload.get("deferred_failures")
+    if deferred is not None:
+        failures = [_mapping(item) for item in _sequence(deferred)]
+        names = [failure.get("name") for failure in failures]
+        if names != list(_sequence(acceptance.get("deferred_failure_names"))):
+            return False
+        if any(
+            not isinstance(name, str) or not name.startswith(_BROAD_REVIEW_CHECK_PREFIX)
+            for name in names
+        ):
+            return False
+    return _deferred_review_reached_all_clear(context, session_id)
+
+
 def _check_misleading_success(context: _CheckContext) -> _Verdict:
     status = context.section("status")
     finished = [
@@ -3061,7 +3173,14 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
         # turn's recipe reappears on the turn that replaced it.
         if _mapping(session).get("turn") in superseded:
             continue
-        if session_verification.get("passed") is False:
+        if session_verification.get(
+            "passed"
+        ) is False and not _accepted_verification_is_accounted_for(
+            context,
+            session_verification,
+            session_id=_mapping(session).get("session_id")
+            or session_verification.get("session"),
+        ):
             counter.append(f"verification failed for {_mapping(session).get('turn')}")
         skipped = _sequence(session_verification.get("skipped_checks"))
         unexplained = [
@@ -3540,6 +3659,25 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
     failing_total = 0
     for session in sessions:
         outcome = _mapping(session.get("verification"))
+        if outcome.get("passed") is False:
+            acceptance = outcome.get("acceptance")
+            if acceptance is not None:
+                deferred = [
+                    _mapping(entry)
+                    for entry in _sequence(outcome.get("deferred_failures"))
+                ]
+                failing_total += len(deferred)
+                if not _accepted_verification_is_accounted_for(
+                    context,
+                    outcome,
+                    session_id=session.get("session_id") or outcome.get("session"),
+                ):
+                    problems.append(
+                        f"the failed verification recorded for {session.get('turn')} "
+                        "claims broad-check deferral without a matching repair cycle "
+                        "and later all-clear review"
+                    )
+            continue
         if outcome.get("passed") is not True:
             continue
         failed = [
@@ -3577,6 +3715,28 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
                     f"{len(failures)} failing check record(s) for {label} never "
                     f"reached a {events.VERIFICATION_FINISHED_EVENT} record"
                 )
+            continue
+        if outcome.get("passed") is False:
+            acceptance = outcome.get("acceptance")
+            if acceptance is not None:
+                failing_total += len(failures)
+                accepted_names = list(
+                    _sequence(_mapping(acceptance).get("deferred_failure_names"))
+                )
+                failure_names = [failure.get("name") for failure in failures]
+                if (
+                    accepted_names != failure_names
+                    or not _accepted_verification_is_accounted_for(
+                        context,
+                        outcome,
+                        session_id=outcome.get("session_id") or outcome.get("session"),
+                    )
+                ):
+                    problems.append(
+                        f"verification for {label} claims broad-check deferral "
+                        "without matching failed checks, a repair cycle, and a "
+                        "later all-clear review"
+                    )
             continue
         if outcome.get("passed") is not True:
             continue
@@ -4393,6 +4553,16 @@ Rules the answer must satisfy:
 - A registry-free legacy plan confined to the Git repository containing its
   bound execution root is allowed by ASL's compatibility contract. Do not infer
   missing authority merely from the absence of registry and scope projections.
+- In `state`, `requested_model`/`requested_model_source` (and their compatibility
+  aliases `model`/`model_source`) describe the requested default. Per-role
+  `model_projection` is authoritative for the effective model. An unresolved
+  requested default beside a resolved effective role model is not a
+  contradiction.
+- A verification with `passed: false` is never a pass. It may carry an explicit
+  `findings-defer-broad-failures` acceptance only when every deferred check is a
+  `broad:*` replay under a valid findings verdict. Treat that deferral as
+  accounted for only if the recorded review cycles then materialize repairs and
+  a later review reaches all-clear; otherwise report the contradiction.
 
 Every finding carries exactly one `identity` object, and there is no default:
 

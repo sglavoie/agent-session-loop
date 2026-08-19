@@ -652,6 +652,12 @@ _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE = "\n".join(
 #: the review's own artifact validators.
 BROAD_REVIEW_CHECK_PREFIX = "broad"
 
+#: A findings review may truthfully finish with broad gates still failing: the
+#: findings are the repair specification for those failures.  The raw check
+#: result stays failed; this reason records why the review turn itself was
+#: accepted into the repair/rereview cycle.
+REVIEW_BROAD_FAILURES_DEFERRED_REASON = "findings-defer-broad-failures"
+
 
 def _broad_review_verification_checks(plan_dir: Path) -> list[dict[str, Any]]:
     """Every gate the plan's own sessions declare, as one deduplicated recipe.
@@ -8116,6 +8122,7 @@ class _LiveVerification:
         gate_count: int | None = None,
         diagnostic_count: int = 0,
         error: str | None = None,
+        acceptance: Mapping[str, Any] | None = None,
     ) -> None:
         with self._lock:
             # Claim the terminal transition before anything that blocks. A
@@ -8154,6 +8161,8 @@ class _LiveVerification:
             }
             if error is not None:
                 event_payload["error"] = error
+            if acceptance is not None:
+                event_payload["acceptance"] = dict(acceptance)
             with self._persistence.lock:
                 self._payload["active_verification"] = None
                 self._persistence.append_event(
@@ -8180,6 +8189,7 @@ class _LiveVerification:
                 "diagnostic_count": diagnostic_count,
                 "passed": passed,
                 "heartbeat_count": self._heartbeat_count,
+                **({"acceptance": dict(acceptance)} if acceptance is not None else {}),
             },
         )
 
@@ -10176,6 +10186,42 @@ def _verification_failure_details(
         "failures": [asdict(check) for check in result.failures],
         "diagnostic_failures": [asdict(check) for check in result.diagnostic_failures],
     }
+
+
+def _review_broad_failure_acceptance(
+    result: verification.VerificationResult,
+    *,
+    plan_dir: Path,
+    require_artifact: bool,
+) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    """Accept only findings-backed failures from replayed plan gates.
+
+    The two returned projections deliberately differ in size.  The event
+    projection carries bounded identity and rationale; the turn projection
+    additionally retains each raw failure beside the ordinary ``checks`` list.
+    A malformed verdict, an all-clear verdict, an artifact-validator failure,
+    or any non-broad failure is ineligible and follows the normal fail-closed
+    verification path.
+    """
+    failures = tuple(result.failures)
+    prefix = f"{BROAD_REVIEW_CHECK_PREFIX}:"
+    if not failures or any(not check.name.startswith(prefix) for check in failures):
+        return None
+    verdict = _read_review_verdict(plan_dir, require_artifact=require_artifact)
+    if not (
+        verdict.get("ok") is True
+        and verdict.get("outcome") == review.REVIEW_OUTCOME_FINDINGS
+    ):
+        return None
+    raw_failures = [asdict(check) for check in failures]
+    acceptance = {
+        "accepted": True,
+        "reason": REVIEW_BROAD_FAILURES_DEFERRED_REASON,
+        "review_outcome": review.REVIEW_OUTCOME_FINDINGS,
+        "deferred_failure_count": len(raw_failures),
+        "deferred_failure_names": [check.name for check in failures],
+    }
+    return acceptance, raw_failures
 
 
 def _verification_fingerprint(details: dict[str, Any] | None) -> str | None:
@@ -12813,6 +12859,8 @@ def _enforce_session_verification(
     total_sessions: int | None,
     heartbeat_interval: float = VERIFICATION_HEARTBEAT_INTERVAL_SECONDS,
     verification_context: verification.VerificationContext | None = None,
+    review_broad_failure_deferral: bool = False,
+    require_review_artifact: bool = False,
 ) -> bool:
     """Run the session's `Verify` recipe and pause on failure or contract problems.
 
@@ -13069,6 +13117,21 @@ def _enforce_session_verification(
         )
         return True
 
+    acceptance_projections = (
+        _review_broad_failure_acceptance(
+            result,
+            plan_dir=before.plan_dir,
+            require_artifact=require_review_artifact,
+        )
+        if review_broad_failure_deferral and not result.passed
+        else None
+    )
+    event_acceptance = (
+        acceptance_projections[0] if acceptance_projections is not None else None
+    )
+    deferred_failures = (
+        acceptance_projections[1] if acceptance_projections is not None else None
+    )
     passed_count = sum(1 for check in result.checks if check.status == "pass")
     diagnostic_count = len(result.diagnostic_names)
     live_verification.finish(
@@ -13083,11 +13146,12 @@ def _enforce_session_verification(
             if result.passed
             else verification.VERIFY_EXIT_REASON_FAILED
         ),
+        acceptance=event_acceptance,
     )
 
     details = _verification_failure_details(result, contract)
     with persistence.lock:
-        turn_payload["verification"] = {
+        verification_payload = {
             "session": session_id,
             "reason": (
                 verification.VERIFY_EXIT_REASON_OK
@@ -13100,6 +13164,10 @@ def _enforce_session_verification(
             "skipped_checks": details["skipped_checks"],
             "diagnostic_failures": details["diagnostic_failures"],
         }
+        if event_acceptance is not None:
+            verification_payload["acceptance"] = event_acceptance
+            verification_payload["deferred_failures"] = deferred_failures
+        turn_payload["verification"] = verification_payload
         _write_json_file(paths["result"], turn_payload)
         for check in result.checks:
             _append_process_sweep_event(
@@ -13115,7 +13183,7 @@ def _enforce_session_verification(
                 },
             )
 
-    if result.passed:
+    if result.passed or event_acceptance is not None:
         return False
 
     summary = _verification_failure_summary(result)
@@ -17078,6 +17146,11 @@ def _run_locked(
                 turn_index=turn_index,
                 total_sessions=total_sessions,
                 verification_context=verification_context,
+                review_broad_failure_deferral=is_review_session,
+                require_review_artifact=(
+                    review_session_version is not None
+                    and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
+                ),
             ):
                 break
 
