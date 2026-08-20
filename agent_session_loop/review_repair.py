@@ -364,6 +364,7 @@ def _merge_verification_checks(
             parsed.cwd or ".",
             parsed.baseline_expectation,
             parsed.on_failure_of,
+            parsed.review_replay,
         )
         previous_settings = (
             previous.timeout_seconds,
@@ -371,6 +372,7 @@ def _merge_verification_checks(
             previous.cwd or ".",
             previous.baseline_expectation,
             previous.on_failure_of,
+            previous.review_replay,
         )
         if settings != previous_settings:
             raise ReviewRepairError(
@@ -445,6 +447,10 @@ def _render_child_body(
                 "scope to other subsystems or unrelated findings."
             ),
             "- Leave every targeted check in the completion contract passing.",
+            (
+                "- Do not commit the repair yourself; ASL owns the "
+                "post-verification commit for this generated repair child."
+            ),
             "- Record results in this session's Handoff when complete.",
         ]
     )

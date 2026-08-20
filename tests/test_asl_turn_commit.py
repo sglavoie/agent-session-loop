@@ -12,6 +12,7 @@ import argparse
 import ast
 import inspect
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ from agent_session_loop import (
     events,
     harnesses,
     plans,
+    review_repair,
     runner,
     state,
     supervisor_audit,
@@ -32,6 +34,7 @@ from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _contract_block,
     init_multi_repo_workspace,
+    install_fake_spec,
     read_jsonl,
     write_multi_repo_plan,
 )
@@ -305,6 +308,65 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertEqual(
             runner._snapshot_payload(plans.inspect_plan(self.plan_dir)),
             finished["after"],
+        )
+
+    def test_authored_session_remains_uncommitted_under_null_mode(self) -> None:
+        payload = self._run_accepted()
+
+        self.assertIsNone(payload["commit_mode"])
+        self.assertEqual([], payload["commits"])
+        self.assertIn(
+            "README.md",
+            runner._run_git(self.repositories["SVC"], ["status", "--porcelain"]).stdout,
+        )
+
+    def test_registered_repair_commits_only_changed_writable_aliases(self) -> None:
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            review_repair.REVIEW_REPAIR_SESSION_MARKER
+            + "\n"
+            + review_repair.review_repair_session_version_marker()
+            + "\n"
+            + session_path.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (self.repositories["OAK"] / "preexisting.txt").write_text(
+            "read-only dirty state\n", encoding="utf-8"
+        )
+        oak_head = runner._read_git_head(self.repositories["OAK"])["head"]
+        fake_spec = install_fake_spec(self.tmp_path)
+        env = {"PATH": str(fake_spec.parent) + os.pathsep + os.environ.get("PATH", "")}
+
+        with (
+            mock.patch.dict(os.environ, env),
+            mock.patch.object(
+                runner.harnesses,
+                "run_harness",
+                side_effect=self._harness(
+                    writes="SVC:repair.txt", declares="SVC:repair.txt"
+                ),
+            ),
+        ):
+            exit_code, payload = self._invoke("registered-repair-commit")
+
+        self.assertEqual(0, exit_code)
+        self.assertIsNone(payload["commit_mode"])
+        self.assertEqual(1, len(payload["commits"]))
+        self.assertEqual("SVC", payload["commits"][0]["repository_alias"])
+        self.assertEqual(
+            "",
+            runner._run_git(
+                self.repositories["SVC"], ["status", "--porcelain"]
+            ).stdout.strip(),
+        )
+        self.assertEqual(
+            oak_head,
+            runner._read_git_head(self.repositories["OAK"])["head"],
+        )
+        self.assertTrue(
+            runner._run_git(
+                self.repositories["OAK"], ["status", "--porcelain"]
+            ).stdout.strip()
         )
 
     def test_turn_finished_digest_matches_stored_result_json(self) -> None:

@@ -509,8 +509,18 @@ class BroadReviewGateTests(unittest.TestCase):
             {
                 "1": self.contract(
                     "1",
-                    {"type": "command", "name": "lint", "argv": ["true"]},
-                    {"type": "file_exists", "name": "readme", "path": "README.md"},
+                    {
+                        "type": "command",
+                        "name": "lint",
+                        "argv": ["true"],
+                        "review_replay": True,
+                    },
+                    {
+                        "type": "file_exists",
+                        "name": "readme",
+                        "path": "README.md",
+                        "review_replay": True,
+                    },
                 )
             }
         )
@@ -531,6 +541,7 @@ class BroadReviewGateTests(unittest.TestCase):
         recipe: dict[str, object] = {
             "type": "command",
             "argv": ["python3", "-c", "pass"],
+            "review_replay": True,
         }
         checks = self.review_checks(
             {
@@ -546,7 +557,12 @@ class BroadReviewGateTests(unittest.TestCase):
             {
                 "1": self.contract(
                     "1",
-                    {"type": "command", "name": "suite", "argv": ["true"]},
+                    {
+                        "type": "command",
+                        "name": "suite",
+                        "argv": ["true"],
+                        "review_replay": True,
+                    },
                     {
                         "type": "command",
                         "name": "suite-detail",
@@ -565,7 +581,13 @@ class BroadReviewGateTests(unittest.TestCase):
         checks = self.review_checks(
             {
                 "1": self.contract(
-                    "1", {"type": "command", "name": "suite", "argv": ["true"]}
+                    "1",
+                    {
+                        "type": "command",
+                        "name": "suite",
+                        "argv": ["true"],
+                        "review_replay": True,
+                    },
                 )
             },
             prior_review=True,
@@ -583,6 +605,7 @@ class BroadReviewGateTests(unittest.TestCase):
                         "name": "suite",
                         "argv": ["true"],
                         "baseline_expectation": "fail",
+                        "review_replay": True,
                     },
                 )
             }
@@ -591,6 +614,7 @@ class BroadReviewGateTests(unittest.TestCase):
         # The expectation describes the workspace the plan started from, which
         # says nothing about the one the repairs produced.
         self.assertNotIn("baseline_expectation", checks[-1])
+        self.assertNotIn("review_replay", checks[-1])
 
     def test_the_replayed_recipe_is_a_readable_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -599,10 +623,22 @@ class BroadReviewGateTests(unittest.TestCase):
                 plan_dir,
                 {
                     "1": self.contract(
-                        "1", {"type": "command", "name": "suite", "argv": ["true"]}
+                        "1",
+                        {
+                            "type": "command",
+                            "name": "suite",
+                            "argv": ["true"],
+                            "review_replay": True,
+                        },
                     ),
                     "2": self.contract(
-                        "2", {"type": "command", "name": "suite", "argv": ["false"]}
+                        "2",
+                        {
+                            "type": "command",
+                            "name": "suite",
+                            "argv": ["false"],
+                            "review_replay": True,
+                        },
                     ),
                 },
                 prior_review=False,

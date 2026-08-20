@@ -41,6 +41,7 @@ from agent_session_loop import (
     responses,
     retention,
     review,
+    review_repair,
     run_flags,
     runner,
     state,
@@ -5199,6 +5200,87 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                     repositories["OAK"].name,
                 ],
                 [Path(record["cwd"]).name for record in records],
+            )
+
+    def test_partial_repair_commit_recovers_under_null_commit_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            specs = DEFAULT_MULTI_REPO_SPECS[:2]
+            workspace_root = tmp_dir / "workspace"
+            repositories = init_multi_repo_workspace(workspace_root, specs)
+            plan_dir = tmp_dir / "plan"
+            write_multi_repo_plan(
+                plan_dir,
+                ("pending",),
+                specs=specs,
+                contracts_by_id={
+                    "1": _contract_block(
+                        '{"type": "file_exists", "repo": "SVC", '
+                        '"path": "README.md", "name": "svc-readme"}',
+                        session="1",
+                    )
+                },
+            )
+            session_path = plan_dir / "session-1.md"
+            session_path.write_text(
+                review_repair.REVIEW_REPAIR_SESSION_MARKER
+                + "\n"
+                + review_repair.review_repair_session_version_marker()
+                + "\n"
+                + session_path.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            registry = plans.read_repository_registry(plan_dir)
+            assert registry is not None
+            plans.save_workspace_plan_metadata(
+                plan_dir, workspace_root, registry.digest
+            )
+            install_fake_spec(tmp_dir)
+            spec_log = tmp_dir / "fake-spec.jsonl"
+            state_dir = tmp_dir / "state"
+            base_env = self._fake_codex_env(
+                tmp_dir,
+                PATH=str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
+                FAKE_SPEC_LOG=str(spec_log),
+            )
+            mutations = [
+                {"path": str(repositories[alias] / "changed.txt"), "text": alias}
+                for alias in ("SVC", "OAK")
+            ]
+
+            first = self._run(
+                plan_dir,
+                workspace_root,
+                state_dir,
+                env_overrides={
+                    **base_env,
+                    "FAKE_CODEX_MUTATIONS_JSON": json.dumps(mutations),
+                    "FAKE_SPEC_FAIL_CWD_BASENAME": repositories["OAK"].name,
+                },
+            )
+
+            self.assertEqual(1, first.returncode, first.stderr)
+            first_payload = json.loads(first.stdout)
+            self.assertIsNone(first_payload["commit_mode"])
+            self.assertEqual("per-child", first_payload["repair_commit_mode"])
+            self.assertEqual("commit-failed", first_payload["pause_reason"])
+            self.assertEqual(
+                ["OAK"], first_payload["commit_groups"][0]["remaining_aliases"]
+            )
+
+            second = self._run(
+                plan_dir,
+                workspace_root,
+                state_dir,
+                "--resume",
+                env_overrides=base_env,
+            )
+
+            self.assertEqual(0, second.returncode, second.stderr)
+            second_payload = json.loads(second.stdout)
+            self.assertTrue(second_payload["commit_group_recovery"]["success"])
+            self.assertEqual(
+                "complete", second_payload["commit_group_recovery"]["group"]["status"]
             )
 
     def test_multi_repo_real_turn_retains_and_reports_read_only_mutation(self) -> None:

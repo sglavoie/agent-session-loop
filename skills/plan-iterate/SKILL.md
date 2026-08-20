@@ -407,6 +407,7 @@ The final plan must pass the `asl prepare` structure gate, which otherwise exits
   - a `### Verify` fenced ```json block parseable by `contracts.parse_completion_contract` giving the session's verification recipe.
 - Contract session IDs must use the canonical unpadded ID returned by the source-heading parser.
 - Contract checks carry `baseline_expectation` (`pass` or `fail`) where a meaningful pre-implementation baseline expectation exists; checks without it carry no baseline obligations.
+- Mark an unconditional gate with `review_replay: true` only when it asserts durable current state that every later generated review should recheck. Leave HEAD identity, dirty-tree state, intermediate-file presence, baseline-only facts, and other point-in-time assertions unmarked; never mark an `on_failure_of` diagnostic. Unmarked legacy and newly authored checks remain session-local.
 - Every session states its own verification command in `### Verify` and its own done-condition in `### Done when`. Neither may be blank, generic, or deferred to a later session's contract — a session whose completion is only provable by a successor cannot converge on its own.
 - The plan converges in **six sessions or fewer**. When the work looks like it needs a seventh, narrow the plan's scope rather than splitting more finely: the long repair tails appeared in the larger splits, so a finer split buys nothing. Record the cut scope under `## Consciously Deferred` per the Step I7 durable-section rule.
 

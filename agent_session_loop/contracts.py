@@ -75,6 +75,7 @@ class CommandCheck:
     kind: CommandKind = "command"
     on_failure_of: tuple[str, ...] = ()
     repo: str | None = None
+    review_replay: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,7 @@ class FileExistsCheck:
     kind: FileExistsKind = "file_exists"
     on_failure_of: tuple[str, ...] = ()
     repo: str | None = None
+    review_replay: bool = False
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,7 @@ class RegexInFileCheck:
     kind: RegexInFileKind = "regex_in_file"
     on_failure_of: tuple[str, ...] = ()
     repo: str | None = None
+    review_replay: bool = False
 
 
 VerificationCheck = CommandCheck | FileExistsCheck | RegexInFileCheck
@@ -376,6 +379,16 @@ def _on_failure_of(
     return tuple(names)
 
 
+def _review_replay(payload: dict, *, index: int, session_id: SessionId) -> bool:
+    raw = payload.get("review_replay", False)
+    if not isinstance(raw, bool):
+        raise PlanError(
+            f"session {session_id.value} contract check #{index + 1} "
+            f"'review_replay' must be a boolean; got {raw!r}"
+        )
+    return raw
+
+
 def _repository_alias(
     payload: dict,
     *,
@@ -489,6 +502,7 @@ def _parse_command_check(
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
     baseline = _baseline_expectation(payload, index=index, session_id=session_id)
     on_failure_of = _on_failure_of(payload, index=index, session_id=session_id)
+    review_replay = _review_replay(payload, index=index, session_id=session_id)
     return CommandCheck(
         name=name,
         argv=tuple(argv),
@@ -497,6 +511,7 @@ def _parse_command_check(
         baseline_expectation=baseline,
         on_failure_of=on_failure_of,
         repo=repo,
+        review_replay=review_replay,
     )
 
 
@@ -521,12 +536,14 @@ def _parse_file_exists_check(
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
     baseline = _baseline_expectation(payload, index=index, session_id=session_id)
     on_failure_of = _on_failure_of(payload, index=index, session_id=session_id)
+    review_replay = _review_replay(payload, index=index, session_id=session_id)
     return FileExistsCheck(
         name=name,
         path=path,
         baseline_expectation=baseline,
         on_failure_of=on_failure_of,
         repo=repo,
+        review_replay=review_replay,
     )
 
 
@@ -561,6 +578,7 @@ def _parse_regex_in_file_check(
     name = _check_name(payload.get("name"), index=index, session_id=session_id)
     baseline = _baseline_expectation(payload, index=index, session_id=session_id)
     on_failure_of = _on_failure_of(payload, index=index, session_id=session_id)
+    review_replay = _review_replay(payload, index=index, session_id=session_id)
     return RegexInFileCheck(
         name=name,
         path=path,
@@ -568,6 +586,7 @@ def _parse_regex_in_file_check(
         baseline_expectation=baseline,
         on_failure_of=on_failure_of,
         repo=repo,
+        review_replay=review_replay,
     )
 
 
@@ -593,6 +612,8 @@ def check_payload(check: VerificationCheck) -> dict[str, Any]:
         payload["baseline_expectation"] = check.baseline_expectation
     if check.on_failure_of:
         payload["on_failure_of"] = list(check.on_failure_of)
+    if check.review_replay:
+        payload["review_replay"] = True
     if check.repo is not None:
         payload["repo"] = check.repo
     return payload
@@ -696,6 +717,12 @@ def _parse_verify_payload(
             "unconditional gate check"
         )
     for check in checks:
+        if check.review_replay and check.on_failure_of:
+            raise PlanError(
+                f"session {session_id.value} contract check {check.name!r} "
+                "cannot set 'review_replay' to true on a diagnostic "
+                "'on_failure_of' check"
+            )
         for dependency in check.on_failure_of:
             if dependency == check.name:
                 raise PlanError(

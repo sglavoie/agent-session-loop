@@ -51,13 +51,12 @@ REVIEW_SESSION_VERSION_MARKER_TEMPLATE = (
 _REVIEW_SESSION_VERSION_MARKER_RE = re.compile(
     r"<!--\s*asl:generated-review-session\s+version=([0-9]+)\s*-->"
 )
-GENERATED_REVIEW_SESSION_VERSION = 3
+GENERATED_REVIEW_SESSION_VERSION = 4
 
-# Repository-aware reviews use independent additive versions so newly
-# generated single-repository review sessions keep their historical v3/v2
-# bytes.  Readers accept both artifact schemas; v3 is selected only when the
-# plan declares a repository registry.
-REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION = 4
+# Repository-aware reviews use an independent additive version. Readers accept
+# both artifact schemas; artifact v3 is selected only when the plan declares a
+# repository registry.
+REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION = 5
 
 # Lowest marker version that must produce ``final-review.json``. Pinned
 # independently of GENERATED_REVIEW_SESSION_VERSION: raising the generated

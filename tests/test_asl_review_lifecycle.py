@@ -25,6 +25,7 @@ from unittest import mock
 from agent_session_loop import (
     cli,
     config,
+    contracts,
     control_queue,
     events,
     harnesses,
@@ -1535,6 +1536,15 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
     def test_review_verdict_persisted_for_counted_findings(self) -> None:
         self._write_plan(("pending",), readiness="loop-ready")
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        for argv in (["git", "add", "README.md"], ["git", "commit", "-m", "seed"]):
+            subprocess.run(
+                argv,
+                cwd=self.repo_root,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+        _fake_spec, _spec_log, spec_env = self._install_fake_spec_on_path()
         review_body = (
             "## Findings\n"
             "- High issue in agent_session_loop/runner.py.\n"
@@ -1560,6 +1570,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             mode="success-with-review",
             review_harness="claude",
             extra_env={
+                **spec_env,
                 "FAKE_CODEX_REVIEW_BODY": review_body,
                 "FAKE_CODEX_REVIEW_JSON": review_json,
             },
@@ -1605,6 +1616,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         check = {
             "type": "command",
             "name": "repair-child-exists",
+            "review_replay": True,
             "argv": [
                 sys.executable,
                 "-c",
@@ -1646,11 +1658,15 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
 
     def test_findings_defer_broad_failure_until_repair_and_all_clear(self) -> None:
         self._setup_review_with_broad_gate_waiting_for_repair()
+        _fake_spec, spec_log, spec_env = self._install_fake_spec_on_path()
 
         completed, payload = self._run(
             mode="success-with-review",
             review_harness="claude",
-            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear"},
+            extra_env={
+                **spec_env,
+                "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
+            },
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
@@ -1679,6 +1695,126 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(finished))
         self.assertFalse(finished[0]["passed"])
+        self.assertEqual([], payload["commits"])
+        self.assertFalse(spec_log.exists())
+
+    def test_generated_repair_commits_under_null_ordinary_mode(self) -> None:
+        self._setup_review_with_broad_gate_waiting_for_repair()
+        _fake_spec, spec_log, spec_env = self._install_fake_spec_on_path()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={
+                **spec_env,
+                "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
+                "FAKE_CODEX_REPAIR_MUTATION_PATH": "repair.txt",
+            },
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIsNone(payload["commit_mode"])
+        self.assertEqual(
+            runner.REPAIR_COMMIT_MODE_PER_CHILD, payload["repair_commit_mode"]
+        )
+        self.assertEqual(1, len(read_jsonl(spec_log)))
+        self.assertEqual(
+            ["2.1"], [commit["session_id"] for commit in payload["commits"]]
+        )
+        self.assertEqual(
+            "",
+            git_stdout(self.repo_root, "status", "--porcelain"),
+        )
+        self.assertEqual(
+            "repair.txt",
+            git_stdout(self.repo_root, "show", "--format=", "--name-only", "HEAD"),
+        )
+
+    def test_generated_repair_skips_runner_commit_after_worker_commit(self) -> None:
+        self._setup_review_with_broad_gate_waiting_for_repair()
+        _fake_spec, spec_log, spec_env = self._install_fake_spec_on_path()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={
+                **spec_env,
+                "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
+                "FAKE_CODEX_REPAIR_MUTATION_PATH": "repair.txt",
+                "FAKE_CODEX_REPAIR_COMMIT": "1",
+            },
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual([], payload["commits"])
+        self.assertFalse(spec_log.exists())
+        repair_turn = next(
+            turn for turn in payload["turns"] if turn["session_id"] == "2.1"
+        )
+        self.assertEqual("no-changes", repair_turn["repair_commit"]["result"])
+        changed = repair_turn["workspace_write_guard"]["changed"]
+        self.assertTrue(next(iter(changed.values()))["head_changed"])
+
+    def test_generated_repair_missing_spec_pauses_before_child_execution(self) -> None:
+        self._setup_review_with_broad_gate_waiting_for_repair()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={
+                "PATH": "/usr/bin:/bin",
+                "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
+            },
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual("commit-preflight", payload["pause_reason"])
+        self.assertEqual("2.1", payload["pause_details"]["session_id"])
+        self.assertEqual(
+            runner.REPAIR_COMMIT_MODE_PER_CHILD,
+            payload["pause_details"]["repair_commit_mode"],
+        )
+        self.assertIn("spec executable not found", payload["pause_message"])
+        self.assertEqual(["2"], [turn["session_id"] for turn in payload["turns"]])
+        self.assertEqual(
+            "pending",
+            plans.read_session_status(
+                plans.SessionFile(
+                    plans.parse_session_id("2.1"),
+                    self.plan_dir / "session-2.1.md",
+                )
+            ).status,
+        )
+
+    def test_generated_repair_dirty_start_pauses_with_path_evidence(self) -> None:
+        self._setup_review_with_broad_gate_waiting_for_repair()
+        first, first_payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={
+                "PATH": "/usr/bin:/bin",
+                "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
+            },
+        )
+        self.assertEqual(1, first.returncode)
+        self.assertEqual("commit-preflight", first_payload["pause_reason"])
+        (self.repo_root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+        _fake_spec, _spec_log, spec_env = self._install_fake_spec_on_path()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={
+                **spec_env,
+                "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
+            },
+        )
+
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual("commit-preflight", payload["pause_reason"])
+        dirty = payload["pause_details"]["dirty_repositories"]
+        self.assertEqual(["dirty.txt"], dirty[0]["dirty_paths"])
+        self.assertEqual([], payload["turns"])
 
     def test_all_clear_cannot_defer_a_broad_failure(self) -> None:
         review_session = self._setup_review_with_broad_gate_waiting_for_repair()
@@ -2126,9 +2262,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertIn("## Delta Review Scope", resumed_body)
         self.assertIn("review verdict validation failed", resumed_body)
 
-    def test_v1_review_session_markdown_only_still_completes(self) -> None:
-        # Existing pending v1 review sessions (base marker, no version marker)
-        # must stay Markdown-compatible: no final-review.json required.
+    def test_v1_pending_review_is_refreshed_before_execution(self) -> None:
+        # Existing pending v1 review sessions are upgraded to the current
+        # generated contract before the harness sees them.
         self._write_plan(("complete",), readiness=None)
         (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
         review_id = plans.next_top_level_session_id(self.plan_dir)
@@ -2199,32 +2335,26 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             ),
         )
         # The first attempt writes a status line whose severity counts do not
-        # add up: a markdown-only rejection, with no artifact in play.
+        # add up. The refreshed contract rejects it immediately.
         completed, payload = self._run(
             mode="success-with-review",
             review_harness="claude",
             extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "invalid-markdown,all-clear"},
         )
 
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertTrue(payload["ok"])
-        self.assertEqual("all-complete", payload["reason"])
-        self.assertTrue(payload["review_completed"])
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual("verify-failed", payload["pause_reason"])
+        refreshed = (self.plan_dir / review_id.filename).read_text(encoding="utf-8")
+        self.assertIn(review.review_session_version_marker(), refreshed)
+        contract = contracts.parse_completion_contract(refreshed, session_id=review_id)
         self.assertEqual(
-            {
-                "status_line": "Status: All clear, no findings",
-                "outcome": "all-clear",
-                "total_findings": 0,
-                "findings_by_severity": {"high": 0, "med": 0, "low": 0},
-            },
-            payload["review_verdict"],
+            [
+                "final-review-output-evidence-based",
+                "final-review-artifact-consistent",
+            ],
+            [check.name for check in contract.verify.checks],
         )
-        retries = self._review_verdict_retries()
-        self.assertEqual(1, len(retries))
-        self.assertEqual("malformed-review", retries[0]["failure_reason"])
-        self.assertFalse(
-            (self.plan_dir / runner.FINAL_REVIEW_ARTIFACT_FILENAME).is_file()
-        )
+        self.assertIn("- **Status**: pending", refreshed)
 
     def test_review_harness_ignores_quoted_runner_pause_in_stderr(self) -> None:
         self._write_plan(("pending",), readiness="loop-ready")

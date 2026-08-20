@@ -96,6 +96,7 @@ FINALIZATION_PHASE_ASSURANCE_AUDIT = "assurance-audit"
 COMMIT_MODE_PER_SESSION = "per-session"
 COMMIT_MODE_END = "end"
 COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
+REPAIR_COMMIT_MODE_PER_CHILD = "per-child"
 COMMIT_ARGV: tuple[str, ...] = ("spec", "commit", "--yes", "--no-verify")
 RUNNER_MANAGED_SESSION_ARG = "--runner-managed"
 SESSION_RUN_SKILL_NAME = "session-run"
@@ -660,7 +661,7 @@ REVIEW_BROAD_FAILURES_DEFERRED_REASON = "findings-defer-broad-failures"
 
 
 def _broad_review_verification_checks(plan_dir: Path) -> list[dict[str, Any]]:
-    """Every gate the plan's own sessions declare, as one deduplicated recipe.
+    """Every replayable gate the plan declares, as one deduplicated recipe.
 
     A repair session's contract covers only the findings it was created for, so
     an all-clear review that follows the last repair otherwise rests on nothing
@@ -680,13 +681,14 @@ def _broad_review_verification_checks(plan_dir: Path) -> list[dict[str, Any]]:
         if contract is None:
             continue
         for check in contract.verify.checks:
-            if check.on_failure_of:
+            if check.on_failure_of or not check.review_replay:
                 continue
             payload = contracts.check_payload(check)
             # A baseline expectation describes what the check did before the
             # plan started, which says nothing about the workspace it is being
             # replayed against.
             payload.pop("baseline_expectation", None)
+            payload.pop("review_replay", None)
             identity = (
                 payload.get("repo"),
                 payload["type"],
@@ -788,6 +790,97 @@ def _generated_review_contract_payload(
             *_broad_review_verification_checks(plan_dir),
         ],
     }
+
+
+def _generated_review_contract_section(
+    session_id: plans.SessionId,
+    *,
+    plan_dir: Path,
+    repository_aliases: Sequence[str] = (),
+) -> str:
+    artifact_version = (
+        REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION
+        if repository_aliases
+        else REVIEW_ARTIFACT_VERSION
+    )
+    contract_json = json.dumps(
+        _generated_review_contract_payload(
+            session_id,
+            plan_dir=plan_dir,
+            repository_aliases=repository_aliases,
+        ),
+        indent=2,
+    )
+    return "\n".join(
+        [
+            "## Completion Contract",
+            "",
+            "### Done when",
+            "",
+            (
+                f"- `{FINAL_REVIEW_FILENAME}` exists in the plan directory and "
+                "contains non-whitespace text, at least three distinct "
+                "source/doc/test path-like references, and at least one "
+                "review-oriented section heading, and ends with exactly one "
+                "valid `Status:` verdict line."
+            ),
+            (
+                f"- `{FINAL_REVIEW_ARTIFACT_FILENAME}` exists in the plan "
+                "directory, parses as version "
+                f"{artifact_version} "
+                "JSON with complete findings, and agrees with the "
+                f"`{FINAL_REVIEW_FILENAME}` status line on outcome and "
+                "severity totals."
+            ),
+            "",
+            "### Verify",
+            "",
+            "```json",
+            contract_json,
+            "```",
+            "",
+        ]
+    )
+
+
+def refreshed_generated_review_contract(
+    text: str,
+    session_id: plans.SessionId,
+    *,
+    plan_dir: Path,
+    repository_aliases: Sequence[str] = (),
+) -> str:
+    """Refresh only a pending generated review's marker and verify recipe."""
+    expected_version = (
+        REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION
+        if repository_aliases
+        else GENERATED_REVIEW_SESSION_VERSION
+    )
+    marker = review.review_session_version_marker(expected_version)
+    version_pattern = re.compile(
+        r"<!--\s*asl:generated-review-session\s+version=[0-9]+\s*-->"
+    )
+    if version_pattern.search(text):
+        refreshed = version_pattern.sub(marker, text, count=1)
+    else:
+        refreshed = text.replace(
+            REVIEW_SESSION_MARKER,
+            f"{REVIEW_SESSION_MARKER}\n{marker}",
+            1,
+        )
+
+    contract_at = refreshed.find(contracts.COMPLETION_CONTRACT_HEADING)
+    handoff_at = refreshed.find(plans.HANDOFF_HEADING, contract_at + 1)
+    if contract_at < 0 or handoff_at < 0:
+        raise plans.PlanError(
+            "generated review is missing its Completion Contract or Handoff"
+        )
+    section = _generated_review_contract_section(
+        session_id,
+        plan_dir=plan_dir,
+        repository_aliases=repository_aliases,
+    )
+    return refreshed[:contract_at] + section + refreshed[handoff_at:]
 
 
 def _review_scope_preamble_lines(*, narrowed: bool) -> list[str]:
@@ -997,15 +1090,11 @@ def build_generated_review_session_body(
         else GENERATED_REVIEW_SESSION_VERSION
     )
     handoff_files = "(none)" if workspace is not None else "(none yet)"
-    contract_json = json.dumps(
-        _generated_review_contract_payload(
-            session_id,
-            plan_dir=canonical_plan_dir,
-            repository_aliases=(
-                workspace.registry.aliases if workspace is not None else ()
-            ),
-        ),
-        indent=2,
+    repository_aliases = workspace.registry.aliases if workspace is not None else ()
+    contract_section = _generated_review_contract_section(
+        session_id,
+        plan_dir=canonical_plan_dir,
+        repository_aliases=repository_aliases,
     )
     scope_lines = _delta_review_scope_lines(delta) if delta is not None else []
     header_lines = [f"# {session_id.display_label}: Final Review", ""]
@@ -1084,6 +1173,12 @@ def build_generated_review_session_body(
                 "`regex_in_file`)."
             ),
             (
+                "- Set `review_replay: true` only on durable current-state "
+                "verification gates that should be rerun by every later "
+                "generated review. Leave HEAD, dirty-tree, intermediate-file, "
+                "and other point-in-time checks unmarked."
+            ),
+            (
                 f"- The `{FINAL_REVIEW_ARTIFACT_FILENAME}` outcome and "
                 "per-severity finding totals must agree exactly with the "
                 f"final `Status:` line of `{FINAL_REVIEW_FILENAME}`."
@@ -1096,31 +1191,7 @@ def build_generated_review_session_body(
             "",
             *repository_lines,
             *scope_lines,
-            "## Completion Contract",
-            "",
-            "### Done when",
-            "",
-            (
-                f"- `{FINAL_REVIEW_FILENAME}` exists in the plan directory and "
-                "contains non-whitespace text, at least three distinct "
-                "source/doc/test path-like references, and at least one "
-                "review-oriented section heading, and ends with exactly one "
-                "valid `Status:` verdict line."
-            ),
-            (
-                f"- `{FINAL_REVIEW_ARTIFACT_FILENAME}` exists in the plan "
-                f"directory, parses as version {artifact_version} "
-                "JSON with complete findings, and agrees with the "
-                f"`{FINAL_REVIEW_FILENAME}` status line on outcome and "
-                "severity totals."
-            ),
-            "",
-            "### Verify",
-            "",
-            "```json",
-            contract_json,
-            "```",
-            "",
+            *contract_section.split("\n"),
             "## Handoff",
             "",
             "<!-- Fill this section when the session is complete -->",
@@ -1234,24 +1305,6 @@ def ensure_generated_review_session(
     canonical_dir = plans.canonicalize_path(plan_dir)
     pending = find_pending_generated_review_session(canonical_dir)
     if pending is not None:
-        if workspace is not None:
-            text = pending.path.read_text(encoding="utf-8")
-            version = review.review_session_marker_version(text)
-            if (
-                version is None
-                or version < REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION
-            ):
-                pending.path.write_text(
-                    build_generated_review_session_body(
-                        pending.session_id,
-                        review_harness=review_harness,
-                        plan_dir=canonical_dir,
-                        delta=delta,
-                        workspace=workspace,
-                        review_bases=review_bases,
-                    ),
-                    encoding="utf-8",
-                )
         return pending, False
 
     session_id = plans.next_top_level_session_id(canonical_dir)
@@ -1270,6 +1323,14 @@ def ensure_generated_review_session(
 
 class RunError(Exception):
     """Raised when the run loop cannot continue safely."""
+
+
+class RepairCommitPreflightError(RunError):
+    """A generated repair child cannot safely enter its owned commit phase."""
+
+    def __init__(self, message: str, details: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.details = dict(details)
 
 
 def _not_implemented(command: str) -> int:
@@ -3878,6 +3939,87 @@ def _validate_commit_preflight(
                 f"in repository {repository.alias}"
             )
     return {"spec_path": spec_path, "repositories": repositories}
+
+
+def _repair_commit_preflight(
+    cwd: Path,
+    *,
+    verification_context: verification.VerificationContext,
+    session_scope: plans.SessionScope | None,
+) -> dict[str, Any]:
+    """Require the commit tool and a clean writable set for one repair child."""
+    details: dict[str, Any] = {
+        "repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD,
+        "repositories": [],
+    }
+    try:
+        details["spec_path"] = _validate_spec_available()
+    except RunError as error:
+        details["error"] = str(error)
+        raise RepairCommitPreflightError(str(error), details) from error
+
+    workspace = verification_context.workspace
+    if workspace is None:
+        selected = [(None, ".", cwd)]
+    else:
+        if session_scope is None or not session_scope.writes:
+            message = "generated repair child declares no writable repository"
+            details["error"] = message
+            raise RepairCommitPreflightError(message, details)
+        write_aliases = set(session_scope.writes)
+        selected = [
+            (repository.alias, repository.repository.path, repository.root)
+            for repository in workspace.repositories
+            if repository.alias in write_aliases
+        ]
+
+    dirty_repositories: list[dict[str, Any]] = []
+    for alias, repository_path, root in selected:
+        worktree = _run_git(root, ["rev-parse", "--is-inside-work-tree"])
+        if worktree.returncode != 0 or worktree.stdout.strip() != "true":
+            detail = worktree.stderr.strip() or worktree.stdout.strip()
+            message = f"writable repository {alias or '.'} is not a Git worktree" + (
+                f": {detail}" if detail else ""
+            )
+            details["error"] = message
+            raise RepairCommitPreflightError(message, details)
+        status = _run_git(root, ["status", "--porcelain"])
+        if status.returncode != 0:
+            detail = status.stderr.strip() or status.stdout.strip()
+            message = f"could not inspect writable repository {alias or '.'}"
+            if detail:
+                message += f": {detail}"
+            details["error"] = message
+            raise RepairCommitPreflightError(message, details)
+        dirty_paths = [
+            line[3:] if len(line) > 3 else line
+            for line in status.stdout.splitlines()
+            if line
+        ]
+        qualified_paths = [
+            f"{alias}:{path}" if alias is not None else path for path in dirty_paths
+        ]
+        row = {
+            "alias": alias,
+            "path": repository_path,
+            "resolved_root": str(root),
+            "clean": not dirty_paths,
+            "dirty_paths": qualified_paths,
+        }
+        details["repositories"].append(row)
+        if dirty_paths:
+            dirty_repositories.append(row)
+
+    if dirty_repositories:
+        labels = ", ".join(str(row["alias"] or ".") for row in dirty_repositories)
+        message = (
+            "generated repair child requires clean writable repositories before "
+            f"execution; dirty: {labels}"
+        )
+        details["error"] = message
+        details["dirty_repositories"] = dirty_repositories
+        raise RepairCommitPreflightError(message, details)
+    return details
 
 
 def _validate_commit_at_end_scope(
@@ -13825,6 +13967,7 @@ def _run_config_payload(
         "review_guard_exclude": list(_review_guard_excludes(args)),
         "review_guard_include_ignored": _review_guard_include_ignored(args),
         "commit_mode": commit_mode,
+        "repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD,
         "unsafe_bypass": _unsafe_bypass(args),
         "no_mailbox": _no_mailbox(args),
         "allow_not_loop_ready": _allow_not_loop_ready(args),
@@ -13885,6 +14028,7 @@ def _initial_payload(
         action_required=None,
         approval_mode=_approval_mode(args),
         commit_mode=commit_mode,
+        repair_commit_mode=REPAIR_COMMIT_MODE_PER_CHILD,
         max_pending_sessions=getattr(args, "max_pending_sessions", None),
         note=getattr(args, "note", None),
         run_config=_run_config_payload(
@@ -14334,6 +14478,7 @@ def _run_locked(
             "max_sessions": max_sessions,
             "max_pending_sessions": getattr(args, "max_pending_sessions", None),
             "commit_mode": commit_mode,
+            "repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD,
             "note": payload.get("note"),
             "run_id": run_id,
             "run_dir": str(run_dir),
@@ -15465,6 +15610,9 @@ def _run_locked(
                 break
 
             is_review_session = is_generated_review_session_file(pending_session.path)
+            is_repair_session = review_repair.is_generated_review_repair_session_file(
+                pending_session.path
+            )
             session_kind = (
                 SESSION_KIND_REVIEW
                 if is_review_session
@@ -15475,6 +15623,23 @@ def _run_locked(
             ) = None
             if is_review_session:
                 try:
+                    review_workspace = verification_context.workspace
+                    review_text = pending_session.path.read_text(encoding="utf-8")
+                    refreshed_text = refreshed_generated_review_contract(
+                        review_text,
+                        pending_session.session_id,
+                        plan_dir=snapshot.plan_dir,
+                        repository_aliases=(
+                            review_workspace.registry.aliases
+                            if review_workspace is not None
+                            else ()
+                        ),
+                    )
+                    contract_refreshed = refreshed_text != review_text
+                    if contract_refreshed:
+                        pending_session.path.write_text(
+                            refreshed_text, encoding="utf-8"
+                        )
                     rescoped = _refresh_pending_review_scope(
                         session=pending_session,
                         event_path=event_path,
@@ -15484,7 +15649,6 @@ def _run_locked(
                         run_id=run_id,
                         persistence=persistence,
                     )
-                    review_workspace = verification_context.workspace
                     base_refreshed = False
                     if review_workspace is not None:
                         try:
@@ -15526,7 +15690,7 @@ def _run_locked(
                                 refreshed_text, encoding="utf-8"
                             )
                             base_refreshed = True
-                    if rescoped or base_refreshed:
+                    if contract_refreshed or rescoped or base_refreshed:
                         _refresh_active_readiness_state(
                             payload, snapshot.plan_dir, persistence
                         )
@@ -15715,6 +15879,45 @@ def _run_locked(
                 if workspace is not None
                 else None
             )
+            if is_repair_session:
+                try:
+                    repair_commit_preflight = _repair_commit_preflight(
+                        cwd,
+                        verification_context=verification_context,
+                        session_scope=session_scope,
+                    )
+                except RepairCommitPreflightError as error:
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(before)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason="commit-preflight",
+                        message=(
+                            f"repair commit preflight failed before "
+                            f"{session_label}: {error}"
+                        ),
+                        details={**session_details, **error.details},
+                        persistence=persistence,
+                    )
+                    break
+                with persistence.lock:
+                    payload.setdefault("repair_commit_preflights", []).append(
+                        {
+                            **session_identity,
+                            **repair_commit_preflight,
+                        }
+                    )
+                    persistence.append_event(
+                        event_path,
+                        events.REPAIR_COMMIT_PREFLIGHT_EVENT,
+                        {
+                            "run_id": run_id,
+                            **session_identity,
+                            **repair_commit_preflight,
+                        },
+                    )
+                    persistence.write_state(payload)
             pending_workspace_scope_repair = (
                 _latest_workspace_scope_repair_requirement(event_path, session_id)
                 if workspace is not None
@@ -15897,6 +16100,11 @@ def _run_locked(
                 "turn_index": turn_index,
                 **session_identity,
                 "session_kind": session_kind,
+                **(
+                    {"repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD}
+                    if is_repair_session
+                    else {}
+                ),
                 "total_sessions": total_sessions,
                 "artifact_dir": str(paths["artifact_dir"]),
                 "prompt": persisted_prompt,
@@ -17390,7 +17598,11 @@ def _run_locked(
 
             _refresh_active_readiness_state(payload, after.plan_dir, persistence)
 
-            if not is_review_session and commit_mode == COMMIT_MODE_PER_SESSION:
+            repair_owned_commit = is_repair_session and commit_mode is None
+            if not is_review_session and (
+                commit_mode == COMMIT_MODE_PER_SESSION or repair_owned_commit
+            ):
+                session_targets: list[dict[str, Any]] = []
                 try:
                     session_targets = (
                         _registered_session_commit_targets(
@@ -17400,23 +17612,50 @@ def _run_locked(
                         if verification_context.workspace is not None
                         else _commit_targets(verification_context)
                     )
-                    commit_group, failed_commit = _run_commit_group(
-                        event_path=event_path,
-                        payload=payload,
-                        progress=progress,
-                        verification_context=verification_context,
-                        run_dir=run_dir,
-                        run_id=run_id,
-                        session_id=session_id,
-                        targets=session_targets,
-                        persistence=persistence,
-                    )
+                    if repair_owned_commit:
+                        session_targets = [
+                            target
+                            for target in session_targets
+                            if not _commit_target_is_clean(target)
+                        ]
+                    if session_targets or not repair_owned_commit:
+                        commit_group, failed_commit = _run_commit_group(
+                            event_path=event_path,
+                            payload=payload,
+                            progress=progress,
+                            verification_context=verification_context,
+                            run_dir=run_dir,
+                            run_id=run_id,
+                            session_id=session_id,
+                            targets=session_targets,
+                            persistence=persistence,
+                        )
+                    else:
+                        commit_group = None
+                        failed_commit = None
                 except RunError as error:
                     commit_group = None
                     failed_commit = None
                     commit_error = str(error)
                 else:
                     commit_error = None
+                if repair_owned_commit:
+                    with persistence.lock:
+                        turn_payload["repair_commit"] = {
+                            "mode": REPAIR_COMMIT_MODE_PER_CHILD,
+                            "result": (
+                                "no-changes"
+                                if not session_targets
+                                else (
+                                    "failed"
+                                    if failed_commit is not None
+                                    or commit_error is not None
+                                    else "committed"
+                                )
+                            ),
+                            "commit_group": commit_group,
+                        }
+                        _write_json_file(paths["result"], turn_payload)
                 if failed_commit is not None or commit_error is not None:
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(after)
@@ -17426,7 +17665,11 @@ def _run_locked(
                         persistence=persistence,
                         turn_payload=turn_payload,
                         session_id=session_id,
-                        guard="session-commit",
+                        guard=(
+                            "repair-session-commit"
+                            if repair_owned_commit
+                            else "session-commit"
+                        ),
                         reason="commit-failed",
                         detail={"error": commit_error},
                     )
@@ -17439,6 +17682,11 @@ def _run_locked(
                         ),
                         details={
                             **session_details,
+                            **(
+                                {"repair_commit_mode": (REPAIR_COMMIT_MODE_PER_CHILD)}
+                                if repair_owned_commit
+                                else {}
+                            ),
                             "commit_group": commit_group,
                             "commit": failed_commit,
                             "error": commit_error,

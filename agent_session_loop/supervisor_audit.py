@@ -1055,7 +1055,12 @@ _REPAIR_STATE_KEYS = (
     "review_reopen",
     "review_resume",
 )
-_COMMIT_STATE_KEYS = ("commit_mode", "commit_groups", "commits")
+_COMMIT_STATE_KEYS = (
+    "commit_mode",
+    "repair_commit_mode",
+    "commit_groups",
+    "commits",
+)
 _COMMIT_DIR_PREFIX = "commit-"
 _STATUS_STATE_KEYS = (
     "action_required",
@@ -3818,7 +3823,12 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
         for alias in _sequence(_mapping(session).get("writes"))
     }
     attempts = [_mapping(item) for item in _sequence(commits.get("attempts"))]
-    if attempts and not commits.get("commit_mode"):
+    repair_commit_mode = commits.get("repair_commit_mode")
+    if (
+        attempts
+        and not commits.get("commit_mode")
+        and repair_commit_mode != "per-child"
+    ):
         contradictions.append(
             f"the run made {len(attempts)} commit attempt(s) without recording the "
             "commit mode they ran under"

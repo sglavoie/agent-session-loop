@@ -2620,6 +2620,87 @@ class ParserAndStateTests(unittest.TestCase):
             contracts.DEFAULT_COMMAND_TIMEOUT_SECONDS, check.timeout_seconds
         )
         self.assertEqual("subdir", check.cwd)
+        self.assertFalse(check.review_replay)
+
+    def test_completion_contract_review_replay_is_explicit_and_round_trips(
+        self,
+    ) -> None:
+        recipe = contracts._parse_verify_payload(
+            {
+                "checks": [
+                    {
+                        "type": "command",
+                        "name": "durable-command",
+                        "argv": ["python3", "-V"],
+                        "review_replay": True,
+                    },
+                    {
+                        "type": "file_exists",
+                        "name": "session-local-file",
+                        "path": "scratch.txt",
+                    },
+                    {
+                        "type": "regex_in_file",
+                        "name": "durable-regex",
+                        "path": "README.md",
+                        "pattern": "ready",
+                        "review_replay": True,
+                    },
+                ]
+            },
+            session_id=plans.parse_session_id("1"),
+        )
+        contract = contracts.CompletionContract(
+            session_id=plans.parse_session_id("1"),
+            done_when=("done",),
+            verify=recipe,
+        )
+
+        rendered = authoring.render_completion_contract(contract)
+        reparsed = contracts.parse_completion_contract(rendered, session_id="1")
+
+        self.assertEqual(
+            [True, False, True],
+            [check.review_replay for check in reparsed.verify.checks],
+        )
+        self.assertEqual(2, rendered.count('"review_replay": true'))
+
+    def test_completion_contract_rejects_invalid_review_replay(self) -> None:
+        with self.assertRaisesRegex(plans.PlanError, "review_replay.*boolean"):
+            contracts._parse_verify_payload(
+                {
+                    "checks": [
+                        {
+                            "type": "file_exists",
+                            "path": "README.md",
+                            "review_replay": "yes",
+                        }
+                    ]
+                },
+                session_id=plans.parse_session_id("1"),
+            )
+
+    def test_completion_contract_rejects_review_replay_on_diagnostic(self) -> None:
+        with self.assertRaisesRegex(plans.PlanError, "diagnostic.*on_failure_of"):
+            contracts._parse_verify_payload(
+                {
+                    "checks": [
+                        {
+                            "type": "command",
+                            "name": "gate",
+                            "argv": ["true"],
+                        },
+                        {
+                            "type": "command",
+                            "name": "diagnostic",
+                            "argv": ["false"],
+                            "on_failure_of": ["gate"],
+                            "review_replay": True,
+                        },
+                    ]
+                },
+                session_id=plans.parse_session_id("1"),
+            )
 
     def test_parse_completion_contract_validates_file_exists_check(self) -> None:
         cases = (

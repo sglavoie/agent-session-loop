@@ -1332,6 +1332,8 @@ def _check_to_json(
         payload["baseline_expectation"] = check.baseline_expectation
     if check.on_failure_of:
         payload["on_failure_of"] = list(check.on_failure_of)
+    if check.review_replay:
+        payload["review_replay"] = True
     return payload
 
 

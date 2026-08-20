@@ -739,6 +739,21 @@ def main() -> int:
             # generated at version >= 2 additionally require the structured
             # ``final-review.json`` artifact.
             body = target.read_text(encoding="utf-8")
+            if "asl:generated-review-repair-session" in body:
+                repair_mutation = os.environ.get("FAKE_CODEX_REPAIR_MUTATION_PATH")
+                if repair_mutation:
+                    _apply_workspace_mutation_record(
+                        {
+                            "path": repair_mutation,
+                            "action": "write",
+                            "text": os.environ.get(
+                                "FAKE_CODEX_REPAIR_MUTATION_TEXT", "repaired\n"
+                            ),
+                        }
+                    )
+                if os.environ.get("FAKE_CODEX_REPAIR_COMMIT"):
+                    subprocess.run(["git", "add", "-A"], check=True)
+                    subprocess.run(["git", "commit", "-m", "worker repair"], check=True)
             if REVIEW_SESSION_MARKER in body:
                 review_mutation = os.environ.get("FAKE_CODEX_REVIEW_MUTATION_PATH")
                 if review_mutation:
@@ -775,7 +790,7 @@ def main() -> int:
                             "asl:generated-review-session version=" in body
                         ),
                         repository_aware=(
-                            "asl:generated-review-session version=4" in body
+                            "asl:generated-review-session version=5" in body
                         ),
                     )
                 else:
@@ -801,7 +816,7 @@ def main() -> int:
                             (
                                 '{"version": 3, "outcome": "all-clear", '
                                 '"findings": []}\n'
-                                if "asl:generated-review-session version=4" in body
+                                if "asl:generated-review-session version=5" in body
                                 else '{"version": 2, "outcome": "all-clear", '
                                 '"findings": []}\n'
                             ),

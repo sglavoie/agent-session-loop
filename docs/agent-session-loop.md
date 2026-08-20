@@ -277,6 +277,12 @@ shapes. Required and optional fields:
   decision. Targets must be unconditional gates in the same recipe; unknown
   names, self-references, and diagnostic chains are rejected. A recipe must
   contain at least one gate.
+- Every check also accepts optional boolean `review_replay` (default `false`).
+  Only unconditional gates marked `true` are copied into later generated
+  reviews. Use it for durable current-state assertions that should remain true
+  after every repair. Leave HEAD identity, dirty-tree state, intermediate-file
+  presence, and other point-in-time checks unmarked. A diagnostic carrying
+  `on_failure_of` cannot set `review_replay: true`.
 - `command`: `argv` (non-empty array of strings, no shell), optional
   `timeout_seconds` (defaults to 60, max 3600), optional `cwd`.
 - `file_exists`: `path` (string).
@@ -1200,7 +1206,7 @@ The final non-empty line must be exactly `Status: All clear, no findings` or
 `Status: N Findings (H high, M med, L low)` with severity counts adding up to
 `N`; missing or malformed status lines fail review verification. Generated
 review sessions carry a versioned marker (`asl:generated-review-session
-version=3`) and additionally require the structured artifact
+version=4`) and additionally require the structured artifact
 `PLAN_DIR/final-review.json`: a JSON object with `version: 2`, an `outcome`
 (`all-clear` or `findings`), and a `findings` list where every finding carries
 a unique `id`, `severity` (`high`/`med`/`low`), `title`, `evidence` (objects
@@ -1230,12 +1236,16 @@ Those two gates read the review's own artifacts, so on their own they say
 nothing about the workspace the run produced — a repair session verifies only
 the findings it was created for, which would leave an all-clear review after
 the last repair resting on no broad check at all. The generated review
-contract therefore also replays every gate the plan's own sessions declare.
+contract therefore also replays every gate the plan's own sessions explicitly
+mark with `review_replay: true`. Unmarked checks are session-local, including
+legacy checks authored before replay metadata existed. This fail-safe opt-in
+keeps contradictory historical assertions about HEAD, dirty trees, and
+intermediate files out of later reviews.
 Each check is copied from its source session's completion contract, renamed
 `broad:<session>:<name>` so two sessions cannot collide on a bare name,
 deduplicated across sessions by repository, kind, argv, cwd, path, and
-pattern, and stripped of its `baseline_expectation` (which describes the
-workspace the plan started from, not the one the repairs produced). Diagnostic
+pattern, and stripped of its `baseline_expectation` and `review_replay`
+authoring metadata. Diagnostic
 checks — those naming an `on_failure_of` gate — are left out because they never
 decide whether verification passes. Prior generated review sessions contribute
 nothing, so the validators are not replayed onto themselves. The replayed gates
@@ -1252,8 +1262,8 @@ other failed gate; those paths reopen the review and retain the normal bounded
 retry/pause behavior. The supervisor considers a deferral accounted for only
 after repairs are materialized and a later review reaches all-clear.
 
-Registered plans generate review session version 4 and structured artifact
-version 3 while legacy plans continue to generate the exact v3/v2 form above.
+Registered plans generate review session version 5 and structured artifact
+version 3 while legacy plans generate the v4/v2 form above.
 The repository-aware session reads every registry alias, writes none, and
 includes an ordered combined repository base containing each alias, path,
 origin, HEAD, and pre-existing qualified dirty paths. Every v3 finding carries
@@ -1756,12 +1766,12 @@ A pending review session's scope is a static list, but the repository keeps
 moving — a crash and resume, or an in-run reuse, can leave a delta scope that
 predates files the reviewer must now inspect, and untracked additions never
 show up in `git diff <base_sha>` at all. So immediately before a pending
-generated review session executes, the runner re-derives its scope from current
-Git evidence and rewrites the `## Delta Review Scope` section in place,
-widening to full scope whenever a narrower one can no longer be proven. Only
-that section changes: the session keeps its id, its generated-review version
-marker, its completion contract, its pending handoff, and the prior findings
-recorded by the earlier review. A session with no scope section is already
+generated review session executes, the runner refreshes an older marker and
+Completion Contract to the current replay recipe, then re-derives its scope
+from current Git evidence and rewrites the `## Delta Review Scope` section in
+place, widening to full scope whenever a narrower one can no longer be proven.
+The refresh preserves the session id, pending handoff, prior findings, and
+ordered repository review base. A session with no scope section is already
 full-scope and is left untouched, so first reviews cost no extra Git probes. A
 scope section the runner cannot parse fails closed with a `malformed-plan`
 pause rather than executing against stale bounds.
@@ -1777,6 +1787,18 @@ not complete the plan—the generated rereview session is the only all-clear
 authority. Existing generated repair children are authoritative after a crash:
 the runner executes pending children or appends a missing rereview, but never
 recreates them.
+
+Generated repair children use a mandatory runner-owned `per-child` commit
+policy even when ordinary `commit_mode` is null. Before each child launches,
+ASL requires `spec` and a clean set of that child's writable repositories;
+failure pauses as `commit-preflight` with repository-qualified dirty paths and
+spends no harness turn. After verification, ASL commits only dirty aliases
+attributed by the write guard, in registry order. A no-change child or a child
+whose worker already committed is clean and produces no runner commit. Partial
+multi-repository failures retain the existing durable commit-group recovery
+path. State, run config, and events record `repair_commit_mode: "per-child"` so
+the supervisor can distinguish these attempts from unauthorized commits under
+a null ordinary mode.
 
 The loop stops on an all-clear rereview, an exhausted repair group, repeated
 finding fingerprints, unstructured findings, operator stop requests, or an
@@ -4163,7 +4185,8 @@ Common pause reasons:
   runner status signal.
 - `no-pending-but-incomplete`: no pending session exists, but not all sessions
   are complete.
-- `commit-preflight`: auto-commit setup failed before the first harness turn,
+- `commit-preflight`: auto-commit setup failed before the first harness turn or
+  before a generated repair child,
   such as a dirty initial worktree, missing `spec`, a non-git working
   directory, or an incompatible `--commit-at-end` and `--max-sessions`
   combination.

@@ -3013,6 +3013,61 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("write-guard", results["mutation-commit-guards"].detail)
             self.assertEqual("unavailable", results["scope-escape"].status)
 
+    def test_repair_commit_mode_authorizes_attempt_under_null_ordinary_mode(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            state_payload = self._read_state(history[2])
+            state_payload["commit_mode"] = None
+            state_payload["repair_commit_mode"] = "per-child"
+            self._write_state(history[2], state_payload)
+            commit_dir = history[3] / "commit-0001-session-01-app"
+            commit_dir.mkdir()
+            (commit_dir / state.RESULT_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "success": True,
+                        "returncode": 0,
+                        "repository_alias": "app",
+                        "session_id": "01",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _, results = self._audit(history)
+
+            verdict = results["mutation-commit-guards"]
+            self.assertEqual("pass", verdict.status, verdict.detail)
+
+    def test_null_modes_do_not_authorize_commit_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            state_payload = self._read_state(history[2])
+            state_payload["commit_mode"] = None
+            state_payload["repair_commit_mode"] = None
+            self._write_state(history[2], state_payload)
+            commit_dir = history[3] / "commit-0001-session-01-app"
+            commit_dir.mkdir()
+            (commit_dir / state.RESULT_FILE_NAME).write_text(
+                json.dumps(
+                    {
+                        "success": True,
+                        "returncode": 0,
+                        "repository_alias": "app",
+                        "session_id": "01",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _, results = self._audit(history)
+
+            verdict = results["mutation-commit-guards"]
+            self.assertEqual("fail", verdict.status)
+            self.assertIn("without recording the commit mode", verdict.detail)
+
     def test_a_legacy_implementation_turn_without_a_guard_is_a_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))

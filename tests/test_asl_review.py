@@ -90,6 +90,21 @@ class StructuredReviewArtifactTests(unittest.TestCase):
             ),
         )
 
+    def test_verification_checks_preserve_review_replay(self) -> None:
+        checks = [
+            {
+                "type": "command",
+                "name": "durable-current-state",
+                "argv": ["python3", "-V"],
+                "review_replay": True,
+            }
+        ]
+
+        self.assertEqual(
+            checks,
+            review._validate_verification_checks("F1", checks),
+        )
+
     def test_parse_review_artifact_accepts_complete_findings(self) -> None:
         artifact = review.parse_review_artifact(json.dumps(self._artifact()))
 
@@ -684,6 +699,119 @@ class StructuredReviewArtifactTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(1, run_check())
+
+
+class GeneratedReviewReplayTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.plan_dir = Path(self._tmp.name) / "plan"
+
+    def _write_replay_plan(self) -> None:
+        durable = json.dumps(
+            {
+                "type": "file_exists",
+                "name": "durable-readme",
+                "path": "README.md",
+                "baseline_expectation": "fail",
+                "review_replay": True,
+            }
+        )
+        historical = json.dumps(
+            {
+                "type": "command",
+                "name": "historical-head",
+                "argv": ["git", "rev-parse", "HEAD"],
+            }
+        )
+        dirty_tree = json.dumps(
+            {
+                "type": "command",
+                "name": "session-local-clean-tree",
+                "argv": ["git", "diff", "--quiet"],
+            }
+        )
+        write_plan(
+            self.plan_dir,
+            ("pending", "pending"),
+            contracts_by_id={
+                "1": _contract_block(
+                    ",".join((durable, historical, dirty_tree)), session="1"
+                ),
+                "2": _contract_block(durable, session="2"),
+            },
+        )
+
+    def test_broad_review_replays_only_opted_in_durable_gates(self) -> None:
+        self._write_replay_plan()
+
+        first = runner._broad_review_verification_checks(self.plan_dir)
+        runner.ensure_generated_review_session(self.plan_dir, review_harness="claude")
+        second = runner._broad_review_verification_checks(self.plan_dir)
+
+        self.assertEqual(first, second)
+        self.assertEqual(["broad:1:durable-readme"], [row["name"] for row in first])
+        self.assertNotIn("baseline_expectation", first[0])
+        self.assertNotIn("review_replay", first[0])
+        serialized = json.dumps(first)
+        self.assertNotIn("historical-head", serialized)
+        self.assertNotIn("session-local-clean-tree", serialized)
+
+    def test_pending_generated_review_refresh_preserves_lifetime_sections(
+        self,
+    ) -> None:
+        self._write_replay_plan()
+        session_id = plans.parse_session_id("3")
+        current = runner.build_generated_review_session_body(
+            session_id,
+            review_harness="claude",
+            plan_dir=self.plan_dir,
+            delta={"mode": runner.REVIEW_SCOPE_FULL, "prior_findings": []},
+        )
+        old = current.replace(
+            review.review_session_version_marker(),
+            review.review_session_version_marker(2),
+            1,
+        ).replace(
+            "## Completion Contract",
+            "## Ordered repository review base\n\n- preserved-base\n\n"
+            "## Completion Contract",
+            1,
+        )
+        old = old.replace(
+            "- **Key decisions**: (none yet)",
+            "- **Key decisions**: preserve this handoff",
+            1,
+        )
+        old_scope = old.split("## Delta Review Scope", 1)[1].split(
+            "## Completion Contract", 1
+        )[0]
+        old_handoff = old.split("## Handoff", 1)[1]
+
+        refreshed = runner.refreshed_generated_review_contract(
+            old,
+            session_id,
+            plan_dir=self.plan_dir,
+        )
+
+        self.assertIn(review.review_session_version_marker(), refreshed)
+        self.assertEqual(
+            old_scope,
+            refreshed.split("## Delta Review Scope", 1)[1].split(
+                "## Completion Contract", 1
+            )[0],
+        )
+        self.assertIn("- preserved-base", refreshed)
+        self.assertEqual(old_handoff, refreshed.split("## Handoff", 1)[1])
+        contract = contracts.parse_completion_contract(refreshed, session_id="3")
+        self.assertEqual(
+            [
+                "final-review-output-evidence-based",
+                "final-review-artifact-consistent",
+                "broad:1:durable-readme",
+            ],
+            [check.name for check in contract.verify.checks],
+        )
 
 
 class ReviewVerdictCommandTests(unittest.TestCase):
@@ -1760,6 +1888,33 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             "name": "second",
             "argv": ["python3", "-c", "pass"],
             "timeout_seconds": 60,
+        }
+        self._write_plan(
+            [
+                self._finding("F1", "runner", verification_checks=[first]),
+                self._finding("F2", "runner", verification_checks=[second]),
+            ]
+        )
+
+        result = self._materialize()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(review_repair.REVIEW_REPAIR_REASON_MALFORMED, result.reason)
+        self.assertIn("conflicting settings", result.error)
+
+    def test_duplicate_commands_with_conflicting_review_replay_fail_closed(
+        self,
+    ) -> None:
+        first = {
+            "type": "command",
+            "name": "first",
+            "argv": ["python3", "-c", "pass"],
+            "review_replay": True,
+        }
+        second = {
+            "type": "command",
+            "name": "second",
+            "argv": ["python3", "-c", "pass"],
         }
         self._write_plan(
             [
