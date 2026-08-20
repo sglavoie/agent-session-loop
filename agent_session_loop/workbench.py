@@ -33,6 +33,7 @@ from typing import Any, Literal
 
 from . import (
     assurance_report,
+    cli_trace,
     config,
     events,
     harnesses,
@@ -5668,7 +5669,12 @@ def launch_plan(
         canonical_state_dir = Path(state_dir).expanduser().resolve()
 
     child_cwd = Path(cwd).expanduser().resolve() if cwd is not None else None
-    popen_env = dict(env) if env is not None else None
+    # Every caller-provided entry is preserved; only the origin marker is the
+    # launcher's to set, and it is materialized even when no mapping was passed
+    # so an inherited environment still attributes the child to the Workbench.
+    popen_env = cli_trace.child_env(
+        os.environ if env is None else env, cli_trace.ORIGIN_WORKBENCH
+    )
 
     stdin_pipe = subprocess.PIPE if reply_via_stdin else subprocess.DEVNULL
     try:

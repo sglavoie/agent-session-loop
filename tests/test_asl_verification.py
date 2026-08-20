@@ -1490,12 +1490,19 @@ class VerificationExecutorTests(unittest.TestCase):
                 timeout_seconds=120.0,
             )
 
-            tracemalloc.start()
-            try:
-                result = verification.run_check(check, repo_root=repo_root)
-                _, peak = tracemalloc.get_traced_memory()
-            finally:
-                tracemalloc.stop()
+            # The sweep's process-table sample is orthogonal to streaming: it
+            # holds command lines of unrelated host processes, whose combined
+            # size is unbounded and varies with whatever else the machine runs.
+            # Opting out keeps the traced peak attributable to the capture path.
+            with mock.patch.dict(
+                os.environ, {process_tree.SWEEP_DISABLED_ENV_VAR: "1"}
+            ):
+                tracemalloc.start()
+                try:
+                    result = verification.run_check(check, repo_root=repo_root)
+                    _, peak = tracemalloc.get_traced_memory()
+                finally:
+                    tracemalloc.stop()
 
             self.assertEqual("pass", result.status)
             self.assertEqual(size, result.stdout_byte_count)

@@ -9,7 +9,8 @@ reports workflow reliability and storage numbers for a recent window
 - pause classifications (including never-retry harness failures),
 - verification repair convergence,
 - review repair-cycle closure and repetition,
-- artifact growth and projected compaction savings.
+- artifact growth and projected compaction savings,
+- CLI invocation lifecycle diagnostics from the root-level trace.
 
 Windowed activity is derived from ``events.jsonl`` and per-turn
 ``result.json`` files. A state directory whose files were all last written
@@ -29,6 +30,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -37,6 +39,7 @@ from typing import Any
 
 from . import (
     assurance_report,
+    cli_trace,
     compact_state,
     events,
     plans,
@@ -50,6 +53,32 @@ DEFAULT_SINCE_DAYS = 7
 _IMPLEMENTATION_KIND = "implementation"
 _COMPLETE_STATUS = "complete"
 _VERIFY_FAILED_REASON = "verify-failed"
+
+# A failing invocation is reported with the same closed, parser-derived field
+# set the trace itself carries, so the diagnostic surface cannot widen into
+# content even if a record ever grows a new key.
+RECENT_FAILURE_FIELDS = (
+    "invocation_id",
+    "timestamp",
+    "command",
+    "options",
+    "help_depth",
+    "harness",
+    "origin",
+    "outcome",
+    "exit_code",
+    "duration_ms",
+    "exception_type",
+)
+RECENT_FAILURE_LIMIT = 10
+FAILING_OUTCOMES = (
+    cli_trace.OUTCOME_FAILED,
+    cli_trace.OUTCOME_USAGE,
+    cli_trace.OUTCOME_INTERRUPTED,
+    cli_trace.OUTCOME_EXCEPTION,
+)
+ROOT_COMMAND_LABEL = "(root)"
+UNKNOWN_LABEL = "unknown"
 
 
 @dataclass
@@ -81,6 +110,7 @@ class MetricsReport:
     artifacts: dict[str, Any]
     compaction: dict[str, Any]
     assurance: dict[str, Any] = field(default_factory=dict)
+    cli_invocations: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -101,6 +131,7 @@ class MetricsReport:
             "artifacts": self.artifacts,
             "compaction": self.compaction,
             "assurance": self.assurance,
+            "cli_invocations": self.cli_invocations,
         }
 
 
@@ -168,6 +199,204 @@ def _directory_sizes(state_dir: Path, cutoff: datetime) -> tuple[int, int, int]:
             grown += stat_result.st_size
             grown_files += 1
     return total, grown, grown_files
+
+
+@dataclass
+class _TracedInvocation:
+    """The start and end record a single invocation UUID produced."""
+
+    start: dict[str, Any] | None = None
+    end: dict[str, Any] | None = None
+
+    def facts(self) -> dict[str, Any]:
+        # End records repeat the start record's parser-derived fields, so
+        # either half alone still describes the command that ran.
+        return self.start if self.start is not None else (self.end or {})
+
+
+def _string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _command_label(record: dict[str, Any]) -> str:
+    path = record.get("command_path")
+    names = (
+        [name for name in path if isinstance(name, str)]
+        if isinstance(path, list)
+        else []
+    )
+    return " ".join(names) if names else ROOT_COMMAND_LABEL
+
+
+def _bump(counts: dict[str, int], key: str) -> None:
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _percentile(ordered: list[float], fraction: float) -> float:
+    # Nearest-rank: with a handful of invocations an interpolated percentile
+    # would report a duration no invocation actually took.
+    rank = math.ceil(fraction * len(ordered))
+    return ordered[min(len(ordered) - 1, max(0, rank - 1))]
+
+
+def _recent_failure_entry(
+    invocation_id: str, invocation: _TracedInvocation
+) -> dict[str, Any]:
+    facts = invocation.facts()
+    end = invocation.end or {}
+    entry = {
+        "invocation_id": invocation_id,
+        "timestamp": _string_or_none(end.get("timestamp"))
+        or _string_or_none(facts.get("timestamp")),
+        "command": _command_label(facts),
+        "options": [
+            name for name in facts.get("options") or [] if isinstance(name, str)
+        ],
+        "help_depth": _string_or_none(facts.get("help_depth")),
+        "harness": _string_or_none(facts.get("harness")),
+        "origin": _string_or_none(facts.get("origin")),
+        "outcome": _string_or_none(end.get("outcome")),
+        "exit_code": end.get("exit_code")
+        if isinstance(end.get("exit_code"), int)
+        else None,
+        "duration_ms": end.get("duration_ms")
+        if isinstance(end.get("duration_ms"), (int, float))
+        else None,
+        "exception_type": _string_or_none(end.get("exception_type")),
+    }
+    return {name: entry[name] for name in RECENT_FAILURE_FIELDS}
+
+
+def collect_cli_invocations(
+    trace_root: Path,
+    *,
+    cutoff: datetime,
+    exclude_invocation_id: str | None = None,
+) -> dict[str, Any]:
+    """Pair CLI trace records by invocation UUID and summarize the window.
+
+    Records are tolerated rather than trusted: a malformed or non-object line
+    and a record without a usable invocation id, event, or timestamp are all
+    counted as read and ignored instead of failing the report, a duplicate
+    record for an id keeps the first one without being counted as ignored, and
+    an invocation whose start was pruned is still summarized from its end.
+    An invocation belongs to the window by its start timestamp, so a pair that
+    straddles midnight or a day boundary is counted once, under its start.
+    """
+    corpus = cli_trace.read_corpus(trace_root)
+    records = corpus.records
+    invocations: dict[str, _TracedInvocation] = {}
+    ignored = corpus.malformed_lines
+    for record in records:
+        invocation_id = _string_or_none(record.get("invocation_id"))
+        event = record.get("event")
+        if invocation_id is None or event not in (
+            cli_trace.EVENT_START,
+            cli_trace.EVENT_END,
+        ):
+            ignored += 1
+            continue
+        if invocation_id == exclude_invocation_id:
+            continue
+        # A duplicate of either half is dropped rather than counted twice, so a
+        # replayed or double-appended file cannot inflate the totals.
+        tracked = invocations.setdefault(invocation_id, _TracedInvocation())
+        if event == cli_trace.EVENT_START:
+            if tracked.start is None:
+                tracked.start = record
+        elif tracked.end is None:
+            tracked.end = record
+
+    windowed: dict[str, _TracedInvocation] = {}
+    for invocation_id, tracked in invocations.items():
+        anchor = tracked.start if tracked.start is not None else tracked.end
+        started_at = _parse_timestamp((anchor or {}).get("timestamp"))
+        if started_at is None:
+            ignored += 1
+            continue
+        if started_at >= cutoff:
+            windowed[invocation_id] = tracked
+
+    starts = 0
+    completions = 0
+    unmatched_starts = 0
+    outcome_counts: dict[str, int] = {}
+    by_command: dict[str, int] = {}
+    by_help_depth: dict[str, int] = {}
+    by_exit_code: dict[str, int] = {}
+    by_harness: dict[str, int] = {}
+    by_origin: dict[str, int] = {}
+    durations: list[float] = []
+    failures: list[tuple[str, str, dict[str, Any]]] = []
+
+    for invocation_id, tracked in windowed.items():
+        facts = tracked.facts()
+        if tracked.start is not None:
+            starts += 1
+        _bump(by_command, _command_label(facts))
+        _bump(by_harness, _string_or_none(facts.get("harness")) or UNKNOWN_LABEL)
+        _bump(by_origin, _string_or_none(facts.get("origin")) or UNKNOWN_LABEL)
+        help_depth = _string_or_none(facts.get("help_depth"))
+        if help_depth is not None:
+            _bump(by_help_depth, help_depth)
+
+        end = tracked.end
+        if end is None:
+            if tracked.start is not None:
+                unmatched_starts += 1
+            continue
+        completions += 1
+        outcome = _string_or_none(end.get("outcome")) or UNKNOWN_LABEL
+        _bump(outcome_counts, outcome)
+        exit_code = end.get("exit_code")
+        _bump(by_exit_code, str(exit_code) if isinstance(exit_code, int) else "none")
+        duration = end.get("duration_ms")
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+            durations.append(float(duration))
+        if outcome in FAILING_OUTCOMES:
+            failures.append(
+                (
+                    _string_or_none(end.get("timestamp")) or "",
+                    invocation_id,
+                    _recent_failure_entry(invocation_id, tracked),
+                )
+            )
+
+    failures.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    ordered_durations = sorted(durations)
+
+    return {
+        "trace_root": str(trace_root),
+        "retention_days": cli_trace.RETENTION_DAYS,
+        "records_read": len(records) + corpus.malformed_lines,
+        "records_ignored": ignored,
+        "starts": starts,
+        "completions": completions,
+        "successes": outcome_counts.get(cli_trace.OUTCOME_OK, 0),
+        "nonzero_exits": outcome_counts.get(cli_trace.OUTCOME_FAILED, 0),
+        "usage_errors": outcome_counts.get(cli_trace.OUTCOME_USAGE, 0),
+        "help_calls": outcome_counts.get(cli_trace.OUTCOME_HELP, 0),
+        "interruptions": outcome_counts.get(cli_trace.OUTCOME_INTERRUPTED, 0),
+        "exceptions": outcome_counts.get(cli_trace.OUTCOME_EXCEPTION, 0),
+        "unmatched_starts": unmatched_starts,
+        "by_command": dict(sorted(by_command.items())),
+        "by_help_depth": dict(sorted(by_help_depth.items())),
+        "by_exit_code": dict(sorted(by_exit_code.items())),
+        "by_harness": dict(sorted(by_harness.items())),
+        "by_origin": dict(sorted(by_origin.items())),
+        "durations_ms": {
+            "count": len(ordered_durations),
+            "median": round(_percentile(ordered_durations, 0.5), 3)
+            if ordered_durations
+            else None,
+            "p95": round(_percentile(ordered_durations, 0.95), 3)
+            if ordered_durations
+            else None,
+            "max": round(ordered_durations[-1], 3) if ordered_durations else None,
+            "total": round(sum(ordered_durations), 3),
+        },
+        "recent_failures": [entry for _, _, entry in failures[:RECENT_FAILURE_LIMIT]],
+    }
 
 
 def collect_metrics(
@@ -526,6 +755,14 @@ def collect_metrics(
         assurance=assurance_report.collect_assurance_metrics(
             state_dir=state_root, since=cutoff
         ),
+        # The trace is per-invocation, not per-plan, so it is read once from
+        # the root itself. This report's own start record is already on disk
+        # and would otherwise show up as an unmatched start.
+        cli_invocations=collect_cli_invocations(
+            state_root,
+            cutoff=cutoff,
+            exclude_invocation_id=cli_trace.current_invocation_id(),
+        ),
     )
 
 
@@ -622,6 +859,67 @@ def _print_assurance_section(assurance: dict[str, Any]) -> None:
         )
 
 
+def _format_counts(counts: dict[str, int]) -> str:
+    return ", ".join(f"{name} {count}" for name, count in counts.items())
+
+
+def _format_duration_ms(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.0f} ms"
+
+
+def _print_cli_invocations_section(section: dict[str, Any]) -> None:
+    """Print which command surfaces ran and which of them failed."""
+    print("\nCLI invocations:")
+    if not section:
+        print("  not collected")
+        return
+    print(
+        f"  trace root {section['trace_root']} "
+        f"(retention {section['retention_days']} day(s), "
+        f"{section['records_read']} record(s) read, "
+        f"{section['records_ignored']} ignored)"
+    )
+    print(
+        f"  starts {section['starts']}, completions {section['completions']}, "
+        f"unmatched starts {section['unmatched_starts']}"
+    )
+    print(
+        f"  successes {section['successes']}, "
+        f"nonzero exits {section['nonzero_exits']}, "
+        f"usage errors {section['usage_errors']}, "
+        f"help {section['help_calls']}, "
+        f"interrupted {section['interruptions']}, "
+        f"exceptions {section['exceptions']}"
+    )
+    durations = section["durations_ms"]
+    print(
+        f"  duration: median {_format_duration_ms(durations['median'])}, "
+        f"p95 {_format_duration_ms(durations['p95'])}, "
+        f"max {_format_duration_ms(durations['max'])}"
+    )
+    for label, counts in (
+        ("by command", section["by_command"]),
+        ("by help depth", section["by_help_depth"]),
+        ("by exit code", section["by_exit_code"]),
+        ("by harness", section["by_harness"]),
+        ("by origin", section["by_origin"]),
+    ):
+        if counts:
+            print(f"  {label}: {_format_counts(counts)}")
+    failures = section["recent_failures"]
+    if not failures:
+        return
+    print(f"  recent failures ({len(failures)}):")
+    for entry in failures:
+        exception = entry["exception_type"]
+        print(
+            f"    {entry['timestamp']} {entry['command']} "
+            f"{entry['outcome']} exit {entry['exit_code']} "
+            f"[{entry['origin']}]"
+            f"{f' {exception}' if exception else ''}"
+        )
+
+
 def _print_report(report: MetricsReport) -> None:
     print(f"Metrics for {report.state_root}")
     print(f"Window: last {report.since_days} day(s), since {report.window_start}")
@@ -715,6 +1013,7 @@ def _print_report(report: MetricsReport) -> None:
     )
     if compaction_section["dirs_skipped"]:
         print(f"  skipped: {len(compaction_section['dirs_skipped'])} dir(s)")
+    _print_cli_invocations_section(report.cli_invocations)
 
 
 def metrics_from_args(args: argparse.Namespace) -> int:

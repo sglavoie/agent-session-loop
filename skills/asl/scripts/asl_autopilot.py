@@ -56,6 +56,9 @@ from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     assurance_report as _assurance_report,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    cli_trace as _cli_trace,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     events as _events,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
@@ -155,6 +158,10 @@ HARNESS_NAMES = _harnesses.HARNESS_NAMES
 # legs run under `--harness`, review/rereview legs under `--review-harness`.
 SESSION_KIND_IMPLEMENTATION = _runner.SESSION_KIND_IMPLEMENTATION
 SESSION_KIND_REVIEW = _runner.SESSION_KIND_REVIEW
+
+# Every `asl` child this helper spawns is internal automation, not a direct
+# operator call, so its invocation trace is attributed to the helper.
+INVOCATION_ORIGIN = _cli_trace.ORIGIN_AUTOPILOT
 
 # Shell operators the helper refuses to interpret. The command is executed
 # without a shell, so any of these would either be passed as a literal to the
@@ -680,10 +687,13 @@ def _child_env(parsed: dict) -> dict:
     The helper runs the child without a shell, so the parsed ``NAME=VALUE``
     assignments have to be merged into ``os.environ`` here rather than being
     interpreted by a shell prefix.
+
+    The invocation-origin marker is applied after that overlay, so a supervised
+    command cannot relabel this helper's own children as direct operator calls.
     """
     env = dict(os.environ)
     env.update(parsed.get("env") or {})
-    return env
+    return _cli_trace.child_env(env, INVOCATION_ORIGIN)
 
 
 def _canonical_path(path: str | None) -> str | None:

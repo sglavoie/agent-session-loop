@@ -9,10 +9,12 @@ import ast
 import importlib.util
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 from agent_session_loop import (
     assurance_ledger,
@@ -20,6 +22,7 @@ from agent_session_loop import (
     assurance_report,
     authoring,
     cli,
+    cli_trace,
     contracts,
     control_cli,
     control_queue,
@@ -39,6 +42,7 @@ from agent_session_loop import (
     review,
     review_continuation,
     runner,
+    startup_context,
     state,
     verification,
     workbench,
@@ -591,6 +595,14 @@ class InstallVerificationTests(unittest.TestCase):
                     skill_dir,
                     target_is_directory=True,
                 )
+
+        for target in startup_context.CONTEXT_TARGETS:
+            context_file = home / target.installed_path
+            context_file.parent.mkdir(parents=True, exist_ok=True)
+            context_file.write_text(
+                startup_context.render_block(target.harness) + "\n",
+                encoding="utf-8",
+            )
         return fake_bin
 
     def test_verify_install_accepts_links_to_this_checkout(self) -> None:
@@ -662,6 +674,29 @@ class InstallVerificationTests(unittest.TestCase):
                     for failure in payload["failures"]
                 )
             )
+
+    def test_status_smoke_marks_its_child_as_an_install_verify_invocation(
+        self,
+    ) -> None:
+        captured: list[dict[str, str]] = []
+
+        def _fake_run(argv, **kwargs):
+            captured.append(dict(kwargs["env"]))
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="stub")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            with mock.patch.object(install_verify.subprocess, "run", _fake_run):
+                install_verify._check_status_smoke(
+                    active_asl="/usr/bin/true",
+                    home=home,
+                    path_env="/usr/bin",
+                )
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]["ASL_INVOCATION_ORIGIN"], "install-verify")
+        self.assertEqual(captured[0]["PATH"], "/usr/bin")
 
 
 class HarnessDocsRegressionTests(unittest.TestCase):
@@ -772,6 +807,64 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         self.assertIn("asl control set-model", commands)
         self.assertIn("--clear-harness-model", commands)
         self.assertIn("--clear-effort", commands)
+
+    def test_docs_expose_the_supervisor_guide_and_leaf_help_routing(self) -> None:
+        docs = self._read("docs/agent-session-loop.md")
+        commands = docs.split("## Commands", 1)[1].split("\n## ", 1)[0]
+        autopilot = docs.split("## Autopilot Skill", 1)[1].split("\n## ", 1)[0]
+        readme = self._read("README.md")
+        supervision = readme.split("### Live ASL supervision", 1)[1].split("\n### ", 1)[
+            0
+        ]
+
+        self.assertIn(
+            "asl supervisor-guide [--harness auto|codex|claude|copilot] [--json]",
+            commands,
+        )
+        for marker in (
+            "`selected_harness`",
+            "`leaf_help`",
+            "carry equivalent commands",
+            "--supervision-id ... --json --detach",
+            "`result_path`",
+            "lazy\n`handler_ref` mechanism",
+            "`asl outbox supervise --help`",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, autopilot)
+        for group in (
+            "`bridge`",
+            "`workbench`",
+            "`control`",
+            "`inbox`,\n`outbox`",
+            "`assurance`",
+        ):
+            with self.subTest(group=group):
+                self.assertIn(group, autopilot)
+
+        # The workbench parent shows the serve flags, so neither document may
+        # apply the leaf-only sentence to it.
+        for marker in (
+            "a leaf-only group's",
+            "`asl workbench` is the exception",
+            "bare `asl workbench` form runs `asl workbench serve`",
+        ):
+            with self.subTest(workbench_marker=marker):
+                self.assertIn(marker, autopilot)
+
+        for marker in (
+            "asl supervisor-guide [--harness auto|codex|claude|copilot] [--json]",
+            "`asl outbox supervise --help`",
+            "every supported candidate when detection is absent or ambiguous",
+            "leaf-only group's help lists its leaves and none of their flags",
+            "`asl workbench` instead carries the serve flags on the parent",
+        ):
+            with self.subTest(readme_marker=marker):
+                self.assertIn(marker, supervision)
+        self.assertNotIn(
+            "`asl workbench`, `asl control`",
+            supervision,
+        )
 
     def test_docs_describe_activation_precedence_waits_and_fallback(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
@@ -3093,6 +3186,62 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             "review_cycles.repairs_materialized",
         ):
             self.assertIn(field, section)
+
+    def test_cli_invocation_metrics_fields_are_documented(self) -> None:
+        report = metrics.collect_metrics(
+            state_dir=REPO_ROOT / ".missing-metrics-state",
+            since_days=metrics.DEFAULT_SINCE_DAYS,
+        )
+        section = self.docs.split("## JSON Output", 1)[1].split("\n## ", 1)[0]
+        for field in report.cli_invocations:
+            self.assertIn(f"`{field}`", section, f"`{field}` is undocumented")
+        for field in metrics.RECENT_FAILURE_FIELDS:
+            self.assertIn(f"`{field}`", self.docs, f"`{field}` is undocumented")
+        self.assertIn("`cli_invocations`", self.docs)
+        self.assertIn("CLI invocations", self.docs)
+        self.assertIn("windowed by its start timestamp", section)
+        self.assertIn(
+            f"the {metrics.RECENT_FAILURE_LIMIT} most recent failing", self.docs
+        )
+
+    def test_invocation_origin_producers_and_precedence_are_documented(self) -> None:
+        section = self.docs.split("### CLI invocation trace", 1)[1].split("\n## ", 1)[0]
+        self.assertIn(f"`{cli_trace.ORIGIN_ENV_VAR}`", section)
+        for origin in cli_trace.ORIGIN_NAMES:
+            self.assertIn(f"`{origin}`", section)
+        self.assertIn("marker is always applied **after**", section)
+        self.assertIn(
+            "cannot disguise\nautomation as an operator call",
+            section,
+        )
+        for producer in (
+            "autopilot helper's central child environment",
+            "`workbench.launch_plan` marks",
+            "verifier marks its `asl status --json` smoke call",
+        ):
+            self.assertIn(producer, section)
+
+    def test_launcher_docs_name_their_own_invocation_origin(self) -> None:
+        for heading, origin in (
+            ("### Safety model", cli_trace.ORIGIN_AUTOPILOT),
+            ("### Security model", cli_trace.ORIGIN_WORKBENCH),
+        ):
+            section = self.docs.split(heading, 1)[1].split("\n## ", 1)[0]
+            self.assertIn(
+                f"`{cli_trace.ORIGIN_ENV_VAR}={origin}`",
+                section,
+                f"{heading} never names its origin marker",
+            )
+
+    def test_state_file_docs_pin_trace_root_and_retention(self) -> None:
+        section = self.docs.split("## State Files", 1)[1].split("\n## ", 1)[0]
+        self.assertIn(
+            f"retained for {cli_trace.RETENTION_DAYS} days",
+            section,
+        )
+        self.assertIn("`cli_invocations.trace_root`", section)
+        self.assertIn("`cli_invocations.retention_days`", section)
+        self.assertIn("`asl gc` never touches these files", section)
 
     def test_metrics_docs_match_default_window(self) -> None:
         self.assertEqual(7, metrics.DEFAULT_SINCE_DAYS)

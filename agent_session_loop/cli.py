@@ -13,7 +13,7 @@ from pathlib import Path
 # workbench, or review subsystems). Every subcommand handler is resolved lazily
 # from its `handler_ref` in `resolve_handler()` so that a light command such as
 # `asl status` never imports the ~21k-line handler graph just to dispatch.
-from . import contracts, harnesses, run_flags, session_overview, tail
+from . import cli_trace, contracts, harnesses, run_flags, session_overview, tail
 
 # Build-time defaults mirrored from heavier modules so light commands do not
 # import `metrics` (pulls in review/compact-state) or `workbench_server` (pulls
@@ -216,6 +216,36 @@ def _add_unsafe_bypass_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+# Nested groups list their leaves and nothing else, so an agent that reads
+# `asl outbox --help` sees no flags and concludes they do not exist. Every group
+# says where the flags actually live instead. `parent_form_leaf` names the leaf a
+# group's bare form runs when the group installs that leaf's flags on itself, so
+# the wording never denies flags the same help output displays.
+def _group_epilogue(
+    group: str,
+    leaf_example: str,
+    *,
+    guide: bool = False,
+    parent_form_leaf: str | None = None,
+) -> str:
+    if parent_form_leaf is None:
+        lines = [
+            f"This help lists the `asl {group}` leaf commands only.",
+            f"Flags belong to a leaf, so read `{leaf_example}` for its flags.",
+        ]
+    else:
+        lines = [
+            f"This help lists the `asl {group}` leaf commands plus the flags "
+            f"the bare `asl {group}` form accepts.",
+            f"Bare `asl {group}` runs `{parent_form_leaf}` with those flags; "
+            f"every other leaf has its own, so read `{leaf_example}` "
+            "or that leaf's help.",
+        ]
+    if guide:
+        lines.append("Run `asl supervisor-guide` for the whole supervision workflow.")
+    return "\n".join(lines)
+
+
 def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     parser = _AgentSessionLoopArgumentParser(
         prog=prog,
@@ -229,6 +259,32 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     run_flags.add_run_arguments(run_parser, mode="cli")
     run_parser.set_defaults(handler_ref="runner:run_from_args")
+
+    supervisor_guide_parser = subparsers.add_parser(
+        "supervisor-guide",
+        help=(
+            "Print the canonical supervisor workflow: skill invocation, "
+            "detached helper launch, mailbox operations, and leaf help."
+        ),
+    )
+    supervisor_guide_parser.add_argument(
+        "--harness",
+        choices=("auto", *harnesses.HARNESS_NAMES),
+        default="auto",
+        help=(
+            "Harness whose skill invocation to show; 'auto' detects the "
+            "invoking harness and falls back to every candidate when detection "
+            "is absent or ambiguous (default: auto)"
+        ),
+    )
+    supervisor_guide_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    supervisor_guide_parser.set_defaults(
+        handler_ref="supervisor_guide:supervisor_guide_from_args",
+    )
 
     questions_parser = subparsers.add_parser(
         "questions",
@@ -1154,6 +1210,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     bridge_parser = subparsers.add_parser(
         "bridge",
         help="Serve the read-only NDJSON run projection to a supervision client.",
+        epilog=_group_epilogue("bridge", "asl bridge serve --help"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     bridge_sub = bridge_parser.add_subparsers(dest="bridge_command", required=True)
     bridge_serve_parser = bridge_sub.add_parser(
@@ -1192,6 +1250,12 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     workbench_parser = subparsers.add_parser(
         "workbench",
         help="Run the local Workbench HTTP control plane.",
+        epilog=_group_epilogue(
+            "workbench",
+            "asl workbench serve --help",
+            parent_form_leaf="asl workbench serve",
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_workbench_serve_args(workbench_parser)
     workbench_parser.set_defaults(
@@ -1267,6 +1331,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
             "Queue a control command for the runner that owns a plan "
             "(works for --json runs, where the run-control keys are off)."
         ),
+        epilog=_group_epilogue("control", "asl control abort --help", guide=True),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     # Unlike `workbench`, the bare `asl control` form has no sensible default
     # action, so a subcommand is required.
@@ -1378,6 +1444,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     inbox_parser = subparsers.add_parser(
         "inbox",
         help="Write supervisor messages or read pending worker guidance.",
+        epilog=_group_epilogue("inbox", "asl inbox reply --help", guide=True),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     inbox_sub = inbox_parser.add_subparsers(
         dest="inbox_command",
@@ -1544,6 +1612,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     outbox_parser = subparsers.add_parser(
         "outbox",
         help="Read worker questions or notices from the supervisor side.",
+        epilog=_group_epilogue("outbox", "asl outbox supervise --help", guide=True),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     outbox_sub = outbox_parser.add_subparsers(
         dest="outbox_command",
@@ -1619,6 +1689,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     assurance_parser = subparsers.add_parser(
         "assurance",
         help="Browse the assurance inbox of audited runs and open issues.",
+        epilog=_group_epilogue("assurance", "asl assurance list --help"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     assurance_sub = assurance_parser.add_subparsers(
         dest="assurance_command",
@@ -1966,8 +2038,35 @@ def resolve_handler(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser(prog=Path(sys.argv[0]).name)
-    args = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        return resolve_handler(args)(args)
+        args = parser.parse_args(raw_argv)
+    except SystemExit as exit_request:
+        cli_trace.record_parser_exit(parser, raw_argv, exit_request.code)
+        raise
+    invocation = cli_trace.start(
+        parser, raw_argv, state_dir=getattr(args, "state_dir", None)
+    )
+    try:
+        exit_code = resolve_handler(args)(args)
     except KeyboardInterrupt:
+        invocation.finish(
+            exit_code=_INTERRUPTED_EXIT, outcome=cli_trace.OUTCOME_INTERRUPTED
+        )
         return _INTERRUPTED_EXIT
+    except SystemExit as exit_request:
+        raised_code = cli_trace.normalize_exit_code(exit_request.code)
+        invocation.finish(
+            exit_code=raised_code,
+            outcome=cli_trace.outcome_for_exit_code(raised_code),
+        )
+        raise
+    except Exception as error:
+        invocation.finish(
+            exit_code=None, outcome=cli_trace.OUTCOME_EXCEPTION, exception=error
+        )
+        raise
+    invocation.finish(
+        exit_code=exit_code, outcome=cli_trace.outcome_for_exit_code(exit_code)
+    )
+    return exit_code

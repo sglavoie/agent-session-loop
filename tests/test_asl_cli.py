@@ -44,6 +44,7 @@ from agent_session_loop import (
     run_flags,
     runner,
     state,
+    supervisor_guide,
     verification,
     workbench,
     workbench_server,
@@ -816,6 +817,217 @@ class CommandAndConfigTests(unittest.TestCase):
             ):
                 parser.parse_args(argv)
             self.assertEqual(2, raised.exception.code)
+
+    def test_supervisor_guide_parser_contract(self) -> None:
+        parser = cli.build_parser()
+
+        defaults = parser.parse_args(["supervisor-guide"])
+        self.assertEqual("auto", defaults.harness)
+        self.assertFalse(defaults.json)
+        self.assertEqual(
+            "supervisor_guide:supervisor_guide_from_args",
+            defaults.handler_ref,
+        )
+        self.assertIs(
+            supervisor_guide.supervisor_guide_from_args,
+            cli.resolve_handler(defaults),
+        )
+
+        for harness in harnesses.HARNESS_NAMES:
+            with self.subTest(harness=harness):
+                args = parser.parse_args(
+                    ["supervisor-guide", "--harness", harness, "--json"]
+                )
+                self.assertEqual(harness, args.harness)
+                self.assertTrue(args.json)
+
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as rejected:
+            parser.parse_args(["supervisor-guide", "--harness", "nope"])
+        self.assertEqual(2, rejected.exception.code)
+
+        root_help = io.StringIO()
+        with redirect_stdout(root_help), self.assertRaises(SystemExit) as printed:
+            parser.parse_args(["--help"])
+        self.assertEqual(0, printed.exception.code)
+        self.assertIn("supervisor-guide", root_help.getvalue())
+
+    def test_supervisor_guide_text_and_json_carry_equivalent_commands(self) -> None:
+        parser = cli.build_parser()
+        handler = cli.resolve_handler(parser.parse_args(["supervisor-guide"]))
+
+        json_out = io.StringIO()
+        with redirect_stdout(json_out):
+            self.assertEqual(
+                0,
+                handler(
+                    parser.parse_args(
+                        ["supervisor-guide", "--harness", "codex", "--json"]
+                    )
+                ),
+            )
+        payload = json.loads(json_out.getvalue())
+
+        text_out = io.StringIO()
+        with redirect_stdout(text_out):
+            self.assertEqual(
+                0,
+                handler(parser.parse_args(["supervisor-guide", "--harness", "codex"])),
+            )
+        text = text_out.getvalue()
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual("supervisor-guide", payload["command"])
+        self.assertEqual("codex", payload["selected_harness"])
+        self.assertEqual(
+            {"codex": "$asl asl run PLAN_DIR"},
+            payload["skills"][0]["invocations"],
+        )
+        self.assertEqual(
+            [
+                "supervise",
+                "reply",
+                "resolve-continue",
+                "resolve-pause",
+                "guidance",
+                "status",
+                "read-result",
+            ],
+            [operation["name"] for operation in payload["operations"]],
+        )
+        self.assertIn(
+            "--supervision-id SUPERVISION_ID --json --detach",
+            payload["helper"]["launch"],
+        )
+        self.assertIn("--reply-stdin --detach", payload["helper"]["resume"])
+        note = payload["helper"]["note"]
+        self.assertIn("result_path", note)
+        self.assertIn("<skill-dir>", payload["helper"]["path"])
+        self.assertIn("<skill-dir> is the installed asl skill directory", note)
+        self.assertIn("SKILL.md", note)
+
+        commands = [
+            payload["helper"]["launch"],
+            payload["helper"]["resume"],
+            *(operation["command"] for operation in payload["operations"]),
+            *payload["leaf_help"],
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIn(command, text)
+
+    def test_supervisor_guide_selects_or_offers_every_harness_candidate(self) -> None:
+        detected = supervisor_guide.guide_payload(env={"CLAUDECODE": "1"})
+        self.assertEqual("claude", detected["selected_harness"])
+        self.assertEqual(
+            {"claude": "/asl asl run PLAN_DIR"},
+            detected["skills"][0]["invocations"],
+        )
+
+        explicit = supervisor_guide.guide_payload(
+            harness="copilot", env={"CLAUDECODE": "1"}
+        )
+        self.assertEqual("copilot", explicit["selected_harness"])
+        self.assertEqual(
+            {"copilot": "/asl asl run PLAN_DIR"},
+            explicit["skills"][0]["invocations"],
+        )
+
+        for label, env in (
+            ("ambiguous", {"CLAUDECODE": "1", "CODEX_HOME": "/tmp"}),
+            ("undetected", {}),
+        ):
+            with self.subTest(detection=label):
+                payload = supervisor_guide.guide_payload(env=env)
+                invocations = payload["skills"][0]["invocations"]
+
+                self.assertIsNone(payload["selected_harness"])
+                self.assertEqual(list(harnesses.HARNESS_NAMES), list(invocations))
+                for name, invocation in invocations.items():
+                    self.assertTrue(
+                        invocation.startswith(harnesses.SKILL_PREFIXES[name]),
+                        invocation,
+                    )
+
+    def test_nested_command_groups_route_agents_to_leaf_help(self) -> None:
+        parser = cli.build_parser()
+        groups = {
+            "bridge": "asl bridge serve --help",
+            "workbench": "asl workbench serve --help",
+            "control": "asl control abort --help",
+            "inbox": "asl inbox reply --help",
+            "outbox": "asl outbox supervise --help",
+            "assurance": "asl assurance list --help",
+        }
+
+        for group, leaf_example in groups.items():
+            with self.subTest(group=group):
+                group_help = io.StringIO()
+                with (
+                    redirect_stdout(group_help),
+                    self.assertRaises(SystemExit) as printed,
+                ):
+                    parser.parse_args([group, "--help"])
+                self.assertEqual(0, printed.exception.code)
+                help_text = group_help.getvalue()
+
+                if group == "workbench":
+                    # The workbench parent installs the serve flags and runs
+                    # them bare, so its help must not deny the flags it prints.
+                    self.assertIn("--host HOST", help_text)
+                    self.assertNotIn(
+                        "This help lists the `asl workbench` leaf commands only.",
+                        help_text,
+                    )
+                    self.assertIn(
+                        "This help lists the `asl workbench` leaf commands plus "
+                        "the flags the bare `asl workbench` form accepts.",
+                        help_text,
+                    )
+                    self.assertIn(
+                        "Bare `asl workbench` runs `asl workbench serve` with "
+                        "those flags; every other leaf has its own, so read "
+                        f"`{leaf_example}` or that leaf's help.",
+                        help_text,
+                    )
+                else:
+                    self.assertNotIn("--host HOST", help_text)
+                    self.assertIn(
+                        f"This help lists the `asl {group}` leaf commands only.",
+                        help_text,
+                    )
+                    self.assertIn(
+                        "Flags belong to a leaf, so read "
+                        f"`{leaf_example}` for its flags.",
+                        help_text,
+                    )
+                self.assertEqual(
+                    group in ("control", "inbox", "outbox"),
+                    "Run `asl supervisor-guide` for the whole supervision workflow."
+                    in help_text,
+                )
+
+        bare = parser.parse_args(["workbench", "--host", "10.0.0.2"])
+        self.assertIsNone(bare.workbench_command)
+        self.assertEqual("10.0.0.2", bare.host)
+
+    def test_building_the_parser_does_not_import_the_supervisor_guide(self) -> None:
+        # The guide is registered through `handler_ref`, so neither importing
+        # nor building the CLI may load it. Run in a clean interpreter because
+        # sys.modules is process-global and this module imports the guide.
+        probe = (
+            "import sys\n"
+            "from agent_session_loop import cli\n"
+            "cli.build_parser()\n"
+            "print('agent_session_loop.supervisor_guide' in sys.modules)\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual("False", completed.stdout.strip(), completed.stdout)
 
     def test_mailbox_activation_accepts_fresh_lease_and_honors_opt_out(
         self,

@@ -438,6 +438,7 @@ asl review-verdict PLAN_DIR [--state-dir DIR] [--json]
 asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
 asl doctor --harness codex|claude|copilot [--harness-model MODEL] [--effort EFFORT] [--cwd ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
+asl supervisor-guide [--harness auto|codex|claude|copilot] [--json]
 asl inbox guidance PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--state-dir DIR] [--json]
 asl inbox reply PLAN_DIR_OR_ID --to QUESTION_ID (--text TEXT | --text-stdin) [--wait-consumed] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl inbox resolve PLAN_DIR_OR_ID --to QUESTION_ID --action continue|pause [--note TEXT|--note-stdin] [--wait-consumed] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
@@ -2729,6 +2730,36 @@ read, so a narrow window costs a stat walk instead of a full-corpus read. Those 
 cover operational JSON only; `asl gc` projects the age-based reclaim over
 `runs/<run-id>/` directories, which is where corpus size actually accumulates,
 and renders its byte totals the same way so the two commands compare directly.
+
+Metrics also reports a `cli_invocations` section — a text `CLI invocations`
+block and an additive JSON object — that turns the
+[CLI invocation trace](#cli-invocation-trace) into operational diagnostics. It
+pairs `start` and `end` records by `invocation_id` and reports starts,
+completions, successes, nonzero exits, usage errors, help calls, interruptions,
+exceptions, and unmatched starts, plus counts by command, help depth, exit code,
+harness, and origin, duration median/p95/max, and a bounded
+`recent_failures` list of the 10 most recent failing, usage-error, interrupted,
+or exception invocations. The `origin` counts are what separate a supervisor's
+own `direct` calls from `autopilot`, `workbench`, and `install-verify`
+automation. `trace_root` and `retention_days` name where the records live and
+how long they survive, so a zeroed section is distinguishable from a missing
+one. Recent failures carry only the trace's own closed field set —
+`invocation_id`, `timestamp`, `command`, `options`, `help_depth`, `harness`,
+`origin`, `outcome`, `exit_code`, `duration_ms`, `exception_type` — so the
+diagnostic names the failing command surface without exposing what was typed.
+The reader tolerates a degraded corpus rather than failing. `records_read`
+counts every non-blank line the trace files hold and `records_ignored` counts
+the ones that produced no usable invocation: a malformed or non-object line, a
+record with no usable `invocation_id` or `event`, and an invocation with no
+parseable timestamp. A duplicate half is skipped without being counted as
+ignored, since its invocation is already summarized. A pair whose
+two halves straddle midnight or two daily files is still counted once, an
+invocation whose `start` was pruned is still summarized from its `end`, and an
+invocation belongs to the window by its start timestamp so narrowing
+`--since-days` never raises a count. The report also excludes its own
+invocation, whose `start` record is already on disk while the handler runs and
+would otherwise always appear as an unmatched start.
+
 The command is read-only:
 it never mutates state, events, or plan directories.
 
@@ -3332,6 +3363,69 @@ and an `enumeration` block with `expected_pgid`, `table_size`, `pgid_members`,
 that found nothing is the normal case and is not recorded, so a `process_sweep`
 event always means real cleanup happened.
 
+### CLI invocation trace
+
+Every real `asl` process — the installed wrapper and `python -m
+agent_session_loop` alike — appends two records to
+`cli-invocations-YYYY-MM-DD.jsonl` at the effective state root: a `start` event
+once the command line has been recognized, and an `end` event on whatever
+happens next (normal exit, nonzero exit, `Ctrl-C`, or an uncaught exception).
+Only `cli.main` is instrumented, so importing `agent_session_loop` as a library
+and calling a handler directly records nothing.
+
+A record carries only vocabulary the parser already owns plus process facts:
+`schema_version`, `event`, `invocation_id`, `timestamp`, `pid`, `command_path`
+(recognized subcommand names), `options` (recognized option names), `help_depth`,
+`harness`, `origin`, and — on the `end` record — `exit_code`, `outcome`,
+`duration_ms`, and `exception_type`. Raw argv, option values, positional values,
+unknown tokens, paths, environment values, message bodies, captured output, and
+exception messages are never assembled into a record, so a trace file cannot
+leak content. An option value is counted and skipped rather than inspected,
+which is why `--state-dir metrics` cannot promote `metrics` into the command
+path.
+
+`outcome` is one of `ok`, `failed`, `help`, `usage`, `interrupted`, or
+`exception`. `help_depth` is `root`, `group`, or `leaf` on a `--help` exit and
+null otherwise. `origin` comes from the internal `ASL_INVOCATION_ORIGIN`
+allowlist (`direct`, `autopilot`, `workbench`, `install-verify`); any other
+value is recorded as `other`, and an unset variable means `direct`.
+
+Every launcher that spawns an `asl` child marks it, so a supervisor reading
+`asl metrics` can tell their own calls apart from internal automation. The
+autopilot helper's central child environment marks its `asl run`, `asl status`,
+and `asl questions` subprocesses as `autopilot`; `workbench.launch_plan` marks
+its `python -m agent_session_loop run` child as `workbench`; and the install
+verifier marks its `asl status --json` smoke call as `install-verify`. Anything
+left is `direct`. The marker is always applied **after** the launcher's other
+environment work — after the autopilot helper overlays the supervised command's
+own `NAME=VALUE` assignments, and after a Workbench caller's `env` mapping —
+because attribution belongs to the process doing the launching. A supervised
+command that sets `ASL_INVOCATION_ORIGIN=direct` therefore cannot disguise
+automation as an operator call, and every other caller-provided entry is
+preserved untouched. A Workbench launch that passes no `env` at all still
+materializes the inherited environment so the marker reaches the child.
+
+A successful parse traces under its effective `--state-dir`. A `--help` or
+argparse usage exit happens before a namespace exists, so its pair lands under
+the default/XDG state root instead.
+
+Each record is one locked, mode-`0600`, append-only write; files are daily and
+pruned opportunistically once they are more than 30 days old. Tracing is
+fail-open in every direction — an unwritable state root, a full disk, or a lock
+that cannot be taken produces no record rather than a failed command, and the
+reader skips malformed lines instead of rejecting the file, counting them so
+that corruption is reported rather than hidden. A killed process leaves an
+unmatched `start`, which readers tolerate.
+
+`asl metrics` is the consumer: its `cli_invocations` section pairs the two
+records by `invocation_id` and reports the lifecycle. See
+[the `metrics` command](#command-behavior) and
+[`metrics --json`](#json-output).
+
+Tracing is **on by default**. Set `ASL_CLI_TRACE=0` (or `false`, `no`, `off`) to
+turn it off; any other value leaves it enabled. The test suite disables it
+package-wide so the suite never writes into a developer's live state root.
+
 ## State Files
 
 By default, runtime metadata is stored under:
@@ -3361,7 +3455,16 @@ sha256 digests, and gzip artifact paths remain) — while each turn's
 raw verification output; full failed-check output lives in the referenced
 `verification/*.gz` artifacts.
 
-Runtime files include:
+`cli-invocations-YYYY-MM-DD.jsonl` sits at the state root itself, beside the
+per-plan-hash directories, because a CLI invocation is not scoped to a plan. It
+is retained for 30 days and pruned opportunistically; `asl metrics` reports that
+root and retention as `cli_invocations.trace_root` and
+`cli_invocations.retention_days` so an empty section is distinguishable from an
+absent trace. `asl gc` never touches these files — its sweep only removes
+`runs/<run-id>/` directories under a plan hash. See
+[CLI invocation trace](#cli-invocation-trace).
+
+The remaining runtime files live under a plan's hash directory:
 
 - `state.json`: latest run payload.
 - `events.jsonl`: append-only run, pause, turn, and commit events.
@@ -3976,7 +4079,8 @@ only where the session declares a handoff target.
 window as `since_days`, `window_start`, and `generated_at`, then
 `state_dirs_scanned` and `state_dirs_active` beside the `turns`, `first_pass`,
 `pauses`, `verification_repair`, `review_cycles`, `agent_mux_delivery`,
-`artifacts`, and `compaction` objects. Every field in those objects answers for
+`artifacts`, `compaction`, and `cli_invocations` objects. Every field in those
+objects answers for
 the window alone, including `review_cycles.unique_materializations` and its
 `review_cycles.repairs_materialized` alias, so narrowing `--since-days` never
 raises a count. `state_dirs_scanned` counts the whole corpus and
@@ -3984,6 +4088,17 @@ raises a count. `state_dirs_scanned` counts the whole corpus and
 `state_dirs_active` counts only the directories with in-window turn or event
 activity, and a directory whose files were all last written before the window
 opened is skipped before its event log is read.
+
+`cli_invocations` is additive: every pre-existing metrics field keeps its name,
+type, and meaning. It carries `trace_root`, `retention_days`, `records_read`,
+`records_ignored`, `starts`, `completions`, `successes`, `nonzero_exits`,
+`usage_errors`, `help_calls`, `interruptions`, `exceptions`,
+`unmatched_starts`, the `by_command`, `by_help_depth`, `by_exit_code`,
+`by_harness`, and `by_origin` count maps, a `durations_ms` object
+(`count`, `median`, `p95`, `max`, `total`, with the summaries null when no
+invocation completed in the window), and `recent_failures`. An invocation is
+windowed by its start timestamp, so `cli_invocations` narrows with
+`--since-days` exactly like every other section.
 
 ## Pause Semantics
 
@@ -4203,6 +4318,41 @@ the command carries `--no-mailbox`, it also establishes a supervisor lease
 before starting a child, discovers live worker questions, and keeps supervising
 while the runner waits for a reply.
 
+### `asl supervisor-guide`
+
+`asl supervisor-guide [--harness auto|codex|claude|copilot] [--json]` prints
+that whole workflow as one canonical model, so an agent that never opened this
+document still gets the exact commands. Text and JSON render from the same
+model and therefore carry equivalent commands; the JSON payload is `ok`,
+`command`, `selected_harness`, `skills`, `helper`, `operations`, and
+`leaf_help`. It covers the `$asl` / `/asl` skill invocation carrying the user's
+exact `asl run` command, the detached
+`<skill-dir>/scripts/asl-autopilot.py --command ... --supervision-id ... --json --detach`
+launch and its `--reply-stdin` resume, the `asl outbox supervise`,
+`asl inbox reply`, `asl inbox resolve`, `asl inbox guidance`, and `asl status`
+operations, and reading the helper's verdict from the handshake's
+`result_path`. Skill prefixes come from the harness adapters themselves rather
+than a second table. `--harness auto` uses the existing invoking-harness
+detection: a single detected harness (or an explicit `--harness NAME`) is
+reported in `selected_harness` and shown alone, while detection that is absent
+or ambiguous leaves `selected_harness` null and offers every supported harness
+candidate rather than failing. The command is registered through the lazy
+`handler_ref` mechanism, so importing or building `cli.py` never loads it.
+
+Every nested command group — `bridge`, `workbench`, `control`, `inbox`,
+`outbox`, and `assurance` — carries an epilogue, because a leaf-only group's
+help lists its leaves and none of their flags, which reads to an agent like the
+flags do not exist. Those groups say that they list leaves only and name the
+leaf help to read instead, such as `asl outbox supervise --help`; the
+supervision groups also point at `asl supervisor-guide`.
+
+`asl workbench` is the exception: it installs the serve flags on the parent
+parser and the bare `asl workbench` form runs `asl workbench serve` with them,
+so its help legitimately shows `--host`, `--port`, `--state-dir`,
+`--plan-root`, `--open`, and `--json` alongside the leaves. Its epilogue says
+so — bare `asl workbench` runs `asl workbench serve` with those flags, and
+every other leaf has its own — instead of claiming the group lists leaves only.
+
 ### Install and sync
 
 The skill ships in the repository's top-level `skills/asl/` and is stowed into
@@ -4210,6 +4360,22 @@ every harness skill directory the same way as the other shared skills. Run
 `just sync-skills` (or `just all`) to refresh the harness package links, then
 `just verify-asl-install` to confirm the active `asl` wrapper and the installed
 skill links resolve to this checkout. See [Shared AI Skills](../README.md#shared-ai-skills).
+
+`just sync-skills` also renders the always-loaded ASL startup card, which is
+how a fresh Codex or Claude session learns the supervisor route without loading
+the whole skill. `agent_session_loop/startup_context.py` builds the card from
+`supervisor_guide.guide_payload`, so the card cannot drift from
+`asl supervisor-guide`, and maintains it as one marked block in
+`codex/.codex/AGENTS.md`, `claude/.claude/CLAUDE.md`,
+`claude/.claude-personal/CLAUDE.md`, and the generated skill reference
+`skills/asl/references/supervisor-context.md`. Everything outside the markers
+is preserved byte for byte. The start marker carries a digest of the block
+body: `python3 -m agent_session_loop.startup_context --check` (also
+`just check-startup-context`) reports stale blocks without rewriting them, and
+`just verify-asl-install` fails when an installed context file carries a marker
+other than the current one, when the installed ASL skill has lost its
+reference-loading instruction, or when its bundled helper does not resolve to
+this checkout.
 
 ### Safety model
 
@@ -4229,6 +4395,13 @@ with the harness agent driving the skill. It:
   rebind guidance; Autopilot never grants itself rebind authority.
 - Never persists reply text: resumes flow through `asl run --reply-stdin`, so
   the reply appears only on the child's stdin, never in argv or helper output.
+- Attributes every `asl` child it spawns to itself. One central child
+  environment feeds the `asl run`, `asl status`, and `asl questions`
+  subprocesses, and it stamps `ASL_INVOCATION_ORIGIN=autopilot` after the
+  supervised command's own `NAME=VALUE` assignments are overlaid, so a
+  registered command cannot relabel helper automation as a direct operator
+  call. `asl metrics` reports those calls under the `autopilot` origin; see
+  [CLI invocation trace](#cli-invocation-trace).
 - Uses the existing child/attach wait loops for mailbox polling and lease
   renewal; it does not create a mailbox watcher thread. Full question bodies
   are retained only in the structured result's `outbox`, while stderr receives
@@ -4746,6 +4919,14 @@ after a restart.
 - Stop controls are checkpoint-only and never terminate an active
   harness subprocess. They are equivalent to typing `p`, `1`/`2`/`3`,
   etc. at a text TTY runner.
+- Every `python -m agent_session_loop run` child the Workbench spawns —
+  including the intervention and `--resume` launches — carries
+  `ASL_INVOCATION_ORIGIN=workbench`, so `asl metrics` attributes those
+  runs to the Workbench rather than to a supervisor at a terminal. The
+  marker is the only entry `launch_plan` sets; a caller-supplied `env`
+  mapping is otherwise passed through unchanged, and a launch with no
+  `env` materializes the inherited environment so the child is still
+  attributed. See [CLI invocation trace](#cli-invocation-trace).
 - The Recovery Center is a read-only diagnosis layer. It may display
   copyable repair commands, but the Workbench never executes those
   commands. Action cards only route to existing affordances and

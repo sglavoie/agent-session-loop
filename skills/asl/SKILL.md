@@ -6,6 +6,20 @@ allowed-tools: Bash, Read
 
 # ASL Autopilot
 
+## Quick Reference
+
+- Supervise: `asl outbox supervise PLAN_DIR --supervision-id SUPERVISION_ID`
+- Answer: `asl inbox reply PLAN_DIR --to QUESTION_ID --text REPLY_TEXT --wait-consumed --wait-timeout 300 --json`
+- Steer: `asl inbox guidance PLAN_DIR --text GUIDANCE_TEXT --json`
+- Recover: `asl status PLAN_DIR --json`
+- Every supervision command in one place: `asl supervisor-guide [--json]`
+
+Read `references/supervisor-context.md` in this skill directory before
+improvising a supervision command. It is the generated copy of the startup card
+the harness already loaded, plus the full guide text; `asl supervisor-guide` is
+authoritative whenever the two disagree. The binding workflow below still
+governs how the helper is launched and how a paused run is resumed.
+
 ## Purpose
 
 Supervise a single `asl run` invocation from start to finish. The user hands

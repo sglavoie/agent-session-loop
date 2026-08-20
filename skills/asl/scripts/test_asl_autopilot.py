@@ -25,6 +25,7 @@ from contextlib import (
 )
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest import mock
 
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "asl_autopilot.py")
 SPEC = importlib.util.spec_from_file_location("asl_autopilot", MODULE_PATH)
@@ -467,6 +468,30 @@ class ParseCommandTest(unittest.TestCase):
         result = autopilot.parse_command("   ")
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "empty-command")
+
+
+class ChildEnvTest(unittest.TestCase):
+    def test_marks_every_child_as_autopilot(self) -> None:
+        env = autopilot._child_env({})
+        self.assertEqual(env["ASL_INVOCATION_ORIGIN"], "autopilot")
+        self.assertEqual(autopilot.INVOCATION_ORIGIN, "autopilot")
+
+    def test_parsed_assignments_are_overlaid_on_the_environment(self) -> None:
+        env = autopilot._child_env({"env": {"CLAUDE_CONFIG_DIR": "/tmp/config"}})
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/tmp/config")
+        self.assertEqual(env["PATH"], os.environ["PATH"])
+
+    def test_supervised_command_cannot_relabel_the_origin(self) -> None:
+        env = autopilot._child_env(
+            {"env": {"ASL_INVOCATION_ORIGIN": "direct", "FOO": "bar"}}
+        )
+        self.assertEqual(env["ASL_INVOCATION_ORIGIN"], "autopilot")
+        self.assertEqual(env["FOO"], "bar")
+
+    def test_an_inherited_origin_is_overridden(self) -> None:
+        with mock.patch.dict(os.environ, {"ASL_INVOCATION_ORIGIN": "workbench"}):
+            env = autopilot._child_env({})
+        self.assertEqual(env["ASL_INVOCATION_ORIGIN"], "autopilot")
 
 
 class RunAutopilotParseIntegrationTest(unittest.TestCase):

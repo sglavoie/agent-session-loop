@@ -10,8 +10,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_session_loop import (
+    cli_trace,
     config,
     events,
     plans,
@@ -470,6 +472,52 @@ class WorkbenchLaunchTests(unittest.TestCase):
 
             self.assertEqual(workbench.LAUNCH_REASON_EMPTY_REPLY, ctx.exception.reason)
             self.assertEqual(0, len(captured), "process must not be spawned")
+
+    def _spawn_and_capture_env(self, **launch_kwargs) -> dict[str, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan_dir = self._seed_launchable_plan(tmp_path)
+            captured: list[_FakePopen] = []
+
+            def factory(argv, **kwargs):
+                proc = _FakePopen(argv, **kwargs)
+                captured.append(proc)
+                return proc
+
+            workbench.launch_plan(plan_dir, popen_factory=factory, **launch_kwargs)
+
+            self.assertEqual(1, len(captured))
+            env = captured[0].env
+            assert env is not None
+            return dict(env)
+
+    def test_launch_plan_marks_the_child_as_workbench_origin(self) -> None:
+        env = self._spawn_and_capture_env()
+
+        self.assertEqual(cli_trace.ORIGIN_WORKBENCH, env[cli_trace.ORIGIN_ENV_VAR])
+
+    def test_launch_plan_preserves_caller_supplied_environment_entries(self) -> None:
+        env = self._spawn_and_capture_env(
+            env={"PATH": "/usr/bin", "ASL_WORKER_MODE": "packet"}
+        )
+
+        self.assertEqual("/usr/bin", env["PATH"])
+        self.assertEqual("packet", env["ASL_WORKER_MODE"])
+        self.assertEqual(cli_trace.ORIGIN_WORKBENCH, env[cli_trace.ORIGIN_ENV_VAR])
+
+    def test_launch_plan_overrides_a_caller_supplied_origin(self) -> None:
+        env = self._spawn_and_capture_env(
+            env={cli_trace.ORIGIN_ENV_VAR: cli_trace.ORIGIN_DIRECT}
+        )
+
+        self.assertEqual(cli_trace.ORIGIN_WORKBENCH, env[cli_trace.ORIGIN_ENV_VAR])
+
+    def test_launch_plan_without_env_still_inherits_and_marks(self) -> None:
+        with mock.patch.dict(os.environ, {"ASL_LAUNCH_PROBE": "inherited"}):
+            env = self._spawn_and_capture_env()
+
+        self.assertEqual("inherited", env["ASL_LAUNCH_PROBE"])
+        self.assertEqual(cli_trace.ORIGIN_WORKBENCH, env[cli_trace.ORIGIN_ENV_VAR])
 
     def test_launch_plan_propagates_popen_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

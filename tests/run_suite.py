@@ -31,6 +31,7 @@ FAST_MODULES = (
     "tests.test_daily_remind",
     "tests.test_claude_lint_hook",
     "tests.test_asl_cli",
+    "tests.test_asl_cli_trace",
     "tests.test_asl_preflight",
     "tests.test_asl_verification",
     "tests.test_asl_baseline",
@@ -74,6 +75,7 @@ FAST_MODULES = (
     "tests.test_asl_process_tree",
     "tests.test_asl_supervision_liveness",
     "tests.test_asl_retention",
+    "tests.test_asl_startup_context",
     "tests.test_skill_sync",
 )
 
