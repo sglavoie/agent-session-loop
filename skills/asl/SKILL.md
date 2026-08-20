@@ -579,22 +579,35 @@ ceiling stands down whenever the live `hang_cpu_progress` sample reports
 `progressing: true` — a worker piping through a buffering consumer is silent,
 not stalled. An unknown sample (no fresh `ps`) still escalates.
 When either bar fires, the helper stops with `reason: worker_hung`
-**without killing or waiting on anything** — the supervised `asl run` child
-stays alive and keeps the plan lock. Its terminal `supervision-end` record
-therefore marks the end of supervision only: that live child can still publish
-mailbox questions and notices after the record lands.
+without killing or waiting on the `asl run` child. Before the helper can reach
+that unresolved stop, the runner gives only `result_received_process_alive` one
+automatic recovery attempt: it re-samples the tree, requires the harness root
+and each deepest leaf to retain the same pid, birth time, command, and ancestry,
+then sends SIGTERM once to the verified leaves. It never escalates to SIGKILL,
+never targets parent shells, and never does this for generic `zero_cpu_idle`, a
+progressing or failed sample, a root-only tree, or when process sweeping is
+disabled. Resumed output clears the episode and the same runner continues.
+`worker_hung` means that recovery was inapplicable or did not resume the turn;
+the supervised child stays alive and keeps the plan lock. Its terminal
+`supervision-end` record therefore marks the end of supervision only: that live
+child can still publish mailbox questions and notices after the record lands.
 
 Read `result.hang` first. It carries the `class`, the runner's `hang_suspected`
-block verbatim (including its sampled `process_tree`), `idle_seconds`,
-`probes`, the plan/state/events paths, and the active turn's artifact paths;
-`supervised_child_pid` and `detached` appear only when the helper launched the
-chunk itself. Then:
+block verbatim (including its sampled `process_tree` and additive `recovery`
+report), `idle_seconds`, `probes`, the plan/state/events paths, and the active
+turn's artifact paths. The recovery report names its policy, attempt time,
+signal, candidate/signaled/already-gone pids, identity mismatches, and signal
+failures. Automatically recovered episodes have a later `turn_hang_cleared`
+event and never reach this stop; a report inside `worker_hung` is an unresolved
+attempt, not permission for a stronger signal. `supervised_child_pid` and
+`detached` appear only when the helper launched the chunk itself. Then:
 
 1. **Re-verify before trusting the snapshot** — pids get reused, so match on
-   command strings, not pids: compare
-   `ps -axo pid,ppid,state,time,command` against
+   pid, birth time, command, and ancestry: compare
+   `ps -axo pid,ppid,state,time,lstart,command` against
    `hang.hang_suspected.process_tree`.
-2. **Ask the user before killing anything.**
+2. **Ask the user before any further signal.** The automatic boundary was
+   SIGTERM-only; unresolved cases require explicit approval.
 3. If approved, kill **only the identified leaf** — the deepest zero-CPU
    descendant (e.g. a `perl .../diff-so-fancy` pager wedged under the worker's
    `/bin/zsh -c`) — never the runner or the `asl run` process.

@@ -3923,6 +3923,7 @@ def _check_resource_anomalies(context: _CheckContext) -> _Verdict:
     references: list[str] = []
     suspected = 0
     cleared = 0
+    automatically_recovered = 0
     for record in context.records:
         name = record.get("name")
         payload = _mapping(record.get("payload"))
@@ -3930,6 +3931,10 @@ def _check_resource_anomalies(context: _CheckContext) -> _Verdict:
             suspected += 1
         elif name == events.TURN_HANG_CLEARED_EVENT:
             cleared += 1
+            block = _mapping(payload.get("hang_suspected"))
+            recovery = _mapping(block.get("recovery"))
+            if _sequence(recovery.get("signaled_pids")):
+                automatically_recovered += 1
         elif name == events.PROCESS_SWEEP_EVENT:
             if _sequence(payload.get("kill_failed")):
                 anomalies.append(
@@ -3981,7 +3986,8 @@ def _check_resource_anomalies(context: _CheckContext) -> _Verdict:
     return _Verdict(
         "pass",
         f"{len(context.turns)} turn(s) ran without a timeout, an interrupt, an "
-        "uncleared hang, or a surviving process",
+        "uncleared hang, or a surviving process; "
+        f"{automatically_recovered} post-result hang(s) recovered automatically",
         evidence,
     )
 

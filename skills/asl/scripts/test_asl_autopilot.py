@@ -7172,6 +7172,31 @@ class SuperviseRunWorkerHungTest(unittest.TestCase):
 
     PARSED = {"plan_dir": "/tmp/plan", "argv": ["asl", "run", "/tmp/plan", "--json"]}
 
+    def test_worker_hung_result_preserves_leaf_recovery_report(self) -> None:
+        block = _hang_block()
+        block["recovery"] = {
+            "policy": "verified_leaf_sigterm",
+            "attempted_at": "2026-08-20T12:00:00+00:00",
+            "signal": "SIGTERM",
+            "candidate_pids": [5001],
+            "signaled_pids": [],
+            "already_gone_pids": [],
+            "identity_mismatches": [{"pid": 5001, "reason": "birth"}],
+            "signal_failures": [],
+        }
+        status = _hung_run_status()
+        status["active_turn"]["hang_suspected"] = block
+        escalation = {
+            "class": autopilot.HANG_CLASS_RESULT_RECEIVED,
+            "hang_suspected": block,
+            "idle_seconds": 162.0,
+            "probes": 2,
+        }
+
+        hang = autopilot._hang_payload(escalation, self.PARSED, status)
+
+        self.assertEqual(block["recovery"], hang["hang_suspected"]["recovery"])
+
     def test_marker_from_chunk_maps_to_worker_hung_result(self) -> None:
         hang = {"class": autopilot.HANG_CLASS_RESULT_RECEIVED, "probes": 2}
         marker_status = {"ok": True, "plan_dir": "/tmp/plan", "marker": True}

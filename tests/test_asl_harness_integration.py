@@ -17,17 +17,19 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
 from collections.abc import Callable
-from contextlib import redirect_stderr, suppress
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    cli,
     config,
     contracts,
     control_queue,
@@ -6375,6 +6377,174 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual([], sweep["survivors_after"])
         assert_marked_pids_exited(marker_dir, label="leaked check child")
 
+    def test_post_result_leaf_recovery_advances_and_releases_lock(self) -> None:
+        """A terminal fake-Claude result with a live leaf recovers in-place."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir = tmp_dir / "plan"
+            state_dir = tmp_dir / "state"
+            workspace = tmp_dir / "workspace"
+            config_home = tmp_dir / "config"
+            control_dir = tmp_dir / "fake-claude-state"
+            control_dir.mkdir()
+            write_plan(plan_dir, ("pending", "pending"))
+            init_git_repo(workspace)
+
+            leaf_script = tmp_dir / "fake-claude-leaf.py"
+            leaf_script.write_text(
+                textwrap.dedent(
+                    """\
+                    import os
+                    import pathlib
+                    import signal
+                    import sys
+                    import time
+
+                    control = pathlib.Path(os.environ["FAKE_CLAUDE_STATE"])
+                    (control / "leaf-pid").write_text(str(os.getpid()))
+
+                    def stop(*_args):
+                        (control / "leaf-termed").write_text("yes")
+                        raise SystemExit(0)
+
+                    signal.signal(signal.SIGTERM, stop)
+                    (control / "leaf-ready").write_text("yes")
+                    time.sleep(60)
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_claude = tmp_dir / "fake-claude"
+            fake_claude.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import json
+                    import os
+                    import pathlib
+                    import subprocess
+                    import sys
+
+                    plan_index = sys.argv.index("--add-dir") + 1
+                    plan = pathlib.Path(sys.argv[plan_index])
+                    control = pathlib.Path(os.environ["FAKE_CLAUDE_STATE"])
+                    pending = [
+                        path
+                        for path in sorted(plan.glob("session-*.md"))
+                        if "- **Status**: pending" in path.read_text()
+                    ]
+                    target = pending[0]
+                    text = target.read_text()
+                    text = text.replace(
+                        "- **Status**: pending", "- **Status**: complete", 1
+                    )
+                    text = text.replace(
+                        "- **Key decisions**: (none)",
+                        "- **Key decisions**: fake Claude completed the session.",
+                        1,
+                    )
+                    target.write_text(text)
+                    result = {
+                        "type": "result",
+                        "subtype": "success",
+                        "result": "Runner status: complete",
+                        "num_turns": 1,
+                    }
+                    first = not (control / "first-used").exists()
+                    if first:
+                        (control / "first-used").write_text("yes")
+                        leaf = subprocess.Popen(
+                            [sys.executable, os.environ["FAKE_CLAUDE_LEAF"]]
+                        )
+                        while not (control / "leaf-ready").exists():
+                            pass
+                        print(json.dumps(result), flush=True)
+                        leaf.wait()
+                        message = {
+                            "type": "assistant",
+                            "message": {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "background task reaped",
+                                    }
+                                ]
+                            },
+                        }
+                        print(json.dumps(message), flush=True)
+                        print(json.dumps(result), flush=True)
+                    else:
+                        print(json.dumps(result), flush=True)
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_claude.chmod(fake_claude.stat().st_mode | stat.S_IXUSR)
+            config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps({"claude": {"executable": str(fake_claude)}}),
+                encoding="utf-8",
+            )
+            argv = [
+                "run",
+                str(plan_dir),
+                "--cwd",
+                str(workspace),
+                "--harness",
+                "claude",
+                "--state-dir",
+                str(state_dir),
+                "--json",
+                "--unsafe-bypass",
+                "--allow-not-loop-ready",
+                "--no-mailbox",
+            ]
+            args = cli.build_parser().parse_args(argv)
+            real_live_turn = runner._LiveTurn
+
+            def fast_live_turn(*call_args, **call_kwargs):
+                call_kwargs["heartbeat_interval"] = 0.05
+                return real_live_turn(*call_args, **call_kwargs)
+
+            output = io.StringIO()
+            with (
+                patched_env(
+                    XDG_CONFIG_HOME=str(config_home),
+                    FAKE_CLAUDE_STATE=str(control_dir),
+                    FAKE_CLAUDE_LEAF=str(leaf_script),
+                    ASL_HANG_RESULT_GRACE_SECONDS="0.05",
+                    ASL_HANG_CONFIRM_SAMPLES="1",
+                ),
+                mock.patch.object(runner, "_LiveTurn", side_effect=fast_live_turn),
+                redirect_stdout(output),
+            ):
+                code = runner.run_from_args(args, run_argv=argv)
+
+            self.assertEqual(0, code, output.getvalue())
+            self.assertTrue((control_dir / "leaf-termed").exists())
+            self.assertEqual(
+                ["complete", "complete"],
+                [session.status for session in plans.inspect_plan(plan_dir).sessions],
+            )
+            lock = state.read_lock_info(plan_dir, state_dir)
+            self.assertIsNone(lock)
+            records = read_jsonl(
+                state.plan_state_dir(plan_dir, state_dir) / events.EVENTS_FILE_NAME
+            )
+            suspected = [
+                record
+                for record in records
+                if record["name"] == events.TURN_HANG_SUSPECTED_EVENT
+            ]
+            self.assertEqual(1, len(suspected))
+            recovery = suspected[0]["payload"]["hang_suspected"]["recovery"]
+            leaf_pid = int((control_dir / "leaf-pid").read_text())
+            self.assertEqual([leaf_pid], recovery["candidate_pids"])
+            self.assertEqual([leaf_pid], recovery["signaled_pids"])
+            self.assertEqual([], recovery["signal_failures"])
+            self.assertNotIn("worker_hung", output.getvalue())
+
 
 class HarnessReaderJoinAndHookTests(unittest.TestCase):
     """Direct adapter-run tests for bounded reader joins and observation hooks."""
@@ -7471,14 +7641,16 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             cleared[0]["payload"]["hang_suspected"]["reason"],
         )
 
-    def _live_turn(self, sample_tree) -> runner._LiveTurn:
+    def _live_turn(
+        self, sample_tree, *, result_grace_seconds: float = 45.0
+    ) -> runner._LiveTurn:
         sentinel = runner._HangSentinel(
             sample_tree=sample_tree,
             monotonic=time.monotonic,
             trigger_idle_seconds=120.0,
             confirm_samples=2,
             cpu_epsilon_seconds=0.5,
-            result_grace_seconds=45.0,
+            result_grace_seconds=result_grace_seconds,
         )
         started_at = runner._isoformat(runner._utc_now() - timedelta(seconds=600))
         active_turn: dict[str, Any] = {
@@ -7503,6 +7675,88 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             progress=mock.Mock(),
             active_turn=active_turn,
             hang_sentinel=sentinel,
+        )
+
+    def test_recovery_report_is_live_in_status_heartbeat_and_hang_event(self) -> None:
+        tree = [
+            {
+                "pid": 4242,
+                "ppid": 1,
+                "state": "S",
+                "cpu_seconds": 9.0,
+                "birth": "root",
+                "command": "claude --print",
+            },
+            {
+                "pid": 5001,
+                "ppid": 4242,
+                "state": "S",
+                "cpu_seconds": 1.0,
+                "birth": "leaf",
+                "command": "eza -la",
+            },
+        ]
+        live_turn = self._live_turn(
+            lambda pid: [dict(entry) for entry in tree],
+            result_grace_seconds=0.0,
+        )
+        live_turn.note_harness_pid(4242)
+        live_turn.note_final_result()
+        report = {
+            "policy": process_tree.POST_RESULT_RECOVERY_POLICY,
+            "attempted_at": "now",
+            "signal": "SIGTERM",
+            "candidate_pids": [5001],
+            "signaled_pids": [],
+            "already_gone_pids": [],
+            "identity_mismatches": [],
+            "signal_failures": [],
+        }
+        with (
+            mock.patch.object(
+                process_tree,
+                "prepare_verified_leaf_recovery",
+                return_value=(report, (5001,)),
+            ),
+            mock.patch.object(
+                process_tree,
+                "signal_verified_leaf_recovery",
+                return_value={**report, "signaled_pids": [5001]},
+            ),
+        ):
+            live_turn._record_heartbeat()
+            live_turn._record_heartbeat()
+            heartbeat = live_turn._record_heartbeat()
+
+        recovery = heartbeat["hang_suspected"]["recovery"]
+        self.assertEqual([5001], recovery["signaled_pids"])
+        state_payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            recovery,
+            state_payload["active_turn"]["hang_suspected"]["recovery"],
+        )
+        suspected = [
+            record
+            for record in read_jsonl(self.event_path)
+            if record["name"] == events.TURN_HANG_SUSPECTED_EVENT
+        ]
+        self.assertEqual(
+            recovery,
+            suspected[0]["payload"]["hang_suspected"]["recovery"],
+        )
+
+        # A harness that exits without another output chunk still clears the
+        # live episode at turn finalization, preserving the recovery evidence.
+        live_turn.finish(runner._utc_now())
+        cleared = [
+            record
+            for record in read_jsonl(self.event_path)
+            if record["name"] == events.TURN_HANG_CLEARED_EVENT
+        ]
+        self.assertEqual(1, len(cleared))
+        self.assertEqual(
+            recovery,
+            cleared[0]["payload"]["hang_suspected"]["recovery"],
         )
 
     def test_cpu_progress_publishes_without_suspicion_and_clears(self) -> None:

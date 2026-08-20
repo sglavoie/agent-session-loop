@@ -5,10 +5,12 @@ into a ppid->children map and walked breadth-first from the harness root pid.
 Any failure — spawn error, timeout, nonzero exit, unparsable output, or an
 absent root — yields ``None`` so callers stay fail-open.
 
-:func:`sweep_survivors` reuses that sampling to SIGKILL processes that outlived
-the harness turn or verification check they belonged to. The sweep is
-best-effort cleanup of something already finished, so nothing in this module
-raises: every failure degrades to ``None`` or an empty report instead.
+:func:`prepare_verified_leaf_recovery` re-samples a suspected-live harness tree
+and selects only identity-verified leaves for a one-shot SIGTERM recovery.
+:func:`sweep_survivors` separately reuses sampling to SIGKILL processes that
+outlived the harness turn or verification check they belonged to. Both paths
+are best-effort cleanup, so nothing in this module raises: every failure
+degrades to a report rather than destabilizing the run.
 
 :func:`accumulate_cpu_seconds` folds successive samples into an identity-keyed
 CPU high-water map, so turn-hang accounting survives tree churn: a descendant
@@ -39,6 +41,9 @@ _SWEEP_DISABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 # until its parent reaps it, so the survivor re-sample waits out the reap of a
 # process whose parent is already gone (the usual case for an escapee).
 SWEEP_SETTLE_SECONDS = 0.05
+
+POST_RESULT_RECOVERY_POLICY = "verified_leaf_sigterm"
+POST_RESULT_RECOVERY_SIGNAL = "SIGTERM"
 
 # macOS ``ps -o time`` emits ``0:00.03`` (mm:ss.ff); Linux emits
 # ``[[dd-]hh:]mm:ss``. One pattern covers both.
@@ -364,6 +369,168 @@ def sweep_enabled(environ: Mapping[str, str] | None = None) -> bool:
         return raw.strip().lower() not in _SWEEP_DISABLED_VALUES
     except Exception:  # noqa: BLE001 - an unreadable opt-out means default on
         return True
+
+
+def _verified_leaf_candidates(
+    root_pid: int,
+    prior_tree: Iterable[Mapping[str, Any]],
+    current_table: Mapping[int, Mapping[str, Any]],
+) -> tuple[list[int], list[int], list[dict[str, Any]]]:
+    """Return verified prior leaves, already-gone pids, and mismatches.
+
+    A candidate must have been a leaf in the sampled suspicion tree, still
+    carry the same pid/birth/command identity, and remain a descendant of the
+    same identity-verified harness root. Parents are never promoted when a leaf
+    disappears, which keeps harness shells and ASL itself out of the target set.
+    """
+    prior: dict[int, Mapping[str, Any]] = {}
+    for entry in prior_tree:
+        try:
+            pid = int(entry["pid"])
+        except KeyError, TypeError, ValueError:
+            continue
+        prior[pid] = entry
+
+    children = {
+        int(entry["ppid"])
+        for entry in prior.values()
+        if isinstance(entry.get("ppid"), int)
+    }
+    candidate_pids = sorted(
+        pid
+        for pid in prior
+        if pid > 1 and pid != root_pid and pid != os.getpid() and pid not in children
+    )
+    if not candidate_pids:
+        return [], [], []
+
+    mismatches: list[dict[str, Any]] = []
+    prior_root = prior.get(root_pid)
+    current_root = current_table.get(root_pid)
+    root_matches = (
+        prior_root is not None
+        and current_root is not None
+        and isinstance(prior_root.get("birth"), str)
+        and bool(prior_root.get("birth"))
+        and current_root.get("birth") == prior_root.get("birth")
+        and current_root.get("command") == prior_root.get("command")
+    )
+    if not root_matches:
+        mismatches.append({"pid": root_pid, "reason": "harness_root_identity"})
+        return [], [], mismatches
+
+    descendants = set(descendant_pids(root_pid, current_table))
+    verified: list[int] = []
+    already_gone: list[int] = []
+    for pid in candidate_pids:
+        recorded = prior[pid]
+        current = current_table.get(pid)
+        if current is None:
+            already_gone.append(pid)
+            continue
+        if pid not in descendants:
+            mismatches.append({"pid": pid, "reason": "ancestry"})
+            continue
+        recorded_birth = recorded.get("birth")
+        if (
+            not isinstance(recorded_birth, str)
+            or not recorded_birth
+            or current.get("birth") != recorded_birth
+        ):
+            mismatches.append({"pid": pid, "reason": "birth"})
+            continue
+        if current.get("command") != recorded.get("command"):
+            mismatches.append({"pid": pid, "reason": "command"})
+            continue
+        verified.append(pid)
+    return verified, already_gone, mismatches
+
+
+def prepare_verified_leaf_recovery(
+    *,
+    root_pid: int,
+    prior_tree: Iterable[Mapping[str, Any]],
+    attempted_at: str,
+    run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    timeout: float = SAMPLE_TIMEOUT_SECONDS,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], tuple[int, ...]]:
+    """Re-sample and prepare a safe one-shot post-result SIGTERM attempt.
+
+    The returned report is ready to publish under ``hang_suspected.recovery``;
+    the second item contains the only pids a caller may signal. Splitting
+    revalidation from delivery lets the runner invalidate an in-flight sample
+    on resumed output immediately before it sends any signal.
+    """
+    report: dict[str, Any] = {
+        "policy": POST_RESULT_RECOVERY_POLICY,
+        "attempted_at": attempted_at,
+        "signal": POST_RESULT_RECOVERY_SIGNAL,
+        "candidate_pids": [],
+        "signaled_pids": [],
+        "already_gone_pids": [],
+        "identity_mismatches": [],
+        "signal_failures": [],
+    }
+    if not sweep_enabled(environ):
+        report["disabled"] = "process_sweep_opt_out"
+        return report, ()
+    try:
+        prior_entries = tuple(dict(entry) for entry in prior_tree)
+        prior_pids = {entry.get("pid") for entry in prior_entries}
+        children = {
+            entry.get("ppid")
+            for entry in prior_entries
+            if entry.get("ppid") is not None
+        }
+        report["candidate_pids"] = sorted(
+            pid
+            for pid in prior_pids
+            if isinstance(pid, int)
+            and pid > 1
+            and pid != root_pid
+            and pid != os.getpid()
+            and pid not in children
+        )
+        table = sample_process_table(run_command=run_command, timeout=timeout)
+        if table is None:
+            report["sample_error"] = "process table sample failed"
+            return report, ()
+        verified, already_gone, mismatches = _verified_leaf_candidates(
+            root_pid, prior_entries, table
+        )
+        report["already_gone_pids"] = already_gone
+        report["identity_mismatches"] = mismatches
+        return report, tuple(verified)
+    except Exception as exc:  # noqa: BLE001 - recovery is strictly best effort
+        report["sample_error"] = str(exc)
+        return report, ()
+
+
+def signal_verified_leaf_recovery(
+    report: Mapping[str, Any],
+    pids: Iterable[int],
+    *,
+    kill: Callable[[int, int], Any] = os.kill,
+) -> dict[str, Any]:
+    """Send SIGTERM once to prepared leaves and return the completed report."""
+    completed = dict(report)
+    signaled: list[int] = list(completed.get("signaled_pids") or ())
+    already_gone: list[int] = list(completed.get("already_gone_pids") or ())
+    failures: list[dict[str, Any]] = list(completed.get("signal_failures") or ())
+    for pid in pids:
+        try:
+            kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            already_gone.append(pid)
+        except Exception as exc:  # noqa: BLE001 - report and fall through
+            failures.append({"pid": pid, "error": str(exc)})
+        else:
+            signaled.append(pid)
+    completed["signaled_pids"] = sorted(set(signaled))
+    completed["already_gone_pids"] = sorted(set(already_gone))
+    completed["signal_failures"] = failures
+    return completed
 
 
 def sweep_survivors(

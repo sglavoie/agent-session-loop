@@ -3074,8 +3074,14 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             ):
                 self.assertIn(token, text, f"{name} never mentions {token!r}")
         # The pause subsection pins the non-destructive escalation contract.
+        normalized_skill = " ".join(skill.split())
         self.assertIn("reason: worker_hung", skill)
-        self.assertIn("without killing or waiting on anything", skill)
+        self.assertIn(
+            "without killing or waiting on the `asl run` child", normalized_skill
+        )
+        self.assertIn("one automatic recovery attempt", normalized_skill)
+        self.assertIn("never escalates to SIGKILL", normalized_skill)
+        self.assertIn("additive `recovery` report", normalized_skill)
         self.assertIn("never the runner or the `asl run` process", skill)
         self.assertIn("re-attach", skill)
 

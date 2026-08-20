@@ -180,12 +180,20 @@ class TaskPacketBuilderTests(unittest.TestCase):
             )
 
     def test_packet_states_runner_signal_protocol(self) -> None:
-        rendered = runner.build_task_packet(
-            "codex", self.PLAN_DIR, session_id="9"
-        ).render()
-        self.assertIn("Runner status: complete", rendered)
-        self.assertIn("Runner status: paused", rendered)
-        self.assertIn("RUNNER_PAUSE: <reason> - <detail>", rendered)
+        for kind in (runner.SESSION_KIND_IMPLEMENTATION, runner.SESSION_KIND_REVIEW):
+            with self.subTest(kind=kind):
+                rendered = runner.build_task_packet(
+                    "codex", self.PLAN_DIR, session_id="9", session_kind=kind
+                ).render()
+                self.assertIn("Runner status: complete", rendered)
+                self.assertIn("Runner status: paused", rendered)
+                self.assertIn("RUNNER_PAUSE: <reason> - <detail>", rendered)
+                self.assertIn("every background command you started", rendered)
+                self.assertIn("commands the harness auto-backgrounded", rendered)
+                self.assertIn(
+                    "Reading a command's output file does not prove its process exited",
+                    rendered,
+                )
 
     def test_packet_separates_focused_validation_from_runner_verification(self) -> None:
         rendered = runner.build_task_packet(

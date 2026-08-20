@@ -2174,6 +2174,12 @@ class SessionTaskPacket:
 
         lines.append("## Runner signal protocol")
         lines.append(
+            "- Before printing either runner signal, wait for or explicitly stop "
+            "every background command you started, including commands the harness "
+            "auto-backgrounded. Reading a command's output file does not prove its "
+            "process exited."
+        )
+        lines.append(
             "- After writing the `complete` handoff, print `Runner status: complete`."
         )
         lines.append(
@@ -7154,6 +7160,7 @@ class _HangSentinel:
         self._cpu_high_water: dict[process_tree.CpuIdentity, float] = {}
         self._zero_cpu_streak = 0
         self._suspected: dict[str, Any] | None = None
+        self._recovery_attempted = False
         # Bumped on every note_activity; assessments carry the generation
         # they sampled so any verdict outlived by resumed output is discarded
         # (mid-sample by evaluate, post-return by confirm_assessment).
@@ -7175,6 +7182,7 @@ class _HangSentinel:
             self._cpu_high_water = {}
             self._last_cpu_seconds = None
             self._zero_cpu_streak = 0
+            self._recovery_attempted = False
 
     def note_final_result(self) -> None:
         with self._lock:
@@ -7197,7 +7205,73 @@ class _HangSentinel:
             self._zero_cpu_streak = 0
             self._last_cpu_seconds = None
             self._cpu_high_water = {}
+            self._recovery_attempted = False
             return retracted
+
+    def note_turn_exit(self) -> dict[str, Any] | None:
+        """Retract an announced suspicion when the harness process exits.
+
+        A terminal process exit is conclusive recovery evidence even when the
+        SIGTERM-unblocked harness emits no additional output chunk. A turn that
+        stays alive never reaches this hook and retains its unresolved block.
+        """
+        with self._lock:
+            retracted = self._suspected if self._announced else None
+            self._suspected = None
+            self._announced = False
+            return dict(retracted) if retracted is not None else None
+
+    def recover_post_result(self, assessment: _HangAssessment) -> _HangAssessment:
+        """Attempt one verified-leaf SIGTERM for a terminal-result suspicion.
+
+        Revalidation samples outside the sentinel lock. The generation is then
+        checked again and signals are delivered while holding the lock, so
+        output that resumed during the sample invalidates the assessment before
+        any process can be touched. Generic idle suspicions never enter here.
+        """
+        block = assessment.suspected
+        if block is None or block.get("reason") != HANG_REASON_RESULT_RECEIVED:
+            return assessment
+        with self._lock:
+            if (
+                assessment.generation != self._activity_generation
+                or self._suspected is None
+                or self._recovery_attempted
+            ):
+                return assessment
+            self._recovery_attempted = True
+            pid = self._harness_pid
+            prior_tree = tuple(block.get("process_tree") or ())
+            attempted_at = str(block.get("last_checked_at") or _isoformat(_utc_now()))
+
+        if pid is None:
+            return assessment
+        recovery, candidates = process_tree.prepare_verified_leaf_recovery(
+            root_pid=pid,
+            prior_tree=prior_tree,
+            attempted_at=attempted_at,
+        )
+
+        with self._lock:
+            if (
+                assessment.generation != self._activity_generation
+                or self._suspected is None
+            ):
+                # Output resumed while the process table was sampled. The
+                # activity path already cleared the episode and re-armed a
+                # future one, so this stale assessment publishes nothing.
+                return _HangAssessment(generation=assessment.generation)
+            recovery = process_tree.signal_verified_leaf_recovery(recovery, candidates)
+            recovered_block = dict(self._suspected)
+            recovered_block["recovery"] = recovery
+            self._suspected = recovered_block
+            return _HangAssessment(
+                suspected=dict(recovered_block),
+                transition=assessment.transition,
+                retracted=assessment.retracted,
+                generation=assessment.generation,
+                cpu_progress=assessment.cpu_progress,
+            )
 
     def confirm_assessment(self, assessment: _HangAssessment) -> bool:
         """Atomically re-validate an assessment immediately before folding.
@@ -7530,6 +7604,7 @@ class _LiveTurn:
 
     def finish(self, finished_at: datetime) -> dict[str, Any]:
         self.stop()
+        hang_retracted = self._hang_sentinel.note_turn_exit()
         with self._lock:
             active_turn = dict(self._active_turn)
             active_turn["finished_at"] = _isoformat(finished_at)
@@ -7541,7 +7616,15 @@ class _LiveTurn:
                 self._last_activity_at,
                 finished_at,
             )
+            active_turn.pop("hang_suspected", None)
+            self._active_turn = active_turn
             with self._persistence.lock:
+                if hang_retracted is not None:
+                    self._persistence.append_event(
+                        self._event_path,
+                        events.TURN_HANG_CLEARED_EVENT,
+                        self._hang_event_payload(hang_retracted, finished_at),
+                    )
                 self._payload["active_turn"] = None
                 self._persistence.write_state(self._payload)
             return active_turn
@@ -7626,6 +7709,7 @@ class _LiveTurn:
                 idle_seconds=idle_seconds,
                 now=now,
             )
+            assessment = self._hang_sentinel.recover_post_result(assessment)
         hang_event: tuple[str, dict[str, Any]] | None = None
         with self._lock:
             if (

@@ -524,8 +524,13 @@ lifetime: the Autopilot helper process that was supervising this plan has
 exited. It ends the helper's lifetime and does not prove the supervised run is
 quiescent. Most terminal reasons do leave the `asl run` child finished, but
 `worker_hung` deliberately stops the helper without killing or waiting on that
-child, which stays alive holding the plan lock and can publish questions and
-notices after the terminal record. A reader that needs to know whether work is
+child, which stays alive holding the plan lock and can publish
+questions and notices after the terminal record. The runner may already have
+made one SIGTERM-only attempt against identity-verified deepest leaves of a
+`result_received_process_alive` tree; automatically recovered attempts clear
+the hang and continue the run, while `worker_hung` carries the unresolved
+attempt under `result.hang.hang_suspected.recovery` and authorizes no stronger
+signal. A reader that needs to know whether work is
 still running asks `asl status <plan-dir> --json`; the record answers only
 whether this supervision is over. Beyond the common `id`, `kind`, `created_at`,
 and `version` fields it carries a required non-empty `text` holding the helper's

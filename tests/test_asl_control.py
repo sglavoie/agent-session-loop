@@ -5520,6 +5520,121 @@ class HangSentinelTests(unittest.TestCase):
             self.assertEqual([123], calls)
 
 
+class PostResultRecoverySentinelTests(unittest.TestCase):
+    NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+
+    @staticmethod
+    def tree() -> list[dict[str, Any]]:
+        return [
+            {
+                "pid": 123,
+                "ppid": 1,
+                "state": "S",
+                "cpu_seconds": 5.0,
+                "birth": "root-birth",
+                "command": "claude --print",
+            },
+            {
+                "pid": 456,
+                "ppid": 123,
+                "state": "S",
+                "cpu_seconds": 1.0,
+                "birth": "leaf-birth",
+                "command": "eza -la",
+            },
+        ]
+
+    def suspected_result(
+        self, sentinel: runner._HangSentinel
+    ) -> runner._HangAssessment:
+        sentinel.note_harness_pid(123)
+        sentinel.note_final_result()
+        sentinel.evaluate(idle_seconds=60.0, now=self.NOW)
+        sentinel.evaluate(idle_seconds=90.0, now=self.NOW)
+        assessment = sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        self.assertEqual("suspected", assessment.transition)
+        return assessment
+
+    def make_sentinel(self) -> runner._HangSentinel:
+        return runner._HangSentinel(
+            sample_tree=lambda pid: self.tree(),
+            monotonic=lambda: 100.0,
+            trigger_idle_seconds=120.0,
+            confirm_samples=2,
+            cpu_epsilon_seconds=0.5,
+            result_grace_seconds=0.0,
+        )
+
+    def test_terminal_result_attempts_sigterm_once_and_attaches_report(self) -> None:
+        sentinel = self.make_sentinel()
+        assessment = self.suspected_result(sentinel)
+        report = {
+            "policy": process_tree.POST_RESULT_RECOVERY_POLICY,
+            "attempted_at": "now",
+            "signal": "SIGTERM",
+            "candidate_pids": [456],
+            "signaled_pids": [],
+            "already_gone_pids": [],
+            "identity_mismatches": [],
+            "signal_failures": [],
+        }
+        with (
+            mock.patch.object(
+                process_tree,
+                "prepare_verified_leaf_recovery",
+                return_value=(report, (456,)),
+            ) as prepare,
+            mock.patch.object(
+                process_tree,
+                "signal_verified_leaf_recovery",
+                return_value={**report, "signaled_pids": [456]},
+            ) as deliver,
+        ):
+            recovered = sentinel.recover_post_result(assessment)
+            refreshed = sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+            sentinel.recover_post_result(refreshed)
+
+        assert recovered.suspected is not None
+        self.assertEqual([456], recovered.suspected["recovery"]["signaled_pids"])
+        prepare.assert_called_once()
+        deliver.assert_called_once()
+
+    def test_generic_idle_suspicion_never_attempts_recovery(self) -> None:
+        sentinel = self.make_sentinel()
+        sentinel.note_harness_pid(123)
+        sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        assessment = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+        self.assertEqual(runner.HANG_REASON_ZERO_CPU, assessment.suspected["reason"])
+
+        with mock.patch.object(
+            process_tree, "prepare_verified_leaf_recovery"
+        ) as prepare:
+            unchanged = sentinel.recover_post_result(assessment)
+
+        self.assertIs(assessment, unchanged)
+        prepare.assert_not_called()
+
+    def test_resumed_output_during_revalidation_cancels_signals(self) -> None:
+        sentinel = self.make_sentinel()
+        assessment = self.suspected_result(sentinel)
+
+        def prepare(**kwargs):
+            sentinel.note_activity()
+            return ({"candidate_pids": [456]}, (456,))
+
+        with (
+            mock.patch.object(
+                process_tree, "prepare_verified_leaf_recovery", side_effect=prepare
+            ),
+            mock.patch.object(process_tree, "signal_verified_leaf_recovery") as deliver,
+        ):
+            stale = sentinel.recover_post_result(assessment)
+
+        self.assertIsNone(stale.suspected)
+        deliver.assert_not_called()
+
+
 class ControlCliTests(unittest.TestCase):
     """`asl control`: the CLI producer surface for the durable control queue.
 

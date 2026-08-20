@@ -2801,6 +2801,66 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             )
             self.assertTrue(bundle.evidence)
 
+    def test_resource_check_distinguishes_recovered_and_unresolved_hangs(self) -> None:
+        recovery = {
+            "policy": "verified_leaf_sigterm",
+            "attempted_at": "2026-08-20T12:00:00+00:00",
+            "signal": "SIGTERM",
+            "candidate_pids": [5001],
+            "signaled_pids": [5001],
+            "already_gone_pids": [],
+            "identity_mismatches": [],
+            "signal_failures": [],
+        }
+        block = {
+            "reason": "result_received_process_alive",
+            "detected_at": "2026-08-20T12:00:00+00:00",
+            "recovery": recovery,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            state_dir = history[2]
+            self._write_events(
+                state_dir,
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.TURN_HANG_SUSPECTED_EVENT,
+                        {"run_id": RUN_ID, "hang_suspected": block},
+                    ),
+                    (
+                        events.TURN_HANG_CLEARED_EVENT,
+                        {"run_id": RUN_ID, "hang_suspected": block},
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            _bundle, recovered_results = self._audit(history)
+            recovered = recovered_results["resource-anomalies"]
+            self.assertEqual("pass", recovered.status)
+            assert recovered.detail is not None
+            self.assertIn(
+                "1 post-result hang(s) recovered automatically", recovered.detail
+            )
+
+            self._write_events(
+                state_dir,
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.TURN_HANG_SUSPECTED_EVENT,
+                        {"run_id": RUN_ID, "hang_suspected": block},
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+            _bundle, unresolved_results = self._audit(history)
+            unresolved = unresolved_results["resource-anomalies"]
+            self.assertEqual("fail", unresolved.status)
+            assert unresolved.detail is not None
+            self.assertIn("suspected hang(s) were never cleared", unresolved.detail)
+
     def test_legacy_single_repository_pass_is_described_truthfully(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
