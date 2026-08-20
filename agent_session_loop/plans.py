@@ -102,6 +102,7 @@ SESSION_ID_RE = re.compile(rf"^{SESSION_ID_PATTERN}$")
 SESSION_FILE_RE = re.compile(rf"^session-({SESSION_ID_PATTERN})\.md$")
 SESSION_EXPANSION_FILE_RE = re.compile(rf"^session-({SESSION_ID_PATTERN})\.expand\.md$")
 LOOSE_SESSION_FILE_RE = re.compile(r"^session-([0-9]+(?:\.[0-9]+)*)\.md$")
+PLAN_TITLE_RE = re.compile(r"^#\s+(.+?)\s*$")
 SESSION_STATUS_TABLE_HEADERS = {
     "#",
     "session",
@@ -663,6 +664,7 @@ class PlanSnapshot:
     plan_dir: Path
     context_path: Path
     manifest_path: Path
+    plan_title: str
     sessions: tuple[SessionStatus, ...]
     content_sha256: str
     path_hash: str
@@ -708,6 +710,15 @@ def canonicalize_path(path: str | Path) -> Path:
     """Return a filesystem-canonical path without requiring it to exist."""
     expanded = os.path.expanduser(os.fspath(path))
     return Path(os.path.realpath(os.path.abspath(expanded)))
+
+
+def plan_title_from_markdown(content: str) -> str | None:
+    """Return the first ``# H1`` title in Markdown, if present."""
+    for line in content.splitlines():
+        match = PLAN_TITLE_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _fsync_directory(path: Path) -> None:
@@ -2261,6 +2272,16 @@ def inspect_plan(
     if not _is_file(manifest_path):
         raise PlanError(f"missing manifest.md in plan directory: {canonical_dir}")
 
+    try:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+    except OSError as error:
+        _raise_read_error(manifest_path, error)
+    plan_title = (
+        plan_title_from_markdown(manifest_text)
+        or canonical_dir.name
+        or str(canonical_dir)
+    )
+
     sessions = discover_session_files(canonical_dir)
     if not sessions:
         noncanonical_suggestions = noncanonical_session_file_suggestions(canonical_dir)
@@ -2303,6 +2324,7 @@ def inspect_plan(
         plan_dir=canonical_dir,
         context_path=context_path,
         manifest_path=manifest_path,
+        plan_title=plan_title,
         sessions=tuple(statuses),
         content_sha256=content_hash,
         path_hash=path_sha256(canonical_dir),

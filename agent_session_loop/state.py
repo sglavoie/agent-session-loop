@@ -1882,6 +1882,7 @@ def status_payload(
     return responses.success_payload(
         "status",
         plan_dir=str(snapshot.plan_dir),
+        plan_title=snapshot.plan_title,
         context_path=str(snapshot.context_path),
         manifest_path=str(snapshot.manifest_path),
         content_sha256=snapshot.content_sha256,
@@ -1916,6 +1917,7 @@ def status_payload(
 
 
 def _print_text_status(payload: dict[str, Any]) -> None:
+    print(f"Plan title: {payload['plan_title']}")
     print(f"Plan: {payload['plan_dir']}")
     print(f"Plan hash: {payload['plan_hash']}")
     print(f"Content SHA-256: {payload['content_sha256']}")

@@ -305,11 +305,7 @@ def extract_inline_plan(raw_input: str) -> str:
 
 def title_from_plan(content: str) -> str:
     """Return the first ``# H1`` title in a plan, or ``"plan"``."""
-    for line in content.splitlines():
-        match = re.match(r"^#\s+(.+?)\s*$", line)
-        if match:
-            return match.group(1)
-    return "plan"
+    return plans.plan_title_from_markdown(content) or "plan"
 
 
 def _write_source_file(

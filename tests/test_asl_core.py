@@ -612,6 +612,42 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertEqual(2, snapshot.next_pending.number)
             self.assertEqual(plans.path_sha256(plan_dir), snapshot.path_hash)
 
+    def test_inspect_plan_uses_manifest_title_for_status_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            (plan_dir / "context.md").write_text("# Context decoy\n", encoding="utf-8")
+            (plan_dir / "manifest.md").write_text(
+                "# Durable plan title\n", encoding="utf-8"
+            )
+
+            snapshot = plans.inspect_plan(plan_dir)
+            payload = state.status_payload(snapshot, state_dir)
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+
+            self.assertEqual("Durable plan title", snapshot.plan_title)
+            self.assertEqual("Durable plan title", payload["plan_title"])
+            self.assertEqual(
+                [
+                    "Plan title: Durable plan title",
+                    f"Plan: {plans.canonicalize_path(plan_dir)}",
+                ],
+                buffer.getvalue().splitlines()[:2],
+            )
+
+    def test_inspect_plan_title_falls_back_to_directory_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "legacy-plan"
+            write_plan(plan_dir, ("pending",))
+            (plan_dir / "manifest.md").write_text("**Sessions**: 1\n", encoding="utf-8")
+
+            snapshot = plans.inspect_plan(plan_dir)
+
+            self.assertEqual("legacy-plan", snapshot.plan_title)
+
     def test_inspect_plan_sorts_dotted_session_files_and_finds_nested_next_pending(
         self,
     ) -> None:

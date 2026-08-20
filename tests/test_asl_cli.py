@@ -4264,6 +4264,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertTrue(payload["ok"])
             self.assertEqual("status", payload["command"])
+            self.assertEqual("Manifest", payload["plan_title"])
             self.assertEqual(
                 str(plans.canonicalize_path(plan_dir)), payload["plan_dir"]
             )
@@ -4280,6 +4281,7 @@ class StatusLabelResolutionCliTests(unittest.TestCase):
                 [plan_dir.name, "--state-dir", str(state_dir)],
                 check=True,
             )
+            self.assertEqual("Plan title: Manifest", completed.stdout.splitlines()[0])
             self.assertIn(str(plans.canonicalize_path(plan_dir)), completed.stdout)
 
     def test_full_path_takes_precedence_over_state_lookup(self) -> None:
