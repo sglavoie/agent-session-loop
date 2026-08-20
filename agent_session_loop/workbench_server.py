@@ -71,8 +71,8 @@ from . import (
     artifacts,
     control_cli,
     control_queue,
-    control_signal,
     harnesses,
+    intervention,
     plans,
     qna,
     responses,
@@ -1402,7 +1402,10 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         command_id = _optional_string(body, "command_id")
         config = self._server().config
         try:
-            queued = control_queue.append_command(
+            # The shared service carries the same best-effort wakeup the CLI
+            # producer sends, so the HTTP surface is not the slower way to
+            # reach a live runner.
+            dispatch = intervention.dispatch_control_command(
                 plan_dir,
                 control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT,
                 state_dir=config.state_dir,
@@ -1411,17 +1414,14 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         except control_queue.ControlQueueError as error:
             self._send_error(400, "invalid-command", str(error))
             return
-        # Same best-effort wakeup the CLI producer sends, so the HTTP surface
-        # is not the slower way to reach a live runner.
-        notified = control_signal.notify_runner(plan_dir, state_dir=config.state_dir)
         self._send_json(
             202,
             responses.success_payload(
                 COMMAND_NAME,
                 reason="accepted",
                 accepted=True,
-                queued_command=queued.to_payload(),
-                signal=notified.to_payload(),
+                queued_command=dispatch.command.to_payload(),
+                signal=dispatch.signal.to_payload(),
             ),
         )
 
@@ -1438,7 +1438,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         config = self._server().config
         run_active, turn_active = self._abort_run_activity(plan_dir, config)
         try:
-            queued = control_queue.append_command(
+            dispatch = intervention.dispatch_control_command(
                 plan_dir,
                 control_queue.COMMAND_REQUEST_ABORT_TURN,
                 state_dir=config.state_dir,
@@ -1469,13 +1469,14 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 },
             )
             return
+        queued = dispatch.command
+        notified = dispatch.signal
         if not run_active:
             note = control_cli.NO_ACTIVE_RUN_NOTE
         elif turn_active:
             note = control_cli.ABORT_WILL_APPLY_NOTE
         else:
             note = control_cli.ABORT_DEGRADES_NOTE
-        notified = control_signal.notify_runner(plan_dir, state_dir=config.state_dir)
         self._send_json(
             202,
             responses.success_payload(
@@ -1532,7 +1533,7 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             return
         config = self._server().config
         try:
-            queued = control_queue.append_command(
+            dispatch = intervention.dispatch_control_command(
                 plan_dir,
                 control_queue.COMMAND_SELECT_FUTURE_HARNESS,
                 state_dir=config.state_dir,
@@ -1542,15 +1543,14 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
         except control_queue.ControlQueueError as error:
             self._send_error(400, "invalid-command", str(error))
             return
-        notified = control_signal.notify_runner(plan_dir, state_dir=config.state_dir)
         self._send_json(
             202,
             responses.success_payload(
                 COMMAND_NAME,
                 reason="accepted",
                 accepted=True,
-                queued_command=queued.to_payload(),
-                signal=notified.to_payload(),
+                queued_command=dispatch.command.to_payload(),
+                signal=dispatch.signal.to_payload(),
             ),
         )
 

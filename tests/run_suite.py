@@ -59,6 +59,8 @@ FAST_MODULES = (
     "tests.test_asl_qna",
     "tests.test_asl_prompts",
     "tests.test_asl_control",
+    "tests.test_asl_bridge_projection",
+    "tests.test_asl_bridge_fixtures",
     "tests.test_asl_workbench_archive",
     "tests.test_asl_workbench_summary",
     "tests.test_asl_workbench_recovery",
@@ -89,6 +91,7 @@ INTEGRATION_MODULES = (
     "tests.test_asl_review",
     "tests.test_asl_workbench_launch",
     "tests.test_asl_pause_ux",
+    "tests.test_asl_bridge_server",
 )
 
 # Standalone helper-script suites (not part of the tests package).

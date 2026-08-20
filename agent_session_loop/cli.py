@@ -36,6 +36,7 @@ _CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS = (
     60.0  # control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS
 )
 _INTERRUPTED_EXIT = 130  # runner.INTERRUPTED_EXIT
+_BRIDGE_PROTOCOL_VERSION = 1  # bridge.PROTOCOL_VERSION
 
 
 _WORKBENCH_SERVE_CHILD_DESTS = {
@@ -1149,6 +1150,44 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Print machine-readable JSON output",
     )
     plans_parser.set_defaults(handler_ref="workbench:plans_from_args")
+
+    bridge_parser = subparsers.add_parser(
+        "bridge",
+        help="Serve the read-only NDJSON run projection to a supervision client.",
+    )
+    bridge_sub = bridge_parser.add_subparsers(dest="bridge_command", required=True)
+    bridge_serve_parser = bridge_sub.add_parser(
+        "serve",
+        help="Stream hello, run snapshots, and change events over stdio.",
+    )
+    bridge_serve_parser.add_argument(
+        "--stdio",
+        action="store_true",
+        default=True,
+        help="Speak the protocol on stdin/stdout (the only transport; default)",
+    )
+    bridge_serve_parser.add_argument(
+        "--protocol",
+        type=int,
+        default=_BRIDGE_PROTOCOL_VERSION,
+        metavar="VERSION",
+        help=(
+            "Protocol version to speak "
+            f"(default and only supported: {_BRIDGE_PROTOCOL_VERSION})"
+        ),
+    )
+    bridge_serve_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    bridge_serve_parser.add_argument(
+        "--plan-root",
+        action="append",
+        default=None,
+        metavar="DIR",
+        help="Extra plan root directory to scan for plans (may be repeated)",
+    )
+    bridge_serve_parser.set_defaults(handler_ref="bridge:bridge_serve_from_args")
 
     workbench_parser = subparsers.add_parser(
         "workbench",

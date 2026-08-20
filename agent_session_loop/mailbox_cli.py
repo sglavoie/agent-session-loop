@@ -22,6 +22,7 @@ from . import (
     agent_mux_delivery,
     cli_common,
     events,
+    intervention,
     mailbox,
     mailbox_rendering,
     plans,
@@ -862,47 +863,8 @@ def _write_supervisor_lease(
     state_dir: str | Path | None,
     supervisor_id: str | None = None,
 ) -> mailbox.MailboxLease:
-    """Heartbeat a live supervisor's lease, or take over when none is alive.
-
-    A fresh, current-version lease that carries a ``run_id`` proves a live
-    supervisor is projecting this plan, so re-emit its ``supervisor_id`` and
-    question projection verbatim with only ``updated_at`` refreshed — a
-    heartbeat, not a takeover. A missing, stale, v1, or unprojected lease
-    means no supervisor is running, so the caller legitimately becomes one:
-    write ``supervisor_id`` (minted fresh when omitted) with no projection.
-    A lease read failure degrades to the takeover path (fail-open, as the
-    blind write always was).
-    """
-    lease: mailbox.MailboxLease | None
-    try:
-        view = mailbox.read_lease(plan_dir, state_dir=state_dir)
-    except OSError, mailbox.MailboxError:
-        lease = None
-    else:
-        lease = view.lease if view.fresh else None
-    if (
-        lease is not None
-        and lease.version == mailbox.MAILBOX_LEASE_VERSION
-        and isinstance(lease.run_id, str)
-        and lease.run_id.strip()
-    ):
-        return mailbox.write_lease(
-            plan_dir,
-            lease.supervisor_id,
-            state_dir=state_dir,
-            run_id=lease.run_id,
-            projection_seq=lease.projection_seq,
-            unanswered_questions=lease.unanswered_questions,
-            latest_unanswered_question_id=(lease.latest_unanswered_question_id),
-            latest_unanswered_question_created_at=(
-                lease.latest_unanswered_question_created_at
-            ),
-        )
-    return mailbox.write_lease(
-        plan_dir,
-        str(uuid.uuid4()) if supervisor_id is None else supervisor_id,
-        state_dir=state_dir,
-    )
+    """Heartbeat a live supervisor's lease, or take over when none is alive."""
+    return intervention.write_supervisor_lease(plan_dir, state_dir, supervisor_id)
 
 
 def _supervisor_write(

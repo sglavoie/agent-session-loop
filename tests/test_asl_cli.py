@@ -23,6 +23,7 @@ from unittest import mock
 
 from agent_session_loop import (
     authoring,
+    bridge,
     cli,
     config,
     contracts,
@@ -1168,6 +1169,7 @@ class CommandAndConfigTests(unittest.TestCase):
             cli._CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS,
         )
         self.assertEqual(runner.INTERRUPTED_EXIT, cli._INTERRUPTED_EXIT)
+        self.assertEqual(bridge.PROTOCOL_VERSION, cli._BRIDGE_PROTOCOL_VERSION)
 
     def test_main_returns_interrupted_exit_on_keyboard_interrupt(self) -> None:
         def interrupted(_args: argparse.Namespace) -> int:

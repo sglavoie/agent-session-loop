@@ -91,8 +91,13 @@ def load_qna_context(
     plan_dir: str | Path,
     *,
     state_dir: str | Path | None = None,
+    reclaim: bool = True,
 ) -> QnAContext:
     """Load and validate the latest paused or live-wait question context.
+
+    ``reclaim=False`` classifies the lock without ever removing it, so a caller
+    that has promised to write nothing observes the corpus rather than changing
+    it.
 
     Raises :class:`QnAError` with a stable ``reason`` on every recognized
     failure path:
@@ -130,6 +135,7 @@ def load_qna_context(
         plan_state=plan_state,
         state_path=state_path,
         waiting_for_reply=waiting_for_reply,
+        reclaim=reclaim,
     )
 
 
@@ -168,17 +174,21 @@ def build_qna_context(
     plan_state: Path,
     state_path: Path,
     waiting_for_reply: dict[str, Any] | None = None,
+    reclaim: bool = True,
 ) -> QnAContext:
     """Build validated latest-turn context for a pause or proposed/live wait.
 
     Passing ``waiting_for_reply`` selects the nonterminal path and permits the
     caller to validate a proposed wait before it is persisted. Omitting it
     preserves the terminal-pause contract and requires ``paused is True``.
+    ``reclaim=False`` keeps the wait classification free of the lock-hygiene
+    side effect.
     """
     if waiting_for_reply is not None:
         lock_info = state._read_lock_path(
             plan_state / state.LOCK_FILE_NAME,
             snapshot.plan_dir,
+            reclaim=reclaim,
         )
         wait_status = state.waiting_for_reply_status(
             waiting_for_reply,

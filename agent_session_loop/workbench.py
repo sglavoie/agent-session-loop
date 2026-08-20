@@ -2948,12 +2948,14 @@ def _recovery_base_artifacts(
 def _build_recovery_context(
     snapshot: plans.PlanSnapshot,
     state_dir: str | Path | None,
+    *,
+    reclaim: bool = True,
 ) -> _RecoveryBuildContext:
     state_path, events_path, progress_path = _summary_base_paths(
         snapshot.plan_dir, state_dir
     )
     lock_path = state.lock_path_for_plan(snapshot.plan_dir, state_dir)
-    lock_info = state._read_lock_path(lock_path, snapshot.plan_dir)
+    lock_info = state._read_lock_path(lock_path, snapshot.plan_dir, reclaim=reclaim)
     runner_state = state._runner_state_payload(
         state_path,
         lock_info=lock_info,
@@ -3005,6 +3007,8 @@ def _expired_wait_qna_context(
     snapshot: plans.PlanSnapshot,
     runner_state: Mapping[str, Any],
     state_dir: str | Path | None,
+    *,
+    reclaim: bool = True,
 ) -> qna.QnAContext | None:
     """Load the CLI's recovery projection for a nonterminal expired wait."""
     if runner_state.get("paused") is True:
@@ -3015,7 +3019,9 @@ def _expired_wait_qna_context(
     ):
         return None
     try:
-        context = qna.load_qna_context(snapshot.plan_dir, state_dir=state_dir)
+        context = qna.load_qna_context(
+            snapshot.plan_dir, state_dir=state_dir, reclaim=reclaim
+        )
     except qna.QnAError:
         return None
     if context.pause_reason != qna.EXPIRED_WAIT_PAUSE_REASON:
@@ -4592,8 +4598,13 @@ def build_workbench_recovery(
     plan: DiscoveredPlan,
     *,
     state_dir: str | Path | None = None,
+    reclaim: bool = True,
 ) -> WorkbenchRecovery:
-    """Build a deterministic, read-only recovery diagnosis for one plan."""
+    """Build a deterministic, read-only recovery diagnosis for one plan.
+
+    ``reclaim=False`` suppresses the stale-lock hygiene the shared lock reader
+    performs by default, so an observational caller leaves the corpus untouched.
+    """
     if not plan.exists:
         return WorkbenchRecovery(
             plan_dir=plan.plan_dir,
@@ -4639,7 +4650,7 @@ def build_workbench_recovery(
         )
 
     try:
-        context = _build_recovery_context(snapshot, state_dir)
+        context = _build_recovery_context(snapshot, state_dir, reclaim=reclaim)
     except (plans.PlanError, OSError, ValueError) as error:
         state_path, events_path, progress_path = _summary_base_paths(
             snapshot.plan_dir, state_dir
@@ -4668,6 +4679,7 @@ def build_workbench_recovery(
         snapshot,
         context.runner_state,
         state_dir,
+        reclaim=reclaim,
     )
     if expired_wait_context is not None:
         context = replace(
@@ -4759,6 +4771,7 @@ def _build_invalid_summary(
     exists: bool,
     state_paths: tuple[Path, Path, Path] | None = None,
     state_dir: str | Path | None = None,
+    reclaim: bool = True,
 ) -> WorkbenchSummary:
     try:
         workspace = _workspace_projection(plan.plan_dir) if exists else {}
@@ -4792,7 +4805,7 @@ def _build_invalid_summary(
         sources=plan.sources,
     )
     recovery = build_workbench_recovery(
-        replace(plan, exists=exists), state_dir=state_dir
+        replace(plan, exists=exists), state_dir=state_dir, reclaim=reclaim
     ).compact_payload()
     return WorkbenchSummary(
         plan_dir=plan.plan_dir,
@@ -4848,11 +4861,15 @@ def build_workbench_summary(
     plan: DiscoveredPlan,
     *,
     state_dir: str | Path | None = None,
+    reclaim: bool = True,
 ) -> WorkbenchSummary:
     """Aggregate one discovered plan into a Workbench queue summary.
 
-    Pure Python builder: reads plan files and runner state, but never
-    mutates them. Classification priority, highest first, is:
+    Reads plan files and runner state without rewriting them, but the shared
+    lock reader reclaims a lock this host has proven dead. ``reclaim=False``
+    suppresses that hygiene so an observational caller — the stdio bridge —
+    projects a function of the corpus rather than of its own read order.
+    Classification priority, highest first, is:
 
     1. ``invalid`` - plan directory missing or unparseable.
     2. ``verifying`` - active lock and ``active_verification`` set.
@@ -4873,6 +4890,7 @@ def build_workbench_summary(
             detail=f"plan directory does not exist: {plan_dir}",
             exists=False,
             state_dir=state_dir,
+            reclaim=reclaim,
         )
 
     try:
@@ -4885,6 +4903,7 @@ def build_workbench_summary(
             exists=True,
             state_paths=state_paths,
             state_dir=state_dir,
+            reclaim=reclaim,
         )
 
     state_path, events_path, progress_path = _summary_base_paths(
@@ -4894,7 +4913,7 @@ def build_workbench_summary(
         snapshot, events_path
     ).to_payload()
     lock_path = state.lock_path_for_plan(snapshot.plan_dir, state_dir)
-    lock_info = state._read_lock_path(lock_path, snapshot.plan_dir)
+    lock_info = state._read_lock_path(lock_path, snapshot.plan_dir, reclaim=reclaim)
     runner_state = state._runner_state_payload(
         state_path,
         lock_info=lock_info,
@@ -4908,6 +4927,7 @@ def build_workbench_summary(
             exists=True,
             state_paths=(state_path, events_path, progress_path),
             state_dir=state_dir,
+            reclaim=reclaim,
         )
     summary_cwd = (
         runner_state.get("cwd")
@@ -4918,11 +4938,13 @@ def build_workbench_summary(
         snapshot,
         runner_state,
         state_dir,
+        reclaim=reclaim,
     )
     stale_unfinished, stale_reason = state._stale_runner_state(runner_state, lock_info)
     recovery = build_workbench_recovery(
         replace(plan, plan_dir=snapshot.plan_dir, exists=True),
         state_dir=state_dir,
+        reclaim=reclaim,
     ).compact_payload()
 
     counts = {"pending": 0, "complete": 0, "empty": 0, "unknown": 0}
@@ -5155,6 +5177,7 @@ def build_workbench_summary(
             context = expired_wait_context or qna.load_qna_context(
                 snapshot.plan_dir,
                 state_dir=state_dir,
+                reclaim=reclaim,
             )
         except qna.QnAError as error:
             warnings.append(
@@ -5383,10 +5406,12 @@ def build_workbench_summaries(
     discovered: Iterable[DiscoveredPlan],
     *,
     state_dir: str | Path | None = None,
+    reclaim: bool = True,
 ) -> tuple[WorkbenchSummary, ...]:
     """Build a Workbench summary per discovered plan in iteration order."""
     return tuple(
-        build_workbench_summary(plan, state_dir=state_dir) for plan in discovered
+        build_workbench_summary(plan, state_dir=state_dir, reclaim=reclaim)
+        for plan in discovered
     )
 
 
@@ -5532,18 +5557,25 @@ def build_launch_argv(
     json_output: bool = True,
     state_dir: str | Path | None = None,
     python_executable: str | None = None,
+    resume: bool = False,
 ) -> list[str]:
     """Return the argv for ``python -m agent_session_loop run ...``.
 
     The argv intentionally omits ``--reply``: reply text only ever flows
     through stdin via the matching ``--reply-stdin`` flag, so the operator
     answer never appears on the child process command line.
+
+    ``resume`` adds ``--resume``, which makes the child rehydrate the harness,
+    model, effort, and workspace binding this plan's ``run_config`` persisted.
+    Explicit profile flags still win, so a caller can resume and override.
     """
     canonical = _validate_launch_plan_dir(plan_dir)
     validated = _validate_launch_profile(profile)
     validated, _workspace = _workspace_launch_profile(canonical, validated)
     interpreter = python_executable or sys.executable
     argv: list[str] = [interpreter, "-m", "agent_session_loop", "run", str(canonical)]
+    if resume:
+        argv.append("--resume")
 
     cwd_value = validated.cwd
     if cwd_value:
@@ -5596,6 +5628,7 @@ def launch_plan(
     stdout: Any = subprocess.DEVNULL,
     stderr: Any = subprocess.DEVNULL,
     popen_factory: Any = subprocess.Popen,
+    resume: bool = False,
 ) -> LaunchResult:
     """Spawn a background ``python -m agent_session_loop run`` process.
 
@@ -5627,6 +5660,7 @@ def launch_plan(
         json_output=json_output,
         state_dir=state_dir,
         python_executable=python_executable,
+        resume=resume,
     )
 
     canonical_state_dir: Path | None = None
@@ -5701,11 +5735,18 @@ def resume_plan_with_reply(
     stderr: Any = subprocess.DEVNULL,
     popen_factory: Any = subprocess.Popen,
 ) -> LaunchResult:
-    """Launch ``asl run`` for a paused plan and stream ``reply_text`` to stdin."""
-    return launch_plan(
+    """Launch ``asl run --resume`` for a paused plan, streaming the reply to stdin.
+
+    Resuming without ``--resume`` would start the paused plan under whichever
+    defaults the launching process happens to carry rather than the harness,
+    model, effort, and workspace binding the original run persisted.
+    """
+    from . import intervention
+
+    return intervention.resume_paused_run(
         plan_dir,
-        profile=profile,
         reply_text=reply_text,
+        profile=profile,
         state_dir=state_dir,
         json_output=json_output,
         python_executable=python_executable,

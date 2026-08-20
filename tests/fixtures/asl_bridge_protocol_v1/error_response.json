@@ -1,0 +1,14 @@
+{
+  "error": {
+    "code": "stale-action-token",
+    "details": {
+      "expected_fingerprint": "cb9dcf6bc1d83a8f6cf76ded1bf9c228"
+    },
+    "message": "action token does not match current plan state; refresh the snapshot",
+    "retryable": true
+  },
+  "id": "req-5",
+  "ok": false,
+  "protocol": 1,
+  "type": "response"
+}

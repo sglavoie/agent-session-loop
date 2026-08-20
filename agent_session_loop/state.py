@@ -1120,6 +1120,10 @@ def _runner_state_payload(
         "error": None,
         "run_id": raw.get("run_id"),
         "harness": raw.get("harness"),
+        # The terminal window the run was launched from is the only durable
+        # handle an external supervisor can focus, so it travels with the rest
+        # of the run's binding rather than only in the run-started event.
+        "kitty_window_id": _coerce_pid(raw.get("kitty_window_id")),
         "review_harness": run_config.get("review_harness"),
         "supervisor_audit": run_config.get("supervisor_audit"),
         "assurance": assurance,

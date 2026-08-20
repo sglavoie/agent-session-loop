@@ -34,6 +34,7 @@ from . import (
     control_signal,
     events,
     harnesses,
+    intervention,
     responses,
     state,
 )
@@ -512,7 +513,7 @@ def _enqueue_and_report(
     queue_path = control_queue.queue_path_for_plan(snapshot.plan_dir, args.state_dir)
 
     try:
-        queued = control_queue.append_command(
+        dispatch = intervention.dispatch_control_command(
             snapshot.plan_dir,
             queue_command,
             state_dir=args.state_dir,
@@ -549,10 +550,11 @@ def _enqueue_and_report(
         )
         return 1
 
-    # Best-effort wakeup after the durable append: the runner would drain
-    # within its poll interval anyway, so the reported outcome is latency
-    # information, never a delivery guarantee for the command itself.
-    notified = control_signal.notify_runner(snapshot.plan_dir, state_dir=args.state_dir)
+    # The wakeup rides along inside the service: the runner would drain within
+    # its poll interval anyway, so the reported outcome is latency information,
+    # never a delivery guarantee for the command itself.
+    queued = dispatch.command
+    notified = dispatch.signal
 
     wait: _ReceiptWait | None = None
     if getattr(args, "wait", False):

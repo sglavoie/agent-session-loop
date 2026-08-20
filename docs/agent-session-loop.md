@@ -465,6 +465,7 @@ asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
 asl migrate-state PLAN_DIR --from OLD_PLAN_PATH [--state-dir DIR] [--apply] [--json]
 asl metrics [--since-days N] [--state-dir DIR] [--json]
+asl bridge serve [--stdio] [--protocol VERSION] [--state-dir DIR] [--plan-root DIR]
 ```
 
 ## Live Mailbox and Future-Turn Model Control
@@ -4754,6 +4755,29 @@ after a restart.
   form surfaces the choice and the UI confirms the launch before
   spawning a child with bypass mode set, but flipping the toggle does
   not change global runner defaults.
+- The supervision bridge can host a Workbench listener of its own.
+  `workbench.ensure` lazily starts one server on `127.0.0.1` with an
+  ephemeral port and a freshly generated token, hands back a
+  `/?token=...#plan?dir=...&focus=...` deep link, reuses that same server
+  for every later request, and stops it when the bridge process exits.
+  The security properties above apply unchanged: the token guards the
+  same mutating endpoints, the read endpoints stay unauthenticated, and
+  the listener is loopback-only. What differs is lifetime and
+  disclosure — the URL carries a token in its query string, so treat it
+  as a credential rather than a bookmark, and the listener dies with the
+  bridge rather than outliving the client that asked for it.
+- The bridge decides what a supervision client is even able to record. A
+  snapshot carries identifiers, counts, states, and timestamps; question
+  and reply prose reaches a client only through a deliberate
+  `question.get` for the one question it is rendering, and comes back with
+  no durable place to land. That is the property a client's own diagnostics
+  inherit: Agent Mux keeps the availability, version, protocol, restart
+  count, snapshot age, and action-outcome counters in `amx doctor` and its
+  debug bundles precisely because the bridge never handed it anything else
+  to keep. A bridge-authored refusal message is not published either — the
+  client reduces it to the stable error code before it reaches a shared
+  artifact, because an ASL message is free to quote the plan it just failed
+  to find.
 
 ### Registry, pins, launch profiles
 
@@ -5635,6 +5659,364 @@ a runner cleanup window should retry once before opening a bug.
   flow. Stale lock cards show lock evidence such as PID/reason when the
   lock file can be read.
 
+## Supervision Bridge
+
+`asl bridge serve --stdio --protocol 1` streams ASL's active-run
+projection to an external supervision client over stdin/stdout and
+accepts the intervention set an operator can already reach from the CLI
+and the Workbench: reply, resolve, resume, stop-after-current, abort,
+and a Workbench deep link. Every one of those goes through the same
+`agent_session_loop.intervention` service layer the other two surfaces
+use, so a rule can never hold on one surface and not another. Protocol 1
+is the only supported version; requesting another exits 2 with a stderr
+diagnostic and serves nothing.
+
+### Transport and framing
+
+- NDJSON: one JSON object per line, UTF-8, newline-terminated.
+- stdout carries protocol frames only. Diagnostics go to stderr.
+- Maximum frame size is 1 MiB (`max_frame_bytes` in the hello).
+- The server writes `hello` before reading any input.
+
+### Hello
+
+```json
+{"type":"hello","protocol":1,"asl_version":"...",
+ "capabilities":["runs.snapshot","runs.changed","question.get",
+   "question.reply","question.resolve","run.resume",
+   "run.stop_after_current","run.abort","operation.updated",
+   "workbench.ensure"],
+ "max_frame_bytes":1048576}
+```
+
+Capabilities are ordered and additive. Detect a feature by membership,
+never by position or list length. The list is derived from the registered
+method handlers and event names rather than written by hand, so a name
+cannot be advertised before something stands behind it.
+
+### Requests and responses
+
+A request is `{"type":"request","protocol":1,"id":"<non-empty>",
+"method":"<name>","params":{}}`. `params` must be an object when
+present. The response echoes `id` and carries `ok` plus exactly one of
+`result` or `error`:
+
+```json
+{"type":"response","id":"req-1","ok":true,"result":{...}}
+{"type":"response","id":"req-1","ok":false,
+ "error":{"code":"unknown-method","message":"...",
+          "retryable":false,"details":{"method":"runs.explode"}}}
+```
+
+Error codes are a closed set — branch on `code`, not on `message`:
+
+| Code | Meaning | `retryable` |
+| --- | --- | --- |
+| `malformed-json` | Frame was not parseable JSON. `id` is `null`. | no |
+| `invalid-request` | Missing/empty `id`, missing `method`, or non-object `params`. | no |
+| `unsupported-protocol` | `protocol` is not 1. `details.supported` lists accepted versions. | no |
+| `unknown-method` | Method not in the capability list. | no |
+| `frame-too-large` | Inbound line exceeded `max_frame_bytes`. | no |
+| `internal-error` | Projection raised. | yes |
+| `mutation-failed` | A durable write or spawn failed. Nothing was applied. | yes |
+| `workbench-unavailable` | The bridge could not start a Workbench server. | yes |
+
+Mutations add the service layer's own refusal reasons, shared verbatim
+with the CLI and the Workbench so a client sees one vocabulary:
+
+| Code | Meaning | `retryable` |
+| --- | --- | --- |
+| `stale-action-token` | The row the request was built from no longer describes the plan. `details.expected_fingerprint` is the current token. | yes |
+| `action-not-permitted` | The action is not in this run's current `actions`. | no |
+| `no-active-run` | No live run holds the plan. | no |
+| `run-mismatch` | `params.run_id` is not the current run. | no |
+| `not-paused` | `run.resume` on a run that is not paused. | no |
+| `no-open-question` | No question is waiting for a reply. | no |
+| `question-mismatch` | `params.question_id` is not open on this plan. | no |
+| `empty-text` | Reply text was blank or whitespace. | no |
+| `question-body-too-large` | Body exceeds 256 KiB. `details.fallback` names `workbench.ensure`. | no |
+| `missing-question-body` | The selected question carries no readable text. | yes |
+| `invalid-plan` | The plan directory could not be canonicalized. | no |
+
+None of these end the server loop. An oversize frame has its remainder
+drained so the next line still parses. Only end-of-stream on stdin or a
+broken stdout ends the process, and both exit 0.
+
+### `runs.snapshot`
+
+Returns the deterministic projection of every active or actionable plan:
+
+```json
+{"protocol":1,"rows":[...],"row_count":1,
+ "warnings":[],"truncated":false,"digest":"<hex>",
+ "projection":{"interval_seconds":1.0,"observed_interval_seconds":9.8,
+   "build_seconds":9.8,"age_seconds":0.4,
+   "staleness_bound_seconds":20.0,"failed_projections":0}}
+```
+
+Rows cover only these primary states, in Workbench urgency order:
+`paused-for-reply`, `failed`, `stale`, `invalid`, `verifying`,
+`running`. Healthy `ready`, `recent`, and `complete` plans are never
+present. Each row carries `row_id` (a stable hash of `plan_dir` and
+`run_id`), the normalized `plan_dir`, `label`, `run_id`, `session_id`,
+`primary_state`, `urgency_rank`, `urgency_group`, `recommended_action`,
+`activity_label`, `phase`, `harness`, `workspace_root`,
+`registry_digest`, `repository_count`, `window`, run and activity
+timestamps, `pause_reason`, `question`, `actions`, `disabled_reasons`,
+`action_token`, and `warnings`.
+
+`actions` lists exactly what this run permits right now, drawn from
+`question.reply`, `question.resolve`, `run.resume`,
+`run.stop_after_current`, `run.abort`, and `workbench.ensure`.
+`disabled_reasons` explains, per unavailable action, why. `action_token`
+fingerprints the plan identity together with the run, question, and
+permitted-action state the row was built from; a mutation must return it.
+
+Human-readable strings come only from ASL's fixed activity vocabulary.
+No free-form summary prose — reasons, details, message previews, pause
+messages — is copied into a row.
+
+`question` is `null` unless the run is waiting on an operator. When
+present it carries `context_kind`, `question_id`, `question_ids`,
+`unanswered_count`, and body-free timing and status metadata. **Question
+bodies are never serialized.** A client that needs the text reads it
+through `asl questions` or `asl inbox read`.
+
+Per-field and aggregate bounds cap text, identifiers, paths, warnings,
+question IDs, and row counts, and the snapshot is shrunk until it fits
+the frame ceiling, so corrupt state cannot produce an unreadable frame.
+A shrunk snapshot sets `truncated`.
+
+`projection` describes the walk these rows came from, so a client can
+label how stale they are instead of assuming the declared interval:
+
+- `interval_seconds` — the declared floor, the same number `hello`
+  advertises.
+- `observed_interval_seconds` — the measured start-to-start cadence of
+  the last two walks that published, never below the floor or the last
+  published build.
+- `build_seconds` — how long the walk that produced these rows took, so
+  a row read at its start is already that much older than the frame.
+- `age_seconds` — how long ago that walk landed, measured when this
+  response was written rather than when the walk finished.
+- `staleness_bound_seconds` — the sum of the three above: the oldest any
+  row in this frame can be before the next walk replaces it.
+- `failed_projections` — how many walks have raised this session. A
+  nonzero count with a healthy `age_seconds` means rows are being served
+  from the last walk that succeeded.
+
+Every measured field except `failed_projections` describes the walk whose
+rows are being served. A failed walk publishes nothing, so it bumps only
+`failed_projections`: it never rewrites the cost or the cadence of the
+snapshot that stays published, and `age_seconds` keeps growing from the
+last successful walk.
+
+The block is attached when a snapshot is served, not when it is built,
+and it is excluded from `digest` — measured durations jitter, and a
+corpus that did not change did not change.
+
+### `runs.changed`
+
+The server polls the projection at least once per second and emits an
+event only when the snapshot digest actually changed:
+
+```json
+{"type":"event","seq":1,"event":"runs.changed","data":{"digest":"<hex>"}}
+```
+
+`seq` is monotonic across the session. An idle corpus produces no
+events, and a digest already delivered through `runs.snapshot`
+suppresses the next event for that same digest.
+
+The one-second interval is a floor, not a promise. A projection walks
+every discovered plan, so its cost scales with the corpus: several
+hundred plans take seconds, not milliseconds. The walk therefore runs on
+its own thread, and requests are answered from the last projection it
+published while the next one runs beside them. Nothing on the protocol
+loop waits for a walk: polling a ten-second projection on the read loop
+left the server permanently mid-build, so it never returned to `select`
+and no client ever got an answer.
+
+The next walk is owed one interval after the last one *started*, not
+after it finished. Counting from the finish added a second full build to
+every cycle, so a ten-second walk observed change every twenty seconds
+while `hello` advertised one; a corpus that cannot be walked within the
+interval now slips by its overrun instead. `poll_interval_seconds` in
+`hello` reports only that floor, so a client that needs the real bound
+reads the measured one off the snapshot rather than inferring it.
+
+Before the first walk lands there is nothing truthful to serve — an
+empty projection would claim an empty corpus and re-enable actions
+against rows nothing has read — so a `runs.snapshot` arriving on a cold
+bridge is refused with `internal-error` and `retryable` set. It is not
+held until the walk lands: the protocol loop is single-threaded, so
+waiting would block that response and every frame behind it for the
+whole corpus walk. A client re-asks and gets rows as soon as the first
+walk publishes, which is what the Agent Mux daemon already does inside
+its snapshot budget.
+
+A walk that fails owes a full second before the next attempt, whether it
+failed on the worker thread or on the loop's own poll. A failure
+publishes nothing, so the deadline of the last walk that succeeded is
+already in the past: without a deadline of its own the loop selected
+with timeout zero and retried the same failing walk immediately. During
+that second the bridge keeps answering, and a `runs.snapshot` is served
+from the last projection that succeeded with an honest `age_seconds`
+rather than refused.
+
+### `question.get`
+
+Fetches the one question body a snapshot deliberately withholds.
+`params` are `plan_dir` and an optional `question_id`; omitting it
+selects the run's current question. A live wait resolves to the mailbox
+record; a paused run has no mailbox question, so the synthetic one is the
+harness's own last message, exactly what `asl questions` resolves. The
+result carries `question_id`, `context_kind` (`waiting` or `pause`),
+`body`, `body_bytes`, and a fresh `action_token`.
+
+Bodies are bounded at 256 KiB. A larger one is refused with
+`question-body-too-large` and `details.fallback` naming
+`workbench.ensure`, because the Workbench already streams artifacts of
+any size and a truncated question is worse than an explicit redirect.
+
+### Mutating methods
+
+`question.reply`, `question.resolve`, `run.resume`,
+`run.stop_after_current`, and `run.abort` all take `plan_dir`,
+`operation_id` (client-chosen, non-empty), and `action_token`, plus
+optional `run_id` and `question_id` for exact-match validation.
+`question.reply` and `run.resume` take `text`; `question.resolve` takes
+`action` (`continue` or `pause`) and an optional `note`.
+
+On a run holding several open questions, `question.reply` and
+`question.resolve` close whichever `question_id` the caller names, as long
+as it is still in the run's unanswered set; omitting `question_id` closes
+the run's primary question. Because `action_token` fingerprints that
+unanswered set, every accepted closure invalidates the token, so a client
+closing questions in sequence must re-read the token — from a fresh
+`runs.snapshot` row or from the `question.get` result for the next
+question — before submitting again.
+
+The bridge re-reads and re-validates the plan immediately before it
+writes anything, so a request built from a row that has since moved is
+refused rather than misapplied. Bridge callers are additionally held to
+strict active-run matching even where the control CLI deliberately
+accepts a command for a runner that has not started yet: a supervision
+client acted on a row it was shown, so a mismatch is a bug to surface.
+
+Control commands use `operation_id` as the durable control-queue command
+ID, and `run.abort` uses ASL's default 120-second abort grace. `run.resume`
+spawns `asl run --resume --reply-stdin`, which rehydrates the harness,
+model, effort, state directory, and workspace binding the original run
+persisted, and streams the reply through stdin so it never appears in
+argv. Replaying the same `operation_id` returns the stored receipt
+without spawning again.
+
+### Operations and `operation.updated`
+
+A mutation returns as soon as ASL's own record is durable, which is
+earlier than the moment the runner acts on it:
+
+```json
+{"operation_id":"op-1","method":"question.reply","status":"accepted",
+ "plan_dir":"/plans/alpha","row_id":"<hex>","run_id":"...",
+ "question_id":"...","closure_id":"...","command_id":null,"detail":null}
+```
+
+The bridge then watches ASL's records and emits a body-free
+`operation.updated` event carrying the same payload with a terminal
+`status`:
+
+| Status | Settled by |
+| --- | --- |
+| `consumed` | A mailbox receipt for the closure, a `run_control` command-observed event, or a resume's run leaving the paused state. |
+| `rejected` | A control command left the queue with no delivery receipt and the run is gone. |
+| `expired` | No outcome was observed within the 15-minute receipt window. |
+| `superseded` | A resume's plan is still paused under a different run. |
+
+The window holds at most 64 operations. Count-based eviction only ever
+drops already-settled operations, so a burst of requests cannot evict an
+in-flight resume and let it spawn twice; anything unsettled leaves only
+through the TTL. It is a receipt window, not a journal: a long-lived
+bridge never accumulates operator history.
+
+### `workbench.ensure`
+
+Takes `plan_dir` and an optional `focus` (`reply`, `verification`,
+`active`, or `events`) and returns a deep link:
+
+```json
+{"plan_dir":"/plans/alpha","row_id":"<hex>","focus":"reply",
+ "url":"http://127.0.0.1:53311/?token=...#plan?dir=%2Fplans%2Falpha&focus=reply"}
+```
+
+The first call lazily starts one Workbench server bound to `127.0.0.1`
+on an ephemeral port with a freshly generated token; later calls reuse
+it, and it is shut down with the bridge. The token rides in the query
+string because a fragment is never sent to the server, and the plan
+selection rides in the fragment because the Workbench front end routes on
+it.
+
+### Observational and mutation guarantees
+
+Every read the bridge performs — Workbench summary, Q&A context, lock
+state, waiting-for-reply status, and every action-validation read —
+passes `reclaim=False`. A dead local lock is classified `stale` and left
+on disk rather than reclaimed, so a snapshot is a function of the corpus
+and not of the bridge's own read order, and validating an action can
+never be the thing that changes the corpus being validated. A plan that
+disappears mid-scan projects as `invalid` alongside its surviving
+neighbours instead of ending the scan.
+
+A refused mutation performs zero writes and never spawns a process: the
+token check runs before the mailbox lease, the control-queue append, and
+the resume spawn alike. Reply text is passed straight to ASL's durable
+records and appears in no response, event, operation receipt, snapshot,
+or stderr line the bridge can emit.
+
+### Cross-language wire fixtures
+
+The protocol has two implementations in two languages, so the wire shape
+is pinned in a checked-in fixture corpus rather than described twice.
+`tests/fixtures/asl_bridge_protocol_v1/` holds one canonical frame per
+message — hello, snapshot, `runs.changed`, question body, operation
+receipt, `operation.updated`, error response, Workbench link — beside a
+`manifest.json` that pins the protocol vocabulary (capabilities, error
+codes, operation statuses, Workbench focus keys, context kinds, the frame
+ceiling, the poll interval), a SHA-256 per frame file, and a combined
+digest over all of them.
+
+This repository is the source of truth. Agent Mux carries a byte-identical
+copy at `internal/aslbridge/testdata/protocol_v1/` and decodes the same
+frames in Go with unknown fields rejected. Both sides recompute the
+combined digest, so a one-sided edit fails on whichever side drifted
+instead of surfacing as a runtime mismatch against an installed pair.
+`tests/test_asl_bridge_fixtures.py` additionally checks the frames against
+what `agent_session_loop.bridge` actually produces, which is what keeps
+the corpus from becoming a self-consistent fiction. The change procedure
+is in the corpus's own `README.md`.
+
+The frames are illustrative wire shapes rather than derived records:
+`plan_dir`, `row_id`, and `action_token` are fixed fixture strings, not
+values recomputed from a live corpus.
+
+### Client rollout order
+
+Ship the bridge before the client. ASL is the older and more widely
+installed half, so upgrading it first means a new supervision client finds
+a bridge it can talk to on its first start. The reverse order is safe but
+inert: a client that finds no `asl`, or one that predates the bridge
+subcommand, reports the integration as unavailable and stays read-only
+until ASL is upgraded. The bridge itself has no client-facing migration —
+it adds a subcommand and changes nothing about `asl run`, `asl workbench`,
+the mailbox, or the control queue.
+
+Capabilities are additive and ordered, and a client feature-detects by
+membership rather than by position, so a newer bridge serving more methods
+than a client knows about is not a version conflict. A client asking for a
+protocol other than 1 is: the server exits 2 with a stderr diagnostic and
+serves nothing rather than degrading into a guess.
+
 ## Verification
 
 Run the regression suite and compile check from this repository:
@@ -5662,6 +6044,19 @@ compatibility shim so historical dotted names
 tests under discovery, so `python3 -m unittest discover -s tests` runs each
 test exactly once. Individual modules still run directly, for example
 `python3 -m unittest tests.test_asl_verification -q`.
+
+The bridge's cross-language contract is checked from both sides.
+`tests/test_asl_bridge_fixtures.py` runs in `just test-fast` and verifies that
+`tests/fixtures/asl_bridge_protocol_v1/` still matches what
+`agent_session_loop.bridge` produces and that the manifest digest matches the
+frame files beside it. The other half runs in the client repository: after
+copying the frames across unchanged, `just asl-integration` in Agent Mux
+launches the installed `asl bridge serve --stdio --protocol 1` against a
+throwaway plan and state root and checks the handshake, the capability list
+against the manifest, snapshot decoding, body-free action and receipt shapes,
+the Workbench URL shape, and a clean exit. That recipe is opt-in there and
+fails rather than skips when ASL is missing or incompatible, so an unrun check
+is never mistaken for a passing one.
 
 Use a synthetic plan directory for manual smoke tests so generated state, locks,
 and logs do not touch an active project plan.
@@ -5719,6 +6114,23 @@ Manual smoke checklist:
   terminal pause after timeout. Repeat with `--no-mailbox`: confirm no lease is
   written, no live protocol is added to the prompt, and the historical
   pause/`asl run --reply` path remains unchanged.
+
+Supervision bridge:
+
+- Pipe a hand-written NDJSON session into `asl bridge serve --stdio --protocol
+  1` against a synthetic state root: confirm `hello` arrives before any input
+  is read, that a `runs.snapshot` of a paused plan carries the question ID and
+  unanswered count but no question text, and that `question.get` is the only
+  way to obtain the body.
+- In the same session, send a malformed line, an unknown method, and a frame
+  past 1 MiB. Confirm each is answered with its own code and the server keeps
+  serving; only end-of-stream should end it.
+- Take an `action_token` from a snapshot, mutate the plan (answer the question
+  elsewhere, or let the run finish), then submit the stale token. Confirm the
+  refusal names the specific race, and that no mailbox record, control-queue
+  entry, or spawned process resulted.
+- Request `--protocol 2` and confirm exit code 2 with a stderr diagnostic and
+  nothing on stdout.
 
 Workbench browser workflow:
 
