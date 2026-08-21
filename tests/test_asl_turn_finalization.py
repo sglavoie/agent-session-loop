@@ -416,6 +416,78 @@ class GeneratedReviewValidatorDiagnosticTests(unittest.TestCase):
             self.assertEqual("artifact-unparsable", payload["reason"])
             self.assertTrue(payload["error"])
 
+    def finding_artifact(self, plan_dir: Path, checks: list[dict[str, object]]) -> None:
+        review.final_review_output_path(plan_dir).write_text(
+            "# Final review\n\n## Findings\n\nSee agent_session_loop/runner.py.\n\n"
+            "Status: 1 Findings (1 high, 0 med, 0 low)\n",
+            encoding="utf-8",
+        )
+        review.final_review_artifact_path(plan_dir).write_text(
+            json.dumps(
+                {
+                    "version": review.REVIEW_ARTIFACT_VERSION,
+                    "outcome": "findings",
+                    "findings": [
+                        {
+                            "id": "F1",
+                            "severity": "high",
+                            "title": "Absence gate",
+                            "evidence": [{"path": "agent_session_loop/runner.py"}],
+                            "explanation": "why",
+                            "repair_group": "g1",
+                            "done_criteria": ["fixed"],
+                            "verification_checks": checks,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_artifact_gate_rejects_an_absence_gate_the_review_authored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_completed_review_plan(plan_dir, [])
+            self.finding_artifact(
+                plan_dir,
+                [
+                    {
+                        "type": "regex_in_file",
+                        "name": "drops-the-claim",
+                        "path": "docs/evidence.md",
+                        "pattern": "75-pixel",
+                        "expect_absent": True,
+                    }
+                ],
+            )
+
+            payload = self.diagnostic(
+                self.run_checks(plan_dir)["final-review-artifact-consistent"]
+            )
+
+            self.assertEqual("verification-check-unknown-keys", payload["reason"])
+            self.assertEqual("F1", payload["finding_id"])
+            self.assertEqual("drops-the-claim", payload["check_name"])
+            self.assertEqual(["expect_absent"], payload["unknown"])
+            self.assertEqual(
+                contracts.CHECK_PRESENCE_SEMANTICS["regex_in_file"],
+                payload["semantics"],
+            )
+
+    def test_artifact_gate_leaves_an_unknown_check_type_to_deep_validation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            write_completed_review_plan(plan_dir, [])
+            self.finding_artifact(
+                plan_dir, [{"type": "bogus", "name": "not-a-check", "nonsense": 1}]
+            )
+
+            completed = self.run_checks(plan_dir)["final-review-artifact-consistent"]
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
     def test_repository_aware_gate_keeps_the_severity_predicate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

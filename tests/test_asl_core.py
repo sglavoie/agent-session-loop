@@ -2520,6 +2520,78 @@ class ParserAndStateTests(unittest.TestCase):
         with self.assertRaisesRegex(plans.PlanError, "'type' must be one of"):
             contracts.parse_completion_contract(text, session_id="1")
 
+    def test_parse_completion_contract_rejects_an_absence_gate(self) -> None:
+        # An unknown key is dropped on the way to the executor, so an absence
+        # flag on a presence check would run as its exact inverse.
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                '{"checks": [{"type": "regex_in_file", "name": "no-todo", '
+                '"path": "a.md", "pattern": "TODO", "expect_absent": true}]}',
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        with self.assertRaises(plans.PlanError) as caught:
+            contracts.parse_completion_contract(text, session_id="1")
+
+        message = str(caught.exception)
+        self.assertIn("contract check #1 'no-todo'", message)
+        self.assertIn("'expect_absent'", message)
+        self.assertIn(
+            "regex_in_file asserts the pattern is PRESENT and has no absence semantics",
+            message,
+        )
+
+    def test_allowed_check_keys_match_what_check_payload_emits(self) -> None:
+        # The allowlist is the fence a fail-closed parser stands behind, so it
+        # has to be exactly the round-trip surface and nothing narrower.
+        checks = (
+            contracts.CommandCheck(
+                name="c1",
+                argv=("python3", "-V"),
+                timeout_seconds=10.0,
+                cwd="sub",
+                baseline_expectation="fail",
+                on_failure_of=("gate",),
+                repo="SVC",
+                review_replay=True,
+            ),
+            contracts.FileExistsCheck(
+                name="f1",
+                path="README.md",
+                baseline_expectation="pass",
+                on_failure_of=("gate",),
+                repo="SVC",
+                review_replay=True,
+            ),
+            contracts.RegexInFileCheck(
+                name="r1",
+                path="main.py",
+                pattern="main",
+                baseline_expectation="pass",
+                on_failure_of=("gate",),
+                repo="SVC",
+                review_replay=True,
+            ),
+        )
+        for check in checks:
+            with self.subTest(kind=check.kind):
+                self.assertEqual(
+                    set(contracts.check_payload(check)),
+                    set(contracts._ALLOWED_CHECK_KEYS[check.kind]),
+                )
+
     def test_parse_completion_contract_validates_command_argv_and_timeout(
         self,
     ) -> None:

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
@@ -626,6 +626,36 @@ CHECK_PARSERS: dict[str, Callable[..., VerificationCheck]] = {
 }
 
 
+def _payload_keys(check_type: type[VerificationCheck]) -> frozenset[str]:
+    """The payload keys that survive a parse into ``check_type``.
+
+    Derived from the dataclass rather than listed, so a field added to a check
+    and its parser is accepted without a second edit here. ``kind`` is the
+    parsed spelling of the payload's ``type``.
+    """
+    return frozenset({field.name for field in fields(check_type)} - {"kind"}) | {"type"}
+
+
+#: Keys each check type accepts. Anything else is rejected before dispatch: a
+#: key no parser reads is dropped by :func:`check_payload` and never reaches
+#: the executor, so tolerating one lets a check claim semantics it does not
+#: have and run as its inverse.
+_ALLOWED_CHECK_KEYS: dict[str, frozenset[str]] = {
+    "command": _payload_keys(CommandCheck),
+    "file_exists": _payload_keys(FileExistsCheck),
+    "regex_in_file": _payload_keys(RegexInFileCheck),
+}
+
+#: What the file-reading check types actually assert, stated in the rejection
+#: because the tempting unknown key is an absence flag.
+CHECK_PRESENCE_SEMANTICS: dict[str, str] = {
+    "file_exists": "file_exists asserts the path EXISTS and has no absence semantics",
+    "regex_in_file": (
+        "regex_in_file asserts the pattern is PRESENT and has no absence semantics"
+    ),
+}
+
+
 def _parse_check(
     payload: object,
     *,
@@ -645,6 +675,25 @@ def _parse_check(
             f"session {session_id.value} contract check #{index + 1} "
             f"'type' must be one of: {allowed}; got {raw_type!r}"
         )
+    allowed_keys = _ALLOWED_CHECK_KEYS[raw_type]
+    unknown = sorted(key for key in payload if key not in allowed_keys)
+    if unknown:
+        raw_name = payload.get("name")
+        named = (
+            f" {raw_name.strip()!r}"
+            if isinstance(raw_name, str) and raw_name.strip()
+            else ""
+        )
+        offending = ", ".join(repr(key) for key in unknown)
+        message = (
+            f"session {session_id.value} contract check #{index + 1}{named} "
+            f"does not support key(s): {offending}; a {raw_type} check allows "
+            f"only: {', '.join(sorted(allowed_keys))}"
+        )
+        semantics = CHECK_PRESENCE_SEMANTICS.get(raw_type)
+        if semantics is not None:
+            message = f"{message}; {semantics}"
+        raise PlanError(message)
     return CHECK_PARSERS[raw_type](
         payload,
         index=index,

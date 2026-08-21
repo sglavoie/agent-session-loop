@@ -298,6 +298,13 @@ shapes. Required and optional fields:
   check's repository-relative `cwd`), while file and regex checks resolve under
   that same alias. JSON check rows and observer events include the alias,
   qualified cwd/path, absolute resolved root, and resolved cwd/path.
+- A check accepts only the keys documented for its type. Any other key is
+  rejected before the check is parsed, because a key no executor reads is
+  dropped on the way to execution and would let a check claim semantics it
+  does not have. `file_exists` asserts the path EXISTS and `regex_in_file`
+  asserts the pattern is PRESENT; neither has absence semantics. Assert that
+  something is gone with a `command` check that exits non-zero while it is
+  still there.
 - Every check also accepts an optional `baseline_expectation` (one of `skip`,
   `pass`, `fail`; defaults to `skip`). `pass`/`fail` declare how the check must
   behave on the *unmodified* repository; `asl baseline` records the evidence

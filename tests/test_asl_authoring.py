@@ -916,6 +916,64 @@ class PlanAuthoringTests(unittest.TestCase):
         )
         self.assertEqual(3, rendered.count('"repo"'))
 
+    def test_rendered_checks_emit_only_keys_the_parser_allows(self) -> None:
+        # The parser fails closed on an unknown key, so anything this renderer
+        # emits must already be inside the allowlist or the tool would author
+        # contracts it cannot read back.
+        registry = workspaces.RepositoryRegistry(
+            (workspaces.Repository("SVC", "svc", "https://example.com/svc.git"),)
+        )
+        contract = contracts.CompletionContract(
+            session_id=plans.parse_session_id("2"),
+            done_when=("done",),
+            verify=contracts.VerifyRecipe(
+                checks=(
+                    contracts.CommandCheck(
+                        name="c1",
+                        argv=("python3", "-V"),
+                        timeout_seconds=10,
+                        cwd="sub",
+                        baseline_expectation="fail",
+                        repo="SVC",
+                        review_replay=True,
+                    ),
+                    contracts.FileExistsCheck(
+                        name="f1",
+                        path="README.md",
+                        baseline_expectation="pass",
+                        on_failure_of=("c1",),
+                        repo="SVC",
+                    ),
+                    contracts.RegexInFileCheck(
+                        name="r1",
+                        path="main.py",
+                        pattern="main",
+                        baseline_expectation="pass",
+                        on_failure_of=("c1",),
+                        repo="SVC",
+                    ),
+                )
+            ),
+        )
+
+        rendered = authoring.render_completion_contract(
+            contract, repository_registry=registry
+        )
+        block = rendered.split("```json\n", 1)[1].split("```", 1)[0]
+        for check in json.loads(block)["checks"]:
+            with self.subTest(check=check["name"]):
+                self.assertEqual(
+                    set(),
+                    set(check) - contracts._ALLOWED_CHECK_KEYS[check["type"]],
+                )
+
+        reparsed = contracts.parse_completion_contract(
+            rendered, session_id="2", repository_registry=registry
+        )
+        self.assertEqual(
+            ["c1", "f1", "r1"], [check.name for check in reparsed.verify.checks]
+        )
+
     # -- session-file rendering ----------------------------------------------
 
     def test_render_session_file_requires_contract_by_default(self) -> None:

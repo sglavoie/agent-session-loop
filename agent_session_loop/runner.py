@@ -585,6 +585,17 @@ _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE = "\n".join(
         "import json, pathlib, re, sys",
         "CHECK = 'final-review-artifact-consistent'",
         *_VALIDATOR_FAIL_HELPER,
+        # Mirrored from the contract parser so a finding's checks are held to
+        # exactly what the repair session they materialize will accept.
+        "ALLOWED_CHECK_KEYS = "
+        + repr(
+            {
+                check_type: sorted(keys)
+                for check_type, keys in sorted(contracts._ALLOWED_CHECK_KEYS.items())
+            }
+        ),
+        "CHECK_SEMANTICS = "
+        + repr(dict(sorted(contracts.CHECK_PRESENCE_SEMANTICS.items()))),
         (
             "md = pathlib.Path("
             f"{review.FINAL_REVIEW_FILENAME!r}).read_text(encoding='utf-8')"
@@ -622,6 +633,25 @@ _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE = "\n".join(
         "fail('finding-severity-invalid', index=index, "
         "finding_id=finding.get('id'), severity=finding['severity'])",
         "    tally[finding['severity']] += 1",
+        "    entries = finding.get('verification_checks')",
+        "    if not isinstance(entries, list) or not entries: "
+        "fail('finding-verification-checks-empty', index=index, "
+        "finding_id=finding.get('id'))",
+        "    for position, entry in enumerate(entries):",
+        "        if not isinstance(entry, dict): "
+        "fail('verification-check-not-object', index=index, "
+        "finding_id=finding.get('id'), check_index=position, "
+        "type=type(entry).__name__)",
+        "        allowed = ALLOWED_CHECK_KEYS.get(entry.get('type'))",
+        # An unrecognized check type stays the deep validation's to reject, so
+        # this gate keeps mirroring a subset of the shared module rather than
+        # racing it to the same verdict from a shallower reading.
+        "        if allowed is None: continue",
+        "        unknown = sorted(key for key in entry if key not in allowed)",
+        "        if unknown: fail('verification-check-unknown-keys', "
+        "index=index, finding_id=finding.get('id'), check_index=position, "
+        "check_name=entry.get('name'), unknown=unknown, allowed=allowed, "
+        "semantics=CHECK_SEMANTICS.get(entry.get('type'), ''))",
         "if (outcome == 'findings') != bool(findings): "
         "fail('artifact-outcome-findings-mismatch', outcome=outcome, "
         "finding_count=len(findings))",
@@ -1171,6 +1201,14 @@ def build_generated_review_session_body(
                 "`verification_checks` (non-empty list of completion-contract "
                 "check objects: `command`, `file_exists`, or "
                 "`regex_in_file`)."
+            ),
+            (
+                "- A verification check accepts only the keys its own type "
+                "documents; any other key is rejected. `file_exists` asserts "
+                "the path EXISTS and `regex_in_file` asserts the pattern is "
+                "PRESENT, and neither has absence semantics: assert that "
+                "something is gone with a `command` check that exits non-zero "
+                "while it is still there."
             ),
             (
                 "- Set `review_replay: true` only on durable current-state "

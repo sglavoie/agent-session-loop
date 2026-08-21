@@ -277,6 +277,39 @@ class StructuredReviewArtifactTests(unittest.TestCase):
                     )
                 )
 
+    def test_parse_review_artifact_rejects_an_absence_gate(self) -> None:
+        # A review that free-authors an absence flag onto a presence check is
+        # emitting a gate that passes exactly when the forbidden text is there.
+        with self.assertRaises(review.ReviewArtifactError) as caught:
+            review.parse_review_artifact(
+                json.dumps(
+                    self._artifact(
+                        findings=[
+                            _structured_review_finding(
+                                verification_checks=[
+                                    {
+                                        "type": "regex_in_file",
+                                        "name": "drops-the-claim",
+                                        "path": "docs/evidence.md",
+                                        "pattern": "75-pixel",
+                                        "expect_absent": True,
+                                    }
+                                ]
+                            )
+                        ]
+                    )
+                )
+            )
+
+        message = str(caught.exception)
+        self.assertIn("verification check #1 is invalid", message)
+        self.assertIn("'drops-the-claim'", message)
+        self.assertIn("'expect_absent'", message)
+        self.assertIn(
+            "regex_in_file asserts the pattern is PRESENT and has no absence semantics",
+            message,
+        )
+
     def test_parse_review_artifact_rejects_duplicate_finding_ids(self) -> None:
         artifact = self._artifact(
             findings=[
@@ -646,6 +679,35 @@ class StructuredReviewArtifactTests(unittest.TestCase):
                     "final-review-artifact-consistent",
                 ],
                 [check.name for check in contract.verify.checks],
+            )
+
+    def test_generated_review_session_body_states_presence_only_semantics(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = runner.build_generated_review_session_body(
+                plans.SessionId((7,)),
+                review_harness="claude",
+                plan_dir=Path(tmp),
+            )
+
+            self.assertIn(
+                "A verification check accepts only the keys its own type "
+                "documents; any other key is rejected.",
+                body,
+            )
+            self.assertIn(
+                "`regex_in_file` asserts the pattern is PRESENT, and neither "
+                "has absence semantics",
+                body,
+            )
+            # The gate the review runs against itself says the same thing.
+            contract = contracts.parse_completion_contract(
+                body, session_id=plans.SessionId((7,))
+            )
+            self.assertIn(
+                contracts.CHECK_PRESENCE_SEMANTICS["regex_in_file"],
+                contract.verify.checks[1].argv[2],
             )
 
     def test_generated_artifact_contract_check_gates_consistency(self) -> None:
@@ -1967,6 +2029,25 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
 
         self.assertEqual(["SVC", "OAK"], [check["repo"] for check in merged])
         self.assertEqual(2, len(merged))
+
+    def test_merge_refuses_to_carry_an_absence_gate_into_a_repair_child(self) -> None:
+        findings = [
+            {
+                "id": "F1",
+                "verification_checks": [
+                    {
+                        "type": "regex_in_file",
+                        "name": "drops-the-claim",
+                        "path": "docs/evidence.md",
+                        "pattern": "75-pixel",
+                        "expect_absent": True,
+                    }
+                ],
+            }
+        ]
+
+        with self.assertRaisesRegex(plans.PlanError, "no absence semantics"):
+            review_repair._merge_verification_checks("runner", findings)
 
     def test_no_finding_is_omitted_or_assigned_twice(self) -> None:
         findings = [
