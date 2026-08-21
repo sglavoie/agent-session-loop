@@ -48,7 +48,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 from . import (
     __version__,
@@ -68,6 +68,7 @@ from . import (
     preflight,
     repository_evidence,
     review,
+    review_continuation,
     state,
     verification,
     workspaces,
@@ -3266,6 +3267,12 @@ def _superseded_turn_names(turns: Sequence[Mapping[str, Any]]) -> frozenset[str]
     return frozenset(superseded)
 
 
+#: A deferred broad-check failure is closed by a later all-clear review
+#: (``resolved``), still waiting on a repair loop the run never finished
+#: (``pending``), or accepted without either (``unresolved``).
+_DeferralResolution = Literal["resolved", "pending", "unresolved"]
+
+
 def _recorded_review_cycles(context: _CheckContext) -> tuple[Mapping[str, Any], ...]:
     """Return ordered cycle evidence, preferring the durable state projection."""
     projected = _sequence(context.section("review").get("review_cycles"))
@@ -3278,25 +3285,59 @@ def _recorded_review_cycles(context: _CheckContext) -> tuple[Mapping[str, Any], 
     )
 
 
-def _deferred_review_reached_all_clear(context: _CheckContext, session_id: Any) -> bool:
-    """Whether one deferred findings review was repaired and later cleared."""
+def _cycle_is_all_clear(cycle: Mapping[str, Any]) -> bool:
+    """Whether one recorded review cycle closed the loop with nothing left."""
+    return (
+        cycle.get("outcome") == review.REVIEW_OUTCOME_ALL_CLEAR
+        and cycle.get("disposition")
+        == review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
+    )
+
+
+def _run_is_in_flight(context: _CheckContext) -> bool:
+    """Whether the run stopped short of an outcome rather than reaching one."""
+    status = context.section("status")
+    if status.get("paused") is True:
+        return True
+    names = {record.get("name") for record in context.records}
+    if events.RUN_PAUSED_EVENT in names:
+        return True
+    return events.RUN_FINISHED_EVENT not in names and "ok" not in status
+
+
+def _deferred_review_resolution(
+    context: _CheckContext, session_id: Any
+) -> _DeferralResolution:
+    """How a deferred findings review ended: cleared, still open, or unearned.
+
+    Only a later all-clear review closes a deferral. But a run that paused
+    before its repair loop converged never got the chance to record one, and
+    grading that as a false deferral claim reads an unfinished run as a
+    dishonest one. Such a run is ``pending``: evidence the audit has not seen
+    yet rather than evidence that contradicts the run.
+    """
     cycles = _recorded_review_cycles(context)
     source_index = next(
         (
             index
             for index, cycle in enumerate(cycles)
             if str(cycle.get("review_session_id")) == str(session_id)
-            and cycle.get("outcome") == "findings"
-            and cycle.get("disposition") == "repairs-materialized"
+            and cycle.get("outcome") == review.REVIEW_OUTCOME_FINDINGS
+            and cycle.get("disposition")
+            == review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS
         ),
         None,
     )
-    if source_index is None:
-        return False
-    return any(
-        cycle.get("outcome") == "all-clear" and cycle.get("disposition") == "all-clear"
-        for cycle in cycles[source_index + 1 :]
-    )
+    if source_index is not None and any(
+        _cycle_is_all_clear(cycle) for cycle in cycles[source_index + 1 :]
+    ):
+        return "resolved"
+    # Deliberately not gated on a repairs-materialized source: a run can pause
+    # while its only cycle is malformed, and that is still an unfinished repair
+    # loop rather than an unearned acceptance.
+    if _run_is_in_flight(context):
+        return "pending"
+    return "unresolved"
 
 
 def _accepted_verification_is_accounted_for(
@@ -3304,23 +3345,33 @@ def _accepted_verification_is_accounted_for(
     verification_payload: Mapping[str, Any],
     *,
     session_id: Any,
-) -> bool:
-    """Validate deferral identity, raw failures, and its later all-clear."""
+) -> _DeferralResolution:
+    """Validate deferral identity, raw failures, and its later all-clear.
+
+    Identity and name validation stay a hard ``unresolved``: a malformed
+    acceptance is a defect whether or not the run ever finished.
+    """
     acceptance = _deferred_review_acceptance(verification_payload)
     if acceptance is None:
-        return False
+        return "unresolved"
     deferred = verification_payload.get("deferred_failures")
     if deferred is not None:
         failures = [_mapping(item) for item in _sequence(deferred)]
         names = [failure.get("name") for failure in failures]
         if names != list(_sequence(acceptance.get("deferred_failure_names"))):
-            return False
+            return "unresolved"
         if any(
             not isinstance(name, str) or not name.startswith(_BROAD_REVIEW_CHECK_PREFIX)
             for name in names
         ):
-            return False
-    return _deferred_review_reached_all_clear(context, session_id)
+            return "unresolved"
+    return _deferred_review_resolution(context, session_id)
+
+
+def _review_cycles_ended_all_clear(context: _CheckContext) -> bool:
+    """Whether the last review cycle the run recorded closed every finding."""
+    cycles = _recorded_review_cycles(context)
+    return bool(cycles) and _cycle_is_all_clear(cycles[-1])
 
 
 def _check_misleading_success(context: _CheckContext) -> _Verdict:
@@ -3357,13 +3408,17 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
         # turn's recipe reappears on the turn that replaced it.
         if _mapping(session).get("turn") in superseded:
             continue
-        if session_verification.get(
-            "passed"
-        ) is False and not _accepted_verification_is_accounted_for(
-            context,
-            session_verification,
-            session_id=_mapping(session).get("session_id")
-            or session_verification.get("session"),
+        if (
+            session_verification.get("passed") is False
+            # A deferral whose repair loop the run never finished is unfinished
+            # evidence, not a contradiction of the success the run claims.
+            and _accepted_verification_is_accounted_for(
+                context,
+                session_verification,
+                session_id=_mapping(session).get("session_id")
+                or session_verification.get("session"),
+            )
+            == "unresolved"
         ):
             counter.append(f"verification failed for {_mapping(session).get('turn')}")
         skipped = _sequence(session_verification.get("skipped_checks"))
@@ -3420,10 +3475,18 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
     if any(record.get("name") == events.RUN_PAUSED_EVENT for record in context.records):
         counter.append("the event log records the run as paused")
     verdict = _mapping(context.section("review").get("review_verdict"))
-    unresolved = verdict.get("total_findings")
-    if isinstance(unresolved, int) and unresolved > 0:
+    # The verdict is rewritten per cycle, so this is what the last review
+    # *found*, not what it left open. Only the cycle log says whether a later
+    # all-clear closed them.
+    found = verdict.get("total_findings")
+    if (
+        isinstance(found, int)
+        and found > 0
+        and not _review_cycles_ended_all_clear(context)
+    ):
         counter.append(
-            f"the recorded review verdict leaves {unresolved} finding(s) unresolved"
+            f"the recorded review verdict reports {found} finding(s) and no later "
+            "all-clear review closed them"
         )
 
     evidence = context.evidence(context.section("state").get("reference"), *references)
@@ -3853,15 +3916,22 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
                     for entry in _sequence(outcome.get("deferred_failures"))
                 ]
                 failing_total += len(deferred)
-                if not _accepted_verification_is_accounted_for(
+                resolution = _accepted_verification_is_accounted_for(
                     context,
                     outcome,
                     session_id=session.get("session_id") or outcome.get("session"),
-                ):
+                )
+                if resolution == "unresolved":
                     problems.append(
                         f"the failed verification recorded for {session.get('turn')} "
                         "claims broad-check deferral without a matching repair cycle "
                         "and later all-clear review"
+                    )
+                elif resolution == "pending":
+                    blind.append(
+                        f"the broad-check failures deferred by "
+                        f"{session.get('turn')} reached no all-clear review "
+                        "before the run stopped"
                     )
             continue
         if outcome.get("passed") is not True:
@@ -3910,18 +3980,25 @@ def _check_verification_outcomes(context: _CheckContext) -> _Verdict:
                     _sequence(_mapping(acceptance).get("deferred_failure_names"))
                 )
                 failure_names = [failure.get("name") for failure in failures]
-                if (
-                    accepted_names != failure_names
-                    or not _accepted_verification_is_accounted_for(
-                        context,
-                        outcome,
-                        session_id=outcome.get("session_id") or outcome.get("session"),
-                    )
-                ):
+                resolution = _accepted_verification_is_accounted_for(
+                    context,
+                    outcome,
+                    session_id=outcome.get("session_id") or outcome.get("session"),
+                )
+                # A deferral naming checks that never failed is a defect no
+                # amount of unfinished repair loop excuses.
+                if accepted_names != failure_names:
+                    resolution = "unresolved"
+                if resolution == "unresolved":
                     problems.append(
                         f"verification for {label} claims broad-check deferral "
                         "without matching failed checks, a repair cycle, and a "
                         "later all-clear review"
+                    )
+                elif resolution == "pending":
+                    blind.append(
+                        f"the broad-check failures deferred by {label} reached no "
+                        "all-clear review before the run stopped"
                     )
             continue
         if outcome.get("passed") is not True:

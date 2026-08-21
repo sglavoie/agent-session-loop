@@ -3447,52 +3447,83 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("pass", results["verification-outcomes"].status)
             self.assertIn("accounted for", results["verification-outcomes"].detail)
 
+    REPAIR_CYCLE = {
+        "cycle": 1,
+        "review_session_id": "2",
+        "outcome": "findings",
+        "disposition": "repairs-materialized",
+    }
+    ALL_CLEAR_CYCLE = {
+        "cycle": 2,
+        "review_session_id": "3",
+        "outcome": "all-clear",
+        "disposition": "all-clear",
+    }
+
+    def _defer_broad_failure(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        *,
+        review_cycles: list[dict[str, Any]],
+        deferred_failure_names: list[str] | None = None,
+        paused: bool = False,
+    ) -> None:
+        """Record a turn whose broad-check failure was deferred to review."""
+        result = self._read_result(history[3])
+        result.update(session_id="2", turn_index=1, status_result="complete")
+        failure = {
+            "name": "broad:1:tests",
+            "kind": "command",
+            "status": "fail",
+            "returncode": 1,
+            "failure_reason": "command-failed",
+        }
+        names = (
+            ["broad:1:tests"]
+            if deferred_failure_names is None
+            else deferred_failure_names
+        )
+        result["verification"] = {
+            "session": "2",
+            "passed": False,
+            "checks": [failure],
+            "skipped_checks": [],
+            "diagnostic_failures": [],
+            "acceptance": {
+                "accepted": True,
+                "reason": runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
+                "review_outcome": "findings",
+                "deferred_failure_count": len(names),
+                "deferred_failure_names": names,
+            },
+            "deferred_failures": [failure],
+        }
+        self._write_result(history[3] / "turn-0001-01", result)
+        state_payload = self._read_state(history[2])
+        state_payload["review_cycles"] = review_cycles
+        if paused:
+            state_payload["ok"] = False
+            state_payload["paused"] = True
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.RUN_PAUSED_EVENT,
+                        {"run_id": RUN_ID, "reason": "verify-failed"},
+                    ),
+                ],
+            )
+        self._write_state(history[2], state_payload)
+
     def test_deferred_broad_failure_is_accounted_only_after_later_all_clear(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
-            result = self._read_result(history[3])
-            result.update(session_id="2", turn_index=1, status_result="complete")
-            failure = {
-                "name": "broad:1:tests",
-                "kind": "command",
-                "status": "fail",
-                "returncode": 1,
-                "failure_reason": "command-failed",
-            }
-            result["verification"] = {
-                "session": "2",
-                "passed": False,
-                "checks": [failure],
-                "skipped_checks": [],
-                "diagnostic_failures": [],
-                "acceptance": {
-                    "accepted": True,
-                    "reason": runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
-                    "review_outcome": "findings",
-                    "deferred_failure_count": 1,
-                    "deferred_failure_names": ["broad:1:tests"],
-                },
-                "deferred_failures": [failure],
-            }
-            self._write_result(history[3] / "turn-0001-01", result)
-            state_payload = self._read_state(history[2])
-            state_payload["review_cycles"] = [
-                {
-                    "cycle": 1,
-                    "review_session_id": "2",
-                    "outcome": "findings",
-                    "disposition": "repairs-materialized",
-                },
-                {
-                    "cycle": 2,
-                    "review_session_id": "3",
-                    "outcome": "all-clear",
-                    "disposition": "all-clear",
-                },
-            ]
-            self._write_state(history[2], state_payload)
+            self._defer_broad_failure(
+                history, review_cycles=[self.REPAIR_CYCLE, self.ALL_CLEAR_CYCLE]
+            )
 
             _, results = self._audit(history)
 
@@ -3502,47 +3533,90 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
     def test_deferred_broad_failure_without_later_all_clear_is_a_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
-            result = self._read_result(history[3])
-            result.update(session_id="2", turn_index=1, status_result="complete")
-            failure = {
-                "name": "broad:1:tests",
-                "kind": "command",
-                "status": "fail",
-                "returncode": 1,
-                "failure_reason": "command-failed",
-            }
-            result["verification"] = {
-                "session": "2",
-                "passed": False,
-                "checks": [failure],
-                "skipped_checks": [],
-                "diagnostic_failures": [],
-                "acceptance": {
-                    "accepted": True,
-                    "reason": runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
-                    "review_outcome": "findings",
-                    "deferred_failure_count": 1,
-                    "deferred_failure_names": ["broad:1:tests"],
-                },
-                "deferred_failures": [failure],
-            }
-            self._write_result(history[3] / "turn-0001-01", result)
-            state_payload = self._read_state(history[2])
-            state_payload["review_cycles"] = [
-                {
-                    "cycle": 1,
-                    "review_session_id": "2",
-                    "outcome": "findings",
-                    "disposition": "repairs-materialized",
-                }
-            ]
-            self._write_state(history[2], state_payload)
+            self._defer_broad_failure(history, review_cycles=[self.REPAIR_CYCLE])
 
             _, results = self._audit(history)
 
             self.assertEqual("fail", results["verification-outcomes"].status)
             self.assertIn("later all-clear", results["verification-outcomes"].detail)
             self.assertEqual("fail", results["misleading-success"].status)
+
+    def test_a_deferral_the_run_paused_before_clearing_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._defer_broad_failure(
+                history, review_cycles=[self.REPAIR_CYCLE], paused=True
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("unavailable", results["verification-outcomes"].status)
+            self.assertIn(
+                "reached no all-clear review before the run stopped",
+                results["verification-outcomes"].detail,
+            )
+
+    def test_a_paused_deferral_is_unavailable_without_a_repair_cycle(self) -> None:
+        """The pending branch cannot key off a repairs-materialized source."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._defer_broad_failure(
+                history,
+                review_cycles=[
+                    {**self.REPAIR_CYCLE, "disposition": "malformed-review-repair"}
+                ],
+                paused=True,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("unavailable", results["verification-outcomes"].status)
+
+    def test_a_paused_run_still_fails_a_deferral_naming_checks_that_passed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._defer_broad_failure(
+                history,
+                review_cycles=[self.REPAIR_CYCLE],
+                deferred_failure_names=["broad:1:docs"],
+                paused=True,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["verification-outcomes"].status)
+
+    def test_review_findings_a_later_all_clear_closed_do_not_contradict_success(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_state(history[2])
+            payload["review_verdict"] = {"outcome": "findings", "total_findings": 2}
+            payload["review_cycles"] = [self.REPAIR_CYCLE, self.ALL_CLEAR_CYCLE]
+            self._write_state(history[2], payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["misleading-success"].status)
+
+    def test_review_findings_no_all_clear_closed_contradict_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_state(history[2])
+            payload["review_verdict"] = {"outcome": "findings", "total_findings": 2}
+            payload["review_cycles"] = [self.REPAIR_CYCLE]
+            self._write_state(history[2], payload)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["misleading-success"].status)
+            self.assertIn(
+                "reports 2 finding(s) and no later all-clear review closed them",
+                results["misleading-success"].detail,
+            )
 
     def test_a_skipped_diagnostic_cannot_absorb_a_failed_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
