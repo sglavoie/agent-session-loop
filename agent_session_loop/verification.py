@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -233,6 +234,11 @@ class CheckResult:
     (:func:`agent_session_loop.process_tree.sweep_survivors`) for a command
     check. It stays ``None`` for file and regex checks, and also whenever the
     sweep was opted out of or could not read the process table.
+
+    ``failure_diagnostic`` is the structured rejection a failed command wrote as
+    the last line of its stderr (see :func:`_parse_failure_diagnostic`). It is
+    ``None`` for every passing check and for any failure whose stderr carries no
+    such line.
     """
 
     name: str
@@ -253,6 +259,7 @@ class CheckResult:
     stderr_truncated: bool = False
     stderr_artifact_path: str | None = None
     sweep: dict[str, Any] | None = None
+    failure_diagnostic: dict[str, Any] | None = None
     repo: str | None = None
     resolved_root: str | None = None
     cwd: str | None = None
@@ -652,6 +659,39 @@ class _ParallelCancellation:
             _kill_process_group(process)
 
 
+#: Longest stderr line still considered for a structured diagnostic. The
+#: producers are ASL's own generated gates, whose rejections run to tens of
+#: bytes; the cap is what keeps an arbitrary command from pushing unbounded
+#: structure into the check record, the event log, and the audit bundle.
+_FAILURE_DIAGNOSTIC_MAX_BYTES = 2048
+
+
+def _parse_failure_diagnostic(stderr_preview: str) -> dict[str, Any] | None:
+    """Read a failed command's last stderr line as a structured rejection.
+
+    Kept only when the line is a bounded JSON object carrying ``check`` and
+    ``reason`` strings, which is the contract every generated review gate leaves
+    through (``runner._VALIDATOR_FAIL_HELPER``). That shape is what makes the
+    value ASL-authored schema rather than application output, so it can travel
+    where a raw stream may not.
+    """
+    lines = [line.strip() for line in stderr_preview.splitlines() if line.strip()]
+    if not lines:
+        return None
+    candidate = lines[-1]
+    if len(candidate.encode("utf-8")) > _FAILURE_DIAGNOSTIC_MAX_BYTES:
+        return None
+    try:
+        parsed = json.loads(candidate)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if not all(isinstance(parsed.get(key), str) for key in ("check", "reason")):
+        return None
+    return parsed
+
+
 def _command_stream_fields(
     check: CommandCheck,
     stdout_capture: StreamCapture,
@@ -692,6 +732,9 @@ def _command_stream_fields(
         "stderr_sha256": stderr_meta.sha256,
         "stderr_truncated": stderr_meta.truncated,
         "stderr_artifact_path": stderr_meta.artifact_path,
+        "failure_diagnostic": (
+            _parse_failure_diagnostic(stderr_meta.preview) if failed else None
+        ),
     }
 
 
@@ -708,6 +751,8 @@ def _command_failure_detail(
     A validator that reports which predicate rejected the artifact says far
     more than its own rendered argv, so the last diagnostic line travels with
     the detail into the pause record instead of staying buried in the streams.
+    It leads, because a ``python3 -c`` gate renders kilobytes of argv and every
+    consumer that bounds an inline string would otherwise keep only that.
     """
     rendered = f"command exited {returncode}: {' '.join(check.argv)}"
     for stream in ("stderr", "stdout"):
@@ -717,7 +762,7 @@ def _command_failure_detail(
             if line.strip()
         ]
         if lines:
-            return f"{rendered}; {lines[-1][:_COMMAND_DIAGNOSTIC_LIMIT]}"
+            return f"{lines[-1][:_COMMAND_DIAGNOSTIC_LIMIT]}; {rendered}"
     return rendered
 
 

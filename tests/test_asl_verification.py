@@ -1466,6 +1466,136 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertIsNotNone(check_result.stdout_artifact_path)
             self.assertTrue(Path(check_result.stdout_artifact_path).exists())
 
+    # --- Structured validator diagnostic coverage (ASI-105) ---
+    # A generated review gate writes one structured JSON line to stderr before
+    # exiting 1. Every downstream consumer used to discard it: the inline detail
+    # put a ~2 KB `python3 -c` argv ahead of it, `stderr` is content-stubbed in
+    # the audit bundle, and pause details drop the streams outright.
+
+    def test_failing_gate_keeps_its_structured_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    "import sys\n"
+                    "sys.stderr.write('warming up\\n')\n"
+                    'sys.stderr.write(\'{"check": "gate", '
+                    '"reason": "missing-required-heading"}\\n\')\n'
+                    "sys.exit(1)",
+                ),
+                name="gate",
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual(
+                {"check": "gate", "reason": "missing-required-heading"},
+                result.failure_diagnostic,
+            )
+            # It leads the detail, so a consumer that keeps only a bounded head
+            # of the string keeps the reason rather than the argv.
+            self.assertTrue(result.detail.startswith('{"check": "gate"'))
+
+    def test_passing_command_carries_no_failure_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    "import sys; sys.stderr.write("
+                    '\'{"check": "gate", "reason": "noise"}\')',
+                )
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("pass", result.status)
+            self.assertIsNone(result.failure_diagnostic)
+
+    def test_failure_diagnostic_requires_the_producer_schema(self) -> None:
+        """Only ``check`` + ``reason`` objects are ASL-authored schema.
+
+        Anything else on that line is application output, which is what the
+        content rules exist to withhold, so it must not travel as structure.
+        """
+        cases = {
+            "not-json": "plain english failure\n",
+            "json-array": '["check", "reason"]\n',
+            "json-scalar": '"just a string"\n',
+            "object-without-reason": '{"check": "gate"}\n',
+            "object-without-check": '{"reason": "missing-required-heading"}\n',
+            "non-string-reason": '{"check": "gate", "reason": 7}\n',
+            "oversized": json.dumps(
+                {"check": "gate", "reason": "x" * 4000}, sort_keys=True
+            )
+            + "\n",
+        }
+        for label, stderr in cases.items():
+            with self.subTest(case=label):
+                self.assertIsNone(verification._parse_failure_diagnostic(stderr))
+
+    def test_failure_diagnostic_survives_serialization_and_compaction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            check = self._command(
+                (
+                    "python3",
+                    "-c",
+                    "import sys\n"
+                    'sys.stderr.write(\'{"check": "gate", '
+                    '"reason": "artifact-missing"}\\n\')\n'
+                    "sys.exit(1)",
+                ),
+                name="gate",
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+            payload = verification._check_result_payload(result)
+            compacted = runner._strip_check_output(payload)
+
+            self.assertEqual(result.failure_diagnostic, payload["failure_diagnostic"])
+            # The compaction that drops the raw streams keeps the diagnostic:
+            # it is the only structured account of the rejection left.
+            self.assertNotIn("stderr", compacted)
+            self.assertEqual(result.failure_diagnostic, compacted["failure_diagnostic"])
+
+    def test_generated_review_output_gate_reports_which_rule_rejected_it(
+        self,
+    ) -> None:
+        """ASI-105 end to end against the real generated gate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            plan_dir = Path(tmp) / "plan"
+            plan_dir.mkdir()
+            review_path = plan_dir / runner.FINAL_REVIEW_FILENAME
+            review_path.write_text("no heading anywhere here\n", encoding="utf-8")
+            source = runner._GENERATED_REVIEW_VERIFY_SOURCE.replace(
+                repr(runner.FINAL_REVIEW_FILENAME), repr(str(review_path))
+            )
+            check = self._command(
+                ("python3", "-c", source),
+                name="final-review-output-evidence-based",
+                timeout_seconds=60.0,
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual("fail", result.status)
+            self.assertEqual(
+                {
+                    "check": "final-review-output-evidence-based",
+                    "reason": "missing-required-heading",
+                },
+                result.failure_diagnostic,
+            )
+
     # --- Incremental streaming regression coverage (M1) ---
     # Verification must bound command output as it arrives instead of
     # buffering the full stream before truncation.

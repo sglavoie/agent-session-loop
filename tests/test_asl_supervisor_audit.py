@@ -23,6 +23,7 @@ from agent_session_loop import (
     assurance_models,
     assurance_projection,
     cli,
+    contracts,
     events,
     harness_failures,
     harnesses,
@@ -2938,6 +2939,96 @@ class ReviewAttestationProjectionTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual(3, section["review_verdict"]["total_findings"])
             self.assertEqual("a" * 64, section["review_output_sha256"])
             self.assertEqual("b" * 64, section["review_artifact_sha256"])
+
+
+class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
+    """ASI-105: a rejected review gate must say which requirement failed.
+
+    Its structured reason used to reach the bundle three ways and be lost in
+    all three: the inline ``detail`` truncated behind a ~2 KB ``python3 -c``
+    argv, the ``stderr`` preview content-stubbed, and the artifact holding the
+    full stream named but never indexed as evidence.
+    """
+
+    def _rejected_gate(self, history: tuple[Path, Path, Path, Path]) -> dict[str, Any]:
+        """Run the real generated gate against a heading-less review artifact."""
+        _, plan_dir, _, run_dir = history
+        review_path = plan_dir / runner.FINAL_REVIEW_FILENAME
+        review_path.write_text("no heading anywhere here\n", encoding="utf-8")
+        source = runner._GENERATED_REVIEW_VERIFY_SOURCE.replace(
+            repr(runner.FINAL_REVIEW_FILENAME), repr(str(review_path))
+        )
+        turn_dir = run_dir / "turn-0001-01"
+        result = verification.run_check(
+            contracts.CommandCheck(
+                name="final-review-output-evidence-based",
+                argv=("python3", "-c", source),
+                timeout_seconds=60.0,
+            ),
+            repo_root=run_dir,
+            artifact_dir=turn_dir / "verification",
+        )
+        self.assertEqual("fail", result.status)
+        payload = self._read_result(run_dir)
+        payload["verification"] = {
+            "passed": False,
+            "checks": [verification._check_result_payload(result)],
+        }
+        self._write_result(turn_dir, payload)
+        return verification._check_result_payload(result)
+
+    def test_the_bundle_carries_the_reason_the_streams_cannot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            recorded = self._rejected_gate(history)
+
+            check = self._bundle(history).payload["turns"][0]["result"]["verification"][
+                "checks"
+            ][0]
+
+            self.assertEqual(
+                {
+                    "check": "final-review-output-evidence-based",
+                    "reason": "missing-required-heading",
+                },
+                check["failure_diagnostic"],
+            )
+            # The two surfaces it had to survive: the stream is still withheld
+            # as application content, and the detail is still truncated -- but
+            # the reason now leads it, inside the inline budget.
+            self.assertIn(supervisor_audit.REASON_APPLICATION_CONTENT, check["stderr"])
+            self.assertIn(
+                "missing-required-heading",
+                check["detail"][: supervisor_audit.MAX_INLINE_STRING_BYTES],
+            )
+            self.assertNotEqual(recorded["detail"], check["detail"])
+
+    def test_the_failed_gate_stderr_artifact_is_indexed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._rejected_gate(history)
+
+            evidence = self._bundle(history).payload["evidence"]
+
+            entry = next(
+                item
+                for item in evidence
+                if item["locator"].endswith(
+                    "final-review-output-evidence-based-stderr.gz"
+                )
+            )
+            self.assertEqual("artifact", entry["kind"])
+            self.assertEqual(
+                "final-review-output-evidence-based stderr", entry["detail"]
+            )
+
+    def test_a_passing_check_indexes_no_stream_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+
+            evidence = self._bundle(history).payload["evidence"]
+
+            self.assertFalse([item for item in evidence if ".gz" in item["locator"]])
 
 
 class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):

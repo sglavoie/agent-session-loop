@@ -98,6 +98,43 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             state_dir=str(state_dir) if state_dir is not None else None,
         )
 
+    def test_verify_failed_pause_keeps_the_validator_reason(self) -> None:
+        """ASI-105: the pause record dropped every account of the rejection.
+
+        A generated review gate writes its reason to stderr, which
+        ``_strip_check_output`` removes from pause details, and puts a ~2 KB
+        argv ahead of it in ``detail``. The structured field is what survives
+        both, so a verify-failed pause names the requirement that failed.
+        """
+        diagnostic = {
+            "check": "final-review-output-evidence-based",
+            "reason": "missing-required-heading",
+        }
+        details = {
+            "session": 6,
+            "failures": [
+                {
+                    "name": "final-review-output-evidence-based",
+                    "kind": "command",
+                    "status": "fail",
+                    "failure_reason": "command-failed",
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": json.dumps(diagnostic, sort_keys=True),
+                    "stderr_sha256": "a" * 64,
+                    "failure_diagnostic": diagnostic,
+                }
+            ],
+        }
+
+        bounded = runner._bounded_verification_details(details)
+
+        failure = bounded["failures"][0]
+        self.assertNotIn("stdout", failure)
+        self.assertNotIn("stderr", failure)
+        self.assertEqual(diagnostic, failure["failure_diagnostic"])
+        self.assertEqual("a" * 64, failure["stderr_sha256"])
+
     def test_set_pause_attaches_pause_policy_block(self) -> None:
         payload: dict[str, object] = {}
         runner._set_pause(payload, reason="verify-failed", message="checks failed")

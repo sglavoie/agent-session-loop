@@ -2183,6 +2183,27 @@ def _scopes_section(
     return {"available": True, "sessions": sessions}
 
 
+def _reference_verification_stderr(
+    collector: _Collector, result: Mapping[str, Any]
+) -> None:
+    """Index the stderr artifact each failed verification check points at.
+
+    That artifact is where a rejected gate's full diagnostic survives: the check
+    record's own copy is a preview the content rules withhold, and its inline
+    detail is bounded. Naming the path without indexing it left the auditor
+    unable to tell evidence it could read from a path it merely saw.
+    """
+    for check in _sequence(_mapping(result.get("verification")).get("checks")):
+        entry = _mapping(check)
+        if entry.get("status") == "pass":
+            continue
+        path = entry.get("stderr_artifact_path")
+        if isinstance(path, str) and path:
+            collector.reference(
+                path, kind="artifact", detail=f"{entry.get('name')} stderr"
+            )
+
+
 def _turn_section(collector: _Collector, directory: Path) -> dict[str, Any]:
     """One turn's packet, prompt, harness metadata, and bounded streams."""
     result, reason = _read_json_file(directory / state.RESULT_FILE_NAME)
@@ -2191,6 +2212,7 @@ def _turn_section(collector: _Collector, directory: Path) -> dict[str, Any]:
         "name": directory.name,
     }
     if isinstance(result, Mapping):
+        _reference_verification_stderr(collector, result)
         turn["result"] = collector.redact(result)
         turn["anomalous"] = _turn_shows_failure(result)
         # Beside ``anomalous``, never folded into it: a harness that lost an

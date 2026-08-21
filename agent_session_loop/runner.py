@@ -8311,6 +8311,7 @@ class _LiveVerification:
         failure_reason: str | None,
         returncode: int | None,
         repo: str | None = None,
+        failure_diagnostic: dict[str, Any] | None = None,
     ) -> None:
         moment = _utc_now()
         with self._lock:
@@ -8341,6 +8342,7 @@ class _LiveVerification:
                 "duration_seconds": duration_seconds,
                 "failure_reason": failure_reason,
                 "returncode": returncode,
+                "failure_diagnostic": failure_diagnostic,
                 "finished_at": _isoformat(moment),
             }
             with self._persistence.lock:
@@ -13279,6 +13281,7 @@ def _enforce_session_verification(
             failure_reason=event.result.failure_reason,
             returncode=event.result.returncode,
             repo=event.repo,
+            failure_diagnostic=event.result.failure_diagnostic,
         )
 
     def _on_check_skipped(event: verification.CheckSkippedEvent) -> None:

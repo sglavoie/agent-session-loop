@@ -279,11 +279,32 @@ class CommandFailureDetailTests(unittest.TestCase):
         self.assertIn("artifact-missing", detail)
         self.assertNotIn("noise", detail)
 
+    def test_the_diagnostic_leads_so_a_bounded_reader_keeps_it(self) -> None:
+        """A `python3 -c` gate renders kilobytes of argv; the reason goes first.
+
+        Every consumer that bounds an inline string cuts the tail, so an
+        argv-first detail is exactly the one that loses the reason.
+        """
+        check = verification.CommandCheck(
+            name="final-review-output-evidence-based",
+            argv=("python3", "-c", "x = 1  # " + "y" * 4000),
+            timeout_seconds=60,
+        )
+        detail = verification._command_failure_detail(
+            check,
+            1,
+            {"stderr": '{"check": "c", "reason": "missing-required-heading"}\n'},
+        )
+        self.assertTrue(detail.startswith('{"check": "c"'))
+        self.assertIn("missing-required-heading", detail[:512])
+
     def test_stdout_is_used_when_stderr_is_silent(self) -> None:
         detail = verification._command_failure_detail(
             self.check(), 2, {"stderr": "   \n", "stdout": "only stdout said this\n"}
         )
-        self.assertTrue(detail.endswith("only stdout said this"))
+        self.assertEqual(
+            "only stdout said this; command exited 2: python3 -c pass", detail
+        )
 
     def test_silent_failure_falls_back_to_the_rendered_argv(self) -> None:
         detail = verification._command_failure_detail(self.check(), 3, {})
@@ -294,7 +315,7 @@ class CommandFailureDetailTests(unittest.TestCase):
             self.check(), 1, {"stderr": "x" * 5000}
         )
         self.assertLessEqual(
-            len(detail) - len("command exited 1: python3 -c pass; "),
+            len(detail) - len("; command exited 1: python3 -c pass"),
             verification._COMMAND_DIAGNOSTIC_LIMIT,
         )
 
