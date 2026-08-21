@@ -50,6 +50,7 @@ FAST_MODULES = (
     "tests.test_asl_assurance_reconcile",
     "tests.test_asl_assurance_cli",
     "tests.test_asl_supervisor_audit",
+    "tests.test_asl_audit_replay",
     "tests.test_asl_assurance_lifecycle",
     "tests.test_asl_assurance_metrics",
     "tests.test_asl_acceptance",
