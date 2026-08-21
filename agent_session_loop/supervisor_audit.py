@@ -1339,10 +1339,11 @@ class _Collector:
         """Return ``value`` with credentials, content, and unsafe paths removed."""
         if parent == verification.FAILURE_DIAGNOSTIC_KEY:
             # A structured rejection travels as control-plane evidence, so
-            # every field inside it is held to that standard: the two bounded
-            # tokens pass, and anything else — an unknown key, a nested
-            # structure, prose in a field that should hold a token — is the
-            # rejected artifact's own text and is withheld like any output.
+            # every field inside it is held to that standard: a value drawn
+            # from ASL's own closed gate vocabulary passes, and anything else —
+            # an unknown key, a nested structure, an application token in a
+            # field that must name a gate or a reason — is the rejected
+            # artifact's own text and is withheld like any output.
             if not verification.is_control_plane_diagnostic_field(key, value):
                 return self._content_stub(
                     value

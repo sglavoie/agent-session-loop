@@ -669,24 +669,73 @@ _FAILURE_DIAGNOSTIC_MAX_BYTES = 2048
 FAILURE_DIAGNOSTIC_KEY = "failure_diagnostic"
 
 #: The marker a generated ASL gate stamps on its rejection line, and the value
-#: it stamps (``runner._VALIDATOR_FAIL_HELPER``). Nothing is promoted without
-#: it, so a third-party command whose output happens to be a ``check``/
-#: ``reason`` object stays application output rather than becoming ASL schema.
-#: It is stripped once read: it authenticates the line and says nothing about
-#: the failure.
+#: it stamps (``runner._VALIDATOR_FAIL_HELPER``). It is a cheap first filter,
+#: not authentication: the literal is public and every command can print it,
+#: so what a promoted line actually rests on is the vocabulary below. It is
+#: stripped once read, since it says nothing about the failure.
 FAILURE_DIAGNOSTIC_MARKER_KEY = "asl_diagnostic"
 FAILURE_DIAGNOSTIC_MARKER_VALUE = "generated-gate/1"
 
-#: The only diagnostic fields that are control-plane text. Everything a gate
-#: attaches beyond them is drawn from the artifact it rejected — the generated
-#: gates pass ``status=``, ``last_line=`` and ``error=`` — so it is application
-#: content and is withheld like any other command output.
-_DIAGNOSTIC_CONTROL_PLANE_KEYS = frozenset({"check", "reason"})
+#: The generated review gates' own names. Each is both the check name the
+#: runner puts in the contract and the ``CHECK`` constant that gate stamps on
+#: its rejection line, and a promoted diagnostic must name the check that is
+#: actually executing — so the value identifies an ASL gate rather than
+#: carrying anything the command chose.
+GENERATED_GATE_CHECK_NAMES = frozenset(
+    {
+        "final-review-artifact-consistent",
+        "final-review-output-evidence-based",
+    }
+)
 
-#: Both control-plane fields must be tokens. Barring whitespace is what makes
-#: them structurally unable to carry prose, so a caller that forges the marker
-#: still cannot smuggle application text through the two fields that travel.
-_DIAGNOSTIC_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+#: Every rejection reason those gates can report. Bounding ``reason`` to a
+#: closed set — rather than to a token *shape* — is what makes forgery
+#: worthless: the marker is copyable and a check may be named anything, but
+#: neither buys a field that can hold an application identifier, an opaque
+#: token, or a proprietary string. ``tests/test_asl_verification.py`` extracts
+#: this vocabulary from the rendered gate sources and pins it equal, so a gate
+#: that grows a reason fails there instead of silently losing its diagnostic.
+GENERATED_GATE_REASONS = frozenset(
+    {
+        "artifact-findings-not-list",
+        "artifact-missing",
+        "artifact-not-object",
+        "artifact-outcome-findings-mismatch",
+        "artifact-outcome-invalid",
+        "artifact-unparsable",
+        "artifact-version-unsupported",
+        "finding-evidence-empty",
+        "finding-evidence-unqualified",
+        "finding-missing-keys",
+        "finding-not-object",
+        "finding-repo-unknown",
+        "finding-severity-invalid",
+        "finding-verification-check-repo-unknown",
+        "finding-verification-checks-empty",
+        "insufficient-path-evidence",
+        "missing-required-heading",
+        "review-output-empty",
+        "review-output-unreadable",
+        "status-line-malformed",
+        "status-line-not-final",
+        "status-outcome-mismatch",
+        "status-tally-inconsistent",
+        "status-tally-mismatch",
+        "status-total-mismatch",
+        "verification-check-not-object",
+        "verification-check-unknown-keys",
+    }
+)
+
+#: The only diagnostic fields that are control-plane text, each with the closed
+#: vocabulary it must draw from. Everything a gate attaches beyond them is
+#: drawn from the artifact it rejected — the generated gates pass ``status=``,
+#: ``last_line=`` and ``error=`` — so it is application content and is withheld
+#: like any other command output.
+_DIAGNOSTIC_CONTROL_PLANE_VOCABULARY = {
+    "check": GENERATED_GATE_CHECK_NAMES,
+    "reason": GENERATED_GATE_REASONS,
+}
 
 
 def is_control_plane_diagnostic_field(key: str | None, value: Any) -> bool:
@@ -696,22 +745,24 @@ def is_control_plane_diagnostic_field(key: str | None, value: Any) -> bool:
     of what is ASL schema and what is application output lives in one place
     rather than being restated by each consumer.
     """
-    return (
-        key in _DIAGNOSTIC_CONTROL_PLANE_KEYS
-        and isinstance(value, str)
-        and _DIAGNOSTIC_TOKEN_RE.fullmatch(value) is not None
-    )
+    # The collector asks this of whatever a recorded bundle holds, so the
+    # string test comes first: a nested structure is unhashable and would
+    # raise on set membership rather than being withheld.
+    vocabulary = _DIAGNOSTIC_CONTROL_PLANE_VOCABULARY.get(key or "")
+    return vocabulary is not None and isinstance(value, str) and value in vocabulary
 
 
-def _parse_failure_diagnostic(stderr_preview: str) -> dict[str, Any] | None:
+def _parse_failure_diagnostic(
+    stderr_preview: str, *, check_name: str
+) -> dict[str, Any] | None:
     """Read a failed command's last stderr line as a structured rejection.
 
-    Kept only when the line is a bounded JSON object that carries the generated
-    gates' marker and whose ``check`` and ``reason`` are tokens, which is the
-    contract every generated review gate leaves through
-    (``runner._VALIDATOR_FAIL_HELPER``). Authenticating the producer is what
-    makes the value ASL-authored schema rather than application output, so it
-    can travel where a raw stream may not.
+    Kept only when the line is a bounded JSON object carrying the generated
+    gates' marker, naming ``check_name`` — the check the runner is actually
+    executing — as its own ``check``, and reporting a ``reason`` from the
+    generated gates' closed vocabulary. Provenance therefore rests on the
+    contract the runner authored rather than on bytes the command chose, and
+    the two fields that travel can hold nothing but ASL's own tokens.
     """
     lines = [line.strip() for line in stderr_preview.splitlines() if line.strip()]
     if not lines:
@@ -727,9 +778,11 @@ def _parse_failure_diagnostic(stderr_preview: str) -> dict[str, Any] | None:
         return None
     if parsed.get(FAILURE_DIAGNOSTIC_MARKER_KEY) != FAILURE_DIAGNOSTIC_MARKER_VALUE:
         return None
+    if parsed.get("check") != check_name:
+        return None
     if not all(
         is_control_plane_diagnostic_field(key, parsed.get(key))
-        for key in _DIAGNOSTIC_CONTROL_PLANE_KEYS
+        for key in _DIAGNOSTIC_CONTROL_PLANE_VOCABULARY
     ):
         return None
     return {
@@ -780,7 +833,9 @@ def _command_stream_fields(
         "stderr_truncated": stderr_meta.truncated,
         "stderr_artifact_path": stderr_meta.artifact_path,
         "failure_diagnostic": (
-            _parse_failure_diagnostic(stderr_meta.preview) if failed else None
+            _parse_failure_diagnostic(stderr_meta.preview, check_name=check.name)
+            if failed
+            else None
         ),
     }
 

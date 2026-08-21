@@ -509,9 +509,12 @@ def parse_review_verdict(text: str) -> dict[str, Any]:
 # Every rejection in the generated review gates leaves through ``fail``, which
 # writes one structured JSON line to stderr before exiting 1. A predicate that
 # exited silently told an operator only that some `python3 -c` script returned
-# 1, which is the whole failure surface these gates used to expose. The marker
-# is what identifies the line as ASL's own: without it the parser reads the
-# line as application output and never promotes it.
+# 1, which is the whole failure surface these gates used to expose. ``CHECK``
+# is the gate's own contract name and every ``reason`` is a literal from a
+# closed vocabulary, which is what the parser holds the line to; the marker is
+# only its first filter. Adding a reason here means adding it to
+# ``verification.GENERATED_GATE_REASONS`` — a test extracts this source and
+# pins the two equal.
 _VALIDATOR_FAIL_HELPER = (
     "def fail(reason, **detail):",
     "    detail.update(check=CHECK, reason=reason, "

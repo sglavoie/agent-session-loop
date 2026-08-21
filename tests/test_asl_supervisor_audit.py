@@ -3039,15 +3039,25 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
 
     APPLICATION_TEXT = "internal proprietary application text"
 
+    #: Application content shaped exactly like a generated gate's own values.
+    APPLICATION_TOKEN = "INTERNAL_PROPRIETARY_TOKEN_ABC123"
+
+    #: A name the runner gives one of its generated review gates.
+    GATE = "final-review-artifact-consistent"
+
     def _recorded_command(
-        self, history: tuple[Path, Path, Path, Path], stderr_line: str
+        self,
+        history: tuple[Path, Path, Path, Path],
+        stderr_line: str,
+        *,
+        name: str = "user-authored-command",
     ) -> dict[str, Any]:
-        """Record one real failed user command and project it through a bundle."""
+        """Record one real failed command and project it through a bundle."""
         _, _, _, run_dir = history
         turn_dir = run_dir / "turn-0001-01"
         result = verification.run_check(
             contracts.CommandCheck(
-                name="user-authored-command",
+                name=name,
                 argv=(
                     "python3",
                     "-c",
@@ -3068,13 +3078,12 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
             "checks"
         ][0]
 
-    def test_a_forged_diagnostic_field_is_withheld_as_application_content(self) -> None:
-        line = (
+    def _marked_line(self, **fields: Any) -> str:
+        """One rejection line carrying the exact public marker literal."""
+        return (
             json.dumps(
                 {
-                    "check": "user-authored-command",
-                    "reason": "failed",
-                    "customer_payload": self.APPLICATION_TEXT,
+                    **fields,
                     verification.FAILURE_DIAGNOSTIC_MARKER_KEY: (
                         verification.FAILURE_DIAGNOSTIC_MARKER_VALUE
                     ),
@@ -3083,17 +3092,106 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
             )
             + "\n"
         )
+
+    def test_a_gates_extra_field_is_withheld_as_application_content(self) -> None:
+        line = self._marked_line(
+            check=self.GATE,
+            reason="artifact-unparsable",
+            customer_payload=self.APPLICATION_TEXT,
+        )
         with tempfile.TemporaryDirectory() as tmp:
-            check = self._recorded_command(self._history(Path(tmp)), line)
+            check = self._recorded_command(
+                self._history(Path(tmp)), line, name=self.GATE
+            )
 
             diagnostic = check["failure_diagnostic"]
-            self.assertEqual("user-authored-command", diagnostic["check"])
-            self.assertEqual("failed", diagnostic["reason"])
+            self.assertEqual(self.GATE, diagnostic["check"])
+            self.assertEqual("artifact-unparsable", diagnostic["reason"])
             self.assertIn(
                 supervisor_audit.REASON_APPLICATION_CONTENT,
                 diagnostic["customer_payload"],
             )
             self.assertNotIn(self.APPLICATION_TEXT, json.dumps(check))
+
+    def test_a_copied_marker_carries_no_application_token(self) -> None:
+        """Copying the public marker buys neither provenance nor a content route.
+
+        The forger's own check is not a gate the runner generates, and the
+        token is shaped like a gate's own values, so the shape bound that used
+        to guard these two fields would have let it through. What denies it is
+        the closed vocabulary, on both the parse side and the collector's.
+        """
+        cases = {
+            "token-in-reason": {
+                "check": "user-authored-command",
+                "reason": self.APPLICATION_TOKEN,
+            },
+            "token-in-check": {
+                "check": self.APPLICATION_TOKEN,
+                "reason": "artifact-missing",
+            },
+        }
+        for label, fields in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                check = self._recorded_command(
+                    self._history(Path(tmp)), self._marked_line(**fields)
+                )
+
+                self.assertIsNone(check["failure_diagnostic"])
+                self.assertEqual("command exited 1: python3", check["detail"])
+                self.assertNotIn(self.APPLICATION_TOKEN, json.dumps(check))
+
+    def test_the_collector_stubs_a_token_in_either_diagnostic_field(self) -> None:
+        """The boundary holds for a diagnostic the collector did not parse.
+
+        ``_Collector.redact`` is the last gate before the bundle and is reached
+        by recorded evidence the current parser never saw, so it re-derives the
+        vocabulary rather than trusting that promotion already checked it.
+        """
+        roots = supervisor_audit.EvidenceRoots.build(
+            run_dir=Path.cwd(), state_dir=Path.cwd(), plan_dir=Path.cwd()
+        )
+        for field in ("check", "reason"):
+            with self.subTest(field=field):
+                diagnostic = {"check": self.GATE, "reason": "artifact-missing"}
+                diagnostic[field] = self.APPLICATION_TOKEN
+
+                projected = supervisor_audit._Collector(roots).redact(
+                    {"failure_diagnostic": diagnostic}
+                )
+
+                self.assertNotIn(self.APPLICATION_TOKEN, json.dumps(projected))
+                self.assertIn(
+                    supervisor_audit.REASON_APPLICATION_CONTENT,
+                    projected["failure_diagnostic"][field],
+                )
+
+    def test_the_collector_withholds_a_nested_diagnostic_field(self) -> None:
+        """A vocabulary is a set, and a recorded bundle may hold anything.
+
+        The collector reads evidence the current parser never produced, so a
+        control-plane field holding a structure has to be withheld rather than
+        raising on the membership test that guards it.
+        """
+        roots = supervisor_audit.EvidenceRoots.build(
+            run_dir=Path.cwd(), state_dir=Path.cwd(), plan_dir=Path.cwd()
+        )
+
+        projected = supervisor_audit._Collector(roots).redact(
+            {
+                "failure_diagnostic": {
+                    "check": {"nested": self.APPLICATION_TEXT},
+                    "reason": ["artifact-missing"],
+                }
+            }
+        )
+
+        self.assertNotIn(self.APPLICATION_TEXT, json.dumps(projected))
+        for field in ("check", "reason"):
+            self.assertIn(
+                supervisor_audit.REASON_APPLICATION_CONTENT,
+                projected["failure_diagnostic"][field],
+            )
 
     def test_a_plain_failed_command_leaves_no_text_in_the_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

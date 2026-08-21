@@ -278,9 +278,18 @@ class CommandFailureDetailTests(unittest.TestCase):
         detail = verification._command_failure_detail(
             self.check(),
             1,
-            {"failure_diagnostic": {"check": "c", "reason": "artifact-missing"}},
+            {
+                "failure_diagnostic": {
+                    "check": "final-review-artifact-consistent",
+                    "reason": "artifact-missing",
+                }
+            },
         )
-        self.assertEqual("c: artifact-missing; command exited 1: python3", detail)
+        self.assertEqual(
+            "final-review-artifact-consistent: artifact-missing; "
+            "command exited 1: python3",
+            detail,
+        )
 
     def test_an_unauthenticated_stream_line_stays_out_of_the_detail(self) -> None:
         """The streams are application output wherever the diagnostic is absent.
@@ -312,11 +321,16 @@ class CommandFailureDetailTests(unittest.TestCase):
         self.assertEqual("command exited 1: python3", detail)
 
     def test_diagnostic_lead_is_truncated(self) -> None:
-        """A total on the lead, independent of the parser's own token bound."""
+        """A total on the lead, independent of the parser's own vocabulary."""
         detail = verification._command_failure_detail(
             self.check(),
             1,
-            {"failure_diagnostic": {"check": "c", "reason": "x" * 5000}},
+            {
+                "failure_diagnostic": {
+                    "check": "final-review-artifact-consistent",
+                    "reason": "x" * 5000,
+                }
+            },
         )
         self.assertLessEqual(
             len(detail) - len("; command exited 1: python3"),
