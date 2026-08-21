@@ -1144,7 +1144,17 @@ evidence pauses as
 `workspace-write-guard-unavailable`. Both post-turn failures retain repository
 contents, restore the handoff to pending, record qualified evidence, and run
 before verification or commit. Scope violations require a durable scope repair
-and fresh expansion/preflight before continuing. A repository the plan never
+and fresh expansion/preflight before continuing. When the retained session is
+an ASL-generated repair child, the runner performs part of that repair itself:
+before it judges the retained changes it widens the child's persisted **Writes
+repositories** in place to the union its own findings require, re-reads the
+scope from the rewritten file, and records the change under the repair
+evidence's `write_scope_regeneration`. The rewrite widens only and touches only
+generated children, so a human-authored session's declared scope is never
+rewritten and an alias the current findings no longer require is never removed.
+Because the file itself is rewritten, preflight, expansion, the completion
+contract and prompt rendering all keep reading the same single scope. A
+repository the plan never
 registered is outside the guard's domain: another `asl run` process working in
 an unrelated checkout beneath the same root cannot pause this run, and no
 exclusion policy is needed to keep it quiet. Git errors inside a registered
@@ -1506,6 +1516,25 @@ run, so it contributes no signal to its lane: where every check on a lane could
 not read its evidence, the lane takes the auditor's judgement, and where any
 check did answer, the worse of the two verdicts wins. That is what lets a legacy
 plan with no registry binding still earn a clean audit.
+
+An out-of-scope write is graded on whether the guard held it, because a run that
+paused on a scope violation is a working guard rather than a leak. Two checks
+share one reading of the same evidence and one lane.
+`packet.write-scope-containment` is critical and owns only the writes that got
+past the guard; `packet.write-scope-guard-catch` is medium and owns the ones it
+stopped, recommending that the child's durable write scope be widened to the
+aliases its own findings name before expansion and preflight are rerun and the
+run resumed. A write counts as caught only when the guard recorded the
+violation, reverted the session to pending, paused the run on
+`workspace-write-scope-violation`, and no commit for that session followed;
+anything weaker is an escape, including a `workspace-write-scope-repair` whose
+own guard evidence still lists violations. A guard that could not inventory a
+repository is neither, and stays on the critical check, because blindness is not
+a catch. Severity lives on the check rather than on the verdict, so one
+invariant key can never report critical on one occurrence and medium on the
+next and split its own issue history in the inbox, and since both checks answer
+`pass` when their case is absent, the lane rollup keeping the worse of them is
+what stops either from masking the other.
 
 A run that paused on a harness failure is graded on whether its own records
 agree with each other, not on whether it retried. The lifecycle lane reads
@@ -3932,7 +3961,7 @@ may ignore this block. `action` is one of `initial-review`,
 `materialize-repairs`, `run-repairs`, `rereview`, or `terminal`; `eligible`
 describes the persisted/effective-cap evaluation, and `blocker` is `null`,
 `review-harness-required`, `higher-cap-required`, `artifact-invalid`,
-`not-loop-ready`, a terminal disposition (`all-clear`,
+`not-loop-ready`, `repair-scope-stale`, a terminal disposition (`all-clear`,
 `repair-group-exhausted`, `findings-repeated`, or `unstructured-findings`), or
 a non-disposition terminal blocker (`repair-sessions-missing`,
 `repair-sessions-not-runnable`, or `unknown-disposition`). Repair children are
@@ -3940,7 +3969,16 @@ written to disk before the executability gate judges them, so a materialization
 the gate refused leaves pending sessions that look runnable. A `run-repairs`
 continuation for such a plan reports `eligible: false` with blocker
 `not-loop-ready` until the plan is marked loop-ready again, rather than
-claiming the refused children are ready to run. An unrecognized recorded disposition is retained in
+claiming the refused children are ready to run. A `run-repairs` continuation
+also reports `eligible: false` with blocker `repair-scope-stale` when a pending
+repair child's persisted **Writes repositories** is narrower than the scope its
+own findings require, which would hand that child a work list naming files it
+is not authorized to write. The comparison is record to record — the persisted
+child scope against the scope recomputed from the validated findings — because
+the retained guard is derived from that same persisted scope and agrees with it
+even when both are too narrow. An additive `repair_scope_gaps` block names the
+missing aliases and their provenance per child; rewriting the child with the
+required scope clears the blocker. An unrecognized recorded disposition is retained in
 `source_disposition` for diagnosis and maps to the stable
 `unknown-disposition` blocker. The projection includes source lineage,
 historical/required/selected cap values, pending and completed repair IDs,

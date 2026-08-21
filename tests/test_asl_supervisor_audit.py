@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import dataclasses
 import hashlib
 import io
 import json
@@ -3685,6 +3687,272 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn(
                 "did not record a passing guard", results["scope-escape"].detail
             )
+
+    def _violating_guard(self, *, reverted: bool) -> dict[str, Any]:
+        """The guard record the runner writes when a session exceeded its writes."""
+        return {
+            "passed": False,
+            "session_id": "01",
+            "reason": events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            "phase": "after",
+            "reverted_to_pending": reverted,
+            "write_aliases": ["app"],
+            "authorized_aliases": ["app"],
+            "violations": [{"alias": "docs", "repository": "docs"}],
+            "unavailable": {},
+        }
+
+    def _scope_violation(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        *,
+        reverted: bool = True,
+        paused: bool = True,
+    ) -> None:
+        """Record one out-of-scope write the way a real run records it.
+
+        The same guard record reaches the turn result and the pause it raised,
+        which is what the analysis has to collapse back into one write.
+        """
+        guard = self._violating_guard(reverted=reverted)
+        payload = self._read_result(history[3])
+        payload["workspace_write_guard"] = guard
+        payload["session_id"] = "01"
+        self._write_result(history[3] / "turn-0001-01", payload)
+        records: list[tuple[str, dict[str, Any]]] = [
+            ("run_started", {"run_id": RUN_ID})
+        ]
+        if paused:
+            records.append(
+                (
+                    events.RUN_PAUSED_EVENT,
+                    {
+                        "run_id": RUN_ID,
+                        "reason": events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+                        "details": {"session": 1, "workspace_write_guard": guard},
+                    },
+                )
+            )
+        else:
+            records.append((events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}))
+        self._write_events(history[2], records)
+
+    def _write_commit(self, run_dir: Path, *, session_id: str) -> None:
+        commit_dir = run_dir / "commit-0001-session-01-app"
+        commit_dir.mkdir()
+        self._write_result(
+            commit_dir,
+            {
+                "success": True,
+                "returncode": 0,
+                "repository_alias": "app",
+                "session_id": session_id,
+            },
+        )
+
+    def test_a_write_the_guard_caught_is_medium_and_never_a_containment_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+
+            _, results = self._audit(history)
+
+            # A working guard is what produced this evidence, so the critical
+            # containment check has nothing to report.
+            self.assertEqual("pass", results["scope-escape"].status)
+            self.assertIn(
+                "none of them reached the tree", results["scope-escape"].detail
+            )
+            self.assertEqual("fail", results["scope-guard-catch"].status)
+            self.assertIn("session 01", results["scope-guard-catch"].detail)
+            self.assertIn("docs", results["scope-guard-catch"].detail)
+            findings = {
+                finding.invariant_key: finding
+                for finding in supervisor_audit.findings_from_results(results.values())
+            }
+            self.assertNotIn("packet.write-scope-containment", findings)
+            caught = findings["packet.write-scope-guard-catch"]
+            self.assertEqual("medium", caught.severity)
+            self.assertEqual("task-packet-coherence", caught.lane)
+            self.assertIn("durable write scope", caught.recommendation)
+            self.assertIn("expansion and preflight", caught.recommendation)
+            # Nothing is masked: the two checks share a lane and the rollup
+            # keeps the worse of them.
+            self.assertEqual(
+                "fail",
+                supervisor_audit.lane_rollup(results.values())["task-packet-coherence"],
+            )
+
+    def test_one_caught_write_is_reported_once_across_turn_and_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+
+            _, results = self._audit(history)
+
+            self.assertEqual(
+                1, results["scope-guard-catch"].detail.count("wrote outside")
+            )
+
+    def test_a_violation_the_run_never_reverted_still_escaped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history, reverted=False)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn("not reverted to pending", results["scope-escape"].detail)
+            self.assertEqual("pass", results["scope-guard-catch"].status)
+            findings = {
+                finding.invariant_key: finding
+                for finding in supervisor_audit.findings_from_results(results.values())
+            }
+            self.assertNotIn("packet.write-scope-guard-catch", findings)
+            self.assertEqual(
+                "critical", findings["packet.write-scope-containment"].severity
+            )
+
+    def test_a_violation_the_run_never_paused_on_still_escaped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history, paused=False)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn(
+                "never paused on the violation", results["scope-escape"].detail
+            )
+            self.assertEqual("pass", results["scope-guard-catch"].status)
+
+    def test_a_commit_for_the_offending_session_undoes_the_catch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+            self._write_commit(history[3], session_id="01")
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn("a commit for that session", results["scope-escape"].detail)
+            self.assertEqual("pass", results["scope-guard-catch"].status)
+
+    def test_a_commit_for_another_session_leaves_the_catch_standing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+            self._write_commit(history[3], session_id="02")
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["scope-escape"].status)
+            self.assertEqual("fail", results["scope-guard-catch"].status)
+
+    def test_a_repair_that_still_lists_violations_escaped_rather_than_caught(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(
+                history[2],
+                [
+                    ("run_started", {"run_id": RUN_ID}),
+                    (
+                        events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
+                        {
+                            "run_id": RUN_ID,
+                            "details": {
+                                "session_id": "01",
+                                "workspace_write_guard": {
+                                    "passed": False,
+                                    "write_aliases": ["app"],
+                                    "authorized_aliases": ["app"],
+                                    "violations": [{"alias": "docs"}],
+                                    "unavailable": {},
+                                },
+                            },
+                        },
+                    ),
+                    (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn(
+                "still excludes retained changes", results["scope-escape"].detail
+            )
+            self.assertEqual("pass", results["scope-guard-catch"].status)
+
+    def test_a_guard_that_could_not_look_is_never_read_as_a_catch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            payload = self._read_result(history[3])
+            payload["workspace_write_guard"] = {
+                "passed": False,
+                "session_id": "01",
+                "write_aliases": ["app"],
+                "authorized_aliases": ["app"],
+                "violations": [],
+                "unavailable": {"app": {"reason": "fingerprint-failed"}},
+            }
+            self._write_result(history[3] / "turn-0001-01", payload)
+
+            _, results = self._audit(history)
+
+            # Blindness stays on the critical check; the catch check owns only
+            # writes the guard demonstrably held.
+            self.assertEqual("unavailable", results["scope-escape"].status)
+            self.assertEqual("pass", results["scope-guard-catch"].status)
+            self.assertEqual(
+                "unavailable",
+                supervisor_audit.lane_rollup(
+                    [results["scope-escape"], results["scope-guard-catch"]]
+                )["task-packet-coherence"],
+            )
+
+    def test_write_scope_severity_lives_on_the_spec_not_on_the_verdict(self) -> None:
+        specs = {
+            spec.invariant_key: spec
+            for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS
+        }
+        containment = specs["packet.write-scope-containment"]
+        catch = specs["packet.write-scope-guard-catch"]
+
+        self.assertEqual("critical", containment.severity)
+        self.assertEqual("medium", catch.severity)
+        self.assertEqual("task-packet-coherence", containment.lane)
+        self.assertEqual(containment.lane, catch.lane)
+        self.assertNotEqual(containment.component, catch.component)
+        # A severity on the verdict would let one issue key report critical on
+        # one occurrence and medium on the next, which is what corrupts the
+        # inbox's dedup history for that key.
+        self.assertNotIn(
+            "severity",
+            {
+                field.name
+                for field in dataclasses.fields(supervisor_audit._Verdict)  # noqa: SLF001
+            },
+        )
+
+    def test_both_write_scope_checks_share_one_analysis_helper(self) -> None:
+        module = ast.parse(Path(supervisor_audit.__file__).read_text(encoding="utf-8"))
+        called = {
+            node.name: {
+                child.func.id
+                for child in ast.walk(node)
+                if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+            }
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+        }
+
+        self.assertIn("_analyze_write_scope", called["_check_scope_escape"])
+        self.assertIn("_analyze_write_scope", called["_check_scope_guard_catch"])
 
     def test_success_claimed_over_failed_verification_is_a_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

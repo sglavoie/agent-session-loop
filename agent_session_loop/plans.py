@@ -511,6 +511,26 @@ def render_session_scope(scope: SessionScope) -> str:
     )
 
 
+def replaced_session_scope_text(text: str, scope: SessionScope) -> str:
+    """Return ``text`` with its structural scope fields rewritten in place.
+
+    Stripping and re-inserting the block relocates it; an already-rendered
+    session file keeps its exact shape when only the two structural lines are
+    substituted. Fenced examples are left alone, because the indices come from
+    the same fence-aware scan the parser uses.
+    """
+    reads_line, writes_line = render_session_scope(scope).rstrip("\n").splitlines()
+    lines = text.splitlines()
+    for index in _structural_session_scope_indices(lines):
+        lines[index] = (
+            reads_line
+            if lines[index].startswith(READS_REPOSITORIES_PREFIX)
+            else writes_line
+        )
+    rewritten = "\n".join(lines)
+    return f"{rewritten}\n" if text.endswith("\n") else rewritten
+
+
 def parse_qualified_path(
     value: str,
     registry_aliases: Iterable[str] | None = None,

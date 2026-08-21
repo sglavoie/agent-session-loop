@@ -46,8 +46,8 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -83,8 +83,26 @@ _REVIEW_REPAIR_SESSION_MARKER_RE = re.compile(
 GENERATED_REVIEW_REPAIR_SESSION_VERSION = 1
 REPOSITORY_AWARE_GENERATED_REVIEW_REPAIR_SESSION_VERSION = 2
 
+_REPAIR_GROUP_LINE_RE = re.compile(r"(?m)^- Repair group: `([^`]+)`\.$")
+
 #: Maximum number of repair groups (child sessions) produced per cycle.
 MAX_REPAIR_GROUPS = 8
+
+# Provenance labels for a repair group's write repositories. A repository can be
+# attributed by more than one source; the strongest attribution is reported.
+WRITE_REPOSITORY_SOURCE_REPO = "repo"
+WRITE_REPOSITORY_SOURCE_EVIDENCE = "evidence"
+WRITE_REPOSITORY_SOURCE_CHECK = "check"
+_WRITE_REPOSITORY_SOURCE_RANK = {
+    WRITE_REPOSITORY_SOURCE_REPO: 0,
+    WRITE_REPOSITORY_SOURCE_EVIDENCE: 1,
+    WRITE_REPOSITORY_SOURCE_CHECK: 2,
+}
+_WRITE_REPOSITORY_SOURCE_LABELS = {
+    WRITE_REPOSITORY_SOURCE_REPO: "finding `repo`",
+    WRITE_REPOSITORY_SOURCE_EVIDENCE: "finding evidence paths",
+    WRITE_REPOSITORY_SOURCE_CHECK: "finding verification checks",
+}
 
 # Stable ``reason`` vocabulary for materialization results.
 REVIEW_REPAIR_REASON_OK = "ok"
@@ -152,6 +170,7 @@ class RepairGroupPlan:
     rendered_text: str
     read_repositories: tuple[str, ...] = ()
     write_repositories: tuple[str, ...] = ()
+    write_repository_sources: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -243,6 +262,119 @@ def group_findings_by_repair_group(
             order.append(group)
         buckets[group].append(finding)
     return [(group, tuple(buckets[group])) for group in order]
+
+
+def repair_group_write_repository_sources(
+    group: str,
+    group_findings: Sequence[Mapping[str, Any]],
+    *,
+    repository_registry: workspaces.RepositoryRegistry,
+) -> dict[str, str]:
+    """Return the aliases a repair group must write, mapped to their provenance.
+
+    A finding's work is not confined to its ``repo``. :func:`_render_child_body`
+    prints every ``evidence[].path`` to the child as its work list and
+    :func:`_merge_verification_checks` puts every ``verification_checks[].repo``
+    into the child's completion contract, so all three attribute writes. Deriving
+    the scope from ``repo`` alone hands the child a work list naming files it is
+    not authorized to write.
+
+    The union is bounded by the group's own findings and never by the registry,
+    so a group whose evidence and checks all name one alias still yields a
+    single-alias write scope. Aliases are keyed in registry order and each maps
+    to its strongest attribution (``repo`` over ``evidence`` over ``check``).
+    """
+    sources: dict[str, str] = {}
+    unknown: set[str] = set()
+
+    def attribute(alias: str, source: str) -> None:
+        if alias not in repository_registry.aliases:
+            unknown.add(alias)
+            return
+        current = sources.get(alias)
+        if (
+            current is None
+            or _WRITE_REPOSITORY_SOURCE_RANK[source]
+            < _WRITE_REPOSITORY_SOURCE_RANK[current]
+        ):
+            sources[alias] = source
+
+    for finding in group_findings:
+        alias = finding.get("repo")
+        if not isinstance(alias, str) or not alias:
+            raise ReviewRepairError(
+                f"repair group {group!r} contains a finding without an "
+                "explicit repository alias"
+            )
+        attribute(alias, WRITE_REPOSITORY_SOURCE_REPO)
+        for evidence in finding["evidence"]:
+            path = evidence["path"]
+            try:
+                qualified = plans.parse_qualified_path(path)
+            except (PlanError, ValueError) as error:
+                raise ReviewRepairError(
+                    f"repair group {group!r} has evidence path {path!r} that is "
+                    f"not a qualified Alias:path reference: {error}"
+                ) from error
+            attribute(qualified.alias, WRITE_REPOSITORY_SOURCE_EVIDENCE)
+        for check in finding["verification_checks"]:
+            check_repository = check.get("repo")
+            if not isinstance(check_repository, str) or not check_repository:
+                raise ReviewRepairError(
+                    f"repair group {group!r} has a verification check without an "
+                    "explicit repository alias"
+                )
+            attribute(check_repository, WRITE_REPOSITORY_SOURCE_CHECK)
+
+    if unknown:
+        raise ReviewRepairError(
+            f"repair group {group!r} references unknown repository aliases: "
+            f"{', '.join(sorted(unknown))}"
+        )
+    return {
+        alias: sources[alias]
+        for alias in repository_registry.aliases
+        if alias in sources
+    }
+
+
+def required_write_repositories(
+    group: str,
+    group_findings: Sequence[Mapping[str, Any]],
+    *,
+    repository_registry: workspaces.RepositoryRegistry,
+) -> tuple[str, ...]:
+    """Return, in registry order, the aliases a repair group must write.
+
+    A projection of :func:`repair_group_write_repository_sources` for callers
+    that need the scope without its provenance. Both come from that one union,
+    so a child regenerated from this and the provenance reported beside it can
+    never describe different repositories.
+    """
+    return tuple(
+        repair_group_write_repository_sources(
+            group,
+            group_findings,
+            repository_registry=repository_registry,
+        )
+    )
+
+
+def repair_group_from_session_text(text: str) -> str | None:
+    """Return the repair group a materialized child declares, if any.
+
+    Reads the line :func:`_render_child_body` writes, so the parser and the
+    renderer of that bullet stay together.
+    """
+    match = _REPAIR_GROUP_LINE_RE.search(text)
+    return None if match is None else match.group(1)
+
+
+def _render_write_repository_sources(sources: Mapping[str, str]) -> str:
+    return ", ".join(
+        f"`{alias}` (from {_WRITE_REPOSITORY_SOURCE_LABELS[source]})"
+        for alias, source in sources.items()
+    )
 
 
 def _dedupe_preserving_order(items: Sequence[str]) -> list[str]:
@@ -400,6 +532,7 @@ def _render_child_body(
     finding_ids: Sequence[str],
     findings: Sequence[dict[str, Any]],
     marker_version: int = GENERATED_REVIEW_REPAIR_SESSION_VERSION,
+    write_repository_sources: Mapping[str, str] | None = None,
 ) -> list[str]:
     lines: list[str] = [
         REVIEW_REPAIR_SESSION_MARKER,
@@ -417,10 +550,19 @@ def _render_child_body(
             f"- Addresses {len(finding_ids)} review finding(s): "
             f"{', '.join(finding_ids)}."
         ),
-        "",
-        "## Findings to repair",
-        "",
     ]
+    if write_repository_sources:
+        lines.append(
+            "- Write scope: "
+            f"{_render_write_repository_sources(write_repository_sources)}."
+        )
+    lines.extend(
+        [
+            "",
+            "## Findings to repair",
+            "",
+        ]
+    )
     for finding in findings:
         lines.append(f"### {finding['id']} ({finding['severity']}): {finding['title']}")
         lines.append("")
@@ -481,27 +623,17 @@ def _build_repair_group_plans(
         )
         read_repositories: tuple[str, ...] = ()
         write_repositories: tuple[str, ...] = ()
+        write_repository_sources: dict[str, str] = {}
         scope: plans.SessionScope | None = None
         marker_version = GENERATED_REVIEW_REPAIR_SESSION_VERSION
         if repository_registry is not None:
-            attributed = {finding.get("repo") for finding in group_findings}
-            if None in attributed or any(
-                not isinstance(alias, str) or not alias for alias in attributed
-            ):
-                raise ReviewRepairError(
-                    f"repair group {group!r} contains a finding without an "
-                    "explicit repository alias"
-                )
-            unknown = attributed.difference(repository_registry.aliases)
-            if unknown:
-                raise ReviewRepairError(
-                    f"repair group {group!r} references unknown repository "
-                    f"aliases: {', '.join(sorted(str(alias) for alias in unknown))}"
-                )
-            read_repositories = repository_registry.aliases
-            write_repositories = tuple(
-                alias for alias in repository_registry.aliases if alias in attributed
+            write_repository_sources = repair_group_write_repository_sources(
+                group,
+                group_findings,
+                repository_registry=repository_registry,
             )
+            read_repositories = repository_registry.aliases
+            write_repositories = tuple(write_repository_sources)
             scope = plans.SessionScope(
                 reads=read_repositories,
                 writes=write_repositories,
@@ -521,6 +653,7 @@ def _build_repair_group_plans(
             finding_ids=finding_ids,
             findings=group_findings,
             marker_version=marker_version,
+            write_repository_sources=write_repository_sources,
         )
         try:
             contract = authoring.contract_from_payload(
@@ -564,6 +697,7 @@ def _build_repair_group_plans(
                 rendered_text=rendered_text,
                 read_repositories=read_repositories,
                 write_repositories=write_repositories,
+                write_repository_sources=write_repository_sources,
             )
         )
         previous_id = child_id

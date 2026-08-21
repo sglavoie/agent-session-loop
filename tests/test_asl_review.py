@@ -1510,6 +1510,149 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         )
         self.assertEqual(plans.SessionScope(("SVC", "OAK"), ("SVC",)), child_scope)
 
+    def _cross_repo_finding(
+        self,
+        finding_id: str,
+        repair_group: str,
+        repo: str,
+        *,
+        evidence_repos: tuple[str, ...],
+        check_repos: tuple[str, ...],
+    ) -> dict[str, Any]:
+        finding = self._finding(
+            finding_id,
+            repair_group,
+            evidence=[
+                {"path": f"{alias}:pkg/{finding_id}.py", "symbol": "target"}
+                for alias in evidence_repos
+            ],
+            verification_checks=[
+                {
+                    "type": "command",
+                    "name": f"verify-{finding_id}-{alias}",
+                    "repo": alias,
+                    "argv": ["python3", "-c", "pass"],
+                }
+                for alias in check_repos
+            ],
+        )
+        finding["repo"] = repo
+        return finding
+
+    def test_registered_group_writes_union_evidence_and_check_repositories(
+        self,
+    ) -> None:
+        # Shape of F002 in run 20260820T182939015261Z-25011: attributed to a
+        # single alias while its evidence and checks span two.
+        widened_finding = self._cross_repo_finding(
+            "F1",
+            "manifest-contract",
+            "OAK",
+            evidence_repos=("OAK", "SVC"),
+            check_repos=("OAK", "SVC"),
+        )
+        narrow_finding = self._make_registered_finding("F2", "svc-only", "SVC")
+        self._register_plan([widened_finding, narrow_finding])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        widened, narrow = repair_plan.repair_groups
+        self.assertEqual(("SVC", "OAK"), widened.write_repositories)
+        self.assertEqual(
+            {"SVC": "evidence", "OAK": "repo"},
+            widened.write_repository_sources,
+        )
+        self.assertIn("**Writes repositories**: SVC, OAK", widened.rendered_text)
+        self.assertIn(
+            "- Write scope: `SVC` (from finding evidence paths), "
+            "`OAK` (from finding `repo`).",
+            widened.rendered_text,
+        )
+        self.assertEqual(("SVC",), narrow.write_repositories)
+        self.assertEqual({"SVC": "repo"}, narrow.write_repository_sources)
+        self.assertIn(
+            "- Write scope: `SVC` (from finding `repo`).",
+            narrow.rendered_text,
+        )
+
+        result = self._materialize()
+
+        self.assertTrue(result.ok, result.error)
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        self.assertEqual(
+            plans.SessionScope(("SVC", "OAK"), ("SVC", "OAK")),
+            plans.parse_session_scope(
+                result.children[0].path.read_text(encoding="utf-8"), registry.aliases
+            ),
+        )
+
+    def test_registered_group_write_scope_records_check_only_attribution(
+        self,
+    ) -> None:
+        finding = self._cross_repo_finding(
+            "F1",
+            "shared",
+            "SVC",
+            evidence_repos=("SVC",),
+            check_repos=("SVC", "OAK"),
+        )
+        self._register_plan([finding])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        (group,) = repair_plan.repair_groups
+        self.assertEqual(("SVC", "OAK"), group.write_repositories)
+        self.assertEqual(
+            {"SVC": "repo", "OAK": "check"},
+            group.write_repository_sources,
+        )
+        self.assertIn(
+            "- Write scope: `SVC` (from finding `repo`), "
+            "`OAK` (from finding verification checks).",
+            group.rendered_text,
+        )
+
+    def test_write_repository_sources_helper_is_bounded_by_group_findings(
+        self,
+    ) -> None:
+        self._register_plan([self._make_registered_finding("F1", "svc-only", "SVC")])
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        findings = [
+            self._cross_repo_finding(
+                "F1",
+                "shared",
+                "OAK",
+                evidence_repos=("OAK",),
+                check_repos=("OAK",),
+            ),
+            self._cross_repo_finding(
+                "F2",
+                "shared",
+                "SVC",
+                evidence_repos=("SVC",),
+                check_repos=("SVC",),
+            ),
+        ]
+
+        self.assertEqual(
+            {"OAK": "repo"},
+            review_repair.repair_group_write_repository_sources(
+                "shared", findings[:1], repository_registry=registry
+            ),
+        )
+        self.assertEqual(
+            ["SVC", "OAK"],
+            list(
+                review_repair.repair_group_write_repository_sources(
+                    "shared", findings, repository_registry=registry
+                )
+            ),
+        )
+
     def test_registered_repair_fails_closed_for_unattributed_legacy_finding(
         self,
     ) -> None:
@@ -1683,6 +1826,80 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         self.assertEqual(
             ["OAK:staged.txt"], recovered["repositories"][1]["dirty_paths"]
         )
+
+    def test_narrowed_pending_repair_child_blocks_until_scope_is_regenerated(
+        self,
+    ) -> None:
+        self._register_plan(
+            [
+                self._cross_repo_finding(
+                    "F1",
+                    "manifest-contract",
+                    "OAK",
+                    evidence_repos=("OAK", "SVC"),
+                    check_repos=("OAK",),
+                )
+            ]
+        )
+        materialized = self._materialize()
+        self.assertTrue(materialized.ok, materialized.error)
+        child_path = materialized.children[0].path
+        regenerated = child_path.read_text(encoding="utf-8")
+
+        def resume() -> review_continuation.ReviewResume:
+            return review_continuation.evaluate_review_continuation(
+                plans.inspect_plan(self.plan_dir),
+                self.tmp_path / "missing-events.jsonl",
+                max_review_fix_cycles=1,
+            )
+
+        ready = resume()
+
+        self.assertEqual("run-repairs", ready.action)
+        self.assertTrue(ready.eligible)
+        self.assertIsNone(ready.blocker)
+        self.assertIsNone(ready.repair_scope_gaps)
+
+        child_path.write_text(
+            regenerated.replace(
+                "**Writes repositories**: SVC, OAK",
+                "**Writes repositories**: OAK",
+            ),
+            encoding="utf-8",
+        )
+        narrowed = resume()
+
+        self.assertEqual("run-repairs", narrowed.action)
+        self.assertFalse(narrowed.eligible)
+        self.assertEqual("repair-scope-stale", narrowed.blocker)
+        assert narrowed.repair_scope_gaps is not None
+        (gap,) = narrowed.repair_scope_gaps
+        self.assertEqual(
+            {
+                "repair_session_id": "2.1",
+                "repair_group": "manifest-contract",
+                "durable_write_repositories": ["OAK"],
+                "required_write_repositories": ["SVC", "OAK"],
+                "missing_write_repositories": ["SVC"],
+                "write_repository_sources": {"SVC": "evidence", "OAK": "repo"},
+            },
+            dict(gap),
+        )
+        self.assertEqual(
+            "widen **Writes repositories** in the pending repair children, "
+            "then resume the same plan: 2.1 needs SVC",
+            review_continuation.review_resume_guidance(
+                narrowed.to_payload(), review_harness_active=True
+            ),
+        )
+
+        child_path.write_text(regenerated, encoding="utf-8")
+        cleared = resume()
+
+        self.assertEqual("run-repairs", cleared.action)
+        self.assertTrue(cleared.eligible)
+        self.assertIsNone(cleared.blocker)
+        self.assertIsNone(cleared.repair_scope_gaps)
 
     def test_dry_planning_accepts_exactly_eight_groups(self) -> None:
         self._write_plan([self._finding(f"F{i}", f"g{i}") for i in range(8)])

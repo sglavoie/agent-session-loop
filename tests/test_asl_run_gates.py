@@ -30,6 +30,7 @@ from agent_session_loop import (
     plans,
     preflight,
     review,
+    review_repair,
     runner,
     session_overview,
     state,
@@ -41,6 +42,7 @@ from tests.support import (
     _command_contract,
     _contract_block,
     _load_script_module,
+    _structured_review_finding,
     agent_mux_notify_enabled,
     init_git_repo,
     init_multi_repo_workspace,
@@ -48,6 +50,7 @@ from tests.support import (
     install_fake_codex,
     patched_env,
     read_jsonl,
+    write_completed_review_plan,
     write_multi_repo_plan,
     write_plan,
 )
@@ -2725,6 +2728,293 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
             second_payload["pause_reason"],
         )
+
+
+class RepairChildWriteScopeRegenerationTests(unittest.TestCase):
+    """Widen a materialized repair child whose findings were recomputed."""
+
+    SPECS = DEFAULT_MULTI_REPO_SPECS[:2]
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.workspace_root = self.tmp_path / "workspace"
+        init_multi_repo_workspace(self.workspace_root, self.SPECS)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+
+    def _finding(
+        self,
+        finding_id: str,
+        repair_group: str,
+        repo: str,
+        *,
+        evidence_repos: tuple[str, ...],
+    ) -> dict[str, Any]:
+        return _structured_review_finding(
+            finding_id=finding_id,
+            repair_group=repair_group,
+            repo=repo,
+            evidence=[
+                {"path": f"{alias}:pkg/{finding_id}.py", "symbol": "target"}
+                for alias in evidence_repos
+            ],
+            verification_checks=[
+                {
+                    "type": "command",
+                    "name": f"verify-{finding_id}",
+                    "repo": repo,
+                    "argv": ["python3", "-c", "pass"],
+                }
+            ],
+        )
+
+    def _register_plan(self, findings: list[dict[str, Any]]) -> None:
+        write_completed_review_plan(self.plan_dir, findings)
+        rows = "\n".join(
+            f"| {alias} | {path} | {origin} |" for alias, path, origin in self.SPECS
+        )
+        (self.plan_dir / "manifest.md").write_text(
+            "# Manifest\n\n## Repositories\n\n"
+            "| Alias | Path | Origin |\n"
+            "| --- | --- | --- |\n"
+            f"{rows}\n",
+            encoding="utf-8",
+        )
+        for session_id, writes in (("1", "SVC, OAK"), ("2", "(none)")):
+            path = self.plan_dir / f"session-{session_id}.md"
+            heading, remainder = path.read_text(encoding="utf-8").split("\n", 1)
+            path.write_text(
+                (
+                    f"{heading}\n\n**Reads repositories**: SVC, OAK\n"
+                    f"**Writes repositories**: {writes}\n{remainder}"
+                ).replace(
+                    "- **Files modified**: (none yet)",
+                    "- **Files modified**: (none)",
+                ),
+                encoding="utf-8",
+            )
+        self._write_artifact(findings)
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        plans.save_workspace_plan_metadata(
+            self.plan_dir,
+            self.workspace_root,
+            registry.digest,
+        )
+
+    def _write_artifact(self, findings: list[dict[str, Any]]) -> None:
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps(
+                {
+                    "version": review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION,
+                    "outcome": "findings",
+                    "findings": findings,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _materialize_child(self, findings: list[dict[str, Any]]) -> Path:
+        self._register_plan(findings)
+        result = review_repair.materialize_review_repair_sessions(
+            self.plan_dir,
+            state_dir=self.state_dir,
+        )
+        self.assertTrue(result.ok, result.error)
+        return self.plan_dir / "session-2.1.md"
+
+    def _child_status(self) -> plans.SessionStatus:
+        for session in plans.discover_session_files(self.plan_dir):
+            if session.id == "2.1":
+                return plans.read_session_status(session)
+        raise AssertionError("the repair child was not materialized")
+
+    def _regenerate(self) -> dict[str, Any] | None:
+        context = verification.VerificationContext.from_plan(
+            self.plan_dir,
+            self.workspace_root,
+        )
+        workspace = context.workspace
+        assert workspace is not None
+        status = self._child_status()
+        return runner._regenerated_repair_child_write_scope(
+            session=status,
+            plan_dir=self.plan_dir,
+            workspace=workspace,
+            scope=plans.parse_session_scope(
+                status.path.read_text(encoding="utf-8"),
+                workspace.registry.aliases,
+            ),
+        )
+
+    def _narrow(self, child: Path) -> str:
+        """Persist the scope a child materialized before the evidence widened."""
+        materialized = child.read_text(encoding="utf-8")
+        self.assertIn("**Writes repositories**: SVC, OAK", materialized)
+        child.write_text(
+            materialized.replace(
+                "**Writes repositories**: SVC, OAK",
+                "**Writes repositories**: OAK",
+            ),
+            encoding="utf-8",
+        )
+        return materialized
+
+    def test_narrowed_child_is_widened_to_what_its_findings_require(self) -> None:
+        child = self._materialize_child(
+            [
+                self._finding(
+                    "F1",
+                    "manifest-contract",
+                    "OAK",
+                    evidence_repos=("OAK", "SVC"),
+                )
+            ]
+        )
+        materialized = self._narrow(child)
+
+        record = self._regenerate()
+
+        self.assertEqual(
+            {
+                "session_id": "2.1",
+                "repair_group": "manifest-contract",
+                "durable_write_repositories": ["OAK"],
+                "required_write_repositories": ["SVC", "OAK"],
+                "added_write_repositories": ["SVC"],
+                "write_repositories": ["SVC", "OAK"],
+                "read_repositories": ["SVC", "OAK"],
+            },
+            record,
+        )
+        # Rewriting only the structural scope fields restores the child the
+        # authoring path would render today, byte for byte.
+        self.assertEqual(materialized, child.read_text(encoding="utf-8"))
+        self.assertIsNone(self._regenerate())
+
+    def test_child_wider_than_its_findings_is_never_narrowed(self) -> None:
+        child = self._materialize_child(
+            [self._finding("F1", "svc-only", "SVC", evidence_repos=("SVC",))]
+        )
+        materialized = child.read_text(encoding="utf-8")
+        self.assertIn("**Writes repositories**: SVC", materialized)
+        widened = materialized.replace(
+            "**Writes repositories**: SVC",
+            "**Writes repositories**: SVC, OAK",
+        )
+        child.write_text(widened, encoding="utf-8")
+
+        self.assertIsNone(self._regenerate())
+        self.assertEqual(widened, child.read_text(encoding="utf-8"))
+
+    def test_human_authored_session_is_never_rewritten(self) -> None:
+        child = self._materialize_child(
+            [
+                self._finding(
+                    "F1",
+                    "manifest-contract",
+                    "OAK",
+                    evidence_repos=("OAK", "SVC"),
+                )
+            ]
+        )
+        self._narrow(child)
+        # Everything a generated child carries except the markers, so the
+        # refusal can only come from the generated-session predicate.
+        human_authored = "\n".join(
+            line
+            for line in child.read_text(encoding="utf-8").split("\n")
+            if "asl:generated-review-repair-session" not in line
+        )
+        child.write_text(human_authored, encoding="utf-8")
+
+        self.assertIsNone(self._regenerate())
+        self.assertEqual(human_authored, child.read_text(encoding="utf-8"))
+
+    def test_group_the_artifact_no_longer_carries_leaves_the_child_alone(
+        self,
+    ) -> None:
+        finding = self._finding(
+            "F1",
+            "manifest-contract",
+            "OAK",
+            evidence_repos=("OAK", "SVC"),
+        )
+        child = self._materialize_child([finding])
+        self._narrow(child)
+        narrowed = child.read_text(encoding="utf-8")
+        self._write_artifact([{**finding, "repair_group": "renamed-group"}])
+
+        self.assertIsNone(self._regenerate())
+        self.assertEqual(narrowed, child.read_text(encoding="utf-8"))
+
+
+class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
+    """Regeneration widens the durable file before anything judges it.
+
+    Ordering is the whole contract. A rewrite after the guard evidence is
+    computed would judge retained changes against the scope it had just
+    replaced, and a start-time override of the value alone would leave the
+    persisted file disagreeing with preflight, expansion, the completion
+    contract and prompt rendering, every one of which reads the file.
+    """
+
+    def setUp(self) -> None:
+        self.tree = ast.parse(Path(runner.__file__).read_text(encoding="utf-8"))
+
+    def _retained_scope_repair_branch(self) -> ast.If:
+        branches = [
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.If)
+            and "pending_workspace_scope_repair is not None" in ast.unparse(node.test)
+            and "== session_id" in ast.unparse(node.test)
+        ]
+        self.assertEqual(1, len(branches), "expected one retained-scope-repair branch")
+        return branches[0]
+
+    def _call_lines(self, node: ast.AST, name: str) -> list[int]:
+        return [
+            call.lineno
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == name
+        ]
+
+    def test_branch_widens_and_rereads_before_the_guard_evidence(self) -> None:
+        branch = self._retained_scope_repair_branch()
+
+        (regenerated,) = self._call_lines(
+            branch, "_regenerated_repair_child_write_scope"
+        )
+        (reread,) = self._call_lines(branch, "_session_scope")
+        (evidence,) = self._call_lines(branch, "_workspace_write_guard_evidence")
+
+        self.assertLess(regenerated, reread)
+        self.assertLess(reread, evidence)
+
+    def test_session_scope_is_only_ever_read_from_the_session_file(self) -> None:
+        assignments = [
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "session_scope"
+                for target in node.targets
+            )
+        ]
+
+        self.assertTrue(assignments, "expected the runner to bind session_scope")
+        for node in assignments:
+            self.assertIn(
+                "_session_scope(",
+                ast.unparse(node.value),
+                "session_scope must stay the session file's own value; "
+                f"line {node.lineno} computes one instead",
+            )
 
 
 class RunRepositoryContentionGateTests(unittest.TestCase):

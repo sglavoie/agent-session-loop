@@ -14,10 +14,11 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal
 
-from . import events, plans, review, review_repair, session_overview
+from . import events, plans, review, review_repair, session_overview, workspaces
 
 REVIEW_CYCLE_DISPOSITION_ALL_CLEAR = "all-clear"
 REVIEW_CYCLE_DISPOSITION_REPAIRS = "repairs-materialized"
@@ -112,6 +113,7 @@ class ReviewResume:
     source_repositories: tuple[Mapping[str, Any], ...] | None = None
     current_repositories: tuple[Mapping[str, Any], ...] | None = None
     repair_groups: tuple[Mapping[str, Any], ...] | None = None
+    repair_scope_gaps: tuple[Mapping[str, Any], ...] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload = {
@@ -167,6 +169,10 @@ class ReviewResume:
             ]
         if self.repair_groups is not None:
             payload["repair_groups"] = [dict(item) for item in self.repair_groups]
+        if self.repair_scope_gaps is not None:
+            payload["repair_scope_gaps"] = [
+                dict(item) for item in self.repair_scope_gaps
+            ]
         return payload
 
 
@@ -1085,15 +1091,15 @@ def _repair_group_records_from_children(
             text = status.path.read_text(encoding="utf-8")
         except OSError:
             return None
-        group_match = re.search(r"(?m)^- Repair group: `([^`]+)`\.$", text)
+        repair_group = review_repair.repair_group_from_session_text(text)
         finding_match = re.search(
             r"(?m)^- Addresses [0-9]+ review finding\(s\): (.+)\.$", text
         )
-        if group_match is None or finding_match is None:
+        if repair_group is None or finding_match is None:
             return None
         groups.append(
             {
-                "repair_group": group_match.group(1),
+                "repair_group": repair_group,
                 "repair_session_id": session_id,
                 "finding_ids": [
                     item.strip()
@@ -1105,17 +1111,30 @@ def _repair_group_records_from_children(
     return tuple(groups)
 
 
+@dataclass(frozen=True)
+class _DurableRepairScopes:
+    """One parse pass over the durable repair children of a review session.
+
+    Both the ``repair_groups`` projection fallback and the pending-child write
+    scope comparison read this, so neither re-reads the children or the
+    manifest registry.
+    """
+
+    groups: tuple[Mapping[str, Any], ...]
+    registry: workspaces.RepositoryRegistry | None
+
+
 def _repair_groups_from_children(
     plan_dir: Path,
     generated: Mapping[str, plans.SessionStatus],
-) -> tuple[Mapping[str, Any], ...] | None:
+) -> _DurableRepairScopes | None:
     """Recover repository attribution from durable generated child sessions."""
     groups = _repair_group_records_from_children(generated)
     if groups is None:
         return None
     registry = plans.read_repository_registry(plan_dir)
     if registry is None:
-        return groups
+        return _DurableRepairScopes(groups, None)
     attributed: list[Mapping[str, Any]] = []
     for group in groups:
         repair_session_id = str(group["repair_session_id"])
@@ -1131,7 +1150,71 @@ def _repair_groups_from_children(
         entry["read_repositories"] = list(scope.reads)
         entry["write_repositories"] = list(scope.writes)
         attributed.append(entry)
-    return tuple(attributed)
+    return _DurableRepairScopes(tuple(attributed), registry)
+
+
+def _pending_repair_scope_gaps(
+    durable: _DurableRepairScopes | None,
+    pending_ids: Sequence[str],
+    planning: review_repair.ReviewRepairPlan,
+) -> tuple[Mapping[str, Any], ...]:
+    """Pending children whose durable write scope is narrower than required.
+
+    This compares record to record: the scope persisted in each pending child
+    against the scope its own findings require today. The retained guard is
+    deliberately not consulted, because it is derived from that same durable
+    scope and therefore agrees with it even when both are too narrow.
+
+    Only strict widening is reported, and only for pending children, so the
+    blocker clears as soon as the child is rewritten and can never strand a
+    completed one.
+    """
+    if durable is None or durable.registry is None:
+        return ()
+    grouped = dict(
+        review_repair.group_findings_by_repair_group(list(planning.validated_findings))
+    )
+    pending = frozenset(pending_ids)
+    gaps: list[Mapping[str, Any]] = []
+    for record in durable.groups:
+        repair_session_id = _nonempty_str(record.get("repair_session_id"))
+        repair_group = _nonempty_str(record.get("repair_group"))
+        durable_writes = _string_tuple(record.get("write_repositories"))
+        if (
+            repair_session_id is None
+            or repair_session_id not in pending
+            or repair_group is None
+            or durable_writes is None
+        ):
+            continue
+        group_findings = grouped.get(repair_group)
+        if not group_findings:
+            continue
+        try:
+            required = review_repair.repair_group_write_repository_sources(
+                repair_group,
+                group_findings,
+                repository_registry=durable.registry,
+            )
+        except review_repair.ReviewRepairError:
+            # Findings this malformed already surface as their own blocker;
+            # staying silent here keeps that diagnosis rather than masking it.
+            continue
+        persisted = frozenset(durable_writes)
+        missing = [alias for alias in required if alias not in persisted]
+        if not missing:
+            continue
+        gaps.append(
+            {
+                "repair_session_id": repair_session_id,
+                "repair_group": repair_group,
+                "durable_write_repositories": list(durable_writes),
+                "required_write_repositories": list(required),
+                "missing_write_repositories": missing,
+                "write_repository_sources": dict(required),
+            }
+        )
+    return tuple(gaps)
 
 
 def _resume(
@@ -1256,6 +1339,23 @@ def _resume(
     )
 
 
+def _repair_scope_widenings(review_resume: Mapping[str, Any]) -> tuple[str, ...]:
+    """Render one ``<child> needs <aliases>`` fragment per stale repair scope."""
+    gaps = review_resume.get("repair_scope_gaps")
+    if not isinstance(gaps, Sequence) or isinstance(gaps, str):
+        return ()
+    fragments: list[str] = []
+    for gap in gaps:
+        if not isinstance(gap, Mapping):
+            continue
+        repair_session_id = _nonempty_str(gap.get("repair_session_id"))
+        missing = _string_tuple(gap.get("missing_write_repositories"))
+        if repair_session_id is None or not missing:
+            continue
+        fragments.append(f"{repair_session_id} needs {', '.join(missing)}")
+    return tuple(fragments)
+
+
 def review_resume_guidance(
     review_resume: Mapping[str, Any] | None,
     *,
@@ -1297,6 +1397,13 @@ def review_resume_guidance(
         if needs_review_harness:
             guidance += ", then resume the same plan with a review harness"
         return guidance
+    if blocker == "repair-scope-stale":
+        widenings = _repair_scope_widenings(review_resume)
+        if widenings:
+            return (
+                "widen **Writes repositories** in the pending repair children, "
+                "then resume the same plan: " + "; ".join(widenings)
+            )
     if review_resume.get("action") == "terminal" and blocker:
         if blocker in TERMINAL_REVIEW_DISPOSITIONS:
             return None
@@ -1461,12 +1568,17 @@ def evaluate_review_continuation(
     )
     repair_attempt_counts = repair_group_attempts(event_path, snapshot)
 
+    @cache
+    def durable_scopes() -> _DurableRepairScopes | None:
+        return _repair_groups_from_children(snapshot.plan_dir, generated_for_source)
+
     def result(
         action: ReviewResumeAction,
         eligible: bool,
         blocker: str | None,
         *,
         planning: review_repair.ReviewRepairPlan | None = None,
+        scope_gaps: tuple[Mapping[str, Any], ...] = (),
     ) -> ReviewResume:
         resume = _resume(
             source_cycle=source_cycle,
@@ -1488,16 +1600,16 @@ def evaluate_review_continuation(
             planning=planning,
         )
         if resume.repair_groups is None:
+            durable = durable_scopes()
             resume = replace(
                 resume,
-                repair_groups=_repair_groups_from_children(
-                    snapshot.plan_dir, generated_for_source
-                ),
+                repair_groups=None if durable is None else durable.groups,
             )
         return replace(
             resume,
             source_review_output_sha256=source_output_digest,
             source_review_artifact_sha256=source_artifact_digest,
+            repair_scope_gaps=scope_gaps or None,
         )
 
     if disposition in TERMINAL_REVIEW_DISPOSITIONS and not (
@@ -1548,6 +1660,15 @@ def evaluate_review_continuation(
         blocker = _unresolved_materialization_blocker(snapshot.plan_dir, disposition)
         if blocker is not None:
             return result("run-repairs", False, blocker, planning=planning)
+        scope_gaps = _pending_repair_scope_gaps(durable_scopes(), pending_ids, planning)
+        if scope_gaps:
+            return result(
+                "run-repairs",
+                False,
+                "repair-scope-stale",
+                planning=planning,
+                scope_gaps=scope_gaps,
+            )
         return result("run-repairs", True, None, planning=planning)
     if generated_for_source and len(completed_ids) == len(generated_for_source):
         return result("rereview", True, None, planning=planning)

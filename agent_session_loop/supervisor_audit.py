@@ -2988,51 +2988,131 @@ def _check_task_packet_paths(context: _CheckContext) -> _Verdict:
     )
 
 
-def _check_scope_escape(context: _CheckContext) -> _Verdict:
-    escapes: list[str] = []
+def _write_scope_session(*candidates: Any) -> str | None:
+    """Name the session a write-scope record belongs to, first source wins.
+
+    A guard record carries ``session_id`` as a string while a pause carries the
+    numeric alias under ``session``, so both are normalized to text before they
+    are matched against each other.
+    """
+    for value in candidates:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (str, int)) and str(value):
+            return str(value)
+    return None
+
+
+def _write_scope_violated_aliases(guard: Mapping[str, Any]) -> list[str]:
+    """The repositories one guard record says were written out of scope."""
+    return [
+        str(alias)
+        for alias in (
+            _mapping(item).get("alias") or _mapping(item).get("repository")
+            for item in _sequence(guard.get("violations"))
+        )
+        if alias
+    ]
+
+
+def _committed_sessions(context: _CheckContext) -> set[str]:
+    """Every session a commit record names, however that commit was learned.
+
+    Covers the runner's own commit projections and the attempts read from
+    ``commit-*`` directories alike, including the entries the audit derived
+    from observed head transitions, because a commit the runner never ran
+    still put the write it names into history.
+    """
+    commits = context.section("commits")
+    records = [_mapping(item) for item in _sequence(commits.get("commits"))]
+    records.extend(_mapping(item) for item in _sequence(commits.get("commit_groups")))
+    records.extend(
+        _mapping(_mapping(item).get("result"))
+        for item in _sequence(commits.get("attempts"))
+    )
+    named = {_write_scope_session(record.get("session_id")) for record in records}
+    return {session for session in named if session is not None}
+
+
+@dataclass(frozen=True)
+class _WriteScopeAnalysis:
+    """One reading of the write guard, split by whether the guard held.
+
+    ``caught`` and ``escaped`` are disjoint by construction: every out-of-scope
+    write lands in exactly one of them, so the two checks that report this
+    analysis can never both name the same write.
+    """
+
+    caught: tuple[str, ...]
+    escaped: tuple[str, ...]
+    blind: tuple[str, ...]
+    observed: int
+    evidence: tuple[str, ...]
+
+
+def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
+    """Judge every write-guard record, separating a catch from an escape.
+
+    A write is *caught* only when the guard recorded the violation, reverted
+    the session to pending, paused the run on
+    ``workspace-write-scope-violation``, and no commit for that session
+    followed: that is a working guard, not a containment failure. Anything
+    weaker is an *escape* — the change reached the tree unauthorized. Blindness
+    is neither, because a guard that could not look proves nothing either way.
+
+    Violations are grouped by session rather than reported per record. The
+    runner writes one guard record into the turn result and the same record
+    into the pause it raised, and a resumed run replays that pause with no turn
+    of its own, so grouping is what keeps one out-of-scope write one claim.
+    """
+    escaped: list[str] = []
     blind: list[str] = []
     references: list[str] = []
     observed = 0
+    offenders: dict[str | None, set[str]] = {}
+    reverted: set[str | None] = set()
+    paused_sessions: set[str] = set()
+    paused_any = False
+
     for turn in context.turns:
-        guard = _mapping(_mapping(turn.get("result")).get("workspace_write_guard"))
+        result = _mapping(turn.get("result"))
+        guard = _mapping(result.get("workspace_write_guard"))
         if not guard:
             continue
         observed += 1
         if isinstance(turn.get("directory"), str):
             references.append(turn["directory"])
-        violations = [_mapping(item) for item in _sequence(guard.get("violations"))]
-        if violations:
-            named = _names(
-                item.get("alias") or item.get("repository") for item in violations
+        aliases = _write_scope_violated_aliases(guard)
+        if aliases:
+            session = _write_scope_session(
+                guard.get("session_id"), result.get("session_id")
             )
-            escapes.append(
-                f"{turn.get('name')} wrote outside its declared scope ({named})"
-            )
+            offenders.setdefault(session, set()).update(aliases)
+            if guard.get("reverted_to_pending") is True:
+                reverted.add(session)
         if _mapping(guard.get("unavailable")):
             blind.append(f"{turn.get('name')} could not be inventoried")
+
     for record in context.records:
         name = record.get("name")
         record_payload = _mapping(record.get("payload"))
         reason = record_payload.get("reason")
+        details = _mapping(record_payload.get("details"))
+        guard = _mapping(details.get("workspace_write_guard"))
         if name == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT:
             observed += 1
-            repair_guard = _mapping(
-                _mapping(record_payload.get("details")).get("workspace_write_guard")
-            )
-            repair_violations = [
-                _mapping(item) for item in _sequence(repair_guard.get("violations"))
-            ]
-            if repair_violations:
-                named = _names(
-                    item.get("alias") or item.get("repository")
-                    for item in repair_violations
+            repair_aliases = _write_scope_violated_aliases(guard)
+            if repair_aliases:
+                # The repair is the run's second chance at containment: a
+                # widened scope that still excludes a retained change means the
+                # write outlived the guard rather than being held by it.
+                escaped.append(
+                    "the widened write scope still excludes retained changes "
+                    f"({_names(repair_aliases)})"
                 )
-                escapes.append(
-                    f"the widened write scope still excludes retained changes ({named})"
-                )
-            elif _mapping(repair_guard.get("unavailable")):
+            elif _mapping(guard.get("unavailable")):
                 blind.append("the widened write scope could not be inventoried")
-            elif repair_guard.get("passed") is not True:
+            elif guard.get("passed") is not True:
                 blind.append(
                     "the write-scope repair did not record a passing guard result"
                 )
@@ -3040,31 +3120,124 @@ def _check_scope_escape(context: _CheckContext) -> _Verdict:
             continue
         elif reason == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION:
             observed += 1
-            escapes.append("the run paused on a workspace write scope violation")
+            paused_any = True
+            session = _write_scope_session(
+                guard.get("session_id"),
+                details.get("session_id"),
+                details.get("session"),
+            )
+            if session is not None:
+                paused_sessions.add(session)
+            aliases = _write_scope_violated_aliases(guard)
+            if aliases:
+                offenders.setdefault(session, set()).update(aliases)
+                if guard.get("reverted_to_pending") is True:
+                    reverted.add(session)
         elif reason == events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE:
             observed += 1
             blind.append("the write guard reported itself unavailable")
-    evidence = context.evidence(*references, context.section("state").get("reference"))
-    if escapes:
-        return _Verdict("fail", _joined(escapes), evidence)
-    if blind:
+
+    committed = _committed_sessions(context)
+
+    def _paused_for(session: str | None) -> bool:
+        """Whether a scope-violation pause corroborates this session's catch.
+
+        A pause names the session it stopped, so the match is per session. A
+        bundle that recorded the pause without attributing it falls back to the
+        run-level fact, because an unattributable pause is still a pause and
+        reading it as none would report a working guard as an escape.
+        """
+        if session is not None and paused_sessions:
+            return session in paused_sessions
+        return paused_any
+
+    caught: list[str] = []
+    for session, aliases in sorted(offenders.items(), key=lambda item: item[0] or ""):
+        who = f"session {session}" if session is not None else "an unnamed session"
+        claim = f"{who} wrote outside its declared scope ({_names(aliases)})"
+        # A commit naming the offending session cannot predate the guard, which
+        # runs after the turn it judges, so its presence says the run carried
+        # the out-of-scope write forward instead of holding it.
+        missing = [
+            note
+            for note, held in (
+                ("the session was not reverted to pending", session in reverted),
+                ("the run never paused on the violation", _paused_for(session)),
+                (
+                    "a commit for that session followed",
+                    session is None or session not in committed,
+                ),
+            )
+            if not held
+        ]
+        if missing:
+            escaped.append(f"{claim} and {', '.join(missing)}")
+        else:
+            caught.append(
+                f"{claim}, and the guard reverted it to pending and paused the "
+                "run before anything was committed"
+            )
+
+    return _WriteScopeAnalysis(
+        caught=tuple(caught),
+        escaped=tuple(escaped),
+        blind=tuple(blind),
+        observed=observed,
+        evidence=context.evidence(
+            *references, context.section("state").get("reference")
+        ),
+    )
+
+
+def _check_scope_escape(context: _CheckContext) -> _Verdict:
+    """Fail only for a write that got past the guard, never for one it held."""
+    analysis = _analyze_write_scope(context)
+    if analysis.escaped:
+        return _Verdict("fail", _joined(analysis.escaped), analysis.evidence)
+    if analysis.blind:
         return _Verdict(
             "unavailable",
-            f"the workspace write guard could not judge containment: {_joined(blind)}",
-            evidence,
+            "the workspace write guard could not judge containment: "
+            f"{_joined(analysis.blind)}",
+            analysis.evidence,
         )
-    if not observed:
+    if not analysis.observed:
         return _Verdict(
             "unavailable",
             "no turn recorded a workspace write guard result, so scope "
             "containment cannot be judged",
-            evidence,
+            analysis.evidence,
+        )
+    if analysis.caught:
+        return _Verdict(
+            "pass",
+            f"the guard held every out-of-scope write across {analysis.observed} "
+            "recorded write-guard and repair results, so none of them reached "
+            "the tree unauthorized",
+            analysis.evidence,
         )
     return _Verdict(
         "pass",
-        f"all {observed} recorded write-guard and repair results kept every "
-        "retained write inside the session's declared scope",
-        evidence,
+        f"all {analysis.observed} recorded write-guard and repair results kept "
+        "every retained write inside the session's declared scope",
+        analysis.evidence,
+    )
+
+
+def _check_scope_guard_catch(context: _CheckContext) -> _Verdict:
+    """Report the writes the guard stopped, which are a plan defect, not a leak.
+
+    Never ``unavailable``: a guard that could not look is reported by
+    :func:`_check_scope_escape`, which owns the critical reading, and both
+    checks share one lane so the rollup keeps the worse of the two.
+    """
+    analysis = _analyze_write_scope(context)
+    if analysis.caught:
+        return _Verdict("fail", _joined(analysis.caught), analysis.evidence)
+    return _Verdict(
+        "pass",
+        "no session had to be stopped for writing outside its declared scope",
+        analysis.evidence,
     )
 
 
@@ -4566,6 +4739,25 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             ),
         ),
         _check_scope_escape,
+    ),
+    # Split from containment rather than expressed as a severity on the verdict:
+    # severity lives on the spec, so one issue key cannot oscillate between
+    # critical and medium across occurrences and corrupt the inbox's dedup
+    # history for the escape that matters.
+    (
+        CheckSpec(
+            check="scope-guard-catch",
+            lane="task-packet-coherence",
+            category="packet",
+            component="workspace-write-guard-catch",
+            invariant_key="packet.write-scope-guard-catch",
+            severity="medium",
+            recommendation=(
+                "Widen the child's durable write scope to the aliases its own "
+                "findings name, rerun expansion and preflight, then resume."
+            ),
+        ),
+        _check_scope_guard_catch,
     ),
     (
         CheckSpec(

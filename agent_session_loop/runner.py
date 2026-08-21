@@ -11645,6 +11645,9 @@ def _advance_review_cycle(
                     {
                         "read_repositories": list(group.read_repositories),
                         "write_repositories": list(group.write_repositories),
+                        "write_repository_sources": dict(
+                            group.write_repository_sources
+                        ),
                     }
                     if "repositories" in cycle_record
                     else {}
@@ -12822,6 +12825,91 @@ def _workspace_scope_repair_comparison(
                 retained.append(repository)
         repaired[kind] = retained
     return repaired, suppressed
+
+
+def _regenerated_repair_child_write_scope(
+    *,
+    session: plans.SessionStatus,
+    plan_dir: Path,
+    workspace: workspaces.ResolvedWorkspace,
+    scope: plans.SessionScope,
+) -> dict[str, Any] | None:
+    """Widen a materialized repair child's persisted write scope in place.
+
+    Authoring already derives a child's write scope from the union its own
+    findings attribute, so a materialized child can only be too narrow when the
+    findings were recomputed — by a re-expansion or a reopen — after the file
+    was written. Recomputing from that same union rewrites the durable file
+    rather than the value in hand, so the file stays the single description of
+    what the child may write and `_session_scope` remains its only reader.
+
+    Widening only, and only for ASL-generated children. A human-authored
+    session's scope is its author's statement of intent and is never rewritten;
+    neither is an alias the current findings no longer require. ``None`` means
+    the file was left exactly as it was, which every fail-open branch here
+    returns rather than persisting a scope it could not fully derive.
+    """
+    if not review_repair.is_generated_review_repair_session_file(session.path):
+        return None
+    try:
+        text = session.path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    group = review_repair.repair_group_from_session_text(text)
+    if group is None:
+        return None
+    planning = review_repair.plan_review_repair_sessions(
+        plan_dir,
+        # Children hang beneath their review's top-level id, which is how
+        # `review_repair` itself recovers a review's existing children.
+        review_session_id=session.session_id.components[0],
+    )
+    grouped = dict(
+        review_repair.group_findings_by_repair_group(list(planning.validated_findings))
+    )
+    group_findings = grouped.get(group)
+    if not group_findings:
+        # A group the current artifact no longer carries has no derivable
+        # scope; leaving the child untouched keeps the artifact's own
+        # diagnosis rather than replacing it with a narrower one.
+        return None
+    try:
+        required = review_repair.required_write_repositories(
+            group,
+            group_findings,
+            repository_registry=workspace.registry,
+        )
+    except review_repair.ReviewRepairError:
+        # Findings this malformed fail closed where they are validated.
+        return None
+    added = tuple(alias for alias in required if alias not in scope.writes)
+    if not added:
+        return None
+    aliases = workspace.registry.aliases
+    reads = frozenset(scope.reads) | frozenset(required)
+    writes = frozenset(scope.writes) | frozenset(required)
+    try:
+        widened = plans.SessionScope(
+            reads=tuple(alias for alias in aliases if alias in reads),
+            # Writes must stay a subset of reads, so a child whose reads were
+            # narrowed by hand widens both rather than persisting an
+            # unparseable scope.
+            writes=tuple(alias for alias in aliases if alias in writes),
+        ).validate_registry(aliases)
+        rewritten = plans.replaced_session_scope_text(text, widened)
+        plans.parse_session_scope(rewritten, aliases)
+    except plans.PlanError, ValueError:
+        return None
+    session.path.write_text(rewritten, encoding="utf-8")
+    return {
+        "session_id": session.id,
+        "repair_group": group,
+        "durable_write_repositories": list(scope.writes),
+        "required_write_repositories": list(required),
+        "added_write_repositories": list(added),
+        "write_repositories": list(widened.writes),
+        "read_repositories": list(widened.reads),
+    }
 
 
 def _enforce_workspace_write_guard(
@@ -16389,6 +16477,22 @@ def _run_locked(
                     pending_workspace_scope_repair is not None
                     and pending_workspace_scope_repair.get("session_id") == session_id
                 ):
+                    # Defense in depth for a child materialized before its
+                    # findings were last recomputed: widen the durable file
+                    # first, then re-read it, so the guard below judges the
+                    # retained changes against the same scope preflight,
+                    # expansion, the contract and the prompt will read.
+                    regenerated_write_scope = _regenerated_repair_child_write_scope(
+                        session=pending_session,
+                        plan_dir=before.plan_dir,
+                        workspace=workspace,
+                        scope=session_scope,
+                    )
+                    if regenerated_write_scope is not None:
+                        _refresh_active_readiness_state(
+                            payload, before.plan_dir, persistence
+                        )
+                        session_scope = _session_scope(pending_session, workspace)
                     prior_snapshot = pending_workspace_scope_repair.get(
                         "snapshot_before"
                     )
@@ -16422,6 +16526,10 @@ def _run_locked(
                             "unavailable": {".": {"reason": "repair-baseline-missing"}},
                             "violations": [],
                         }
+                    if regenerated_write_scope is not None:
+                        repair_evidence["write_scope_regeneration"] = (
+                            regenerated_write_scope
+                        )
                     current_expansion = _session_expansion_evidence(
                         before.plan_dir, session_id
                     )
