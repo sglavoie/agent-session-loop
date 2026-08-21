@@ -4299,7 +4299,13 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
     def _recorded_commit(
         self, history: tuple[Path, Path, Path, Path], **payload: Any
     ) -> None:
-        """Record one failed commit before the run's terminal record."""
+        """Record one commit before the run's terminal record.
+
+        Shaped like ``runner._run_spec_commit``'s payload, which writes
+        ``success`` and ``status_result`` and no ``ok`` field. A helper that adds
+        one grades a record no run emits, and hides that every commit failure but
+        ``nonzero-exit`` is reached at exit zero.
+        """
         state_dir = history[2]
         run_dir = history[3]
         commit_dir = run_dir / "commit-0001"
@@ -4312,7 +4318,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                     events.COMMIT_FINISHED_EVENT,
                     {
                         "run_id": RUN_ID,
-                        "ok": False,
+                        "commit_index": 1,
                         "artifact_dir": str(commit_dir),
                         **payload,
                     },
@@ -4327,6 +4333,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             commit_dir = history[3] / "commit-0001"
             self._recorded_commit(
                 history,
+                success=False,
                 status_result="nonzero-exit",
                 returncode=1,
                 stderr_path=str(commit_dir / "stderr.log"),
@@ -4345,10 +4352,71 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             # as one nothing classified.
             self.assertEqual("pass", results["unclassified-anomalies"].status)
 
+    def test_a_zero_exit_commit_failure_is_graded_like_any_other(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # Every commit outcome but nonzero-exit is reached on a clean exit,
+            # so a check that selects on the exit code alone reports the run's
+            # only failed commit as no failure at all.
+            self._recorded_commit(
+                history,
+                success=False,
+                status_result="unchanged-head",
+                returncode=0,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["commit-failure-accounting"].status)
+            self.assertIn(
+                "failed without recording why",
+                results["commit-failure-accounting"].detail,
+            )
+
+    def test_a_zero_exit_commit_failure_that_accounted_for_itself_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            commit_dir = history[3] / "commit-0001"
+            self._recorded_commit(
+                history,
+                success=False,
+                status_result="dirty-after-commit",
+                returncode=0,
+                stderr_path=str(commit_dir / "stderr.log"),
+                stderr_chars=32,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["commit-failure-accounting"].status)
+            self.assertIn(
+                "1 of 1 recorded commit(s) failed",
+                results["commit-failure-accounting"].detail,
+            )
+            self.assertEqual("pass", results["unclassified-anomalies"].status)
+
+    def test_a_successful_commit_is_not_read_as_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._recorded_commit(
+                history,
+                success=True,
+                status_result="success",
+                returncode=0,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["commit-failure-accounting"].status)
+            self.assertIn(
+                "0 of 1 recorded commit(s) failed",
+                results["commit-failure-accounting"].detail,
+            )
+
     def test_a_failed_commit_that_classified_nothing_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
-            self._recorded_commit(history, returncode=1)
+            self._recorded_commit(history, success=False, returncode=1)
 
             _, results = self._audit(history)
 
@@ -4363,6 +4431,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             history = self._history(Path(tmp))
             self._recorded_commit(
                 history,
+                success=False,
                 status_result="unchanged-head",
                 returncode=1,
                 status_error="HEAD did not move",
@@ -4381,6 +4450,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             history = self._history(Path(tmp))
             self._recorded_commit(
                 history,
+                success=False,
                 status_result="exploded",
                 returncode=1,
                 status_error="something else entirely",
@@ -4400,6 +4470,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             commit_dir = history[3] / "commit-0001"
             self._recorded_commit(
                 history,
+                success=False,
                 status_result="nonzero-exit",
                 returncode=1,
                 # An empty stream is a stream nobody can read a reason out of.

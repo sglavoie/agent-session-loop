@@ -4235,6 +4235,25 @@ def _commit_record_label(payload: Mapping[str, Any]) -> str:
     return f"commit {index}" if index is not None else "an unnamed commit"
 
 
+def _commit_shows_failure(payload: Mapping[str, Any]) -> bool:
+    """Whether a commit record is a failure in the runner's own vocabulary.
+
+    Most commit failures exit zero: ``unchanged-head``, ``missing-head``,
+    ``dirty-after-commit`` and ``status-unavailable`` are all reached on a clean
+    exit, and the runner reports them as ``success=False`` with the outcome
+    token. The generic anomaly predicate reads neither field, so selecting on it
+    alone skips every commit failure but the one that exited nonzero. Any
+    ``status_result`` other than ``success`` counts, so an outcome ASL never
+    writes is graded rather than silently read as a clean commit.
+    """
+    if payload.get("success") is False:
+        return True
+    status_result = payload.get("status_result")
+    if isinstance(status_result, str) and status_result and status_result != "success":
+        return True
+    return _payload_shows_failure(payload)
+
+
 def _commit_failure_classification(payload: Mapping[str, Any]) -> str | None:
     """The token the run gave a failed commit, explicit key before outcome."""
     for key in ("failure_classification", "status_result"):
@@ -4272,9 +4291,10 @@ def _check_commit_failure_accounting(context: _CheckContext) -> _Verdict:
     A failed commit is recorded once, in ``commit_finished``, and that record
     already carries the outcome that classified the failure and the streams the
     failure was written to. Reading them here is what lets the unknown-anomalies
-    catch-all stop reporting a failed commit: the exemption covers exactly what
-    this check grades, so a record that names no classification, contradicts its
-    own exit code, or points at no reason still surfaces by name.
+    catch-all stop reporting a failed commit: this check grades every record that
+    catch-all would have selected and the zero-exit failures it would have
+    missed, so a record that names no classification, contradicts its own exit
+    code, or points at no reason still surfaces by name.
     """
     problems: list[str] = []
     references: list[str] = []
@@ -4285,7 +4305,7 @@ def _check_commit_failure_accounting(context: _CheckContext) -> _Verdict:
             continue
         recorded += 1
         payload = _mapping(record.get("payload"))
-        if not _payload_shows_failure(payload):
+        if not _commit_shows_failure(payload):
             continue
         failures += 1
         label = _commit_record_label(payload)
