@@ -16,8 +16,14 @@ INVARIANT_KEYS = tuple(
 )
 
 
-def _matrix(rows: dict[str, dict[str, str]], keys: tuple[str, ...] = ("a", "b")):
-    return audit_replay.CorpusReplay(invariant_keys=keys, matrix=rows, errors={})
+def _matrix(
+    rows: dict[str, dict[str, str]],
+    keys: tuple[str, ...] = ("a", "b"),
+    errors: dict[str, str] | None = None,
+):
+    return audit_replay.CorpusReplay(
+        invariant_keys=keys, matrix=rows, errors=errors or {}
+    )
 
 
 class BundleDiscoveryTests(unittest.TestCase):
@@ -181,6 +187,7 @@ class MatrixDiffTests(unittest.TestCase):
         self.assertEqual(diff.added_runs, ("run-2",))
         self.assertEqual(diff.changes, ())
         self.assertFalse(diff.has_changes)
+        self.assertFalse(diff.incomplete)
 
     def test_pruned_runs_are_listed_but_are_not_drift(self) -> None:
         before = _matrix({"run-1": {"a": "pass", "b": "pass"}})
@@ -189,7 +196,47 @@ class MatrixDiffTests(unittest.TestCase):
         diff = audit_replay.diff_matrices(before, after)
 
         self.assertEqual(diff.removed_runs, ("run-1",))
+        self.assertEqual(diff.unreadable_runs, ())
         self.assertFalse(diff.has_changes)
+        self.assertFalse(diff.incomplete)
+
+    def test_an_unreadable_baseline_run_is_lost_evidence_not_a_pruned_run(self) -> None:
+        before = _matrix({"run-1": {"a": "pass", "b": "pass"}})
+        after = _matrix({}, errors={"run-1": "JSONDecodeError: truncated"})
+
+        diff = audit_replay.diff_matrices(before, after)
+
+        self.assertEqual(diff.unreadable_runs, ("run-1",))
+        self.assertEqual(diff.removed_runs, ())
+        self.assertFalse(diff.has_changes)
+        self.assertTrue(diff.incomplete)
+
+    def test_an_unreadable_run_the_baseline_never_judged_is_not_incomplete(
+        self,
+    ) -> None:
+        before = _matrix({"run-1": {"a": "pass", "b": "pass"}})
+        after = _matrix(
+            {"run-1": {"a": "pass", "b": "pass"}},
+            errors={"run-2": "OSError: gone"},
+        )
+
+        diff = audit_replay.diff_matrices(before, after)
+
+        self.assertEqual(diff.unreadable_runs, ())
+        self.assertEqual(diff.errors, {"run-2": "OSError: gone"})
+        self.assertFalse(diff.incomplete)
+
+    def test_the_diff_payload_reports_lost_evidence_apart_from_drift(self) -> None:
+        before = _matrix({"run-1": {"a": "pass", "b": "pass"}})
+        after = _matrix({}, errors={"run-1": "JSONDecodeError: truncated"})
+
+        payload = audit_replay.diff_matrices(before, after).payload()
+
+        self.assertFalse(payload["has_changes"])
+        self.assertTrue(payload["incomplete"])
+        self.assertEqual(payload["unreadable_runs"], ["run-1"])
+        self.assertEqual(payload["errors"], {"run-1": "JSONDecodeError: truncated"})
+        self.assertEqual(payload["removed_runs"], [])
 
     def test_a_new_or_dropped_invariant_key_is_drift(self) -> None:
         before = _matrix({"run-1": {"a": "pass", "b": "pass"}}, keys=("a", "b"))
@@ -265,6 +312,31 @@ class CommandLineTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(printed)["has_changes"], False)
+
+    def test_diff_fails_when_a_baseline_bundle_no_longer_reads(self) -> None:
+        output = self.root / "baseline.json"
+        self._run("capture", "--output", str(output))
+        (self.run_dir / "supervisor-audit-input.json").write_text('{"plan": ')
+
+        code, printed = self._run("diff", str(output))
+
+        self.assertEqual(code, 1)
+        self.assertIn("unreadable baseline run: run-1", printed)
+        self.assertIn("comparison incomplete", printed)
+
+    def test_diff_json_output_distinguishes_lost_evidence_from_no_drift(self) -> None:
+        output = self.root / "baseline.json"
+        self._run("capture", "--output", str(output))
+        (self.run_dir / "supervisor-audit-input.json").write_text('{"plan": ')
+
+        code, printed = self._run("--json", "diff", str(output))
+        payload = json.loads(printed)
+
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["has_changes"])
+        self.assertTrue(payload["incomplete"])
+        self.assertEqual(payload["unreadable_runs"], ["run-1"])
+        self.assertIn("JSONDecodeError", payload["errors"]["run-1"])
 
 
 class WorktreeFidelityTests(unittest.TestCase):

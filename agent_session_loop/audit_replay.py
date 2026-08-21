@@ -85,6 +85,8 @@ class MatrixDiff:
     removed_runs: tuple[str, ...]
     added_keys: tuple[str, ...]
     removed_keys: tuple[str, ...]
+    errors: Mapping[str, str]
+    unreadable_runs: tuple[str, ...]
 
     @property
     def has_changes(self) -> bool:
@@ -95,6 +97,17 @@ class MatrixDiff:
         drift on every comparison and make the verdict worthless.
         """
         return bool(self.changes or self.added_keys or self.removed_keys)
+
+    @property
+    def incomplete(self) -> bool:
+        """Whether a run the baseline judged could not be judged again.
+
+        Distinct from :attr:`has_changes`: nothing moved, because nothing was
+        compared. A baseline run that no longer reads is lost evidence, not a
+        run retention pruned away, and a clean verdict over what remains is
+        not proof that the checks still judge it the same way.
+        """
+        return bool(self.unreadable_runs)
 
     def transitions(self) -> dict[str, dict[str, int]]:
         """Count ``before->after`` moves per invariant key."""
@@ -108,6 +121,9 @@ class MatrixDiff:
     def payload(self) -> dict[str, Any]:
         return {
             "has_changes": self.has_changes,
+            "incomplete": self.incomplete,
+            "errors": dict(self.errors),
+            "unreadable_runs": list(self.unreadable_runs),
             "changes": [
                 {
                     "run_id": change.run_id,
@@ -192,12 +208,15 @@ def diff_matrices(before: CorpusReplay, after: CorpusReplay) -> MatrixDiff:
             for key in shared_keys
             if old_row[key] != new_row[key]
         )
+    unreadable = set(before.matrix) & set(after.errors)
     return MatrixDiff(
         changes=tuple(changes),
         added_runs=tuple(sorted(set(after.matrix) - set(before.matrix))),
-        removed_runs=tuple(sorted(set(before.matrix) - set(after.matrix))),
+        removed_runs=tuple(sorted(set(before.matrix) - set(after.matrix) - unreadable)),
         added_keys=tuple(k for k in after.invariant_keys if k not in before_keys),
         removed_keys=tuple(k for k in before.invariant_keys if k not in after_keys),
+        errors=dict(after.errors),
+        unreadable_runs=tuple(sorted(unreadable)),
     )
 
 
@@ -239,6 +258,8 @@ def _emit_diff(before: CorpusReplay, after: CorpusReplay, as_json: bool) -> int:
             print(f"new invariant key: {key}")
         for key in diff.removed_keys:
             print(f"dropped invariant key: {key}")
+        for run_id in diff.unreadable_runs:
+            print(f"unreadable baseline run: {run_id}  {diff.errors[run_id]}")
         print(
             f"{len(diff.changes)} cell(s) changed across "
             f"{len(before.matrix)} baseline runs; "
@@ -247,7 +268,12 @@ def _emit_diff(before: CorpusReplay, after: CorpusReplay, as_json: bool) -> int:
         for key, counts in sorted(diff.transitions().items()):
             rendered = ", ".join(f"{label} {n}" for label, n in sorted(counts.items()))
             print(f"  {key}: {rendered}")
-    return 1 if diff.has_changes else 0
+        if diff.incomplete:
+            print(
+                f"comparison incomplete: {len(diff.unreadable_runs)} "
+                "baseline run(s) could not be replayed"
+            )
+    return 1 if diff.has_changes or diff.incomplete else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -279,7 +305,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Capture or diff the corpus matrix; ``diff`` exits 1 when a status moved."""
+    """Capture or diff the corpus matrix.
+
+    ``diff`` exits 1 when a status moved and when a baseline run could no
+    longer be replayed, because neither outcome is evidence of no drift.
+    """
     args = build_parser().parse_args(argv)
     state_root = (
         Path(args.state_root).expanduser()
