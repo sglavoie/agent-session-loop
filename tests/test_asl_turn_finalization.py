@@ -269,53 +269,57 @@ class CommandFailureDetailTests(unittest.TestCase):
             timeout_seconds=60,
         )
 
-    def test_last_stderr_line_travels_with_the_detail(self) -> None:
-        detail = verification._command_failure_detail(
-            self.check(),
-            1,
-            {"stderr": 'noise\n{"check": "c", "reason": "artifact-missing"}\n'},
-        )
-        self.assertIn("command exited 1", detail)
-        self.assertIn("artifact-missing", detail)
-        self.assertNotIn("noise", detail)
-
-    def test_the_diagnostic_leads_so_a_bounded_reader_keeps_it(self) -> None:
+    def test_the_authenticated_diagnostic_leads_the_detail(self) -> None:
         """A `python3 -c` gate renders kilobytes of argv; the reason goes first.
 
         Every consumer that bounds an inline string cuts the tail, so an
         argv-first detail is exactly the one that loses the reason.
         """
+        detail = verification._command_failure_detail(
+            self.check(),
+            1,
+            {"failure_diagnostic": {"check": "c", "reason": "artifact-missing"}},
+        )
+        self.assertEqual("c: artifact-missing; command exited 1: python3", detail)
+
+    def test_an_unauthenticated_stream_line_stays_out_of_the_detail(self) -> None:
+        """The streams are application output wherever the diagnostic is absent.
+
+        `detail` is inlined into the audit bundle, so a failed user command's
+        last line must reach it through no route at all -- not on stderr, and
+        not on stdout when stderr is silent.
+        """
+        detail = verification._command_failure_detail(
+            self.check(),
+            2,
+            {
+                "stderr": "   \n",
+                "stdout": "only stdout said this\n",
+                "failure_diagnostic": None,
+            },
+        )
+        self.assertEqual("command exited 2: python3", detail)
+
+    def test_the_authored_argv_stays_out_of_the_detail(self) -> None:
         check = verification.CommandCheck(
             name="final-review-output-evidence-based",
             argv=("python3", "-c", "x = 1  # " + "y" * 4000),
             timeout_seconds=60,
         )
+
+        detail = verification._command_failure_detail(check, 1, {})
+
+        self.assertEqual("command exited 1: python3", detail)
+
+    def test_diagnostic_lead_is_truncated(self) -> None:
+        """A total on the lead, independent of the parser's own token bound."""
         detail = verification._command_failure_detail(
-            check,
+            self.check(),
             1,
-            {"stderr": '{"check": "c", "reason": "missing-required-heading"}\n'},
-        )
-        self.assertTrue(detail.startswith('{"check": "c"'))
-        self.assertIn("missing-required-heading", detail[:512])
-
-    def test_stdout_is_used_when_stderr_is_silent(self) -> None:
-        detail = verification._command_failure_detail(
-            self.check(), 2, {"stderr": "   \n", "stdout": "only stdout said this\n"}
-        )
-        self.assertEqual(
-            "only stdout said this; command exited 2: python3 -c pass", detail
-        )
-
-    def test_silent_failure_falls_back_to_the_rendered_argv(self) -> None:
-        detail = verification._command_failure_detail(self.check(), 3, {})
-        self.assertEqual("command exited 3: python3 -c pass", detail)
-
-    def test_diagnostic_line_is_truncated(self) -> None:
-        detail = verification._command_failure_detail(
-            self.check(), 1, {"stderr": "x" * 5000}
+            {"failure_diagnostic": {"check": "c", "reason": "x" * 5000}},
         )
         self.assertLessEqual(
-            len(detail) - len("; command exited 1: python3 -c pass"),
+            len(detail) - len("; command exited 1: python3"),
             verification._COMMAND_DIAGNOSTIC_LIMIT,
         )
 

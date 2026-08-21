@@ -1337,6 +1337,19 @@ class _Collector:
         self, value: Any, *, key: str | None = None, parent: str | None = None
     ) -> Any:
         """Return ``value`` with credentials, content, and unsafe paths removed."""
+        if parent == verification.FAILURE_DIAGNOSTIC_KEY:
+            # A structured rejection travels as control-plane evidence, so
+            # every field inside it is held to that standard: the two bounded
+            # tokens pass, and anything else — an unknown key, a nested
+            # structure, prose in a field that should hold a token — is the
+            # rejected artifact's own text and is withheld like any output.
+            if not verification.is_control_plane_diagnostic_field(key, value):
+                return self._content_stub(
+                    value
+                    if isinstance(value, str)
+                    else json.dumps(value, default=str, sort_keys=True)
+                )
+            return self._redact_string(value, key=key, parent=parent)
         if isinstance(value, Mapping):
             return {
                 str(name): self.redact(item, key=str(name), parent=key)

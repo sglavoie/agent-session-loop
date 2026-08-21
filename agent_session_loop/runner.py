@@ -509,10 +509,14 @@ def parse_review_verdict(text: str) -> dict[str, Any]:
 # Every rejection in the generated review gates leaves through ``fail``, which
 # writes one structured JSON line to stderr before exiting 1. A predicate that
 # exited silently told an operator only that some `python3 -c` script returned
-# 1, which is the whole failure surface these gates used to expose.
+# 1, which is the whole failure surface these gates used to expose. The marker
+# is what identifies the line as ASL's own: without it the parser reads the
+# line as application output and never promotes it.
 _VALIDATOR_FAIL_HELPER = (
     "def fail(reason, **detail):",
-    "    detail.update(check=CHECK, reason=reason)",
+    "    detail.update(check=CHECK, reason=reason, "
+    f"{verification.FAILURE_DIAGNOSTIC_MARKER_KEY}="
+    f"{verification.FAILURE_DIAGNOSTIC_MARKER_VALUE!r})",
     "    sys.stderr.write(json.dumps(detail, sort_keys=True) + '\\n')",
     "    sys.exit(1)",
 )

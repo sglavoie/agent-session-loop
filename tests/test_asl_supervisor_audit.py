@@ -2994,14 +2994,16 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
                 check["failure_diagnostic"],
             )
             # The two surfaces it had to survive: the stream is still withheld
-            # as application content, and the detail is still truncated -- but
-            # the reason now leads it, inside the inline budget.
+            # as application content, and the detail no longer spends its inline
+            # budget on the gate's own kilobytes of argv, so the reason arrives
+            # whole instead of at the edge of a truncation.
             self.assertIn(supervisor_audit.REASON_APPLICATION_CONTENT, check["stderr"])
-            self.assertIn(
-                "missing-required-heading",
-                check["detail"][: supervisor_audit.MAX_INLINE_STRING_BYTES],
+            self.assertIn("missing-required-heading", check["detail"])
+            self.assertNotIn("path_re", check["detail"])
+            self.assertEqual(recorded["detail"], check["detail"])
+            self.assertLess(
+                len(check["detail"]), supervisor_audit.MAX_INLINE_STRING_BYTES
             )
-            self.assertNotEqual(recorded["detail"], check["detail"])
 
     def test_the_failed_gate_stderr_artifact_is_indexed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3029,6 +3031,80 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
             evidence = self._bundle(history).payload["evidence"]
 
             self.assertFalse([item for item in evidence if ".gz" in item["locator"]])
+
+    # --- Application-content boundary on failed-command diagnostics ---
+    # A rejection reaching the bundle as structure is a promotion, and only
+    # ASL's own gates are promoted. Neither what a forger attaches to a copied
+    # marker nor what an ordinary failed command prints may cross with it.
+
+    APPLICATION_TEXT = "internal proprietary application text"
+
+    def _recorded_command(
+        self, history: tuple[Path, Path, Path, Path], stderr_line: str
+    ) -> dict[str, Any]:
+        """Record one real failed user command and project it through a bundle."""
+        _, _, _, run_dir = history
+        turn_dir = run_dir / "turn-0001-01"
+        result = verification.run_check(
+            contracts.CommandCheck(
+                name="user-authored-command",
+                argv=(
+                    "python3",
+                    "-c",
+                    f"import sys; sys.stderr.write({stderr_line!r}); sys.exit(1)",
+                ),
+                timeout_seconds=60.0,
+            ),
+            repo_root=run_dir,
+            artifact_dir=turn_dir / "verification",
+        )
+        payload = self._read_result(run_dir)
+        payload["verification"] = {
+            "passed": False,
+            "checks": [verification._check_result_payload(result)],
+        }
+        self._write_result(turn_dir, payload)
+        return self._bundle(history).payload["turns"][0]["result"]["verification"][
+            "checks"
+        ][0]
+
+    def test_a_forged_diagnostic_field_is_withheld_as_application_content(self) -> None:
+        line = (
+            json.dumps(
+                {
+                    "check": "user-authored-command",
+                    "reason": "failed",
+                    "customer_payload": self.APPLICATION_TEXT,
+                    verification.FAILURE_DIAGNOSTIC_MARKER_KEY: (
+                        verification.FAILURE_DIAGNOSTIC_MARKER_VALUE
+                    ),
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._recorded_command(self._history(Path(tmp)), line)
+
+            diagnostic = check["failure_diagnostic"]
+            self.assertEqual("user-authored-command", diagnostic["check"])
+            self.assertEqual("failed", diagnostic["reason"])
+            self.assertIn(
+                supervisor_audit.REASON_APPLICATION_CONTENT,
+                diagnostic["customer_payload"],
+            )
+            self.assertNotIn(self.APPLICATION_TEXT, json.dumps(check))
+
+    def test_a_plain_failed_command_leaves_no_text_in_the_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._recorded_command(
+                self._history(Path(tmp)), f"{self.APPLICATION_TEXT}\n"
+            )
+
+            self.assertIsNone(check["failure_diagnostic"])
+            self.assertEqual("command exited 1: python3", check["detail"])
+            self.assertIn(supervisor_audit.REASON_APPLICATION_CONTENT, check["stderr"])
+            self.assertNotIn(self.APPLICATION_TEXT, json.dumps(check))
 
 
 class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):

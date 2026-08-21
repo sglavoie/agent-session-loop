@@ -665,15 +665,53 @@ class _ParallelCancellation:
 #: structure into the check record, the event log, and the audit bundle.
 _FAILURE_DIAGNOSTIC_MAX_BYTES = 2048
 
+#: Key naming a failed command's structured rejection wherever it travels.
+FAILURE_DIAGNOSTIC_KEY = "failure_diagnostic"
+
+#: The marker a generated ASL gate stamps on its rejection line, and the value
+#: it stamps (``runner._VALIDATOR_FAIL_HELPER``). Nothing is promoted without
+#: it, so a third-party command whose output happens to be a ``check``/
+#: ``reason`` object stays application output rather than becoming ASL schema.
+#: It is stripped once read: it authenticates the line and says nothing about
+#: the failure.
+FAILURE_DIAGNOSTIC_MARKER_KEY = "asl_diagnostic"
+FAILURE_DIAGNOSTIC_MARKER_VALUE = "generated-gate/1"
+
+#: The only diagnostic fields that are control-plane text. Everything a gate
+#: attaches beyond them is drawn from the artifact it rejected — the generated
+#: gates pass ``status=``, ``last_line=`` and ``error=`` — so it is application
+#: content and is withheld like any other command output.
+_DIAGNOSTIC_CONTROL_PLANE_KEYS = frozenset({"check", "reason"})
+
+#: Both control-plane fields must be tokens. Barring whitespace is what makes
+#: them structurally unable to carry prose, so a caller that forges the marker
+#: still cannot smuggle application text through the two fields that travel.
+_DIAGNOSTIC_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+
+
+def is_control_plane_diagnostic_field(key: str | None, value: Any) -> bool:
+    """Whether a ``failure_diagnostic`` member may travel as control-plane text.
+
+    The audit boundary asks this of every field it projects, so the definition
+    of what is ASL schema and what is application output lives in one place
+    rather than being restated by each consumer.
+    """
+    return (
+        key in _DIAGNOSTIC_CONTROL_PLANE_KEYS
+        and isinstance(value, str)
+        and _DIAGNOSTIC_TOKEN_RE.fullmatch(value) is not None
+    )
+
 
 def _parse_failure_diagnostic(stderr_preview: str) -> dict[str, Any] | None:
     """Read a failed command's last stderr line as a structured rejection.
 
-    Kept only when the line is a bounded JSON object carrying ``check`` and
-    ``reason`` strings, which is the contract every generated review gate leaves
-    through (``runner._VALIDATOR_FAIL_HELPER``). That shape is what makes the
-    value ASL-authored schema rather than application output, so it can travel
-    where a raw stream may not.
+    Kept only when the line is a bounded JSON object that carries the generated
+    gates' marker and whose ``check`` and ``reason`` are tokens, which is the
+    contract every generated review gate leaves through
+    (``runner._VALIDATOR_FAIL_HELPER``). Authenticating the producer is what
+    makes the value ASL-authored schema rather than application output, so it
+    can travel where a raw stream may not.
     """
     lines = [line.strip() for line in stderr_preview.splitlines() if line.strip()]
     if not lines:
@@ -687,9 +725,18 @@ def _parse_failure_diagnostic(stderr_preview: str) -> dict[str, Any] | None:
         return None
     if not isinstance(parsed, dict):
         return None
-    if not all(isinstance(parsed.get(key), str) for key in ("check", "reason")):
+    if parsed.get(FAILURE_DIAGNOSTIC_MARKER_KEY) != FAILURE_DIAGNOSTIC_MARKER_VALUE:
         return None
-    return parsed
+    if not all(
+        is_control_plane_diagnostic_field(key, parsed.get(key))
+        for key in _DIAGNOSTIC_CONTROL_PLANE_KEYS
+    ):
+        return None
+    return {
+        key: value
+        for key, value in parsed.items()
+        if key != FAILURE_DIAGNOSTIC_MARKER_KEY
+    }
 
 
 def _command_stream_fields(
@@ -746,23 +793,24 @@ def _command_failure_detail(
     returncode: int,
     stream_fields: Mapping[str, Any],
 ) -> str:
-    """Render a failed command's detail with the diagnostic its streams carry.
+    """Render a failed command's detail from control-plane text alone.
 
     A validator that reports which predicate rejected the artifact says far
-    more than its own rendered argv, so the last diagnostic line travels with
-    the detail into the pause record instead of staying buried in the streams.
-    It leads, because a ``python3 -c`` gate renders kilobytes of argv and every
-    consumer that bounds an inline string would otherwise keep only that.
+    more than the command itself, so an authenticated gate's rejection leads
+    the detail into the pause record and the audit bundle instead of staying
+    buried in the streams. A command with no such diagnostic contributes
+    nothing but its exit code and its program: its last stream line is
+    application output, and its remaining argv is authored text — a `python3
+    -c` gate's is kilobytes of inline source — where ``detail`` is inlined into
+    a bundle that quotes no other authored body. Both are recoverable at full
+    fidelity, the streams from their artifacts and the argv from the contract
+    this check's name indexes.
     """
-    rendered = f"command exited {returncode}: {' '.join(check.argv)}"
-    for stream in ("stderr", "stdout"):
-        lines = [
-            line.strip()
-            for line in str(stream_fields.get(stream) or "").splitlines()
-            if line.strip()
-        ]
-        if lines:
-            return f"{lines[-1][:_COMMAND_DIAGNOSTIC_LIMIT]}; {rendered}"
+    rendered = f"command exited {returncode}: {check.argv[0]}"
+    diagnostic = stream_fields.get(FAILURE_DIAGNOSTIC_KEY)
+    if isinstance(diagnostic, Mapping):
+        lead = f"{diagnostic['check']}: {diagnostic['reason']}"
+        return f"{lead[:_COMMAND_DIAGNOSTIC_LIMIT]}; {rendered}"
     return rendered
 
 

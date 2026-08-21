@@ -1472,43 +1472,61 @@ class VerificationExecutorTests(unittest.TestCase):
     # put a ~2 KB `python3 -c` argv ahead of it, `stderr` is content-stubbed in
     # the audit bundle, and pause details drop the streams outright.
 
+    def _diagnostic_line(self, **fields: Any) -> str:
+        """One marked rejection line, as a generated gate's ``fail`` writes it."""
+        return (
+            json.dumps(
+                {
+                    **fields,
+                    verification.FAILURE_DIAGNOSTIC_MARKER_KEY: (
+                        verification.FAILURE_DIAGNOSTIC_MARKER_VALUE
+                    ),
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+    def _writes_stderr(self, *lines: str, exit_code: int) -> tuple[str, ...]:
+        source = "import sys\n" + "".join(
+            f"sys.stderr.write({line!r})\n" for line in lines
+        )
+        return ("python3", "-c", f"{source}sys.exit({exit_code})")
+
     def test_failing_gate_keeps_its_structured_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp) / "repo"
             repo_root.mkdir()
             check = self._command(
-                (
-                    "python3",
-                    "-c",
-                    "import sys\n"
-                    "sys.stderr.write('warming up\\n')\n"
-                    'sys.stderr.write(\'{"check": "gate", '
-                    '"reason": "missing-required-heading"}\\n\')\n'
-                    "sys.exit(1)",
+                self._writes_stderr(
+                    "warming up\n",
+                    self._diagnostic_line(
+                        check="gate", reason="missing-required-heading"
+                    ),
+                    exit_code=1,
                 ),
                 name="gate",
             )
 
             result = verification.run_check(check, repo_root=repo_root)
 
+            # The marker authenticates the line and is not evidence about the
+            # failure, so it is read and dropped rather than carried.
             self.assertEqual(
                 {"check": "gate", "reason": "missing-required-heading"},
                 result.failure_diagnostic,
             )
             # It leads the detail, so a consumer that keeps only a bounded head
             # of the string keeps the reason rather than the argv.
-            self.assertTrue(result.detail.startswith('{"check": "gate"'))
+            self.assertTrue(result.detail.startswith("gate: missing-required-heading"))
 
     def test_passing_command_carries_no_failure_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp) / "repo"
             repo_root.mkdir()
             check = self._command(
-                (
-                    "python3",
-                    "-c",
-                    "import sys; sys.stderr.write("
-                    '\'{"check": "gate", "reason": "noise"}\')',
+                self._writes_stderr(
+                    self._diagnostic_line(check="gate", reason="noise"), exit_code=0
                 )
             )
 
@@ -1518,39 +1536,101 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertIsNone(result.failure_diagnostic)
 
     def test_failure_diagnostic_requires_the_producer_schema(self) -> None:
-        """Only ``check`` + ``reason`` objects are ASL-authored schema.
+        """Only a marked gate's bounded ``check`` + ``reason`` is ASL schema.
 
         Anything else on that line is application output, which is what the
         content rules exist to withhold, so it must not travel as structure.
+        Each case below is well-formed except for the property it names.
         """
+        text = "internal proprietary application text"
         cases = {
             "not-json": "plain english failure\n",
             "json-array": '["check", "reason"]\n',
             "json-scalar": '"just a string"\n',
-            "object-without-reason": '{"check": "gate"}\n',
-            "object-without-check": '{"reason": "missing-required-heading"}\n',
-            "non-string-reason": '{"check": "gate", "reason": 7}\n',
-            "oversized": json.dumps(
-                {"check": "gate", "reason": "x" * 4000}, sort_keys=True
+            "object-without-reason": self._diagnostic_line(check="gate"),
+            "object-without-check": self._diagnostic_line(reason="artifact-missing"),
+            "non-string-reason": self._diagnostic_line(check="gate", reason=7),
+            "oversized": self._diagnostic_line(check="gate", reason="x" * 4000),
+            # An unmarked object is any command's output that happens to look
+            # like a rejection, including one forging the schema outright.
+            "unmarked": '{"check": "gate", "reason": "artifact-missing"}\n',
+            "wrong-marker": json.dumps(
+                {
+                    "check": "gate",
+                    "reason": "artifact-missing",
+                    verification.FAILURE_DIAGNOSTIC_MARKER_KEY: "not-the-marker",
+                },
+                sort_keys=True,
             )
             + "\n",
+            # A marker is copyable; prose in a field that must hold a token is
+            # what a forger needs next, and the token bound denies it.
+            "prose-reason": self._diagnostic_line(check="gate", reason=text),
+            "prose-check": self._diagnostic_line(check=text, reason="artifact-missing"),
         }
         for label, stderr in cases.items():
             with self.subTest(case=label):
                 self.assertIsNone(verification._parse_failure_diagnostic(stderr))
+
+    def test_forged_diagnostic_fields_stay_out_of_the_detail(self) -> None:
+        """A copied marker buys structure, never a route for content.
+
+        The extra field survives on the record, where the run's own artifacts
+        already hold the whole stream; the audit boundary is what withholds it
+        (see ``test_asl_supervisor_audit``). ``detail`` crosses that boundary
+        inline, so it is rendered from the two bounded tokens alone.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            text = "internal proprietary application text"
+            check = self._command(
+                self._writes_stderr(
+                    self._diagnostic_line(
+                        check="user-authored-command",
+                        reason="failed",
+                        customer_payload=text,
+                    ),
+                    exit_code=1,
+                ),
+                name="user-authored-command",
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertEqual(text, result.failure_diagnostic["customer_payload"])
+            self.assertEqual(
+                "user-authored-command: failed; command exited 1: python3",
+                result.detail,
+            )
+
+    def test_unauthenticated_failure_leaves_no_content_in_the_detail(self) -> None:
+        """A plain failed user command contributes its exit code and nothing else."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            text = "internal proprietary application text"
+            check = self._command(
+                self._writes_stderr(f"{text}\n", exit_code=2), name="user-command"
+            )
+
+            result = verification.run_check(check, repo_root=repo_root)
+
+            self.assertIsNone(result.failure_diagnostic)
+            self.assertNotIn(text, result.detail)
+            self.assertEqual("command exited 2: python3", result.detail)
+            # The stream itself is untouched: bounding the record is the
+            # boundary's job, not withholding the operator's own output.
+            self.assertIn(text, result.stderr)
 
     def test_failure_diagnostic_survives_serialization_and_compaction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp) / "repo"
             repo_root.mkdir()
             check = self._command(
-                (
-                    "python3",
-                    "-c",
-                    "import sys\n"
-                    'sys.stderr.write(\'{"check": "gate", '
-                    '"reason": "artifact-missing"}\\n\')\n'
-                    "sys.exit(1)",
+                self._writes_stderr(
+                    self._diagnostic_line(check="gate", reason="artifact-missing"),
+                    exit_code=1,
                 ),
                 name="gate",
             )
