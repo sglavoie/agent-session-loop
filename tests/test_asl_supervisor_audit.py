@@ -31,6 +31,7 @@ from agent_session_loop import (
     pause_policy,
     plans,
     repository_evidence,
+    review,
     run_flags,
     runner,
     state,
@@ -2211,6 +2212,103 @@ class EvidenceBundleTests(unittest.TestCase):
                     status["assurance"]["source"],
                 )
 
+    def test_control_plane_signal_sources_survive_under_any_parent(self) -> None:
+        # The runner stamps this provenance under several parents, so the
+        # exemption is keyed on the value rather than on the parent name.
+        for source in sorted(supervisor_audit._CONTROL_PLANE_SOURCE_VALUES):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmp:
+                workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+                self._rewrite_state(
+                    state_dir,
+                    action_required={"reason": "runner-pause", "source": source},
+                    pause_details={"source": source},
+                )
+
+                status = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                    "status"
+                ]
+
+                self.assertEqual(source, status["action_required"]["source"])
+                self.assertEqual(source, status["pause_details"]["source"])
+
+    def test_an_unbounded_source_is_still_withheld_as_application_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._rewrite_state(
+                state_dir,
+                action_required={"source": "arbitrary application text"},
+                pause_details={"source": "stdout of the agent, quoted at length"},
+            )
+
+            status = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "status"
+            ]
+
+            self.assertIn(
+                supervisor_audit.REASON_APPLICATION_CONTENT,
+                status["action_required"]["source"],
+            )
+            self.assertIn(
+                supervisor_audit.REASON_APPLICATION_CONTENT,
+                status["pause_details"]["source"],
+            )
+
+    def test_final_review_artifacts_are_indexed_from_the_plan_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            review.final_review_output_path(plan_dir).write_text(
+                f"{review.REVIEW_STATUS_ALL_CLEAR}\n", encoding="utf-8"
+            )
+            review.final_review_artifact_path(plan_dir).write_text(
+                json.dumps(
+                    {
+                        "version": review.REVIEW_ARTIFACT_VERSION,
+                        "outcome": review.REVIEW_OUTCOME_ALL_CLEAR,
+                        "findings": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+
+            locators = {entry["locator"] for entry in payload["evidence"]}
+            self.assertIn(f"plan/{review.FINAL_REVIEW_FILENAME}", locators)
+            self.assertIn(f"plan/{review.FINAL_REVIEW_ARTIFACT_FILENAME}", locators)
+            self.assertEqual(
+                [],
+                [
+                    entry
+                    for entry in payload["omissions"]
+                    if entry["section"] == "review.artifacts"
+                ],
+            )
+
+    def test_absent_final_review_artifacts_are_explained_by_an_omission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self.assertFalse(review.final_review_output_path(plan_dir).exists())
+
+            payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+
+            locators = {entry["locator"] for entry in payload["evidence"]}
+            self.assertNotIn(f"plan/{review.FINAL_REVIEW_FILENAME}", locators)
+            self.assertEqual(
+                [
+                    {
+                        "section": "review.artifacts",
+                        "reason": supervisor_audit.REASON_MISSING,
+                        "count": 2,
+                        "sha256": mock.ANY,
+                    }
+                ],
+                [
+                    entry
+                    for entry in payload["omissions"]
+                    if entry["section"] == "review.artifacts"
+                ],
+            )
+
     def test_a_failed_write_guard_makes_its_turn_anomalous(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
@@ -2755,14 +2853,14 @@ class ReviewAttestationProjectionTests(_RunHistoryFixture, unittest.TestCase):
             payload["review_artifact_sha256"] = "b" * 64
             self._write_state(history[2], payload)
 
-            review = self._bundle(history).payload["review"]
+            section = self._bundle(history).payload["review"]
 
-            self.assertEqual("11", review["review_session_executed"])
-            self.assertFalse(review["review_completed"])
-            self.assertIsNone(review["review_skipped_reason"])
-            self.assertEqual(3, review["review_verdict"]["total_findings"])
-            self.assertEqual("a" * 64, review["review_output_sha256"])
-            self.assertEqual("b" * 64, review["review_artifact_sha256"])
+            self.assertEqual("11", section["review_session_executed"])
+            self.assertFalse(section["review_completed"])
+            self.assertIsNone(section["review_skipped_reason"])
+            self.assertEqual(3, section["review_verdict"]["total_findings"])
+            self.assertEqual("a" * 64, section["review_output_sha256"])
+            self.assertEqual("b" * 64, section["review_artifact_sha256"])
 
 
 class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):

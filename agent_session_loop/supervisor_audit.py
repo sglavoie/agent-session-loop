@@ -48,7 +48,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from . import (
     __version__,
@@ -67,6 +67,7 @@ from . import (
     plans,
     preflight,
     repository_evidence,
+    review,
     state,
     verification,
     workspaces,
@@ -963,6 +964,20 @@ _REPLY_ORIGIN_VALUES = frozenset({"argv", "stdin", "mailbox"})
 #: control-plane provenance validated by :class:`assurance_models.AuditRole`.
 _AUDIT_ROLE_SOURCE_VALUES = frozenset(assurance_models.AUDIT_ROLE_SOURCES)
 
+#: Closed set of tokens a ``source`` may carry to name *where a runner control
+#: signal was read*, as opposed to application output. Deliberately a value
+#: allowlist rather than a parent-name exemption: the runner writes this
+#: provenance under several different parents, while a ``source`` holding real
+#: application text must stay withheld under every one of them.
+#:
+#: Mirrors, without importing the runner (which imports this module):
+#: ``get_args(harnesses.StreamName)``, ``runner.TRUSTED_RUNNER_SIGNAL_SOURCES``
+#: minus the streams, ``runner.RUNNER_STATUS_SOURCE_ABSENT``, and the ``"pause"``
+#: literal the runner stamps when the pause itself, not a stream, is the origin.
+_CONTROL_PLANE_SOURCE_VALUES = frozenset(get_args(harnesses.StreamName)) | frozenset(
+    {"last_message", "absent", "pause"}
+)
+
 #: Field parents under which ``origin`` names how an operator reply reached the
 #: run rather than a repository. ``None`` covers the reply event, which carries
 #: the enum at its payload root.
@@ -1348,6 +1363,8 @@ class _Collector:
                 return REDACTED
             if key in _CONTENT_KEYS:
                 if parent == "role" and text in _AUDIT_ROLE_SOURCE_VALUES:
+                    return text
+                if key == "source" and text in _CONTROL_PLANE_SOURCE_VALUES:
                     return text
                 return self._content_stub(text)
             if key in _ORIGIN_KEYS:
@@ -2350,6 +2367,20 @@ def collect_audit_input(
         candidate = run_dir / name
         if candidate.exists():
             collector.reference(candidate, kind="artifact")
+    # The review cycle records these two paths and their digests, so an index
+    # that never mentions them leaves the auditor unable to tell a review that
+    # produced no artifact from one whose artifact was simply never indexed.
+    # The absence is therefore recorded rather than skipped.
+    for candidate in (
+        review.final_review_output_path(plan_dir),
+        review.final_review_artifact_path(plan_dir),
+    ):
+        if candidate.exists():
+            collector.reference(candidate, kind="artifact")
+        else:
+            collector.omissions.record(
+                "review.artifacts", REASON_MISSING, str(candidate)
+            )
 
     payload["evidence"] = collector.evidence()
     payload["omissions"] = collector.omissions.to_list()
@@ -3551,10 +3582,12 @@ def _check_retryable_transport_failure(context: _CheckContext) -> _Verdict:
 
 
 def _check_review_independence(context: _CheckContext) -> _Verdict:
-    review = context.section("review")
+    review_section = context.section("review")
     run_state = context.section("state")
     evidence = context.evidence(run_state.get("reference"))
-    if not review and not _sequence(context.section("verification").get("sessions")):
+    if not review_section and not _sequence(
+        context.section("verification").get("sessions")
+    ):
         return _Verdict(
             "unavailable",
             "the run recorded neither a review verdict nor a verification result "
@@ -3562,13 +3595,13 @@ def _check_review_independence(context: _CheckContext) -> _Verdict:
             evidence,
         )
 
-    verdict = review.get("review_verdict")
+    verdict = review_section.get("review_verdict")
     harness = run_state.get("harness")
-    review_harness = review.get("review_harness")
+    review_harness = review_section.get("review_harness")
     contradictions: list[str] = []
     if verdict and harness and review_harness == harness:
         contradictions.append(f"the {harness} harness reviewed its own work")
-    if verdict == "approved" and review.get("review_completed") is False:
+    if verdict == "approved" and review_section.get("review_completed") is False:
         contradictions.append("a verdict was approved without the review completing")
     if contradictions:
         return _Verdict(
