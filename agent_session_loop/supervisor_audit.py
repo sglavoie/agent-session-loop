@@ -1077,6 +1077,11 @@ _COMMIT_STATE_KEYS = (
     "commits",
 )
 _COMMIT_DIR_PREFIX = "commit-"
+
+#: How a projected commit was learned. The runner's own commit records carry no
+#: origin, so this marks exactly the entries the audit derived from the write
+#: guard rather than from a commit the runner ran itself.
+OBSERVED_COMMIT_ORIGIN = "observed-write-guard"
 _STATUS_STATE_KEYS = (
     "action_required",
     "assurance",
@@ -1725,16 +1730,19 @@ def _turn_directories(run_dir: Path) -> list[Path]:
     return sorted(entries, key=lambda entry: entry.name)
 
 
-def _observed_head_transitions(
+def _observed_repository_writes(
     turns: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """HEAD moves the write guard saw, whoever made them.
+    """Repository writes the write guard saw, whoever made them.
 
     ``commit_mode`` describes only the commits the runner itself was asked to
     make, so a worker that commits under a null commit mode leaves the commit
     projection empty while the guard records the move. Harvesting the guard
     here means the projection answers "what landed" rather than "what the
     runner intended", which is the question an auditor is asking.
+
+    A moved ref counts even when HEAD stayed put: a commit written to a branch
+    the worktree does not have checked out still landed.
     """
     observed: list[dict[str, Any]] = []
     for turn in turns:
@@ -1742,15 +1750,137 @@ def _observed_head_transitions(
         guard = _mapping(result.get("workspace_write_guard"))
         for alias, raw_changes in _mapping(guard.get("changed")).items():
             changes = _mapping(raw_changes)
-            if changes.get("head_changed") is not True:
+            refs = [
+                str(_mapping(entry).get("ref"))
+                for entry in _sequence(changes.get("refs_changed"))
+                if _mapping(entry).get("ref")
+            ]
+            head_changed = changes.get("head_changed") is True
+            if not head_changed and not refs:
                 continue
-            entry: dict[str, Any] = {
-                "turn": turn.get("name"),
-                "repository": alias,
-                "transition": _mapping(changes.get("head_transition")) or None,
-            }
-            observed.append(entry)
+            observed.append(
+                {
+                    "turn": turn.get("name"),
+                    "directory": turn.get("directory"),
+                    "repository": alias,
+                    "session_id": result.get("session_id"),
+                    "head_changed": head_changed,
+                    "transition": _mapping(changes.get("head_transition")) or None,
+                    "head_before": changes.get("head_before"),
+                    "head_after": changes.get("head_after"),
+                    "refs_changed": refs,
+                }
+            )
     return observed
+
+
+def _observed_head_transitions(
+    observed: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """The observed writes that moved HEAD, in the shape bundles record."""
+    return [
+        {
+            "turn": entry.get("turn"),
+            "repository": entry.get("repository"),
+            "transition": entry.get("transition"),
+        }
+        for entry in observed
+        if entry.get("head_changed") is True
+    ]
+
+
+def _recorded_commit_heads(section: Mapping[str, Any]) -> set[tuple[str, str]]:
+    """The repository and resulting head of every commit the run recorded."""
+    recorded = [_mapping(item) for item in _sequence(section.get("commits"))]
+    recorded.extend(
+        _mapping(_mapping(item).get("result"))
+        for item in _sequence(section.get("attempts"))
+    )
+    pairs: set[tuple[str, str]] = set()
+    for entry in recorded:
+        alias = (
+            entry.get("repository_alias")
+            or entry.get("repo")
+            or entry.get("repository_key")
+        )
+        for key in ("head_after", "commit_sha"):
+            head = entry.get(key)
+            if isinstance(alias, str) and isinstance(head, str):
+                pairs.add((alias, head))
+    return pairs
+
+
+def _reconcile_observed_commits(
+    section: dict[str, Any], observed: Sequence[Mapping[str, Any]]
+) -> None:
+    """Project what the guard saw onto the commit records the run kept.
+
+    A worker that commits on its own leaves ``attempts``, ``commit_groups`` and
+    ``commits`` empty while the commits themselves sit in the repository, so
+    the projections are derived here rather than left contradicting the guard.
+    Every derived entry names its ``origin``, and one whose resulting head a
+    recorded commit already claims is dropped instead of counted twice.
+    """
+    accounted = _recorded_commit_heads(section)
+    commits: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+    groups: dict[Any, dict[str, Any]] = {}
+    for entry in observed:
+        alias = entry.get("repository")
+        transition = _mapping(entry.get("transition"))
+        head_after = entry.get("head_after") or transition.get("after")
+        if (
+            isinstance(alias, str)
+            and isinstance(head_after, str)
+            and (alias, head_after) in accounted
+        ):
+            continue
+        commits_added = transition.get("commits_added")
+        commit = {
+            "origin": OBSERVED_COMMIT_ORIGIN,
+            "turn": entry.get("turn"),
+            "session_id": entry.get("session_id"),
+            "repository_key": alias,
+            "repository_alias": alias,
+            "repo": alias,
+            "head_before": entry.get("head_before") or transition.get("before"),
+            "head_after": head_after,
+            "commit_sha": head_after if commits_added else None,
+            "relation": transition.get("relation"),
+            "commits_added": commits_added,
+            "history_rewrite": transition.get("history_rewrite"),
+            "refs_changed": list(entry.get("refs_changed") or ()),
+        }
+        commits.append(commit)
+        attempts.append(
+            {
+                "name": entry.get("turn"),
+                "reference": entry.get("directory"),
+                "origin": OBSERVED_COMMIT_ORIGIN,
+                "result": commit,
+            }
+        )
+        session_id = entry.get("session_id")
+        group = groups.setdefault(
+            session_id if session_id is not None else entry.get("turn"),
+            {
+                "origin": OBSERVED_COMMIT_ORIGIN,
+                "scope": "session" if session_id is not None else "end",
+                "session_id": session_id,
+                "ordered_aliases": [],
+                "repositories": [],
+            },
+        )
+        if alias not in group["ordered_aliases"]:
+            group["ordered_aliases"].append(alias)
+        group["repositories"].append(commit)
+    if not commits:
+        return
+    section["attempts"] = list(_sequence(section.get("attempts"))) + attempts
+    section["commits"] = list(_sequence(section.get("commits"))) + commits
+    section["commit_groups"] = list(_sequence(section.get("commit_groups"))) + list(
+        groups.values()
+    )
 
 
 def _commit_section(
@@ -1762,7 +1892,8 @@ def _commit_section(
 ) -> dict[str, Any]:
     """What the run committed, from state projection plus per-commit results."""
     section = _projection(collector, state_payload, _COMMIT_STATE_KEYS)
-    section["observed_head_transitions"] = _observed_head_transitions(turns)
+    observed = _observed_repository_writes(turns)
+    section["observed_head_transitions"] = _observed_head_transitions(observed)
     attempts: list[dict[str, Any]] = []
     try:
         directories = sorted(
@@ -1787,6 +1918,7 @@ def _commit_section(
             entry["result"] = {"available": False, "reason": reason or REASON_MALFORMED}
         attempts.append(entry)
     section["attempts"] = attempts
+    _reconcile_observed_commits(section, observed)
     return section
 
 
@@ -2413,6 +2545,7 @@ RUN_ANCHOR = EVIDENCE_ROOT_RUN
 _CLASSIFIED_EVENT_NAMES = frozenset(
     {
         _RUN_STARTED_EVENT,
+        events.COMMIT_FINISHED_EVENT,
         events.PROCESS_SWEEP_EVENT,
         events.REVIEW_VERDICT_RETRY_EVENT,
         events.RUN_FINISHED_EVENT,
@@ -2425,6 +2558,21 @@ _CLASSIFIED_EVENT_NAMES = frozenset(
         events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
     }
 )
+
+#: Every outcome the runner records for a commit it ran, mirrored as literals
+#: because ``runner`` imports this module and never the other way round.
+#: ``success`` is listed beside the failures so a record naming a token from
+#: neither set reads as an outcome nobody defined rather than as a clean one.
+_COMMIT_FAILURE_RESULTS = frozenset(
+    {
+        "dirty-after-commit",
+        "missing-head",
+        "nonzero-exit",
+        "status-unavailable",
+        "unchanged-head",
+    }
+)
+_COMMIT_RESULTS = _COMMIT_FAILURE_RESULTS | {"success"}
 
 #: The records that report one session's turn outcome. A pause names the
 #: session it died on, so these are the only names its classification can
@@ -3856,14 +4004,18 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
         for alias in _sequence(_mapping(session).get("writes"))
     }
     attempts = [_mapping(item) for item in _sequence(commits.get("attempts"))]
+    # A commit the guard observed is by definition one the runner never ran, so
+    # the commit mode it would have run under is absent for the same reason the
+    # commit is: nobody asked the runner to make it.
+    ran = [
+        attempt
+        for attempt in attempts
+        if attempt.get("origin") != OBSERVED_COMMIT_ORIGIN
+    ]
     repair_commit_mode = commits.get("repair_commit_mode")
-    if (
-        attempts
-        and not commits.get("commit_mode")
-        and repair_commit_mode != "per-child"
-    ):
+    if ran and not commits.get("commit_mode") and repair_commit_mode != "per-child":
         contradictions.append(
-            f"the run made {len(attempts)} commit attempt(s) without recording the "
+            f"the run made {len(ran)} commit attempt(s) without recording the "
             "commit mode they ran under"
         )
     for attempt in attempts:
@@ -3957,6 +4109,125 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
         f"{guarded} guarded turn(s), {len(attempts)} commit attempt(s), "
         f"{head_moves} worker HEAD move(s), and {history_rewrites} history "
         "rewrite(s) stayed inside the run's declared write scope",
+        evidence,
+    )
+
+
+def _commit_record_label(payload: Mapping[str, Any]) -> str:
+    """Name a commit record by the artifact it wrote, else by its index."""
+    for key in ("artifact_dir", "result_path"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    index = payload.get("commit_index")
+    return f"commit {index}" if index is not None else "an unnamed commit"
+
+
+def _commit_failure_classification(payload: Mapping[str, Any]) -> str | None:
+    """The token the run gave a failed commit, explicit key before outcome."""
+    for key in ("failure_classification", "status_result"):
+        value = payload.get(key)
+        if isinstance(value, str) and value and value != "success":
+            return value
+    return None
+
+
+def _commit_failure_reason(payload: Mapping[str, Any]) -> str | None:
+    """Where the run said why a commit failed.
+
+    The bundle carries no command output by design, so a reason is either named
+    in the record itself or written to a stream the record points at and sizes.
+    A failure with neither left nothing for an auditor to read.
+    """
+    for key in ("failure_reason", "exec_error", "status_error"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    for path_key, size_key in (
+        ("stderr_path", "stderr_chars"),
+        ("stdout_path", "stdout_chars"),
+    ):
+        path = payload.get(path_key)
+        size = payload.get(size_key)
+        if isinstance(path, str) and path and isinstance(size, int) and size > 0:
+            return path
+    return None
+
+
+def _check_commit_failure_accounting(context: _CheckContext) -> _Verdict:
+    """Grade the run's own account of every commit it recorded as failed.
+
+    A failed commit is recorded once, in ``commit_finished``, and that record
+    already carries the outcome that classified the failure and the streams the
+    failure was written to. Reading them here is what lets the unknown-anomalies
+    catch-all stop reporting a failed commit: the exemption covers exactly what
+    this check grades, so a record that names no classification, contradicts its
+    own exit code, or points at no reason still surfaces by name.
+    """
+    problems: list[str] = []
+    references: list[str] = []
+    recorded = 0
+    failures = 0
+    for record in context.records:
+        if record.get("name") != events.COMMIT_FINISHED_EVENT:
+            continue
+        recorded += 1
+        payload = _mapping(record.get("payload"))
+        if not _payload_shows_failure(payload):
+            continue
+        failures += 1
+        label = _commit_record_label(payload)
+        references.append(str(payload.get("artifact_dir")))
+        status_result = payload.get("status_result")
+        returncode = payload.get("returncode")
+        if _commit_failure_classification(payload) is None:
+            problems.append(f"{label} failed without classifying the failure")
+        elif isinstance(status_result, str) and status_result not in _COMMIT_RESULTS:
+            problems.append(
+                f"{label} recorded {status_result}, which is no commit outcome ASL "
+                "writes"
+            )
+        elif (
+            isinstance(status_result, str)
+            and isinstance(returncode, int)
+            and (returncode != 0) != (status_result == "nonzero-exit")
+        ):
+            problems.append(
+                f"{label} recorded {status_result} against exit {returncode}"
+            )
+        if payload.get("success") is True:
+            problems.append(f"{label} claimed success while recording a failure")
+        if _commit_failure_reason(payload) is None:
+            problems.append(f"{label} failed without recording why")
+
+    evidence = context.evidence(
+        *references,
+        context.event_summary.get("reference"),
+        context.section("state").get("reference"),
+    )
+    if problems:
+        return _Verdict(
+            "fail",
+            f"the run left a commit failure unaccounted for: {_joined(problems)}",
+            evidence,
+        )
+    if context.events_shed:
+        return _Verdict(
+            "unavailable",
+            "the event log was shed under the size cap, so the run's commit "
+            "results cannot be read in full",
+            evidence,
+        )
+    if not context.records:
+        return _Verdict(
+            "unavailable",
+            "the run recorded no events, so it recorded no commit outcome to grade",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"{failures} of {recorded} recorded commit(s) failed, each naming its "
+        "classification and where its reason was written",
         evidence,
     )
 
@@ -4260,6 +4531,22 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             ),
         ),
         _check_mutation_commit_guards,
+    ),
+    (
+        CheckSpec(
+            check="commit-failure-accounting",
+            lane="mutation-commit-guards",
+            category="guards",
+            component="commit-failure",
+            invariant_key="guards.commit-failure-accounting",
+            severity="medium",
+            recommendation=(
+                "Record the outcome that classified the failed commit and the "
+                "stream its reason was written to, so a failed commit is read "
+                "from its own record instead of landing in the catch-all."
+            ),
+        ),
+        _check_commit_failure_accounting,
     ),
     (
         CheckSpec(

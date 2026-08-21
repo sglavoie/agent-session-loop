@@ -2725,7 +2725,12 @@ class TurnAnomalyClassificationTests(_RunHistoryFixture, unittest.TestCase):
 class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
     """A commit the guard saw is projected even when the runner made none."""
 
-    def _worker_committed(self, tmp: str) -> dict[str, Any]:
+    HEAD_BEFORE = "ab503cce84cf73bcaadb3c5e09f395f370ca5bc0"
+    HEAD_AFTER = "ede6829cedf2d8e91d1aaf91c0a8cc401dfdbe8d"
+
+    def _worker_committed(
+        self, tmp: str, **changes: Any
+    ) -> tuple[Path, Path, Path, Path]:
         history = self._history(Path(tmp))
         workspace, _, state_dir, run_dir = history
         state_payload = self._read_state(state_dir)
@@ -2735,11 +2740,12 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
         turn_dir = run_dir / "turn-0001-01"
         result = self._clean_result(workspace, turn_dir)
         result["workspace_write_guard"]["changed"] = {
-            "app": {
+            "app": changes
+            or {
                 "head_changed": True,
                 "head_transition": {
-                    "before": "ab503cce84cf73bcaadb3c5e09f395f370ca5bc0",
-                    "after": "ede6829cedf2d8e91d1aaf91c0a8cc401dfdbe8d",
+                    "before": self.HEAD_BEFORE,
+                    "after": self.HEAD_AFTER,
                     "relation": "fast-forward",
                     "commits_added": 1,
                     "commits_removed": 0,
@@ -2748,14 +2754,15 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
             }
         }
         self._write_result(turn_dir, result)
-        return self._bundle(history).payload["commits"]
+        return history
 
     def test_a_worker_commit_under_a_null_commit_mode_is_projected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            commits = self._worker_committed(tmp)
+            history = self._worker_committed(tmp)
+
+            commits = self._bundle(history).payload["commits"]
 
             self.assertIsNone(commits["commit_mode"])
-            self.assertEqual([], commits["attempts"])
             observed = commits["observed_head_transitions"]
             self.assertEqual(1, len(observed))
             self.assertEqual("app", observed[0]["repository"])
@@ -2763,11 +2770,81 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
             transition = observed[0]["transition"]
             self.assertEqual("fast-forward", transition["relation"])
             self.assertEqual(1, transition["commits_added"])
+            self.assertEqual(self.HEAD_BEFORE, transition["before"])
+            self.assertEqual(self.HEAD_AFTER, transition["after"])
+
+            # The move the guard saw is what landed, so the projections a
+            # reader reaches for first no longer contradict it.
+            self.assertEqual(1, len(commits["attempts"]))
+            self.assertEqual(1, len(commits["commits"]))
+            self.assertEqual(1, len(commits["commit_groups"]))
+            projected = commits["commits"][0]
             self.assertEqual(
-                "ab503cce84cf73bcaadb3c5e09f395f370ca5bc0", transition["before"]
+                supervisor_audit.OBSERVED_COMMIT_ORIGIN, projected["origin"]
             )
+            self.assertEqual("app", projected["repository_alias"])
+            self.assertEqual(self.HEAD_BEFORE, projected["head_before"])
+            self.assertEqual(self.HEAD_AFTER, projected["head_after"])
+            self.assertEqual(self.HEAD_AFTER, projected["commit_sha"])
+            attempt = commits["attempts"][0]
+            self.assertEqual("turn-0001-01", attempt["name"])
+            self.assertEqual("run/turn-0001-01", attempt["reference"])
+            self.assertEqual(["app"], commits["commit_groups"][0]["ordered_aliases"])
+
+    def test_a_projected_commit_is_not_a_commit_mode_contradiction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed(tmp)
+
+            results = {
+                result.check: result
+                for result in supervisor_audit.run_deterministic_checks(
+                    self._bundle(history)
+                )
+            }
+
+            # Nobody asked the runner to make this commit, so the commit mode
+            # it would have run under is absent for the same reason it is.
+            self.assertEqual("pass", results["mutation-commit-guards"].status)
+            self.assertIn(
+                "1 commit attempt(s)", results["mutation-commit-guards"].detail
+            )
+
+    def test_a_recorded_commit_is_not_projected_a_second_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed(tmp)
+            _, _, state_dir, _ = history
+            state_payload = self._read_state(state_dir)
+            state_payload["commits"] = [
+                {"repository_alias": "app", "head_after": self.HEAD_AFTER}
+            ]
+            self._write_state(state_dir, state_payload)
+
+            commits = self._bundle(history).payload["commits"]
+
+            self.assertEqual(1, len(commits["commits"]))
+            self.assertNotIn("origin", commits["commits"][0])
+            self.assertEqual([], commits["attempts"])
+
+    def test_a_moved_ref_is_projected_even_when_head_stayed_put(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed(
+                tmp,
+                head_changed=False,
+                refs_changed=[
+                    {
+                        "ref": "refs/heads/feature",
+                        "before": self.HEAD_BEFORE,
+                        "after": self.HEAD_AFTER,
+                    }
+                ],
+            )
+
+            commits = self._bundle(history).payload["commits"]
+
+            self.assertEqual([], commits["observed_head_transitions"])
+            self.assertEqual(1, len(commits["commits"]))
             self.assertEqual(
-                "ede6829cedf2d8e91d1aaf91c0a8cc401dfdbe8d", transition["after"]
+                ["refs/heads/feature"], commits["commits"][0]["refs_changed"]
             )
 
     def test_a_run_whose_head_never_moved_projects_no_transition(self) -> None:
@@ -3962,7 +4039,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 history,
                 also_recorded=(
                     (
-                        events.COMMIT_FINISHED_EVENT,
+                        events.COMMIT_GROUP_FINISHED_EVENT,
                         {"run_id": RUN_ID, "session": 12, "ok": False},
                     ),
                 ),
@@ -3974,8 +4051,127 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             # session touched on its way there.
             self.assertEqual("fail", results["unclassified-anomalies"].status)
             self.assertIn(
-                events.COMMIT_FINISHED_EVENT,
+                events.COMMIT_GROUP_FINISHED_EVENT,
                 results["unclassified-anomalies"].detail,
+            )
+
+    def _recorded_commit(
+        self, history: tuple[Path, Path, Path, Path], **payload: Any
+    ) -> None:
+        """Record one failed commit before the run's terminal record."""
+        state_dir = history[2]
+        run_dir = history[3]
+        commit_dir = run_dir / "commit-0001"
+        commit_dir.mkdir(exist_ok=True)
+        self._write_events(
+            state_dir,
+            [
+                ("run_started", {"run_id": RUN_ID}),
+                (
+                    events.COMMIT_FINISHED_EVENT,
+                    {
+                        "run_id": RUN_ID,
+                        "ok": False,
+                        "artifact_dir": str(commit_dir),
+                        **payload,
+                    },
+                ),
+                (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+            ],
+        )
+
+    def test_a_failed_commit_is_read_from_the_account_it_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            commit_dir = history[3] / "commit-0001"
+            self._recorded_commit(
+                history,
+                status_result="nonzero-exit",
+                returncode=1,
+                stderr_path=str(commit_dir / "stderr.log"),
+                stderr_chars=64,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["commit-failure-accounting"].status)
+            self.assertIn(
+                "1 of 1 recorded commit(s) failed",
+                results["commit-failure-accounting"].detail,
+            )
+            # The exemption in the catch-all covers exactly what the check above
+            # graded, so a commit failure the run explained is not also reported
+            # as one nothing classified.
+            self.assertEqual("pass", results["unclassified-anomalies"].status)
+
+    def test_a_failed_commit_that_classified_nothing_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._recorded_commit(history, returncode=1)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["commit-failure-accounting"].status)
+            self.assertIn(
+                "failed without classifying the failure",
+                results["commit-failure-accounting"].detail,
+            )
+
+    def test_a_commit_outcome_contradicting_its_exit_code_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._recorded_commit(
+                history,
+                status_result="unchanged-head",
+                returncode=1,
+                status_error="HEAD did not move",
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["commit-failure-accounting"].status)
+            self.assertIn(
+                "recorded unchanged-head against exit 1",
+                results["commit-failure-accounting"].detail,
+            )
+
+    def test_a_commit_outcome_asl_never_writes_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._recorded_commit(
+                history,
+                status_result="exploded",
+                returncode=1,
+                status_error="something else entirely",
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["commit-failure-accounting"].status)
+            self.assertIn(
+                "which is no commit outcome ASL writes",
+                results["commit-failure-accounting"].detail,
+            )
+
+    def test_a_failed_commit_that_recorded_no_reason_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            commit_dir = history[3] / "commit-0001"
+            self._recorded_commit(
+                history,
+                status_result="nonzero-exit",
+                returncode=1,
+                # An empty stream is a stream nobody can read a reason out of.
+                stderr_path=str(commit_dir / "stderr.log"),
+                stderr_chars=0,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["commit-failure-accounting"].status)
+            self.assertIn(
+                "failed without recording why",
+                results["commit-failure-accounting"].detail,
             )
 
     def test_a_final_failure_is_accounted_for_by_its_classification(self) -> None:
