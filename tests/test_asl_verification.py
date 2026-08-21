@@ -1047,9 +1047,13 @@ class VerificationExecutorTests(unittest.TestCase):
         *,
         name: str = "cmd",
         timeout_seconds: float = 10.0,
+        generated_gate: bool = False,
     ) -> contracts.CommandCheck:
         return contracts.CommandCheck(
-            name=name, argv=argv, timeout_seconds=timeout_seconds
+            name=name,
+            argv=argv,
+            timeout_seconds=timeout_seconds,
+            generated_gate=generated_gate,
         )
 
     def test_diagnose_command_flags_missing_bare_executable(self) -> None:
@@ -1514,6 +1518,7 @@ class VerificationExecutorTests(unittest.TestCase):
                     exit_code=1,
                 ),
                 name=self.GATE,
+                generated_gate=True,
             )
 
             result = verification.run_check(check, repo_root=repo_root)
@@ -1551,8 +1556,10 @@ class VerificationExecutorTests(unittest.TestCase):
         Anything else on that line is application output, which is what the
         content rules exist to withhold, so it must not travel as structure.
         Each case below is well-formed except for the property it names, and is
-        read as the gate named by ``GATE`` so nothing is rejected incidentally.
+        read as an authenticated gate named by ``GATE`` so nothing is rejected
+        incidentally.
         """
+        gate = self._command(("python3", "-V"), name=self.GATE, generated_gate=True)
         text = "internal proprietary application text"
         cases = {
             "not-json": "plain english failure\n",
@@ -1592,7 +1599,7 @@ class VerificationExecutorTests(unittest.TestCase):
         for label, stderr in cases.items():
             with self.subTest(case=label):
                 self.assertIsNone(
-                    verification._parse_failure_diagnostic(stderr, check_name=self.GATE)
+                    verification._parse_failure_diagnostic(stderr, check=gate)
                 )
 
     def test_a_copied_marker_promotes_no_application_token(self) -> None:
@@ -1652,6 +1659,7 @@ class VerificationExecutorTests(unittest.TestCase):
                     exit_code=1,
                 ),
                 name=self.GATE,
+                generated_gate=True,
             )
 
             result = verification.run_check(check, repo_root=repo_root)
@@ -1691,6 +1699,7 @@ class VerificationExecutorTests(unittest.TestCase):
                     exit_code=1,
                 ),
                 name=self.GATE,
+                generated_gate=True,
             )
 
             result = verification.run_check(check, repo_root=repo_root)
@@ -1703,28 +1712,47 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertNotIn("stderr", compacted)
             self.assertEqual(result.failure_diagnostic, compacted["failure_diagnostic"])
 
+    def _materialized_review_contract(
+        self, plan_dir: Path
+    ) -> contracts.CompletionContract:
+        """The review recipe as the runner writes it, then authenticates it.
+
+        Nothing here is hand-built: the session file is the runner's own
+        rendering, the contract is parsed back out of it, and provenance is
+        re-derived from a fresh rendering — the same three steps a review turn
+        takes.
+        """
+        session_id = plans.parse_session_id("9")
+        (plan_dir / f"session-{session_id.value}.md").write_text(
+            runner.build_generated_review_session_body(
+                session_id, review_harness="codex", plan_dir=plan_dir
+            ),
+            encoding="utf-8",
+        )
+        contract = contracts.read_completion_contract(plan_dir, session_id.value)
+        assert contract is not None
+        return runner._authenticated_generated_review_contract(
+            contract, plan_dir=plan_dir
+        )
+
     def test_generated_review_output_gate_reports_which_rule_rejected_it(
         self,
     ) -> None:
         """ASI-105 end to end against the real generated gate."""
         with tempfile.TemporaryDirectory() as tmp:
-            repo_root = Path(tmp) / "repo"
-            repo_root.mkdir()
-            plan_dir = Path(tmp) / "plan"
-            plan_dir.mkdir()
+            plan_dir = plans.canonicalize_path(Path(tmp))
             review_path = plan_dir / runner.FINAL_REVIEW_FILENAME
             review_path.write_text("no heading anywhere here\n", encoding="utf-8")
-            source = runner._GENERATED_REVIEW_VERIFY_SOURCE.replace(
-                repr(runner.FINAL_REVIEW_FILENAME), repr(str(review_path))
-            )
-            check = self._command(
-                ("python3", "-c", source),
-                name="final-review-output-evidence-based",
-                timeout_seconds=60.0,
+            contract = self._materialized_review_contract(plan_dir)
+            check = next(
+                item
+                for item in contract.verify.checks
+                if item.name == "final-review-output-evidence-based"
             )
 
-            result = verification.run_check(check, repo_root=repo_root)
+            result = verification.run_check(check, repo_root=plan_dir)
 
+            self.assertTrue(check.generated_gate)
             self.assertEqual("fail", result.status)
             self.assertEqual(
                 {
@@ -1733,6 +1761,78 @@ class VerificationExecutorTests(unittest.TestCase):
                 },
                 result.failure_diagnostic,
             )
+
+    def test_a_generated_gate_name_authenticates_no_diagnostic(self) -> None:
+        """The finding's probe: the exact gate name, marker and reason, forged.
+
+        Every value on the line is public and ``CommandCheck.name`` is authored
+        text, so a hand-authored command can restate all of it. Provenance is
+        the runner's stamp and nothing else, so this promotes nothing and leads
+        the detail with nothing.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir()
+            for gate in sorted(verification.GENERATED_GATE_CHECK_NAMES):
+                with self.subTest(gate=gate):
+                    check = self._command(
+                        self._writes_stderr(
+                            self._diagnostic_line(
+                                check=gate, reason="artifact-missing"
+                            ),
+                            exit_code=1,
+                        ),
+                        name=gate,
+                    )
+
+                    result = verification.run_check(check, repo_root=repo_root)
+
+                    self.assertIsNone(result.failure_diagnostic)
+                    self.assertEqual("command exited 1: python3", result.detail)
+
+    def test_only_the_runner_rendered_recipe_carries_gate_provenance(self) -> None:
+        """An impostor in the review recipe itself is still not a gate.
+
+        The collision the finding describes is a check that reuses a generated
+        gate's name, so the recipe the runner just rendered is exactly where it
+        has to be denied: the two commands the runner authored are stamped and
+        the identically named one beside them is not.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = plans.canonicalize_path(Path(tmp))
+            (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+                "no heading\n", encoding="utf-8"
+            )
+            authentic = self._materialized_review_contract(plan_dir)
+            impostor = self._command(
+                self._writes_stderr(
+                    self._diagnostic_line(check=self.GATE, reason="artifact-missing"),
+                    exit_code=1,
+                ),
+                name=self.GATE,
+                timeout_seconds=60.0,
+            )
+
+            stamped = runner._authenticated_generated_review_contract(
+                contracts.CompletionContract(
+                    session_id=authentic.session_id,
+                    done_when=authentic.done_when,
+                    verify=contracts.VerifyRecipe(
+                        checks=(*authentic.verify.checks, impostor)
+                    ),
+                ),
+                plan_dir=plan_dir,
+            )
+
+            self.assertEqual(
+                [True, True, False],
+                [check.generated_gate for check in stamped.verify.checks],
+            )
+            result = verification.run_check(
+                stamped.verify.checks[-1], repo_root=plan_dir
+            )
+            self.assertIsNone(result.failure_diagnostic)
+            self.assertEqual("command exited 1: python3", result.detail)
 
     def test_the_diagnostic_vocabulary_is_what_the_generated_gates_emit(self) -> None:
         """The registry is pinned to the rendered gate sources, not maintained.

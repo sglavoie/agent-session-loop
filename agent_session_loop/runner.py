@@ -28,6 +28,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import asdict, dataclass, field
+from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -512,7 +513,9 @@ def parse_review_verdict(text: str) -> dict[str, Any]:
 # 1, which is the whole failure surface these gates used to expose. ``CHECK``
 # is the gate's own contract name and every ``reason`` is a literal from a
 # closed vocabulary, which is what the parser holds the line to; the marker is
-# only its first filter. Adding a reason here means adding it to
+# only its first filter, and none of the three is what authenticates the line —
+# ``_authenticated_generated_review_contract`` is. Adding a reason here means
+# adding it to
 # ``verification.GENERATED_GATE_REASONS`` — a test extracts this source and
 # pins the two equal.
 _VALIDATOR_FAIL_HELPER = (
@@ -744,12 +747,19 @@ def _broad_review_verification_checks(plan_dir: Path) -> list[dict[str, Any]]:
     return list(collected.values())
 
 
-def _generated_review_contract_payload(
-    session_id: plans.SessionId,
+def _generated_review_gate_payloads(
     *,
     plan_dir: Path,
     repository_aliases: Sequence[str] = (),
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
+    """The two artifact validators the runner writes into every review recipe.
+
+    Split out from the full contract because provenance is re-derived from
+    exactly this rendering: the checks that carry a failure diagnostic are the
+    ones the runner authored, so authenticating them must not depend on the
+    plan's replayed gates, which are authored elsewhere and change as sessions
+    are added.
+    """
     repository_alias = repository_aliases[0] if repository_aliases else None
     review_path = str(plan_dir / review.FINAL_REVIEW_FILENAME)
     artifact_path = str(plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME)
@@ -816,17 +826,83 @@ def _generated_review_contract_payload(
             check["repo"] = repository_alias
         return check
 
+    return [
+        command_check("final-review-output-evidence-based", verify_source),
+        command_check("final-review-artifact-consistent", artifact_source),
+    ]
+
+
+def _generated_review_contract_payload(
+    session_id: plans.SessionId,
+    *,
+    plan_dir: Path,
+    repository_aliases: Sequence[str] = (),
+) -> dict[str, Any]:
     return {
         "session": session_id.value,
         "checks": [
-            command_check("final-review-output-evidence-based", verify_source),
-            command_check("final-review-artifact-consistent", artifact_source),
+            *_generated_review_gate_payloads(
+                plan_dir=plan_dir, repository_aliases=repository_aliases
+            ),
             # The artifact validators supplement this gate rather than standing
             # in for it. They run first only because rejecting a malformed
             # review is cheap and replaying the plan's whole recipe is not.
             *_broad_review_verification_checks(plan_dir),
         ],
     }
+
+
+def _gate_provenance_identity(
+    name: str, argv: Sequence[str], cwd: str | None, repo: str | None
+) -> tuple[Any, ...]:
+    """What a check must reproduce exactly to be one the runner rendered."""
+    return (name, tuple(argv), cwd, repo)
+
+
+def _authenticated_generated_review_contract(
+    contract: contracts.CompletionContract,
+    *,
+    plan_dir: Path,
+    repository_aliases: Sequence[str] = (),
+) -> contracts.CompletionContract:
+    """Stamp generated-gate provenance on the review gates the runner rendered.
+
+    A promoted failure diagnostic asserts that ASL's own review gate rejected
+    an artifact, so the assertion has to rest on something no contract can say.
+    Everything the rejection line carries is public — the marker literal, both
+    gate names, every reason — and ``CommandCheck.name`` is whatever the
+    contract's author typed, so a hand-authored command reproduces all of it.
+    What it cannot reproduce is being generated here: the recipe is re-rendered
+    from this plan directory and only a byte-identical command is stamped, and
+    the stamp is a field the contract parser rejects, so it exists only for
+    checks this function returns. The review session's own recipe is rewritten
+    from the same rendering immediately before the turn runs, which is why the
+    real gates always match.
+    """
+    expected = {
+        _gate_provenance_identity(
+            payload["name"], payload["argv"], payload.get("cwd"), payload.get("repo")
+        )
+        for payload in _generated_review_gate_payloads(
+            plan_dir=plan_dir, repository_aliases=repository_aliases
+        )
+    }
+    stamped = tuple(
+        (
+            dataclass_replace(check, generated_gate=True)
+            if isinstance(check, contracts.CommandCheck)
+            and _gate_provenance_identity(check.name, check.argv, check.cwd, check.repo)
+            in expected
+            else check
+        )
+        for check in contract.verify.checks
+    )
+    if stamped == contract.verify.checks:
+        return contract
+    return dataclass_replace(
+        contract,
+        verify=dataclass_replace(contract.verify, checks=stamped),
+    )
 
 
 def _generated_review_contract_section(
@@ -13148,6 +13224,7 @@ def _enforce_session_verification(
     verification_context: verification.VerificationContext | None = None,
     review_broad_failure_deferral: bool = False,
     require_review_artifact: bool = False,
+    generated_review_session: bool = False,
 ) -> bool:
     """Run the session's `Verify` recipe and pause on failure or contract problems.
 
@@ -13246,6 +13323,18 @@ def _enforce_session_verification(
     # the in-flight phase as "verifying" rather than "idle".
     with persistence.lock:
         payload["final_snapshot"] = _snapshot_payload(after)
+
+    if generated_review_session:
+        review_workspace = (
+            verification_context.workspace if verification_context is not None else None
+        )
+        contract = _authenticated_generated_review_contract(
+            contract,
+            plan_dir=before.plan_dir,
+            repository_aliases=(
+                () if review_workspace is None else review_workspace.registry.aliases
+            ),
+        )
 
     contract_checks = contract.verify.checks
     check_count = len(contract_checks)
@@ -17505,6 +17594,7 @@ def _run_locked(
                     review_session_version is not None
                     and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
                 ),
+                generated_review_session=is_review_session,
             ):
                 break
 

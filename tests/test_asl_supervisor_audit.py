@@ -2951,20 +2951,40 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
     """
 
     def _rejected_gate(self, history: tuple[Path, Path, Path, Path]) -> dict[str, Any]:
-        """Run the real generated gate against a heading-less review artifact."""
+        """Run the real generated gate against a heading-less review artifact.
+
+        The command is taken from the runner's own rendering and stamped by the
+        runner's own authenticator, because a diagnostic only reaches a bundle
+        for a gate the runner generated.
+        """
         _, plan_dir, _, run_dir = history
         review_path = plan_dir / runner.FINAL_REVIEW_FILENAME
         review_path.write_text("no heading anywhere here\n", encoding="utf-8")
-        source = runner._GENERATED_REVIEW_VERIFY_SOURCE.replace(
-            repr(runner.FINAL_REVIEW_FILENAME), repr(str(review_path))
+        payload = next(
+            item
+            for item in runner._generated_review_gate_payloads(plan_dir=plan_dir)
+            if item["name"] == "final-review-output-evidence-based"
+        )
+        contract = runner._authenticated_generated_review_contract(
+            contracts.CompletionContract(
+                session_id=plans.parse_session_id("1"),
+                done_when=("reviewed",),
+                verify=contracts.VerifyRecipe(
+                    checks=(
+                        contracts.CommandCheck(
+                            name=payload["name"],
+                            argv=tuple(payload["argv"]),
+                            timeout_seconds=float(payload["timeout_seconds"]),
+                            cwd=payload["cwd"],
+                        ),
+                    )
+                ),
+            ),
+            plan_dir=plan_dir,
         )
         turn_dir = run_dir / "turn-0001-01"
         result = verification.run_check(
-            contracts.CommandCheck(
-                name="final-review-output-evidence-based",
-                argv=("python3", "-c", source),
-                timeout_seconds=60.0,
-            ),
+            contract.verify.checks[0],
             repo_root=run_dir,
             artifact_dir=turn_dir / "verification",
         )
@@ -3051,6 +3071,7 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
         stderr_line: str,
         *,
         name: str = "user-authored-command",
+        generated_gate: bool = False,
     ) -> dict[str, Any]:
         """Record one real failed command and project it through a bundle."""
         _, _, _, run_dir = history
@@ -3064,6 +3085,7 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
                     f"import sys; sys.stderr.write({stderr_line!r}); sys.exit(1)",
                 ),
                 timeout_seconds=60.0,
+                generated_gate=generated_gate,
             ),
             repo_root=run_dir,
             artifact_dir=turn_dir / "verification",
@@ -3101,7 +3123,7 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             check = self._recorded_command(
-                self._history(Path(tmp)), line, name=self.GATE
+                self._history(Path(tmp)), line, name=self.GATE, generated_gate=True
             )
 
             diagnostic = check["failure_diagnostic"]
@@ -3140,6 +3162,23 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
                 self.assertIsNone(check["failure_diagnostic"])
                 self.assertEqual("command exited 1: python3", check["detail"])
                 self.assertNotIn(self.APPLICATION_TOKEN, json.dumps(check))
+
+    def test_a_generated_gate_name_reaches_the_bundle_as_nothing(self) -> None:
+        """The collision the finding describes, projected all the way through.
+
+        A hand-authored command may be named after a generated gate and may
+        print that gate's marker and one of its real reasons; only the runner's
+        own recipe is a gate, so the bundle carries neither the diagnostic nor
+        a diagnostic-led detail.
+        """
+        line = self._marked_line(check=self.GATE, reason="artifact-missing")
+        with tempfile.TemporaryDirectory() as tmp:
+            check = self._recorded_command(
+                self._history(Path(tmp)), line, name=self.GATE
+            )
+
+            self.assertIsNone(check["failure_diagnostic"])
+            self.assertEqual("command exited 1: python3", check["detail"])
 
     def test_the_collector_stubs_a_token_in_either_diagnostic_field(self) -> None:
         """The boundary holds for a diagnostic the collector did not parse.

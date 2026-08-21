@@ -2553,6 +2553,36 @@ class ParserAndStateTests(unittest.TestCase):
             message,
         )
 
+    def test_parse_completion_contract_rejects_claimed_gate_provenance(self) -> None:
+        # ``generated_gate`` says the runner rendered the command itself, which
+        # is the whole basis for promoting that command's rejection as ASL
+        # schema. A contract that could set it would be a session file
+        # authenticating its own text.
+        text = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "- something",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                '{"checks": [{"type": "command", '
+                '"name": "final-review-artifact-consistent", '
+                '"argv": ["python3", "-c", "pass"], "generated_gate": true}]}',
+                "```",
+                "",
+                "## Handoff",
+                "- **Status**: pending",
+            ]
+        )
+
+        with self.assertRaises(plans.PlanError) as caught:
+            contracts.parse_completion_contract(text, session_id="1")
+
+        self.assertIn("'generated_gate'", str(caught.exception))
+
     def test_allowed_check_keys_match_what_check_payload_emits(self) -> None:
         # The allowlist is the fence a fail-closed parser stands behind, so it
         # has to be exactly the round-trip surface and nothing narrower.

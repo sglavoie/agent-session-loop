@@ -670,17 +670,19 @@ FAILURE_DIAGNOSTIC_KEY = "failure_diagnostic"
 
 #: The marker a generated ASL gate stamps on its rejection line, and the value
 #: it stamps (``runner._VALIDATOR_FAIL_HELPER``). It is a cheap first filter,
-#: not authentication: the literal is public and every command can print it,
-#: so what a promoted line actually rests on is the vocabulary below. It is
-#: stripped once read, since it says nothing about the failure.
+#: not authentication: the literal is public and every command can print it, so
+#: what a promoted line rests on is the runner's own provenance stamp, then the
+#: vocabulary below. It is stripped once read, since it says nothing about the
+#: failure.
 FAILURE_DIAGNOSTIC_MARKER_KEY = "asl_diagnostic"
 FAILURE_DIAGNOSTIC_MARKER_VALUE = "generated-gate/1"
 
 #: The generated review gates' own names. Each is both the check name the
 #: runner puts in the contract and the ``CHECK`` constant that gate stamps on
 #: its rejection line, and a promoted diagnostic must name the check that is
-#: actually executing — so the value identifies an ASL gate rather than
-#: carrying anything the command chose.
+#: actually executing. A name is authored text and authenticates nothing on its
+#: own — ``CommandCheck.generated_gate`` is what does that — so this set exists
+#: to bound the value that travels, not to identify the producer.
 GENERATED_GATE_CHECK_NAMES = frozenset(
     {
         "final-review-artifact-consistent",
@@ -753,17 +755,26 @@ def is_control_plane_diagnostic_field(key: str | None, value: Any) -> bool:
 
 
 def _parse_failure_diagnostic(
-    stderr_preview: str, *, check_name: str
+    stderr_preview: str, *, check: CommandCheck
 ) -> dict[str, Any] | None:
     """Read a failed command's last stderr line as a structured rejection.
 
-    Kept only when the line is a bounded JSON object carrying the generated
-    gates' marker, naming ``check_name`` — the check the runner is actually
-    executing — as its own ``check``, and reporting a ``reason`` from the
-    generated gates' closed vocabulary. Provenance therefore rests on the
-    contract the runner authored rather than on bytes the command chose, and
-    the two fields that travel can hold nothing but ASL's own tokens.
+    Provenance is decided first and decides everything: a promoted diagnostic
+    says ASL's own review gate rejected an artifact, and only
+    ``check.generated_gate`` — set by the runner on the recipe it rendered
+    itself, and unsettable from any contract — can say that. Every value on the
+    line is public, so a hand-authored command can reproduce the marker, either
+    gate name and any reason verbatim; what it cannot reproduce is a command
+    the runner generated.
+
+    Past that fence the line must still be a bounded JSON object carrying the
+    marker, naming the executing check as its own ``check``, and reporting a
+    ``reason`` from the generated gates' closed vocabulary — so a gate that
+    misreports its own identity, or a reason ASL never writes, still travels
+    as nothing.
     """
+    if not check.generated_gate:
+        return None
     lines = [line.strip() for line in stderr_preview.splitlines() if line.strip()]
     if not lines:
         return None
@@ -778,7 +789,7 @@ def _parse_failure_diagnostic(
         return None
     if parsed.get(FAILURE_DIAGNOSTIC_MARKER_KEY) != FAILURE_DIAGNOSTIC_MARKER_VALUE:
         return None
-    if parsed.get("check") != check_name:
+    if parsed.get("check") != check.name:
         return None
     if not all(
         is_control_plane_diagnostic_field(key, parsed.get(key))
@@ -833,7 +844,7 @@ def _command_stream_fields(
         "stderr_truncated": stderr_meta.truncated,
         "stderr_artifact_path": stderr_meta.artifact_path,
         "failure_diagnostic": (
-            _parse_failure_diagnostic(stderr_meta.preview, check_name=check.name)
+            _parse_failure_diagnostic(stderr_meta.preview, check=check)
             if failed
             else None
         ),

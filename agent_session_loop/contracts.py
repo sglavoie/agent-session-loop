@@ -65,7 +65,15 @@ DEFAULT_BASELINE_TOTAL_BUDGET_SECONDS = 600.0
 
 @dataclass(frozen=True)
 class CommandCheck:
-    """A check that runs a command (no shell) and asserts it exits 0."""
+    """A check that runs a command (no shell) and asserts it exits 0.
+
+    ``generated_gate`` is provenance, not configuration: it says the runner
+    rendered this command itself rather than reading it from a contract. Every
+    other field is authored text, so nothing else on this object can establish
+    that. It is deliberately absent from :data:`_ALLOWED_CHECK_KEYS` and from
+    :func:`check_payload`, which is what keeps it unsettable from a session
+    file and unable to survive a round trip through one.
+    """
 
     name: str
     argv: tuple[str, ...]
@@ -76,6 +84,7 @@ class CommandCheck:
     on_failure_of: tuple[str, ...] = ()
     repo: str | None = None
     review_replay: bool = False
+    generated_gate: bool = False
 
 
 @dataclass(frozen=True)
@@ -626,14 +635,23 @@ CHECK_PARSERS: dict[str, Callable[..., VerificationCheck]] = {
 }
 
 
+#: Check fields no contract may declare. ``kind`` is the parsed spelling of the
+#: payload's ``type``; ``generated_gate`` is provenance the runner stamps in
+#: process, and a payload that could set it would be a session file asserting
+#: its own authorship.
+_INTERNAL_CHECK_FIELDS = frozenset({"kind", "generated_gate"})
+
+
 def _payload_keys(check_type: type[VerificationCheck]) -> frozenset[str]:
     """The payload keys that survive a parse into ``check_type``.
 
     Derived from the dataclass rather than listed, so a field added to a check
-    and its parser is accepted without a second edit here. ``kind`` is the
-    parsed spelling of the payload's ``type``.
+    and its parser is accepted without a second edit here, minus the fields no
+    payload may carry.
     """
-    return frozenset({field.name for field in fields(check_type)} - {"kind"}) | {"type"}
+    return frozenset(
+        {field.name for field in fields(check_type)} - _INTERNAL_CHECK_FIELDS
+    ) | {"type"}
 
 
 #: Keys each check type accepts. Anything else is rejected before dispatch: a
