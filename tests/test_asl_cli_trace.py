@@ -66,6 +66,12 @@ class CliTraceTestCase(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The origin marker is inherited, so a suite launched by autopilot or
+        # the workbench would otherwise see its launcher's origin instead of
+        # `direct`. Drop it for the same reason the trace root is redirected:
+        # these cases assert what the CLI records, not who ran the tests.
+        # `patch.dict` restores the whole mapping, so the removal is undone too.
+        os.environ.pop(cli_trace.ORIGIN_ENV_VAR, None)
         self.root = config.default_state_root()
 
     def corpus(self, root: Path | None = None) -> cli_trace.TraceCorpus:
