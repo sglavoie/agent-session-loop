@@ -3445,14 +3445,22 @@ class RepairScopeRegenerationIntegrationTests(_GeneratedRepairDispatchFixture):
             name=name, argv=["fake"], returncode=0, stdout="ok\n", stderr=""
         )
 
-    def test_a_retained_violation_is_repaired_before_preflight_and_the_packet(
-        self,
-    ) -> None:
+    def _git(self, alias: str, *args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(self.repositories[alias]), *args],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return result.stdout
+
+    def _retain_a_violation(self) -> None:
         self._stamp_ready()
         _exit_code, first = self._run("retained-run-1", self._stray_write)
         self.assertEqual("workspace-write-scope-violation", first["pause_reason"])
         self.assertIn("- **Status**: pending", self.child.read_text(encoding="utf-8"))
 
+    def _widen_the_review_to_the_stray_repository(self) -> None:
         # The review now agrees the stray repository was in scope all along,
         # which is exactly what regeneration has to widen the child to.
         self._write_review_artifact([self._finding(("OAK", "SVC", "OWL"))])
@@ -3460,6 +3468,12 @@ class RepairScopeRegenerationIntegrationTests(_GeneratedRepairDispatchFixture):
             "# Expansion for 2.1\n\nRepaired scope notes.\n", encoding="utf-8"
         )
         self._stamp_ready()
+
+    def test_a_retained_violation_is_repaired_before_preflight_and_the_packet(
+        self,
+    ) -> None:
+        self._retain_a_violation()
+        self._widen_the_review_to_the_stray_repository()
 
         _exit_code, second = self._run("retained-run-2", self._record_prompt)
 
@@ -3486,6 +3500,44 @@ class RepairScopeRegenerationIntegrationTests(_GeneratedRepairDispatchFixture):
         # And the packet the repair worker received names the added alias.
         self.assertEqual(
             "SVC, OAK, OWL", self._prompt_field(self.prompts[-1], "Writable aliases")
+        )
+
+    def test_unrelated_dirt_after_retention_is_not_committed(self) -> None:
+        self._retain_a_violation()
+        # An operator starts unrelated work in a repository the repair child is
+        # about to write to. The repair's commit is repository-wide, so dirt the
+        # sanction lets through is published under the repair's name -- work
+        # nobody reviewed, in a commit nobody attributed to its author.
+        (self.repositories["OAK"] / "operator-unrelated.md").write_text(
+            "operator work\n", encoding="utf-8"
+        )
+        self._widen_the_review_to_the_stray_repository()
+        head_before = self._git("OAK", "rev-parse", "HEAD")
+
+        exit_code, payload = self._run("retained-unrelated-dirt", self._refuse)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("commit-preflight", payload["pause_reason"])
+        self.assertEqual([], payload["turns"])
+        details = payload["pause_details"]
+        sanction = details["retained_scope_repair"]
+        # The retained turn's own two paths stay sanctioned; the path it never
+        # wrote is what stops the run, and only its repository is named.
+        self.assertEqual(
+            ["OAK:notes.md", "OWL:notes.md"], sorted(sanction["sanctioned_dirty_paths"])
+        )
+        self.assertEqual(
+            ["OAK:operator-unrelated.md"], sanction["unsanctioned_dirty_paths"]
+        )
+        self.assertEqual(
+            ["OAK"], [row["alias"] for row in details["dirty_repositories"]]
+        )
+        # Nothing was published: the operator's file is still their own
+        # uncommitted work, and so is the retained repair it would have ridden.
+        self.assertEqual(head_before, self._git("OAK", "rev-parse", "HEAD"))
+        self.assertEqual(
+            "?? notes.md\n?? operator-unrelated.md\n",
+            self._git("OAK", "status", "--porcelain"),
         )
 
     def test_dirt_without_a_retained_violation_still_fails_commit_preflight(

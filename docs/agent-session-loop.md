@@ -1157,11 +1157,22 @@ never removed. Because the file itself is rewritten before anything reads it,
 preflight, expansion, the completion contract, prompt rendering and the guard
 all keep reading the same single scope. Commit preflight normally refuses to
 start a repair child whose writable repositories are dirty; on this retained
-path it records those dirty paths as sanctioned under
-`retained_scope_repair` instead, because the runner is the author of that dirt
-and demanding a clean tree would dead-end the very repair the retention exists
-to enable. Nothing escapes review: the guard still judges every retained change
-against the post-regeneration scope before the turn begins. A
+path it sanctions exactly the paths the retained violating turn's own guard
+record names as changed, recording them under `retained_scope_repair` as
+`sanctioned_dirty_paths` beside the `retained_turn_paths` they were proven
+against, because the runner is the author of that dirt and demanding a clean
+tree would dead-end the very repair the retention exists to enable. The
+sanction stops there. A repair child's commit is repository-wide, so any other
+dirty path — work started after the pause, in a repository the child is about
+to touch — would be published under the repair's name; preflight instead
+pauses as `commit-preflight` before the harness starts, naming those paths as
+`unsanctioned_dirty_paths` and the repositories holding them. Preflight
+enumerates untracked files individually and reads Git's NUL-framed status, so a
+retained path inside a newly created directory, or one whose name would
+otherwise be quoted, still matches the recorded evidence; anything the guard
+could not observe is not proof of origin and is treated as unrelated. Nothing
+escapes review either: the guard still judges every retained change against the
+post-regeneration scope before the turn begins. A
 repository the plan never
 registered is outside the guard's domain: another `asl run` process working in
 an unrelated checkout beneath the same root cannot pause this run, and no

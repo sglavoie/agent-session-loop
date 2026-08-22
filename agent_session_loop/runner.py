@@ -4062,6 +4062,59 @@ def _validate_commit_preflight(
     return {"spec_path": spec_path, "repositories": repositories}
 
 
+def _porcelain_dirty_paths(output: str) -> list[str]:
+    """Name every dirty path individually from NUL-framed porcelain output.
+
+    ``--untracked-files=all`` is what makes a newly created directory read as
+    the files inside it, which is the only form the write guard ever records a
+    path in; the collapsed ``dir/`` entry the default listing prints matches no
+    recorded path at all. ``-z`` is what keeps a path holding a quote or a
+    newline from arriving as a quoted rendering that no recorded path matches
+    either. A rename or copy entry carries its source path as a second field,
+    and that source is dirt of its own, so both sides are named.
+    """
+    fields = output.split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        entry = fields[index]
+        index += 1
+        if not entry:
+            continue
+        status, path = entry[:2], entry[3:]
+        if path:
+            paths.append(path)
+        if "R" in status or "C" in status:
+            if index < len(fields) and fields[index]:
+                paths.append(fields[index])
+            index += 1
+    return list(dict.fromkeys(paths))
+
+
+def _retained_turn_changed_paths(record: Mapping[str, Any]) -> frozenset[str]:
+    """Qualified paths the retained violating turn is proven to have written.
+
+    The guard's own ``changed`` evidence is the proof: it is the before/after
+    comparison of that turn and nothing else, already qualified by alias. The
+    record's ``violations`` are a projection of these same paths, so reading
+    ``changed`` reads both the authorized and the escaped half of the retained
+    work. Anything the guard could not see -- an ignored path, an excluded one,
+    the plan directory -- is deliberately absent: not being observed is not
+    proof of origin.
+    """
+    paths: set[str] = set()
+    changed = record.get("changed")
+    if not isinstance(changed, Mapping):
+        return frozenset()
+    for entry in changed.values():
+        if not isinstance(entry, Mapping):
+            continue
+        qualified = entry.get("qualified_paths")
+        if isinstance(qualified, Sequence) and not isinstance(qualified, (str, bytes)):
+            paths.update(str(path) for path in qualified)
+    return frozenset(paths)
+
+
 def _repair_commit_preflight(
     cwd: Path,
     *,
@@ -4072,14 +4125,19 @@ def _repair_commit_preflight(
     """Require the commit tool and a clean writable set for one repair child.
 
     ``retained_scope_repair`` is the uncleared write-scope-violation record for
-    this same child. On that path the runner is the author of the dirt: it
-    deliberately retained the violating turn's changes and reverted the child to
-    pending so its durable scope could be repaired. Demanding a clean writable
-    set there dead-ends the very repair the retention exists to enable, so the
-    dirty paths are recorded as sanctioned instead of raising. Nothing escapes
-    review: the retained-scope branch still judges every retained change against
-    the child's post-regeneration write scope before the turn starts, and pauses
-    when any of it falls outside.
+    this same child. On that path the runner is the author of *some* of the
+    dirt: it deliberately retained the violating turn's changes and reverted the
+    child to pending so its durable scope could be repaired. Demanding a clean
+    writable set there dead-ends the very repair the retention exists to enable,
+    so exactly the paths that turn is recorded as having written are sanctioned.
+    The sanction stops there. The repair child's commit is repository-wide, so
+    any other dirty path -- work an operator started after the pause, in a
+    repository the child is about to touch -- would be staged and committed
+    under the repair's name; that case raises here, before the harness starts,
+    rather than riding along. Nothing escapes review either: the retained-scope
+    branch still judges every retained change against the child's
+    post-regeneration write scope before the turn starts, and pauses when any of
+    it falls outside.
     """
     details: dict[str, Any] = {
         "repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD,
@@ -4116,7 +4174,9 @@ def _repair_commit_preflight(
             )
             details["error"] = message
             raise RepairCommitPreflightError(message, details)
-        status = _run_git(root, ["status", "--porcelain"])
+        status = _run_git(
+            root, ["status", "--porcelain", "-z", "--untracked-files=all"]
+        )
         if status.returncode != 0:
             detail = status.stderr.strip() or status.stdout.strip()
             message = f"could not inspect writable repository {alias or '.'}"
@@ -4124,11 +4184,7 @@ def _repair_commit_preflight(
                 message += f": {detail}"
             details["error"] = message
             raise RepairCommitPreflightError(message, details)
-        dirty_paths = [
-            line[3:] if len(line) > 3 else line
-            for line in status.stdout.splitlines()
-            if line
-        ]
+        dirty_paths = _porcelain_dirty_paths(status.stdout)
         qualified_paths = [
             f"{alias}:{path}" if alias is not None else path for path in dirty_paths
         ]
@@ -4144,16 +4200,46 @@ def _repair_commit_preflight(
             dirty_repositories.append(row)
 
     if dirty_repositories:
-        labels = ", ".join(str(row["alias"] or ".") for row in dirty_repositories)
         if retained_scope_repair is not None:
+            retained_paths = _retained_turn_changed_paths(retained_scope_repair)
+            sanctioned: list[str] = []
+            unsanctioned: list[str] = []
+            unsanctioned_rows: list[dict[str, Any]] = []
+            for row in dirty_repositories:
+                stray = [
+                    path for path in row["dirty_paths"] if path not in retained_paths
+                ]
+                sanctioned.extend(
+                    path for path in row["dirty_paths"] if path in retained_paths
+                )
+                if stray:
+                    unsanctioned.extend(stray)
+                    unsanctioned_rows.append(row)
             details["retained_scope_repair"] = {
                 "session_id": retained_scope_repair.get("session_id"),
-                "sanctioned_repositories": labels,
-                "sanctioned_dirty_paths": [
-                    path for row in dirty_repositories for path in row["dirty_paths"]
-                ],
+                "sanctioned_repositories": ", ".join(
+                    str(row["alias"] or ".")
+                    for row in dirty_repositories
+                    if any(path in retained_paths for path in row["dirty_paths"])
+                ),
+                "sanctioned_dirty_paths": sanctioned,
+                "retained_turn_paths": sorted(retained_paths),
+                "unsanctioned_dirty_paths": unsanctioned,
             }
-            return details
+            if not unsanctioned:
+                return details
+            named = ", ".join(unsanctioned[:3])
+            if len(unsanctioned) > 3:
+                named += f" (+{len(unsanctioned) - 3} more)"
+            message = (
+                "generated repair child cannot recover its retained changes "
+                "while unrelated work is present; dirty paths the retained "
+                f"turn did not write: {named}"
+            )
+            details["error"] = message
+            details["dirty_repositories"] = unsanctioned_rows
+            raise RepairCommitPreflightError(message, details)
+        labels = ", ".join(str(row["alias"] or ".") for row in dirty_repositories)
         message = (
             "generated repair child requires clean writable repositories before "
             f"execution; dirty: {labels}"
