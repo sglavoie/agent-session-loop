@@ -1158,10 +1158,23 @@ preflight, expansion, the completion contract, prompt rendering and the guard
 all keep reading the same single scope. Commit preflight normally refuses to
 start a repair child whose writable repositories are dirty; on this retained
 path it sanctions exactly the paths the retained violating turn's own guard
-record names as changed, recording them under `retained_scope_repair` as
+record names as changed *and still holding the content that turn left at them*,
+recording them under `retained_scope_repair` as
 `sanctioned_dirty_paths` beside the `retained_turn_paths` they were proven
 against, because the runner is the author of that dirt and demanding a clean
-tree would dead-end the very repair the retention exists to enable. The
+tree would dead-end the very repair the retention exists to enable. A pathname
+is not an origin, so a scope-violation guard record keeps the turn's whole
+post-turn content vector (`snapshot_after`) beside the pre-turn one, and
+preflight recaptures the writable repositories under the exclusion policy that
+record itself names and compares the two. A retained path whose worktree
+content or index state has moved since — an operator edit or an operator
+`git add` between the pause and the resume — is reported under
+`content_drifted_dirty_paths`, loses its sanction, and pauses the run. When
+that comparison cannot be made at all — a record written with no post-turn
+vector, a writable repository the vector never covered, a capture failure, a
+repository that has since disappeared — `content_evidence` carries
+`available: false` with the reason and nothing is sanctioned, because an
+unproven path is not a proven one. The
 sanction stops there. A repair child's commit is repository-wide, so any other
 dirty path — work started after the pause, in a repository the child is about
 to touch — would be published under the repair's name; preflight instead

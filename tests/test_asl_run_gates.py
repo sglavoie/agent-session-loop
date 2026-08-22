@@ -3460,6 +3460,30 @@ class RepairScopeRegenerationIntegrationTests(_GeneratedRepairDispatchFixture):
         self.assertEqual("workspace-write-scope-violation", first["pause_reason"])
         self.assertIn("- **Status**: pending", self.child.read_text(encoding="utf-8"))
 
+    def _drop_recorded_post_turn_evidence(self) -> None:
+        # A pause recorded before the guard kept an after-vector carries the
+        # retained pathnames and nothing about their content; stripping the key
+        # reproduces that record shape exactly.
+        event_path = self._event_path()
+        stripped = 0
+        lines: list[str] = []
+        for record in read_jsonl(event_path):
+            payload = record.get("payload")
+            details = payload.get("details") if isinstance(payload, dict) else None
+            guard = (
+                details.get("workspace_write_guard")
+                if isinstance(details, dict)
+                else None
+            )
+            if (
+                isinstance(guard, dict)
+                and guard.pop("snapshot_after", None) is not None
+            ):
+                stripped += 1
+            lines.append(json.dumps(record))
+        self.assertTrue(stripped, "the pause must record post-turn content evidence")
+        event_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     def _widen_the_review_to_the_stray_repository(self) -> None:
         # The review now agrees the stray repository was in scope all along,
         # which is exactly what regeneration has to widen the child to.
@@ -3538,6 +3562,84 @@ class RepairScopeRegenerationIntegrationTests(_GeneratedRepairDispatchFixture):
         self.assertEqual(
             "?? notes.md\n?? operator-unrelated.md\n",
             self._git("OAK", "status", "--porcelain"),
+        )
+
+    def test_operator_edit_to_retained_path_after_pause_is_not_committed(self) -> None:
+        self._retain_a_violation()
+        # The operator edits a path the retained turn really did write. Its
+        # pathname is proven, but these bytes are not: nobody reviewed them, and
+        # the repository-wide repair commit would publish them under the repair
+        # child's name exactly as it would publish a brand-new file.
+        (self.repositories["OAK"] / "notes.md").write_text(
+            "in-scope work\noperator addition\n", encoding="utf-8"
+        )
+        self._widen_the_review_to_the_stray_repository()
+        head_before = self._git("OAK", "rev-parse", "HEAD")
+
+        exit_code, payload = self._run("retained-path-edited", self._refuse)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("commit-preflight", payload["pause_reason"])
+        self.assertEqual([], payload["turns"])
+        details = payload["pause_details"]
+        sanction = details["retained_scope_repair"]
+        # The pathname is still recorded as one the retained turn wrote; what
+        # withdraws the sanction is that the content at it has since moved.
+        self.assertIn("OAK:notes.md", sanction["retained_turn_paths"])
+        self.assertEqual(["OWL:notes.md"], sanction["sanctioned_dirty_paths"])
+        self.assertEqual(["OAK:notes.md"], sanction["unsanctioned_dirty_paths"])
+        self.assertEqual(["OAK:notes.md"], sanction["content_drifted_dirty_paths"])
+        self.assertTrue(sanction["content_evidence"]["available"])
+        self.assertEqual(
+            ["OAK"], [row["alias"] for row in details["dirty_repositories"]]
+        )
+        # Nothing was published, and the operator's own bytes are still theirs.
+        self.assertEqual(head_before, self._git("OAK", "rev-parse", "HEAD"))
+        self.assertEqual("?? notes.md\n", self._git("OAK", "status", "--porcelain"))
+        self.assertEqual(
+            "in-scope work\noperator addition\n",
+            (self.repositories["OAK"] / "notes.md").read_text(encoding="utf-8"),
+        )
+
+    def test_staging_a_retained_path_after_pause_withdraws_its_sanction(self) -> None:
+        self._retain_a_violation()
+        # Identical bytes, moved into the index. The commit the repair child
+        # ends with stages everything anyway, so an index the retained turn did
+        # not leave behind is as unproven as content it did not leave behind.
+        self._git("OAK", "add", "notes.md")
+        self._widen_the_review_to_the_stray_repository()
+
+        exit_code, payload = self._run("retained-path-staged", self._refuse)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("commit-preflight", payload["pause_reason"])
+        sanction = payload["pause_details"]["retained_scope_repair"]
+        self.assertEqual(["OAK:notes.md"], sanction["content_drifted_dirty_paths"])
+        self.assertEqual(["OWL:notes.md"], sanction["sanctioned_dirty_paths"])
+
+    def test_a_retained_violation_without_post_turn_evidence_cannot_be_sanctioned(
+        self,
+    ) -> None:
+        self._retain_a_violation()
+        self._drop_recorded_post_turn_evidence()
+        self._widen_the_review_to_the_stray_repository()
+
+        exit_code, payload = self._run("retained-without-after-evidence", self._refuse)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("commit-preflight", payload["pause_reason"])
+        details = payload["pause_details"]
+        sanction = details["retained_scope_repair"]
+        # A pathname the runner cannot check the content of is not sanctioned at
+        # all, so a record written before the after-vector existed fails closed.
+        self.assertEqual([], sanction["sanctioned_dirty_paths"])
+        self.assertEqual(
+            ["OAK:notes.md", "OWL:notes.md"],
+            sorted(sanction["unsanctioned_dirty_paths"]),
+        )
+        self.assertFalse(sanction["content_evidence"]["available"])
+        self.assertIn(
+            "no post-turn content evidence", sanction["content_evidence"]["reason"]
         )
 
     def test_dirt_without_a_retained_violation_still_fails_commit_preflight(

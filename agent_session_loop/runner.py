@@ -4115,11 +4115,133 @@ def _retained_turn_changed_paths(record: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(paths)
 
 
+@dataclass(frozen=True)
+class _RetainedContentEvidence:
+    """Whether retained paths still hold the bytes their own turn left behind.
+
+    ``available`` is the only key a caller may sanction on: it is false whenever
+    the comparison could not be made at all, and an unproven path is never a
+    proven one. ``drifted`` names the retained paths whose current worktree or
+    index content no longer matches the post-turn record.
+    """
+
+    available: bool
+    drifted: frozenset[str] = frozenset()
+    reason: str | None = None
+    repositories: tuple[str, ...] = ()
+
+    def payload(self) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "available": self.available,
+            "drifted_paths": sorted(self.drifted),
+            "repositories": list(self.repositories),
+        }
+        if self.reason is not None:
+            record["reason"] = self.reason
+        return record
+
+
+def _retained_turn_content_drift(
+    record: Mapping[str, Any],
+    *,
+    workspace: workspaces.ResolvedWorkspace,
+    scope: plans.SessionScope,
+    plan_dir: Path,
+) -> _RetainedContentEvidence:
+    """Compare the writable repositories against the retained turn's own after-state.
+
+    A pathname is not an origin. The violating turn's guard record proves which
+    paths that turn wrote, but the bytes sitting at one of those paths now are
+    whatever the last writer put there, and between the pause and this resume
+    that writer may have been an operator. The record's ``snapshot_after`` is the
+    durable description of what the turn actually left behind — per path, in the
+    worktree and in the index — so recapturing the same evidence now and
+    comparing the two vectors is what distinguishes a retained path that is still
+    retained content from one that has since been rewritten.
+
+    The comparison is made under the exclusion policy the record itself names
+    rather than this run's, because a fingerprint captured under a different
+    policy describes a different thing and would report drift where none
+    happened. Everything that cannot be compared — a missing after-vector, a
+    writable repository the vector never covered, a capture failure, a
+    repository that has since disappeared — returns ``available=False`` so the
+    caller sanctions nothing.
+    """
+    writable = tuple(
+        repository.repository.path
+        for repository in workspace.repositories
+        if repository.alias in scope.writes
+    )
+    if not writable:
+        return _RetainedContentEvidence(
+            False, reason="the repair child declares no writable registered repository"
+        )
+    recorded_after = record.get("snapshot_after")
+    if not isinstance(recorded_after, Mapping) or not recorded_after:
+        return _RetainedContentEvidence(
+            False, reason="retained turn recorded no post-turn content evidence"
+        )
+    recorded: repository_evidence.WorkspaceSnapshot = OrderedDict()
+    for key, fingerprint in recorded_after.items():
+        linked = repository_evidence.split_linked_worktree_key(str(key))
+        owner = linked[0] if linked is not None else str(key)
+        if owner in writable and isinstance(fingerprint, Mapping):
+            recorded[str(key)] = dict(fingerprint)
+    uncovered = [path for path in writable if path not in recorded]
+    if uncovered:
+        return _RetainedContentEvidence(
+            False,
+            reason=(
+                "retained turn recorded no post-turn content evidence for "
+                f"{', '.join(sorted(uncovered))}"
+            ),
+        )
+    exclude = tuple(str(entry) for entry in record.get("excluded") or ())
+    include_ignored = bool(record.get("include_ignored"))
+    try:
+        current = repository_evidence.capture_registered_snapshot(
+            workspace.root,
+            plan_dir,
+            writable,
+            default_exclude=exclude,
+            include_ignored=include_ignored,
+            _run_git_fn=_run_git,
+            _run_git_bytes_fn=_run_git_bytes,
+        )
+    except repository_evidence.RepositoryEvidenceError as error:
+        return _RetainedContentEvidence(
+            False, reason=f"current content evidence unavailable: {error}"
+        )
+    comparison = repository_evidence.compare_workspace_snapshots(recorded, current)
+    unavailable = comparison.get("unavailable") or {}
+    removed = comparison.get("removed") or []
+    if unavailable or removed:
+        named = ", ".join(sorted({*map(str, unavailable), *map(str, removed)}))
+        return _RetainedContentEvidence(
+            False, reason=f"content evidence could not be compared for {named}"
+        )
+    evidence = _workspace_write_guard_evidence(
+        workspace=workspace,
+        scope=scope,
+        comparison=comparison,
+        exclude=exclude,
+        include_ignored=include_ignored,
+    )
+    # Both sets are produced by one projection, so the drifted paths are
+    # qualified exactly the way the retained paths they are subtracted from are.
+    return _RetainedContentEvidence(
+        True,
+        drifted=_retained_turn_changed_paths(evidence),
+        repositories=writable,
+    )
+
+
 def _repair_commit_preflight(
     cwd: Path,
     *,
     verification_context: verification.VerificationContext,
     session_scope: plans.SessionScope | None,
+    plan_dir: Path | None = None,
     retained_scope_repair: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Require the commit tool and a clean writable set for one repair child.
@@ -4129,15 +4251,16 @@ def _repair_commit_preflight(
     dirt: it deliberately retained the violating turn's changes and reverted the
     child to pending so its durable scope could be repaired. Demanding a clean
     writable set there dead-ends the very repair the retention exists to enable,
-    so exactly the paths that turn is recorded as having written are sanctioned.
-    The sanction stops there. The repair child's commit is repository-wide, so
-    any other dirty path -- work an operator started after the pause, in a
-    repository the child is about to touch -- would be staged and committed
-    under the repair's name; that case raises here, before the harness starts,
-    rather than riding along. Nothing escapes review either: the retained-scope
-    branch still judges every retained change against the child's
-    post-regeneration write scope before the turn starts, and pauses when any of
-    it falls outside.
+    so the sanction covers exactly the paths that turn is recorded as having
+    written and still recorded as holding the content it left at them. The
+    sanction stops there. The repair child's commit is repository-wide, so any
+    other dirty path -- work an operator started after the pause in a repository
+    the child is about to touch, or an edit they made to a retained path itself
+    -- would be staged and committed under the repair's name; that case raises
+    here, before the harness starts, rather than riding along. Nothing escapes
+    review either: the retained-scope branch still judges every retained change
+    against the child's post-regeneration write scope before the turn starts,
+    and pauses when any of it falls outside.
     """
     details: dict[str, Any] = {
         "repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD,
@@ -4201,9 +4324,27 @@ def _repair_commit_preflight(
 
     if dirty_repositories:
         if retained_scope_repair is not None:
-            retained_paths = _retained_turn_changed_paths(retained_scope_repair)
+            if workspace is None or plan_dir is None:
+                content = _RetainedContentEvidence(
+                    False,
+                    reason="retained-scope recovery requires a registered workspace",
+                )
+            else:
+                assert session_scope is not None
+                content = _retained_turn_content_drift(
+                    retained_scope_repair,
+                    workspace=workspace,
+                    scope=session_scope,
+                    plan_dir=plan_dir,
+                )
+            retained_paths = (
+                _retained_turn_changed_paths(retained_scope_repair) - content.drifted
+                if content.available
+                else frozenset()
+            )
             sanctioned: list[str] = []
             unsanctioned: list[str] = []
+            drifted_dirty: list[str] = []
             unsanctioned_rows: list[dict[str, Any]] = []
             for row in dirty_repositories:
                 stray = [
@@ -4212,6 +4353,7 @@ def _repair_commit_preflight(
                 sanctioned.extend(
                     path for path in row["dirty_paths"] if path in retained_paths
                 )
+                drifted_dirty.extend(path for path in stray if path in content.drifted)
                 if stray:
                     unsanctioned.extend(stray)
                     unsanctioned_rows.append(row)
@@ -4223,19 +4365,36 @@ def _repair_commit_preflight(
                     if any(path in retained_paths for path in row["dirty_paths"])
                 ),
                 "sanctioned_dirty_paths": sanctioned,
-                "retained_turn_paths": sorted(retained_paths),
+                "retained_turn_paths": sorted(
+                    _retained_turn_changed_paths(retained_scope_repair)
+                ),
                 "unsanctioned_dirty_paths": unsanctioned,
+                "content_drifted_dirty_paths": drifted_dirty,
+                "content_evidence": content.payload(),
             }
             if not unsanctioned:
                 return details
             named = ", ".join(unsanctioned[:3])
             if len(unsanctioned) > 3:
                 named += f" (+{len(unsanctioned) - 3} more)"
-            message = (
-                "generated repair child cannot recover its retained changes "
-                "while unrelated work is present; dirty paths the retained "
-                f"turn did not write: {named}"
-            )
+            if not content.available:
+                message = (
+                    "generated repair child cannot recover its retained changes "
+                    "without durable evidence of what the retained turn left "
+                    f"behind: {content.reason}; dirty paths: {named}"
+                )
+            elif drifted_dirty:
+                message = (
+                    "generated repair child cannot recover its retained changes "
+                    "after they were edited; dirty paths the retained turn did "
+                    f"not leave behind: {named}"
+                )
+            else:
+                message = (
+                    "generated repair child cannot recover its retained changes "
+                    "while unrelated work is present; dirty paths the retained "
+                    f"turn did not write: {named}"
+                )
             details["error"] = message
             details["dirty_repositories"] = unsanctioned_rows
             raise RepairCommitPreflightError(message, details)
@@ -13138,6 +13297,7 @@ def _enforce_workspace_write_guard(
     plan_cache: plans.PlanSnapshotCache,
 ) -> bool:
     """Fail closed when a registered implementation turn exceeds its writes."""
+    snapshot_after: repository_evidence.WorkspaceSnapshot | None = None
     try:
         snapshot_after = _capture_workspace_write_guard_snapshot(
             workspace=workspace,
@@ -13234,6 +13394,13 @@ def _enforce_workspace_write_guard(
     }
     if reason == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION:
         guard_record["snapshot_before"] = snapshot_before
+        # The retained changes outlive this process, so what the turn left
+        # behind has to outlive it too: the after-vector is the only durable
+        # description of the *content* of every retained path. Without it a
+        # later resume can prove that a dirty path bears a name the turn wrote
+        # but never that it still holds the bytes the turn wrote.
+        if snapshot_after is not None:
+            guard_record["snapshot_after"] = snapshot_after
         guard_record["expansion_before_repair"] = _session_expansion_evidence(
             before.plan_dir, session_id
         )
@@ -16382,6 +16549,7 @@ def _run_locked(
                         cwd,
                         verification_context=verification_context,
                         session_scope=session_scope,
+                        plan_dir=before.plan_dir,
                         retained_scope_repair=retained_scope_repair,
                     )
                 except RepairCommitPreflightError as error:
