@@ -3944,6 +3944,122 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("a commit for that session", results["scope-escape"].detail)
             self.assertEqual("pass", results["scope-guard-catch"].status)
 
+    def _mixed_scope_violations(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        *,
+        paused_violations: list[dict[str, Any]],
+        turn_violations: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Record two out-of-scope writes, only one of which names a session.
+
+        The turn half is left unattributed the way a guard record that omits
+        ``session_id`` leaves it, and the pause half is attributed through its
+        own envelope, so the two records can only be tied together by what they
+        say was written.
+        """
+        guard = self._violating_guard(reverted=True, attributed=False)
+        if turn_violations is not None:
+            guard["violations"] = turn_violations
+        payload = self._read_result(history[3])
+        payload["workspace_write_guard"] = guard
+        self._write_result(history[3] / "turn-0001-01", payload)
+        paused_guard = self._violating_guard(reverted=True, attributed=False)
+        paused_guard["violations"] = paused_violations
+        self._write_events(
+            history[2],
+            [
+                ("run_started", {"run_id": RUN_ID}),
+                (
+                    events.RUN_PAUSED_EVENT,
+                    {
+                        "run_id": RUN_ID,
+                        "reason": events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+                        "details": {
+                            "session": 1,
+                            "workspace_write_guard": paused_guard,
+                        },
+                    },
+                ),
+            ],
+        )
+
+    def test_distinct_unnamed_violation_is_not_folded_into_a_named_pause(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._mixed_scope_violations(
+                history,
+                paused_violations=[{"alias": "notes", "repository": "notes"}],
+            )
+            # Another session's commit, which says nothing about the write the
+            # guard left unattributed and so cannot excuse it.
+            self._write_commit(history[3], session_id="02")
+
+            _, results = self._audit(history)
+
+            # The pause names one violation; the turn records a different one.
+            # Merging them would delete the unattributed write, whose catch the
+            # bundle's commit evidence cannot support.
+            escape = results["scope-escape"]
+            self.assertEqual("fail", escape.status)
+            self.assertEqual(1, escape.detail.count("wrote outside"))
+            self.assertIn("an unnamed session", escape.detail)
+            self.assertIn("docs", escape.detail)
+            self.assertIn("cannot be ruled out", escape.detail)
+            self.assertNotIn("notes", escape.detail)
+            caught = results["scope-guard-catch"]
+            self.assertEqual("fail", caught.status)
+            self.assertEqual(1, caught.detail.count("wrote outside"))
+            self.assertIn("session 1", caught.detail)
+            self.assertIn("notes", caught.detail)
+            self.assertNotIn("docs", caught.detail)
+            findings = {
+                finding.invariant_key: finding
+                for finding in supervisor_audit.findings_from_results(results.values())
+            }
+            self.assertEqual(
+                "critical", findings["packet.write-scope-containment"].severity
+            )
+            self.assertEqual(
+                "medium", findings["packet.write-scope-guard-catch"].severity
+            )
+
+    def test_a_pause_naming_other_paths_does_not_attribute_an_unnamed_violation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # One alias, two writes: sameness is decided on the paths too, so
+            # neither record is evidence for the other.
+            self._mixed_scope_violations(
+                history,
+                turn_violations=[
+                    {
+                        "alias": "docs",
+                        "repository": "docs",
+                        "qualified_paths": ["docs:guide.md"],
+                    }
+                ],
+                paused_violations=[
+                    {
+                        "alias": "docs",
+                        "repository": "docs",
+                        "qualified_paths": ["docs:reference.md"],
+                    }
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            # Nothing was committed, so both readings stay catches; what this
+            # pins is that they stay two.
+            caught = results["scope-guard-catch"]
+            self.assertEqual("fail", caught.status)
+            self.assertEqual(2, caught.detail.count("wrote outside"))
+            self.assertIn("an unnamed session", caught.detail)
+            self.assertIn("session 1", caught.detail)
+            self.assertEqual("pass", results["scope-escape"].status)
+
     def test_a_repair_that_still_lists_violations_escaped_rather_than_caught(
         self,
     ) -> None:

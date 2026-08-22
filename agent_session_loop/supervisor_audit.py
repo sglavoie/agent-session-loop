@@ -3015,6 +3015,37 @@ def _write_scope_violated_aliases(guard: Mapping[str, Any]) -> list[str]:
     ]
 
 
+_ViolationFingerprint = tuple[tuple[str, str, str, tuple[str, ...]], ...]
+
+
+def _write_scope_violation_fingerprint(
+    guard: Mapping[str, Any],
+) -> _ViolationFingerprint:
+    """Reduce one guard record's violations to a comparable identity.
+
+    Two records describe the same out-of-scope write only if they name the same
+    repositories and the same paths inside them, so that is all the fingerprint
+    keeps. The order the guard happened to list them in is not evidence of
+    anything and is normalized away.
+    """
+    entries = [
+        (
+            str(violation.get("kind") or ""),
+            str(violation.get("alias") or ""),
+            str(violation.get("repository") or ""),
+            tuple(
+                sorted(
+                    str(path)
+                    for path in _sequence(violation.get("qualified_paths"))
+                    if path
+                )
+            ),
+        )
+        for violation in (_mapping(item) for item in _sequence(guard.get("violations")))
+    ]
+    return tuple(sorted(entries))
+
+
 def _commit_records(context: _CheckContext) -> list[Mapping[str, Any]]:
     """Every commit the bundle records, however that commit was learned.
 
@@ -3077,11 +3108,11 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
     into the pause it raised, and a resumed run replays that pause with no turn
     of its own, so grouping is what keeps one out-of-scope write one claim.
 
-    A violation no record attributes is first correlated to the session its
-    own pause names; if nothing durable names one, it can still be caught, but
-    only in a bundle that recorded no commit at all, because there is no
-    session to match a commit against and claiming the guard held is a claim
-    about evidence that was never checked.
+    A violation no record attributes is correlated to the session named by a
+    pause that recorded the very same violation; if nothing durable names one,
+    it can still be caught, but only in a bundle that recorded no commit at
+    all, because there is no session to match a commit against and claiming the
+    guard held is a claim about evidence that was never checked.
     """
     escaped: list[str] = []
     blind: list[str] = []
@@ -3089,8 +3120,32 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
     observed = 0
     offenders: dict[str | None, set[str]] = {}
     reverted: set[str | None] = set()
+    unnamed: dict[_ViolationFingerprint, set[str]] = {}
+    unnamed_reverted: set[_ViolationFingerprint] = set()
+    paused_fingerprints: dict[_ViolationFingerprint, set[str]] = {}
     paused_sessions: set[str] = set()
     paused_any = False
+
+    def _claim(
+        session: str | None,
+        aliases: list[str],
+        fingerprint: _ViolationFingerprint,
+        was_reverted: bool,
+    ) -> None:
+        """File one guard record's violation under the session it names.
+
+        An unattributed record is filed under the violation it describes rather
+        than under a shared unnamed bucket, because what it describes is the
+        only thing that can later tie it to a session.
+        """
+        if session is None:
+            unnamed.setdefault(fingerprint, set()).update(aliases)
+            if was_reverted:
+                unnamed_reverted.add(fingerprint)
+            return
+        offenders.setdefault(session, set()).update(aliases)
+        if was_reverted:
+            reverted.add(session)
 
     for turn in context.turns:
         result = _mapping(turn.get("result"))
@@ -3105,9 +3160,12 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
             session = _write_scope_session(
                 guard.get("session_id"), result.get("session_id")
             )
-            offenders.setdefault(session, set()).update(aliases)
-            if guard.get("reverted_to_pending") is True:
-                reverted.add(session)
+            _claim(
+                session,
+                aliases,
+                _write_scope_violation_fingerprint(guard),
+                guard.get("reverted_to_pending") is True,
+            )
         if _mapping(guard.get("unavailable")):
             blind.append(f"{turn.get('name')} could not be inventoried")
 
@@ -3148,9 +3206,15 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
                 paused_sessions.add(session)
             aliases = _write_scope_violated_aliases(guard)
             if aliases:
-                offenders.setdefault(session, set()).update(aliases)
-                if guard.get("reverted_to_pending") is True:
-                    reverted.add(session)
+                fingerprint = _write_scope_violation_fingerprint(guard)
+                if session is not None:
+                    paused_fingerprints.setdefault(fingerprint, set()).add(session)
+                _claim(
+                    session,
+                    aliases,
+                    fingerprint,
+                    guard.get("reverted_to_pending") is True,
+                )
         elif reason == events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE:
             observed += 1
             blind.append("the write guard reported itself unavailable")
@@ -3160,16 +3224,19 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
 
     # The runner writes one guard record into the turn result and the same
     # record into the pause it raises, so a bundle where only the pause carries
-    # the session id splits one write into a named claim and an unnamed one. A
-    # lone scope-violation pause is durable attribution for that unnamed half,
-    # which both rejoins the claim and lets it be matched against commits by
-    # session. Two pauses name two candidates and correlating would be a guess,
-    # so the violation stays unnamed and is judged as ambiguous below.
-    if None in offenders and len(paused_sessions) == 1:
-        (attributed,) = paused_sessions
-        offenders.setdefault(attributed, set()).update(offenders.pop(None))
-        if None in reverted:
-            reverted.discard(None)
+    # the session id splits one write into a named claim and an unnamed one.
+    # Rejoining those halves needs proof that they are halves of one write, and
+    # the guard's own violation list — the repositories it names and the paths
+    # inside them — is the only durable evidence of that. An unnamed record
+    # describing something no pause described is a second, distinct violation
+    # that keeps its own unattributed reading, and a violation two pauses
+    # attribute to two sessions makes the choice a guess, so it stays unnamed
+    # too and is judged as ambiguous below.
+    for fingerprint, aliases in unnamed.items():
+        candidates = paused_fingerprints.get(fingerprint, set())
+        attributed = next(iter(candidates)) if len(candidates) == 1 else None
+        offenders.setdefault(attributed, set()).update(aliases)
+        if fingerprint in unnamed_reverted:
             reverted.add(attributed)
 
     def _paused_for(session: str | None) -> bool:
