@@ -3506,10 +3506,10 @@ def _live_action_signal(
 #: The reasons :func:`_live_action_signal` can produce. Each names an
 #: intervention the agent asked for mid-turn, so each is only current while the
 #: run is still stopped on it. A reason the runner itself declared — review
-#: findings above all — is not a live signal and is never cleared here.
-_LIVE_ACTION_REQUIRED_REASONS = frozenset(
-    {"runner-pause", "runner-status-paused", "approval-required"}
-)
+#: findings above all — is not a live signal and is never cleared here. The set
+#: lives in :mod:`agent_session_loop.events` because the supervisor audit
+#: retires the same reasons on the bundle's status projection.
+_LIVE_ACTION_REQUIRED_REASONS = events.LIVE_ACTION_REQUIRED_REASONS
 
 
 def _clear_live_action_required(payload: dict[str, Any]) -> dict[str, Any] | None:

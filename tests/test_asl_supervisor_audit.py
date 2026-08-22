@@ -1593,8 +1593,11 @@ class EvidenceBundleTests(unittest.TestCase):
     FOREIGN_QUESTION_ID = "77777777-7777-4777-8777-777777777777"
     FOREIGN_REPLY_ID = "88888888-8888-4888-8888-888888888888"
     FOREIGN_RUN_ID = "20260810T101112123456Z-9999"
+    GUIDANCE_ID = "99999999-9999-4999-8999-999999999999"
+    SECOND_QUESTION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     QUESTION_TEXT = "Two checks print `unknown flag: --docs`. Remove them?"
     REPLY_TEXT = "Option (a), done — removed both from session-15.1.md."
+    GUIDANCE_TEXT = "Prefer the narrower fixture; do not touch the shared one."
 
     def _mailbox_records(self) -> list[dict[str, Any]]:
         """One full exchange for this run, plus another run's question."""
@@ -2043,6 +2046,240 @@ class EvidenceBundleTests(unittest.TestCase):
                     for entry in payload["omissions"]
                 )
             )
+
+    def _append_mailbox_record(self, state_dir: Path, record: dict[str, Any]) -> None:
+        with (state_dir / mailbox.MAILBOX_FILE_NAME).open(
+            "a", encoding="utf-8"
+        ) as handle:
+            handle.write(json.dumps(record) + "\n")
+
+    def _append_event(
+        self, state_dir: Path, name: str, payload: dict[str, Any]
+    ) -> None:
+        with (state_dir / events.EVENTS_FILE_NAME).open(
+            "a", encoding="utf-8"
+        ) as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "name": name,
+                        "version": events.EVENT_SCHEMA_VERSION,
+                        "created_at": "2026-08-10T10:11:13Z",
+                        "payload": payload,
+                    }
+                )
+                + "\n"
+            )
+
+    def _write_guidance(self, state_dir: Path, *, observed: bool) -> None:
+        """Append plan-addressed guidance, optionally delivered into this run."""
+        self._append_mailbox_record(
+            state_dir,
+            {
+                "created_at": "2026-08-10T10:11:11Z",
+                "id": self.GUIDANCE_ID,
+                "kind": mailbox.KIND_GUIDANCE,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "text": self.GUIDANCE_TEXT,
+            },
+        )
+        if not observed:
+            return
+        self._append_event(
+            state_dir,
+            events.MAILBOX_EVENT,
+            {
+                "run_id": RUN_ID,
+                "action": events.MAILBOX_ACTION_GUIDANCE_OBSERVED,
+                "message_id": self.GUIDANCE_ID,
+                "seq": 1,
+                "session_id": "01",
+                "turn_index": 1,
+                "length": len(self.GUIDANCE_TEXT),
+                "digest": hashlib.sha256(
+                    self.GUIDANCE_TEXT.encode("utf-8")
+                ).hexdigest(),
+            },
+        )
+
+    def _set_action_required(
+        self, state_dir: Path, signal: dict[str, Any] | None, **status: object
+    ) -> None:
+        path = state_dir / events.STATE_FILE_NAME
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["action_required"] = signal
+        payload.update(status)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _live_signal(
+        self,
+        *,
+        created_at: str = "2026-08-10T10:11:13Z",
+        reason: str = "runner-status-paused",
+    ) -> dict[str, Any]:
+        return {
+            "created_at": created_at,
+            "reason": reason,
+            "message": "paused",
+            "matched": events.RUNNER_STATUS_PREFIX,
+            "run_id": RUN_ID,
+            "session_id": "01",
+            "turn_index": 1,
+        }
+
+    def test_guidance_delivered_into_a_turn_reaches_the_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._write_guidance(state_dir, observed=True)
+
+            bundle = self._collect(workspace, plan_dir, state_dir, run_dir)
+            section = bundle.payload["mailbox"]
+            guidance = next(
+                record
+                for record in section["records"]
+                if record["kind"] == mailbox.KIND_GUIDANCE
+            )
+            text = bundle.to_bytes().decode("utf-8")
+
+            self.assertEqual(self.GUIDANCE_ID, guidance["id"])
+            self.assertEqual(
+                supervisor_audit.MAILBOX_OWNERSHIP_DELIVERED, guidance["ownership"]
+            )
+            self.assertEqual(1, section["summary"]["delivered_count"])
+            self.assertEqual(1, section["summary"]["counts"][mailbox.KIND_GUIDANCE])
+            self.assertNotIn(self.GUIDANCE_TEXT, text)
+            self.assertIn(
+                hashlib.sha256(self.GUIDANCE_TEXT.encode("utf-8")).hexdigest()[:16],
+                text,
+            )
+
+    def test_guidance_this_run_never_read_is_counted_rather_than_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._write_guidance(state_dir, observed=False)
+
+            summary = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "mailbox"
+            ]["summary"]
+
+            self.assertEqual(3, summary["unscoped_count"])
+            self.assertEqual(0, summary["delivered_count"])
+            self.assertNotIn(mailbox.KIND_GUIDANCE, summary["counts"])
+
+    def test_a_ruled_and_consumed_ask_retires_the_action_required_projection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            signal = self._live_signal()
+            self._set_action_required(
+                state_dir, signal, paused=True, pause_reason="blocked"
+            )
+
+            status = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "status"
+            ]
+            superseded = status["action_required_superseded"]
+
+            self.assertIsNone(status["action_required"])
+            self.assertTrue(status["paused"])
+            self.assertEqual("blocked", status["pause_reason"])
+            self.assertEqual(
+                supervisor_audit.SUPERSEDED_BY_CONSUMED_RULING,
+                superseded["superseded_by"],
+            )
+            self.assertEqual(signal, superseded["record"])
+            self.assertEqual(
+                [(self.QUESTION_ID, self.REPLY_ID, True)],
+                [
+                    (ask["id"], ask["closure_id"], ask["consumed"])
+                    for ask in superseded["questions"]
+                ],
+            )
+
+    def test_an_unanswered_ask_from_the_same_turn_keeps_the_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._append_mailbox_record(
+                state_dir,
+                {
+                    "created_at": "2026-08-10T10:11:20Z",
+                    "id": self.SECOND_QUESTION_ID,
+                    "kind": mailbox.KIND_QUESTION,
+                    "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                    "text": "And what about the second one?",
+                    "delivery_mode": mailbox.DELIVERY_MODE_ASYNC,
+                    "run_id": RUN_ID,
+                    "session_id": "01",
+                    "turn_index": 1,
+                },
+            )
+            self._set_action_required(
+                state_dir, self._live_signal(), paused=True, pause_reason="blocked"
+            )
+
+            status = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "status"
+            ]
+
+            self.assertEqual(
+                "runner-status-paused", status["action_required"]["reason"]
+            )
+            self.assertNotIn("action_required_superseded", status)
+
+    def test_a_ruling_older_than_the_signal_does_not_retire_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._set_action_required(
+                state_dir,
+                self._live_signal(created_at="2026-08-10T10:11:16Z"),
+                paused=True,
+                pause_reason="blocked",
+            )
+
+            status = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "status"
+            ]
+
+            self.assertEqual(
+                "runner-status-paused", status["action_required"]["reason"]
+            )
+            self.assertNotIn("action_required_superseded", status)
+
+    def test_a_reason_the_runner_declared_itself_is_never_retired(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            self._set_action_required(
+                state_dir,
+                self._live_signal(reason="review-findings"),
+                paused=True,
+                pause_reason="review-findings",
+            )
+
+            status = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "status"
+            ]
+
+            self.assertEqual("review-findings", status["action_required"]["reason"])
+            self.assertNotIn("action_required_superseded", status)
+
+    def test_another_turns_answer_does_not_retire_this_turns_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            signal = self._live_signal()
+            signal["turn_index"] = 2
+            self._set_action_required(
+                state_dir, signal, paused=True, pause_reason="blocked"
+            )
+
+            status = self._collect(workspace, plan_dir, state_dir, run_dir).payload[
+                "status"
+            ]
+
+            self.assertEqual(
+                "runner-status-paused", status["action_required"]["reason"]
+            )
+            self.assertNotIn("action_required_superseded", status)
 
     def test_the_mailbox_is_named_in_the_evidence_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

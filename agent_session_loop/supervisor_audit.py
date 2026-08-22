@@ -952,6 +952,10 @@ _SHEDDABLE_MAILBOX_KINDS = frozenset(mailbox.LIFECYCLE_KINDS) | {mailbox.KIND_AC
 #: closure it acknowledges, and a wait record at the wait it opened.
 _MAILBOX_JOIN_KEYS = ("to", "wait_id", "closure_id")
 
+#: How a mailbox record the collector claimed by delivery is marked, as opposed
+#: to one that named this run outright or joined an exchange that did.
+MAILBOX_OWNERSHIP_DELIVERED = "delivered"
+
 #: Keys naming a Git origin, which is canonicalized rather than copied so a
 #: credential embedded in a remote URL cannot reach the bundle.
 _ORIGIN_KEYS = frozenset({"origin", "origins", "remote", "remote_url", "url"})
@@ -1110,6 +1114,15 @@ _STATUS_STATE_KEYS = (
     "run_started_at",
     "version",
 )
+#: Where a retired ``status.action_required`` is kept. The status section is
+#: otherwise a verbatim copy of the terminal state payload, so a retirement has
+#: to name what overrode the copy and keep the record it replaced: the history
+#: an auditor reads is not allowed to shrink because the current state moved on.
+_STATUS_ACTION_REQUIRED_SUPERSEDED = "action_required_superseded"
+
+#: What retired it: the run's mailbox holds the ruling that answered the ask,
+#: and a receipt proving the ruling reached the run.
+SUPERSEDED_BY_CONSUMED_RULING = "mailbox-ruling-consumed"
 _SNAPSHOT_IDENTITY_KEYS = (
     "content_sha256",
     "counts",
@@ -2004,8 +2017,41 @@ def _read_events(
     return records, summary
 
 
+def _delivered_mailbox_ids(
+    event_records: Sequence[Mapping[str, Any]], run_id: str
+) -> frozenset[str]:
+    """Mailbox messages this run's own event stream says it took delivery of.
+
+    Guidance is addressed to the plan, not to a run: a supervisor appends it
+    without knowing which run — or which turn — will read it, so
+    ``mailbox.append_guidance`` writes no ``run_id`` and the record cannot be
+    claimed the way ``append_notice``'s is. Delivery is the tie, and delivery is
+    already recorded: the runner appends a ``guidance-observed`` mailbox event
+    naming the message it read into a turn. Joining on that accounts for the
+    guidance a run acted on while leaving guidance meant for some other run
+    where it belongs.
+    """
+    delivered: set[str] = set()
+    for record in event_records:
+        if record.get("name") != events.MAILBOX_EVENT:
+            continue
+        payload = _mapping(record.get("payload"))
+        if payload.get("action") != events.MAILBOX_ACTION_GUIDANCE_OBSERVED:
+            continue
+        if payload.get("run_id") not in (None, run_id):
+            continue
+        message_id = payload.get("message_id")
+        if message_id is not None:
+            delivered.add(str(message_id))
+    return frozenset(delivered)
+
+
 def _read_mailbox(
-    path: Path, run_id: str, collector: _Collector
+    path: Path,
+    run_id: str,
+    collector: _Collector,
+    *,
+    delivered_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Read the run's slice of the shared operator mailbox.
 
@@ -2016,9 +2062,12 @@ def _read_mailbox(
     Only a record that names a run outright can be claimed by run ID; a reply,
     a receipt and the wait records join their exchange through ``to``,
     ``wait_id`` or ``closure_id``, so ownership is seeded from the named
-    records and walked forward. A record that never joins belongs to another
-    run or to the plan, and is counted rather than reported as withheld: an
-    omission means evidence was kept back, not that it was someone else's.
+    records and walked forward. ``delivered_ids`` adds the third seed a
+    plan-addressed record needs, since guidance names no run and answers no
+    question: the run's own event stream saying it read that message. A record
+    that never joins belongs to another run or to the plan, and is counted
+    rather than reported as withheld: an omission means evidence was kept back,
+    not that it was someone else's.
 
     The file is read directly rather than through :mod:`mailbox`, which is
     addressed by plan directory and takes a shared lock that a live supervisor
@@ -2026,6 +2075,7 @@ def _read_mailbox(
     """
     summary: dict[str, Any] = {
         "available": False,
+        "delivered_count": 0,
         "rejected_count": 0,
         "unscoped_count": 0,
         "counts": {},
@@ -2067,13 +2117,16 @@ def _read_mailbox(
     records: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
     unscoped = 0
+    delivered = 0
     for index, parsed in parsed_lines:
+        identifier = parsed.get("id")
+        was_delivered = identifier is not None and str(identifier) in delivered_ids
         joined = any(parsed.get(key) in owned for key in _MAILBOX_JOIN_KEYS)
-        if not joined and parsed.get("run_id") != run_id:
+        if not joined and not was_delivered and parsed.get("run_id") != run_id:
             unscoped += 1
             continue
-        if parsed.get("id") is not None:
-            owned.add(str(parsed["id"]))
+        if identifier is not None:
+            owned.add(str(identifier))
         kind = str(parsed.get("kind") or "")
         counts[kind] = counts.get(kind, 0) + 1
         # The prose lives under ``text``, which redaction already treats as
@@ -2081,7 +2134,13 @@ def _read_mailbox(
         # its bytes do not.
         record = dict(collector.redact(parsed))
         record["sequence"] = index
+        if was_delivered and parsed.get("run_id") != run_id:
+            # Say how a record naming no run reached this run's slice, so a
+            # reader is not left inferring it from the absence of a ``run_id``.
+            delivered += 1
+            record["ownership"] = MAILBOX_OWNERSHIP_DELIVERED
         records.append(record)
+    summary["delivered_count"] = delivered
     summary["rejected_count"] = rejected
     summary["unscoped_count"] = unscoped
     summary["counts"] = counts
@@ -2266,6 +2325,129 @@ def _verification_section(turns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             }
         )
     return {"sessions": sessions, "session_count": len(sessions)}
+
+
+def _moment(value: object) -> datetime | None:
+    """Parse a recorded ISO timestamp, or ``None`` when it cannot be trusted."""
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = f"{value[:-1]}+00:00" if value.endswith(("Z", "z")) else value
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _mailbox_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Every question in the run's mailbox slice, with how far it got.
+
+    Mirrors :meth:`mailbox.MailboxView.delivery_state_for`: a question is
+    answered once a reply or a resolution targets it, and answered *and
+    consumed* once a receipt names that closure. Only the consumed state
+    proves the answer reached the run rather than sitting unread.
+    """
+    closures: dict[str, Mapping[str, Any]] = {}
+    receipted: set[str] = set()
+    for record in records:
+        kind = record.get("kind")
+        target = record.get("to")
+        if kind in mailbox.CLOSURE_KINDS and target is not None:
+            closures.setdefault(str(target), record)
+        elif kind == mailbox.KIND_RECEIPT and record.get("closure_id") is not None:
+            receipted.add(str(record["closure_id"]))
+    asks: list[dict[str, Any]] = []
+    for record in records:
+        if record.get("kind") != mailbox.KIND_QUESTION or record.get("id") is None:
+            continue
+        closure = closures.get(str(record["id"]))
+        closure_id = None if closure is None else closure.get("id")
+        asks.append(
+            {
+                "id": str(record["id"]),
+                "session_id": record.get("session_id"),
+                "turn_index": record.get("turn_index"),
+                "closure_id": closure_id,
+                "closure_action": None if closure is None else closure.get("action"),
+                "closed_at": None if closure is None else closure.get("created_at"),
+                "consumed": closure_id is not None and str(closure_id) in receipted,
+            }
+        )
+    return asks
+
+
+def _raised_by_same_turn(ask: Mapping[str, Any], signal: Mapping[str, Any]) -> bool:
+    """Whether ``ask`` was raised by the turn that emitted ``signal``.
+
+    Both identifiers are required on both sides. A signal that names no turn
+    cannot be shown to correspond to any particular question, and the whole
+    point of the comparison is to avoid retiring one turn's ask on another
+    turn's answer.
+    """
+    for key in ("session_id", "turn_index"):
+        expected = signal.get(key)
+        actual = ask.get(key)
+        if expected is None or actual is None or str(expected) != str(actual):
+            return False
+    return True
+
+
+def _status_section(
+    collector: _Collector,
+    state_payload: Mapping[str, Any],
+    mailbox_records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The terminal state projection, with an answered ask retired.
+
+    ``action_required`` is the current unresolved intervention, not the run's
+    history — the reading ``runner._clear_live_action_required`` already
+    enforces on live state, where starting another turn or finishing unpaused
+    proves the signal was answered. Neither proof is available to a run that
+    stopped *on* the signal, so a paused run reaches the bundle still
+    advertising an ask a human has already ruled on, and an auditor cannot tell
+    it from a run genuinely waiting on one.
+
+    A ruling the run consumed is the third proof. When every question the
+    signal's own turn raised has been answered and receipted, and at least one
+    of those rulings is no older than the signal itself, the projection is
+    retired and the record it replaced is kept beside it. ``action_required``
+    of ``null`` next to a standing ``paused`` then reads as what it is: a run
+    merely paused, not one still asking. The ordering requirement is what keeps
+    an earlier, unrelated exchange in the same turn from retiring a signal
+    raised after it; without a ruling that postdates the signal, nothing shows
+    a human ever saw it.
+    """
+    status = _projection(collector, state_payload, _STATUS_STATE_KEYS)
+    signal = status.get("action_required")
+    if not isinstance(signal, Mapping):
+        return status
+    if signal.get("reason") not in events.LIVE_ACTION_REQUIRED_REASONS:
+        return status
+    raised_at = _moment(signal.get("created_at"))
+    if raised_at is None:
+        return status
+    asks = [
+        ask
+        for ask in _mailbox_asks(mailbox_records)
+        if _raised_by_same_turn(ask, signal)
+    ]
+    if not asks or not all(ask["consumed"] for ask in asks):
+        return status
+    answered_after = [
+        ask
+        for ask in asks
+        if (closed_at := _moment(ask["closed_at"])) is not None
+        and closed_at >= raised_at
+    ]
+    if not answered_after:
+        return status
+    status["action_required"] = None
+    status[_STATUS_ACTION_REQUIRED_SUPERSEDED] = {
+        "superseded_by": SUPERSEDED_BY_CONSUMED_RULING,
+        "questions": asks,
+        "record": dict(signal),
+    }
+    return status
 
 
 def _projection(
@@ -2472,7 +2654,10 @@ def collect_audit_input(
         state_dir / events.EVENTS_FILE_NAME, run_id, collector
     )
     mailbox_records, mailbox_summary = _read_mailbox(
-        state_dir / mailbox.MAILBOX_FILE_NAME, run_id, collector
+        state_dir / mailbox.MAILBOX_FILE_NAME,
+        run_id,
+        collector,
+        delivered_ids=_delivered_mailbox_ids(event_records, run_id),
     )
     turns = [
         _turn_section(collector, directory) for directory in _turn_directories(run_dir)
@@ -2528,7 +2713,7 @@ def collect_audit_input(
         "commits": _commit_section(
             collector, run_dir=run_dir, state_payload=state_payload, turns=turns
         ),
-        "status": _projection(collector, state_payload, _STATUS_STATE_KEYS),
+        "status": _status_section(collector, state_payload, mailbox_records),
         "repository": _repository_section(collector, workspace_snapshot),
         "versions": _versions_section(),
     }

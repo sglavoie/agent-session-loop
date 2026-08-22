@@ -141,6 +141,18 @@ MAILBOX_ACTIONS: tuple[str, ...] = (
     MAILBOX_ACTION_WAIT_STARTED,
     MAILBOX_ACTION_WAIT_CLEARED,
 )
+# The ``action_required.reason`` values a live harness signal can carry. Each
+# names an intervention the agent asked for mid-turn, so each is only current
+# while the run is still stopped on it; a reason the runner itself declared —
+# review findings above all — is not a live signal and is never retired.
+# ``action_required`` is the current unresolved intervention, not the run's
+# history, and this set is what both readers of that rule retire against: the
+# runner on the durable state it keeps, and the supervisor audit on the status
+# section it projects into a bundle. Splitting the two would let a bundle
+# advertise an ask the runner had already retired.
+LIVE_ACTION_REQUIRED_REASONS = frozenset(
+    {"runner-pause", "runner-status-paused", "approval-required"}
+)
 # Stable, evidence-based harness-failure categories produced by
 # ``agent_session_loop.runner.classify_harness_failure``. A nonzero harness
 # exit is classified into exactly one of these; ``nonzero-exit`` remains the
