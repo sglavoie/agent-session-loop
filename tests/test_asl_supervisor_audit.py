@@ -3688,9 +3688,11 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 "did not record a passing guard", results["scope-escape"].detail
             )
 
-    def _violating_guard(self, *, reverted: bool) -> dict[str, Any]:
+    def _violating_guard(
+        self, *, reverted: bool, attributed: bool = True
+    ) -> dict[str, Any]:
         """The guard record the runner writes when a session exceeded its writes."""
-        return {
+        guard = {
             "passed": False,
             "session_id": "01",
             "reason": events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
@@ -3701,6 +3703,9 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             "violations": [{"alias": "docs", "repository": "docs"}],
             "unavailable": {},
         }
+        if not attributed:
+            del guard["session_id"]
+        return guard
 
     def _scope_violation(
         self,
@@ -3708,17 +3713,26 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
         *,
         reverted: bool = True,
         paused: bool = True,
+        attributed: bool = True,
+        pause_session: int | None = 1,
     ) -> None:
         """Record one out-of-scope write the way a real run records it.
 
         The same guard record reaches the turn result and the pause it raised,
         which is what the analysis has to collapse back into one write.
+        ``attributed`` drops the session id from the guard and the turn result,
+        leaving ``pause_session`` as the only record that can name the
+        offender — or, at ``None``, leaving the violation unattributable.
         """
-        guard = self._violating_guard(reverted=reverted)
+        guard = self._violating_guard(reverted=reverted, attributed=attributed)
         payload = self._read_result(history[3])
         payload["workspace_write_guard"] = guard
-        payload["session_id"] = "01"
+        if attributed:
+            payload["session_id"] = "01"
         self._write_result(history[3] / "turn-0001-01", payload)
+        details: dict[str, Any] = {"workspace_write_guard": guard}
+        if pause_session is not None:
+            details["session"] = pause_session
         records: list[tuple[str, dict[str, Any]]] = [
             ("run_started", {"run_id": RUN_ID})
         ]
@@ -3729,7 +3743,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                     {
                         "run_id": RUN_ID,
                         "reason": events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
-                        "details": {"session": 1, "workspace_write_guard": guard},
+                        "details": details,
                     },
                 )
             )
@@ -3850,6 +3864,85 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
 
             self.assertEqual("pass", results["scope-escape"].status)
             self.assertEqual("fail", results["scope-guard-catch"].status)
+
+    def test_unnamed_scope_violation_without_commits_is_still_a_catch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history, attributed=False, pause_session=None)
+
+            _, results = self._audit(history)
+
+            # Nothing was committed, so "before anything was committed" is a
+            # claim the bundle actually supports even with no session named.
+            self.assertEqual("pass", results["scope-escape"].status)
+            self.assertEqual("fail", results["scope-guard-catch"].status)
+            self.assertIn("an unnamed session", results["scope-guard-catch"].detail)
+            self.assertIn(
+                "before anything was committed", results["scope-guard-catch"].detail
+            )
+
+    def test_unnamed_scope_violation_with_any_commit_is_not_reported_as_caught(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history, attributed=False, pause_session=None)
+            # No session to match this commit against, so it cannot be excused
+            # the way another session's commit is when the offender is named.
+            self._write_commit(history[3], session_id="02")
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn("cannot be ruled out", results["scope-escape"].detail)
+            self.assertEqual("pass", results["scope-guard-catch"].status)
+            self.assertNotIn(
+                "before anything was committed", results["scope-guard-catch"].detail
+            )
+            findings = {
+                finding.invariant_key: finding
+                for finding in supervisor_audit.findings_from_results(results.values())
+            }
+            self.assertNotIn("packet.write-scope-guard-catch", findings)
+            self.assertEqual(
+                "critical", findings["packet.write-scope-containment"].severity
+            )
+
+    def test_a_violation_named_only_by_its_pause_is_attributed_to_that_session(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history, attributed=False)
+
+            _, results = self._audit(history)
+
+            # The turn half is unnamed and the pause half names session 1;
+            # correlating them keeps one write one claim instead of reporting
+            # it twice, once as an unnamed ambiguity.
+            self.assertEqual("fail", results["scope-guard-catch"].status)
+            self.assertIn("session 1", results["scope-guard-catch"].detail)
+            self.assertNotIn("an unnamed session", results["scope-guard-catch"].detail)
+            self.assertEqual(
+                1, results["scope-guard-catch"].detail.count("wrote outside")
+            )
+            self.assertEqual("pass", results["scope-escape"].status)
+
+    def test_a_commit_for_the_pause_named_session_undoes_the_correlated_catch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history, attributed=False)
+            self._write_commit(history[3], session_id="1")
+
+            _, results = self._audit(history)
+
+            # Correlation is real attribution, so the commit is matched by
+            # session rather than swept in as an unresolvable ambiguity.
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn("a commit for that session", results["scope-escape"].detail)
+            self.assertEqual("pass", results["scope-guard-catch"].status)
 
     def test_a_repair_that_still_lists_violations_escaped_rather_than_caught(
         self,

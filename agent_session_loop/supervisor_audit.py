@@ -3015,8 +3015,8 @@ def _write_scope_violated_aliases(guard: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _committed_sessions(context: _CheckContext) -> set[str]:
-    """Every session a commit record names, however that commit was learned.
+def _commit_records(context: _CheckContext) -> list[Mapping[str, Any]]:
+    """Every commit the bundle records, however that commit was learned.
 
     Covers the runner's own commit projections and the attempts read from
     ``commit-*`` directories alike, including the entries the audit derived
@@ -3030,7 +3030,19 @@ def _committed_sessions(context: _CheckContext) -> set[str]:
         _mapping(_mapping(item).get("result"))
         for item in _sequence(commits.get("attempts"))
     )
-    named = {_write_scope_session(record.get("session_id")) for record in records}
+    return [record for record in records if record]
+
+
+def _committed_sessions(context: _CheckContext) -> set[str]:
+    """Every session a commit record names.
+
+    Reads the same records as :func:`_commit_records` so the attributed and
+    unattributed readings of "did a commit follow" cannot drift apart.
+    """
+    named = {
+        _write_scope_session(record.get("session_id"))
+        for record in _commit_records(context)
+    }
     return {session for session in named if session is not None}
 
 
@@ -3064,6 +3076,12 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
     runner writes one guard record into the turn result and the same record
     into the pause it raised, and a resumed run replays that pause with no turn
     of its own, so grouping is what keeps one out-of-scope write one claim.
+
+    A violation no record attributes is first correlated to the session its
+    own pause names; if nothing durable names one, it can still be caught, but
+    only in a bundle that recorded no commit at all, because there is no
+    session to match a commit against and claiming the guard held is a claim
+    about evidence that was never checked.
     """
     escaped: list[str] = []
     blind: list[str] = []
@@ -3138,6 +3156,21 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
             blind.append("the write guard reported itself unavailable")
 
     committed = _committed_sessions(context)
+    any_commit = bool(_commit_records(context))
+
+    # The runner writes one guard record into the turn result and the same
+    # record into the pause it raises, so a bundle where only the pause carries
+    # the session id splits one write into a named claim and an unnamed one. A
+    # lone scope-violation pause is durable attribution for that unnamed half,
+    # which both rejoins the claim and lets it be matched against commits by
+    # session. Two pauses name two candidates and correlating would be a guess,
+    # so the violation stays unnamed and is judged as ambiguous below.
+    if None in offenders and len(paused_sessions) == 1:
+        (attributed,) = paused_sessions
+        offenders.setdefault(attributed, set()).update(offenders.pop(None))
+        if None in reverted:
+            reverted.discard(None)
+            reverted.add(attributed)
 
     def _paused_for(session: str | None) -> bool:
         """Whether a scope-violation pause corroborates this session's catch.
@@ -3157,16 +3190,26 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
         claim = f"{who} wrote outside its declared scope ({_names(aliases)})"
         # A commit naming the offending session cannot predate the guard, which
         # runs after the turn it judges, so its presence says the run carried
-        # the out-of-scope write forward instead of holding it.
+        # the out-of-scope write forward instead of holding it. A violation no
+        # record attributes cannot be matched against a commit by session at
+        # all, so every commit in the bundle is a candidate for having carried
+        # it and the catch is conceded rather than claimed on evidence that
+        # was never checked.
+        if session is None:
+            uncommitted = not any_commit
+            commit_note = (
+                "the run recorded commits that cannot be ruled out as carrying "
+                "the unattributed violation"
+            )
+        else:
+            uncommitted = session not in committed
+            commit_note = "a commit for that session followed"
         missing = [
             note
             for note, held in (
                 ("the session was not reverted to pending", session in reverted),
                 ("the run never paused on the violation", _paused_for(session)),
-                (
-                    "a commit for that session followed",
-                    session is None or session not in committed,
-                ),
+                (commit_note, uncommitted),
             )
             if not held
         ]

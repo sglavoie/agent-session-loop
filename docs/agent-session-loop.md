@@ -1544,6 +1544,17 @@ next and split its own issue history in the inbox, and since both checks answer
 `pass` when their case is absent, the lane rollup keeping the worse of them is
 what stops either from masking the other.
 
+Grading by session needs a session, and the runner records the same guard both
+in the turn result and in the pause it raises, so a violation the guard itself
+left unattributed is first correlated to the session its own scope-violation
+pause names — which rejoins the two halves of one write into one claim instead
+of reporting it twice. Where nothing durable names a session, the violation can
+still be caught, but only in a bundle that recorded no commit at all: with no
+session to match a commit against, every commit in the bundle is a candidate
+for having carried the write, and reporting a medium catch on the strength of
+"nothing was committed" would be asserting evidence that was never checked. An
+unattributed violation alongside any commit is therefore an escape.
+
 A run that paused on a harness failure is graded on whether its own records
 agree with each other, not on whether it retried. The lifecycle lane reads
 `pause_details.failure_classification` against the persisted `pause_policy`:
