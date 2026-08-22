@@ -4067,8 +4067,20 @@ def _repair_commit_preflight(
     *,
     verification_context: verification.VerificationContext,
     session_scope: plans.SessionScope | None,
+    retained_scope_repair: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Require the commit tool and a clean writable set for one repair child."""
+    """Require the commit tool and a clean writable set for one repair child.
+
+    ``retained_scope_repair`` is the uncleared write-scope-violation record for
+    this same child. On that path the runner is the author of the dirt: it
+    deliberately retained the violating turn's changes and reverted the child to
+    pending so its durable scope could be repaired. Demanding a clean writable
+    set there dead-ends the very repair the retention exists to enable, so the
+    dirty paths are recorded as sanctioned instead of raising. Nothing escapes
+    review: the retained-scope branch still judges every retained change against
+    the child's post-regeneration write scope before the turn starts, and pauses
+    when any of it falls outside.
+    """
     details: dict[str, Any] = {
         "repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD,
         "repositories": [],
@@ -4133,6 +4145,15 @@ def _repair_commit_preflight(
 
     if dirty_repositories:
         labels = ", ".join(str(row["alias"] or ".") for row in dirty_repositories)
+        if retained_scope_repair is not None:
+            details["retained_scope_repair"] = {
+                "session_id": retained_scope_repair.get("session_id"),
+                "sanctioned_repositories": labels,
+                "sanctioned_dirty_paths": [
+                    path for row in dirty_repositories for path in row["dirty_paths"]
+                ],
+            }
+            return details
         message = (
             "generated repair child requires clean writable repositories before "
             f"execution; dirty: {labels}"
@@ -12900,7 +12921,13 @@ def _regenerated_repair_child_write_scope(
         plans.parse_session_scope(rewritten, aliases)
     except plans.PlanError, ValueError:
         return None
-    session.path.write_text(rewritten, encoding="utf-8")
+    try:
+        session.path.write_text(rewritten, encoding="utf-8")
+    except OSError:
+        # A child the runner cannot rewrite keeps its narrow durable scope, and
+        # the caller's revalidation is what turns that into a refusal to launch
+        # rather than a crash on the way to one.
+        return None
     return {
         "session_id": session.id,
         "repair_group": group,
@@ -12910,6 +12937,99 @@ def _regenerated_repair_child_write_scope(
         "write_repositories": list(widened.writes),
         "read_repositories": list(widened.reads),
     }
+
+
+REPAIR_SCOPE_STALE_BLOCKER = "repair-scope-stale"
+
+
+def _regenerate_stale_repair_child_scopes(
+    *,
+    snapshot: plans.PlanSnapshot,
+    workspace: workspaces.ResolvedWorkspace,
+    gaps: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Widen every pending child a scope-stale projection named.
+
+    The projection is plan-wide, so a single stale sibling blocks the whole
+    ``run-repairs`` continuation. Regenerating each child the projection names —
+    not only the one about to run — is what keeps the gate self-clearing rather
+    than a deadlock an operator has to hand-edit their way out of.
+    """
+    by_id = {session.id: session for session in snapshot.sessions}
+    records: list[dict[str, Any]] = []
+    for gap in gaps:
+        session_id = gap.get("repair_session_id")
+        session = by_id.get(session_id) if isinstance(session_id, str) else None
+        if session is None or session.status != "pending":
+            continue
+        try:
+            scope = _session_scope(session, workspace)
+        except plans.PlanError:
+            # Fail open exactly like the regeneration helper: a child whose
+            # scope cannot be read keeps the blocker rather than being rewritten
+            # from a scope nobody could parse.
+            continue
+        record = _regenerated_repair_child_write_scope(
+            session=session,
+            plan_dir=snapshot.plan_dir,
+            workspace=workspace,
+            scope=scope,
+        )
+        if record is not None:
+            records.append(record)
+    return records
+
+
+def _pending_repair_child_continuation(
+    *,
+    snapshot: plans.PlanSnapshot,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    workspace: workspaces.ResolvedWorkspace | None,
+    max_repair_group_attempts: int,
+    max_review_fix_cycles: int,
+    review_requested: bool,
+) -> review_continuation.ReviewResume:
+    """Project the repair continuation, clearing a stale scope once if it can.
+
+    The continuation is the only component that compares every pending child's
+    persisted scope against the scope its own findings require today. Projecting
+    it before the child is dispatched is what turns ``repair-scope-stale`` from
+    an advisory note into a gate: the caller either launches a child the
+    projection calls eligible, or stops without spending a turn.
+    """
+
+    def project() -> review_continuation.ReviewResume:
+        return _set_review_resume(
+            snapshot=snapshot,
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            max_repair_group_attempts=max_repair_group_attempts,
+            max_review_fix_cycles=max_review_fix_cycles,
+            review_requested=review_requested,
+        )
+
+    resume = project()
+    if (
+        workspace is None
+        or resume.action != "run-repairs"
+        or resume.eligible
+        or resume.blocker != REPAIR_SCOPE_STALE_BLOCKER
+        or not resume.repair_scope_gaps
+    ):
+        return resume
+    if not _regenerate_stale_repair_child_scopes(
+        snapshot=snapshot,
+        workspace=workspace,
+        gaps=resume.repair_scope_gaps,
+    ):
+        return resume
+    _refresh_active_readiness_state(payload, snapshot.plan_dir, persistence)
+    # Revalidate rather than assume: the rewrite is widening-only and fail-open,
+    # so the second projection is the only proof the gap actually closed.
+    return project()
 
 
 def _enforce_workspace_write_guard(
@@ -16104,12 +16224,79 @@ def _run_locked(
                 if workspace is not None
                 else None
             )
+            retained_scope_repair = (
+                _latest_workspace_scope_repair_requirement(event_path, session_id)
+                if workspace is not None
+                else None
+            )
+            if (
+                retained_scope_repair is not None
+                and retained_scope_repair.get("session_id") != session_id
+            ):
+                # The lookup also matches on the pause envelope's session, so
+                # the guard record's own identity is the narrower proof that
+                # this is the turn whose changes were retained for this child.
+                retained_scope_repair = None
+            regenerated_write_scope: dict[str, Any] | None = None
             if is_repair_session:
+                if workspace is not None:
+                    assert session_scope is not None
+                    # The durable child file is the single description of what
+                    # this child may write. Widening it here — ahead of commit
+                    # preflight, the task packet, the persisted prompt and the
+                    # guard — is what keeps all four reading one scope instead
+                    # of preflight and the packet describing the pre-repair one.
+                    regenerated_write_scope = _regenerated_repair_child_write_scope(
+                        session=pending_session,
+                        plan_dir=before.plan_dir,
+                        workspace=workspace,
+                        scope=session_scope,
+                    )
+                    if regenerated_write_scope is not None:
+                        _refresh_active_readiness_state(
+                            payload, before.plan_dir, persistence
+                        )
+                        session_scope = _session_scope(pending_session, workspace)
+                repair_resume = _pending_repair_child_continuation(
+                    snapshot=before,
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    workspace=workspace,
+                    max_repair_group_attempts=_max_repair_group_attempts(args),
+                    max_review_fix_cycles=max_review_fix_cycles,
+                    review_requested=review_requested,
+                )
+                if repair_resume.action == "run-repairs" and not repair_resume.eligible:
+                    # The continuation is the only view that reconciles every
+                    # pending child with the artifact they were derived from. A
+                    # child it refuses is not launched under the scope that
+                    # refusal describes.
+                    repair_blocker = repair_resume.blocker or "unknown blocker"
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(before)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason=events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+                        message=(
+                            "generated repair child "
+                            f"{session_label} cannot be run safely: "
+                            f"{repair_blocker}."
+                        ),
+                        details={
+                            **session_details,
+                            "review_resume": repair_resume.to_payload(),
+                        },
+                        persistence=persistence,
+                    )
+                    break
                 try:
                     repair_commit_preflight = _repair_commit_preflight(
                         cwd,
                         verification_context=verification_context,
                         session_scope=session_scope,
+                        retained_scope_repair=retained_scope_repair,
                     )
                 except RepairCommitPreflightError as error:
                     with persistence.lock:
@@ -16143,11 +16330,6 @@ def _run_locked(
                         },
                     )
                     persistence.write_state(payload)
-            pending_workspace_scope_repair = (
-                _latest_workspace_scope_repair_requirement(event_path, session_id)
-                if workspace is not None
-                else None
-            )
             turn_reply = pending_reply
             turn_resolution = pending_resolution
             if turn_reply is not None and turn_resolution is not None:
@@ -16473,29 +16655,12 @@ def _run_locked(
                         persistence=persistence,
                     )
                     break
-                if (
-                    pending_workspace_scope_repair is not None
-                    and pending_workspace_scope_repair.get("session_id") == session_id
-                ):
-                    # Defense in depth for a child materialized before its
-                    # findings were last recomputed: widen the durable file
-                    # first, then re-read it, so the guard below judges the
-                    # retained changes against the same scope preflight,
-                    # expansion, the contract and the prompt will read.
-                    regenerated_write_scope = _regenerated_repair_child_write_scope(
-                        session=pending_session,
-                        plan_dir=before.plan_dir,
-                        workspace=workspace,
-                        scope=session_scope,
-                    )
-                    if regenerated_write_scope is not None:
-                        _refresh_active_readiness_state(
-                            payload, before.plan_dir, persistence
-                        )
-                        session_scope = _session_scope(pending_session, workspace)
-                    prior_snapshot = pending_workspace_scope_repair.get(
-                        "snapshot_before"
-                    )
+                if retained_scope_repair is not None:
+                    # The durable file was already widened before preflight and
+                    # the task packet were built, so the guard below judges the
+                    # retained changes against exactly the scope preflight,
+                    # expansion, the contract and the prompt already read.
+                    prior_snapshot = retained_scope_repair.get("snapshot_before")
                     if isinstance(prior_snapshot, Mapping):
                         repair_comparison = (
                             repository_evidence.compare_workspace_snapshots(
@@ -16533,7 +16698,7 @@ def _run_locked(
                     current_expansion = _session_expansion_evidence(
                         before.plan_dir, session_id
                     )
-                    prior_expansion = pending_workspace_scope_repair.get(
+                    prior_expansion = retained_scope_repair.get(
                         "expansion_before_repair"
                     )
                     expansion_fresh = isinstance(
@@ -16543,7 +16708,7 @@ def _run_locked(
                     )
                     if not repair_evidence["passed"] or not expansion_fresh:
                         repair_record = {
-                            **pending_workspace_scope_repair,
+                            **retained_scope_repair,
                             "phase": "repair-check",
                             "current_scope_evidence": repair_evidence,
                             "current_expansion": current_expansion,

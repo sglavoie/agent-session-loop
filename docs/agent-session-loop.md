@@ -1146,14 +1146,22 @@ contents, restore the handoff to pending, record qualified evidence, and run
 before verification or commit. Scope violations require a durable scope repair
 and fresh expansion/preflight before continuing. When the retained session is
 an ASL-generated repair child, the runner performs part of that repair itself:
-before it judges the retained changes it widens the child's persisted **Writes
-repositories** in place to the union its own findings require, re-reads the
-scope from the rewritten file, and records the change under the repair
-evidence's `write_scope_regeneration`. The rewrite widens only and touches only
-generated children, so a human-authored session's declared scope is never
-rewritten and an alias the current findings no longer require is never removed.
-Because the file itself is rewritten, preflight, expansion, the completion
-contract and prompt rendering all keep reading the same single scope. A
+before the turn starts — ahead of repair commit preflight, task-packet
+rendering, the persisted active-turn prompt and the write guard — it widens the
+child's persisted **Writes repositories** in place to the union its own findings
+require, re-reads the scope from the rewritten file, and records the change
+under the repair evidence's `write_scope_regeneration`. The rewrite widens only
+and touches only generated children, so a human-authored session's declared
+scope is never rewritten and an alias the current findings no longer require is
+never removed. Because the file itself is rewritten before anything reads it,
+preflight, expansion, the completion contract, prompt rendering and the guard
+all keep reading the same single scope. Commit preflight normally refuses to
+start a repair child whose writable repositories are dirty; on this retained
+path it records those dirty paths as sanctioned under
+`retained_scope_repair` instead, because the runner is the author of that dirt
+and demanding a clean tree would dead-end the very repair the retention exists
+to enable. Nothing escapes review: the guard still judges every retained change
+against the post-regeneration scope before the turn begins. A
 repository the plan never
 registered is outside the guard's domain: another `asl run` process working in
 an unrelated checkout beneath the same root cannot pause this run, and no
@@ -3978,7 +3986,13 @@ child scope against the scope recomputed from the validated findings — because
 the retained guard is derived from that same persisted scope and agrees with it
 even when both are too narrow. An additive `repair_scope_gaps` block names the
 missing aliases and their provenance per child; rewriting the child with the
-required scope clears the blocker. An unrecognized recorded disposition is retained in
+required scope clears the blocker. The blocker is a gate, not an advisory:
+`asl run` projects this continuation before it dispatches any pending generated
+repair child, widens every child the `repair_scope_gaps` block names — not only
+the one about to run, since one stale sibling blocks the plan-wide projection —
+and reprojects. A child the second projection still refuses is never launched;
+the run pauses as `malformed-review-repair` carrying the blocker and the
+missing-alias evidence. An unrecognized recorded disposition is retained in
 `source_disposition` for diagnosis and maps to the stable
 `unknown-disposition` blocker. The projection includes source lineage,
 historical/required/selected cap values, pending and completed repair IDs,

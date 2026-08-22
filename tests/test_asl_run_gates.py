@@ -48,6 +48,7 @@ from tests.support import (
     init_multi_repo_workspace,
     install_fake_amx,
     install_fake_codex,
+    install_fake_spec,
     patched_env,
     read_jsonl,
     write_completed_review_plan,
@@ -2952,49 +2953,96 @@ class RepairChildWriteScopeRegenerationTests(unittest.TestCase):
 
 
 class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
-    """Regeneration widens the durable file before anything judges it.
+    """Regeneration widens the durable file before anything reads it.
 
-    Ordering is the whole contract. A rewrite after the guard evidence is
-    computed would judge retained changes against the scope it had just
-    replaced, and a start-time override of the value alone would leave the
-    persisted file disagreeing with preflight, expansion, the completion
-    contract and prompt rendering, every one of which reads the file.
+    Ordering is the whole contract. The durable child file is what commit
+    preflight, the task packet, the persisted prompt and the write guard each
+    read, so a rewrite landing after any of them leaves that reader describing
+    a scope the run no longer uses -- and a start-time override of the value
+    alone would leave the file itself disagreeing with all four.
     """
 
     def setUp(self) -> None:
         self.tree = ast.parse(Path(runner.__file__).read_text(encoding="utf-8"))
+        self.run_locked = self._function("_run_locked")
 
-    def _retained_scope_repair_branch(self) -> ast.If:
-        branches = [
+    def _function(self, name: str) -> ast.FunctionDef:
+        matches = [
             node
             for node in ast.walk(self.tree)
-            if isinstance(node, ast.If)
-            and "pending_workspace_scope_repair is not None" in ast.unparse(node.test)
-            and "== session_id" in ast.unparse(node.test)
+            if isinstance(node, ast.FunctionDef) and node.name == name
         ]
-        self.assertEqual(1, len(branches), "expected one retained-scope-repair branch")
-        return branches[0]
+        self.assertEqual(1, len(matches), f"expected one {name} definition")
+        return matches[0]
 
     def _call_lines(self, node: ast.AST, name: str) -> list[int]:
-        return [
+        return sorted(
             call.lineno
             for call in ast.walk(node)
             if isinstance(call, ast.Call)
             and isinstance(call.func, ast.Name)
             and call.func.id == name
+        )
+
+    def _turn_record_line(self) -> int:
+        # The turn record is where the rendered prompt becomes durable state, so
+        # pin the literal that carries it rather than every rebinding of the name.
+        lines = sorted(
+            assign.lineno
+            for assign in ast.walk(self.run_locked)
+            if isinstance(assign, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "active_turn"
+                for target in assign.targets
+            )
+            and isinstance(assign.value, ast.Dict)
+            and any(
+                isinstance(key, ast.Constant) and key.value == "prompt"
+                for key in assign.value.keys
+                if key is not None
+            )
+        )
+        self.assertEqual(1, len(lines), "expected one persisted turn record")
+        return lines[0]
+
+    def test_regeneration_precedes_every_reader_of_the_child_scope(self) -> None:
+        (regenerated,) = self._call_lines(
+            self.run_locked, "_regenerated_repair_child_write_scope"
+        )
+        reread = self._call_lines(self.run_locked, "_session_scope")
+        (preflight_call,) = self._call_lines(
+            self.run_locked, "_repair_commit_preflight"
+        )
+        packet = self._call_lines(self.run_locked, "build_task_packet")
+        prompt_persisted = self._turn_record_line()
+        guard = self._call_lines(self.run_locked, "_workspace_write_guard_evidence")
+
+        # The re-read is what makes the widened file the value in hand; every
+        # other reader has to come after it, not merely after the rewrite.
+        self.assertTrue(
+            any(line > regenerated for line in reread),
+            "the durable file must be re-read after it is widened",
+        )
+        self.assertLess(regenerated, preflight_call)
+        self.assertLess(preflight_call, min(packet))
+        self.assertLess(min(packet), prompt_persisted)
+        self.assertLess(prompt_persisted, min(guard))
+
+    def test_the_retained_scope_branch_no_longer_widens_the_child_itself(self) -> None:
+        branches = [
+            node
+            for node in ast.walk(self.run_locked)
+            if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "retained_scope_repair is not None"
+            and self._call_lines(node, "_workspace_write_guard_evidence")
         ]
 
-    def test_branch_widens_and_rereads_before_the_guard_evidence(self) -> None:
-        branch = self._retained_scope_repair_branch()
-
-        (regenerated,) = self._call_lines(
-            branch, "_regenerated_repair_child_write_scope"
+        self.assertEqual(1, len(branches), "expected one retained-scope-repair branch")
+        self.assertEqual(
+            [],
+            self._call_lines(branches[0], "_regenerated_repair_child_write_scope"),
+            "widening inside the guard branch is what F002 moved out of it",
         )
-        (reread,) = self._call_lines(branch, "_session_scope")
-        (evidence,) = self._call_lines(branch, "_workspace_write_guard_evidence")
-
-        self.assertLess(regenerated, reread)
-        self.assertLess(reread, evidence)
 
     def test_session_scope_is_only_ever_read_from_the_session_file(self) -> None:
         assignments = [
@@ -3015,6 +3063,448 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
                 "session_scope must stay the session file's own value; "
                 f"line {node.lineno} computes one instead",
             )
+
+
+class _GeneratedRepairDispatchFixture(unittest.TestCase):
+    """A completed multi-repository review whose repair children can be run.
+
+    Both dispatch gates only exist inside a real ``_run_locked`` turn, so these
+    tests build the whole artifact chain -- registry, final review artifact,
+    materialized children -- and drive the runner rather than the helpers.
+    """
+
+    SPECS = DEFAULT_MULTI_REPO_SPECS[:2]
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp_path = Path(tmp.name)
+        self.workspace_root = self.tmp_path / "workspace"
+        self.repositories = init_multi_repo_workspace(self.workspace_root, self.SPECS)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.child = self.plan_dir / "session-2.1.md"
+        self.prompts: list[str] = []
+        install_fake_spec(self.tmp_path)
+        self.path_env = str(self.tmp_path) + os.pathsep + os.environ.get("PATH", "")
+
+    def _finding(
+        self,
+        evidence_aliases: tuple[str, ...],
+        *,
+        finding_id: str = "F1",
+        repair_group: str = "manifest-contract",
+        repo: str = "OAK",
+    ) -> dict[str, Any]:
+        return _structured_review_finding(
+            finding_id=finding_id,
+            repair_group=repair_group,
+            repo=repo,
+            evidence=[
+                {"path": f"{alias}:pkg/{finding_id}.py", "symbol": "target"}
+                for alias in evidence_aliases
+            ],
+            verification_checks=[
+                {
+                    "type": "command",
+                    "name": f"verify-{finding_id}",
+                    "repo": repo,
+                    "argv": ["python3", "-c", "pass"],
+                }
+            ],
+        )
+
+    def _write_review_artifact(self, findings: list[dict[str, Any]]) -> None:
+        counts = {
+            severity: sum(1 for item in findings if item["severity"] == severity)
+            for severity in ("high", "med", "low")
+        }
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
+            "# Final review\n\n"
+            f"Status: {len(findings)} Findings ({counts['high']} high, "
+            f"{counts['med']} med, {counts['low']} low)\n",
+            encoding="utf-8",
+        )
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            json.dumps(
+                {
+                    "version": review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION,
+                    "outcome": "findings",
+                    "findings": findings,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _pin_workspace(self) -> None:
+        registry = plans.read_repository_registry(self.plan_dir)
+        self.assertIsNotNone(registry, "the plan must carry a repository registry")
+        assert registry is not None
+        plans.save_workspace_plan_metadata(
+            self.plan_dir, self.workspace_root, registry.digest
+        )
+
+    def _materialize_children(self) -> None:
+        result = review_repair.materialize_review_repair_sessions(
+            self.plan_dir, state_dir=self.state_dir
+        )
+        self.assertTrue(result.ok, result.error)
+
+    def _write_scope(self, path: Path) -> str:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("**Writes repositories**:"):
+                return line.split(":", 1)[1].strip()
+        self.fail(f"{path.name} declares no write scope")
+
+    def _narrow(self, path: Path, aliases: str) -> None:
+        text = path.read_text(encoding="utf-8")
+        current = self._write_scope(path)
+        path.write_text(
+            text.replace(
+                f"**Writes repositories**: {current}",
+                f"**Writes repositories**: {aliases}",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+    def _prompt_field(self, prompt: str, label: str) -> str:
+        for line in prompt.splitlines():
+            if line.startswith(f"- {label}:"):
+                return line.split(":", 1)[1].strip()
+        self.fail(f"the task packet carries no {label!r} line")
+
+    def _record_prompt(self, name: str, **kwargs: Any) -> harnesses.HarnessResult:
+        self.prompts.append(str(kwargs.get("prompt", "")))
+        return harnesses.HarnessResult(
+            name=name, argv=["fake"], returncode=0, stdout="ok\n", stderr=""
+        )
+
+    def _refuse(self, name: str, **kwargs: Any) -> harnesses.HarnessResult:
+        raise AssertionError(f"the harness must not be reached; got {name}")
+
+    def _event_path(self) -> Path:
+        plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
+        return plan_state / events.EVENTS_FILE_NAME
+
+    def _pause_reasons(self) -> list[str]:
+        event_path = self._event_path()
+        if not event_path.exists():
+            return []
+        return [
+            record["payload"]["reason"]
+            for record in read_jsonl(event_path)
+            if record["name"] == events.RUN_PAUSED_EVENT
+        ]
+
+    def _run(self, run_id: str, harness: Any) -> tuple[int, dict[str, Any]]:
+        args = argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.workspace_root),
+            harness="codex",
+            state_dir=str(self.state_dir),
+            json=True,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+        context = verification.VerificationContext.from_plan(
+            self.plan_dir, self.workspace_root
+        )
+        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        try:
+            with (
+                patched_env(PATH=self.path_env),
+                mock.patch.object(runner.harnesses, "run_harness", side_effect=harness),
+            ):
+                return runner._run_locked(
+                    args=args,
+                    cwd=self.workspace_root,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=None,
+                    lock_info=lock_info,
+                    run_id=run_id,
+                    verification_context=context,
+                )
+        finally:
+            state.release_lock(self.plan_dir, self.state_dir)
+
+
+class RepairScopeStaleDispatchTests(_GeneratedRepairDispatchFixture):
+    """``repair-scope-stale`` gates the child before a turn is ever spent.
+
+    The blocker used to be advisory: the continuation computed it, nothing
+    consulted it before dispatch, and a child whose durable scope had been
+    narrowed away from what its findings require ran anyway -- under the narrow
+    scope, so its legitimate writes looked like violations.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        write_completed_review_plan(self.plan_dir, [self._finding(("OAK", "SVC"))])
+        rows = "\n".join(
+            f"| {alias} | {path} | {origin} |" for alias, path, origin in self.SPECS
+        )
+        (self.plan_dir / "manifest.md").write_text(
+            "# Manifest\n\n## Repositories\n\n"
+            "| Alias | Path | Origin |\n| --- | --- | --- |\n" + rows + "\n",
+            encoding="utf-8",
+        )
+        for session_id, writes in (("1", "SVC, OAK"), ("2", "(none)")):
+            path = self.plan_dir / f"session-{session_id}.md"
+            heading, remainder = path.read_text(encoding="utf-8").split("\n", 1)
+            path.write_text(
+                (
+                    f"{heading}\n\n**Reads repositories**: SVC, OAK\n"
+                    f"**Writes repositories**: {writes}\n{remainder}"
+                ).replace(
+                    "- **Files modified**: (none yet)", "- **Files modified**: (none)"
+                ),
+                encoding="utf-8",
+            )
+
+    def _seed(self, findings: list[dict[str, Any]]) -> None:
+        # Materialization is one-shot per review session, so every child a test
+        # needs has to be present in the artifact before it runs.
+        self._write_review_artifact(findings)
+        self._pin_workspace()
+        self._materialize_children()
+        self.assertEqual("SVC, OAK", self._write_scope(self.child))
+
+    def test_a_narrowed_child_runs_only_under_its_regenerated_scope(self) -> None:
+        self._seed([self._finding(("OAK", "SVC"))])
+        self._narrow(self.child, "OAK")
+
+        _exit_code, payload = self._run("stale-widened", self._record_prompt)
+
+        self.assertEqual("SVC, OAK", self._write_scope(self.child))
+        self.assertEqual(1, len(self.prompts))
+        # The packet the worker actually received is the proof: a child
+        # dispatched under the stale scope would name OAK alone here.
+        self.assertEqual(
+            "SVC, OAK", self._prompt_field(self.prompts[0], "Writable aliases")
+        )
+        self.assertNotIn(
+            events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR, self._pause_reasons()
+        )
+        self.assertEqual("2.1", payload["turns"][0]["session_id"])
+
+    def test_a_child_whose_scope_cannot_be_repaired_is_never_dispatched(self) -> None:
+        self._seed([self._finding(("OAK", "SVC"))])
+        self._narrow(self.child, "OAK")
+        # Regeneration is fail-open, so a durable file the runner cannot rewrite
+        # is the reachable case where the blocker has to stop the run itself.
+        self.child.chmod(0o444)
+        self.addCleanup(self.child.chmod, 0o644)
+
+        exit_code, payload = self._run("stale-blocked", self._refuse)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR, payload["pause_reason"]
+        )
+        self.assertEqual([], payload["turns"])
+        self.assertEqual("OAK", self._write_scope(self.child))
+        resume = payload["review_resume"]
+        self.assertEqual("run-repairs", resume["action"])
+        self.assertFalse(resume["eligible"])
+        self.assertEqual("repair-scope-stale", resume["blocker"])
+        (gap,) = resume["repair_scope_gaps"]
+        self.assertEqual("2.1", gap["repair_session_id"])
+        self.assertEqual(["SVC"], gap["missing_write_repositories"])
+        self.assertEqual(["SVC", "OAK"], gap["required_write_repositories"])
+
+    def test_a_stale_sibling_does_not_deadlock_the_child_that_can_run(self) -> None:
+        # The projection is plan-wide, so the sibling's staleness blocks the
+        # whole continuation even though the sibling is not the one dispatching.
+        self._seed(
+            [
+                self._finding(("OAK", "SVC")),
+                self._finding(
+                    ("SVC", "OAK"),
+                    finding_id="F2",
+                    repair_group="docs-drift",
+                    repo="SVC",
+                ),
+            ]
+        )
+        sibling = self.plan_dir / "session-2.2.md"
+        self._narrow(sibling, "SVC")
+
+        _exit_code, _payload = self._run("stale-sibling", self._record_prompt)
+
+        self.assertEqual("SVC, OAK", self._write_scope(sibling))
+        self.assertEqual(1, len(self.prompts))
+        self.assertEqual(
+            "SVC, OAK", self._prompt_field(self.prompts[0], "Writable aliases")
+        )
+
+
+class RepairScopeRegenerationIntegrationTests(_GeneratedRepairDispatchFixture):
+    """Regeneration lands before preflight, the packet, the prompt and the guard.
+
+    The scenario is the one the retention exists for: a child writes outside its
+    declared scope, the runner keeps those changes and reverts the child so its
+    scope can be widened, and the next run has to repair the durable file early
+    enough that every downstream reader sees the widened value.
+    """
+
+    SPECS = DEFAULT_MULTI_REPO_SPECS[:3]
+
+    def setUp(self) -> None:
+        super().setUp()
+        aliases = ", ".join(alias for alias, _path, _origin in self.SPECS)
+        contracts = {
+            session_id: _contract_block(
+                '{"type": "file_exists", "repo": "SVC", '
+                '"path": "README.md", "name": "svc-readme"}',
+                session=session_id,
+            )
+            for session_id in ("1", "2")
+        }
+        write_multi_repo_plan(
+            self.plan_dir,
+            ("complete", "complete"),
+            specs=self.SPECS,
+            contracts_by_id=contracts,
+        )
+        # ``write_multi_repo_plan`` writes an ordinary session 2; the repair
+        # machinery only recognises a child's parent by these two markers.
+        review_path = self.plan_dir / "session-2.md"
+        heading, remainder = review_path.read_text(encoding="utf-8").split("\n", 1)
+        review_path.write_text(
+            (
+                f"{heading}\n\n{review.REVIEW_SESSION_MARKER}\n"
+                "<!-- asl:generated-review-session version="
+                f"{review.GENERATED_REVIEW_SESSION_VERSION} -->\n{remainder}"
+            ).replace(
+                f"**Writes repositories**: {aliases}",
+                "**Writes repositories**: (none)",
+            ),
+            encoding="utf-8",
+        )
+        for session_id in ("1", "2"):
+            path = self.plan_dir / f"session-{session_id}.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "- **Files modified**: (none yet)",
+                    "- **Files modified**: (none)",
+                ),
+                encoding="utf-8",
+            )
+        self._write_review_artifact([self._finding(("OAK", "SVC"))])
+        self._pin_workspace()
+        self._materialize_children()
+        self.assertEqual("SVC, OAK", self._write_scope(self.child))
+
+    def _stamp_ready(self) -> None:
+        # The retained-violation branch only runs once the pre-loop readiness
+        # gate passes, and that gate needs both a journal and a fresh stamp.
+        plans.write_progress_journal(
+            self.plan_dir,
+            tuple(
+                plans.ProgressEntry(
+                    session_id=plans.parse_session_id(session_id),
+                    status="complete",
+                    completed_at="2026-06-19T00:00:00Z",
+                )
+                for session_id in ("1", "2")
+            ),
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+    def _stray_write(self, name: str, **kwargs: Any) -> harnesses.HarnessResult:
+        self.prompts.append(str(kwargs.get("prompt", "")))
+        (self.repositories["OAK"] / "notes.md").write_text(
+            "in-scope work\n", encoding="utf-8"
+        )
+        (self.repositories["OWL"] / "notes.md").write_text(
+            "stray work\n", encoding="utf-8"
+        )
+        self.child.write_text(
+            self.child.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete", 1
+            ),
+            encoding="utf-8",
+        )
+        return harnesses.HarnessResult(
+            name=name, argv=["fake"], returncode=0, stdout="ok\n", stderr=""
+        )
+
+    def test_a_retained_violation_is_repaired_before_preflight_and_the_packet(
+        self,
+    ) -> None:
+        self._stamp_ready()
+        _exit_code, first = self._run("retained-run-1", self._stray_write)
+        self.assertEqual("workspace-write-scope-violation", first["pause_reason"])
+        self.assertIn("- **Status**: pending", self.child.read_text(encoding="utf-8"))
+
+        # The review now agrees the stray repository was in scope all along,
+        # which is exactly what regeneration has to widen the child to.
+        self._write_review_artifact([self._finding(("OAK", "SVC", "OWL"))])
+        (self.plan_dir / "session-2.1.expand.md").write_text(
+            "# Expansion for 2.1\n\nRepaired scope notes.\n", encoding="utf-8"
+        )
+        self._stamp_ready()
+
+        _exit_code, second = self._run("retained-run-2", self._record_prompt)
+
+        self.assertEqual("SVC, OAK, OWL", self._write_scope(self.child))
+        # Preflight ran against the widened scope and sanctioned the dirt the
+        # retention deliberately kept, instead of dead-ending the repair.
+        (preflight_record,) = second["repair_commit_preflights"]
+        self.assertEqual(
+            {"OAK", "OWL"},
+            {
+                row["alias"]
+                for row in preflight_record["repositories"]
+                if not row["clean"]
+            },
+        )
+        sanction = preflight_record["retained_scope_repair"]
+        self.assertEqual("2.1", sanction["session_id"])
+        self.assertEqual("OAK, OWL", sanction["sanctioned_repositories"])
+        self.assertEqual(
+            ["OAK:notes.md", "OWL:notes.md"],
+            sorted(sanction["sanctioned_dirty_paths"]),
+        )
+        self.assertNotIn("commit-preflight", self._pause_reasons())
+        # And the packet the repair worker received names the added alias.
+        self.assertEqual(
+            "SVC, OAK, OWL", self._prompt_field(self.prompts[-1], "Writable aliases")
+        )
+
+    def test_dirt_without_a_retained_violation_still_fails_commit_preflight(
+        self,
+    ) -> None:
+        (self.repositories["OAK"] / "notes.md").write_text(
+            "unexplained work\n", encoding="utf-8"
+        )
+
+        exit_code, payload = self._run("unsanctioned-dirt", self._refuse)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("commit-preflight", payload["pause_reason"])
+        self.assertEqual([], payload["turns"])
+        details = payload["pause_details"]
+        self.assertEqual(
+            ["OAK"], [row["alias"] for row in details["dirty_repositories"]]
+        )
+        self.assertNotIn("retained_scope_repair", details)
 
 
 class RunRepositoryContentionGateTests(unittest.TestCase):
