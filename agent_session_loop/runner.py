@@ -5250,6 +5250,10 @@ def _snapshot_commit_descendants(root_pid: int) -> tuple[Mapping[str, Any], ...]
     to pid 1, after which no descendant walk can reach it. The snapshot is the
     sweep's only route to such a process, so it must be taken before the kill
     (mirrors :func:`harnesses._snapshot_descendants`).
+
+    It names only what was running at this instant. A child forked after it is
+    covered instead by :func:`process_tree.sweep_survivors` walking the live
+    ancestry of everything this snapshot did name.
     """
     if not process_tree.sweep_enabled():
         return ()
@@ -5269,7 +5273,9 @@ def _sweep_commit_descendants(
     ``start_new_session=True``. The caller reaps the child before this runs, so
     the sweep excludes it rather than signalling a PID that may be reused; what
     it reaches is the descendant the process-group kill could not — one that
-    called ``setsid`` and therefore never received the group signal.
+    called ``setsid`` and therefore never received the group signal, together
+    with anything that descendant has forked since ``prior_snapshot`` was
+    taken.
     """
     if not process_tree.sweep_enabled():
         return None

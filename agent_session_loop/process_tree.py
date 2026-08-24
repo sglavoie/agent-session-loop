@@ -26,6 +26,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Set as AbstractSet
 from typing import Any
 
 PS_COMMAND: tuple[str, ...] = ("ps", "-axo", "pid=,ppid=,state=,time=,lstart=,command=")
@@ -83,12 +84,21 @@ def _parse_cpu_time(raw: str) -> float | None:
     return float(days * 86400 + hours * 3600 + minutes * 60) + seconds
 
 
-def descendant_pids(root_pid: int, table: Mapping[int, Mapping[str, Any]]) -> list[int]:
+def descendant_pids(
+    root_pid: int,
+    table: Mapping[int, Mapping[str, Any]],
+    *,
+    stop: AbstractSet[int] = frozenset(),
+) -> list[int]:
     """Return ``root_pid``'s descendants in BFS order, root itself excluded.
 
     ``table`` is any pid-keyed mapping whose entries carry ``ppid`` — both
     :func:`sample_process_tree`'s parse and :func:`sample_process_table` qualify.
     Children keep the order ``ps`` listed them in.
+
+    A pid in ``stop`` is neither returned nor descended into, so a caller that
+    walks the tree to find things to signal can fence off a subtree it must
+    never touch — its own, above all.
     """
     children: dict[int, list[int]] = {}
     for pid, entry in table.items():
@@ -104,7 +114,7 @@ def descendant_pids(root_pid: int, table: Mapping[int, Mapping[str, Any]]) -> li
     while queue:
         pid = queue.pop(0)
         for child_pid in children.get(pid, ()):
-            if child_pid in seen:
+            if child_pid in seen or child_pid in stop:
                 continue
             seen.add(child_pid)
             ordered.append(child_pid)
@@ -545,7 +555,7 @@ def sweep_survivors(
 ) -> dict[str, Any] | None:
     """SIGKILL what outlived ``root_pid`` and report on it, or ``None``.
 
-    Candidates come from two independent identifications, unioned:
+    Candidates come from three identifications, unioned:
 
     * every current member of ``expected_pgid`` — positive identification, since
       a process group is only entered by inheritance from the root. Callers reap
@@ -558,19 +568,30 @@ def sweep_survivors(
       The re-verification is what makes a snapshot safe to act on later: a pid
       reused by an unrelated process no longer matches, and one reused by a
       process running the same command is rejected on its birth time.
+    * every process the live table shows descended from one of the above. A
+      snapshot names only what existed when it was taken, so a child forked
+      afterwards is in no snapshot — and if it called ``setsid``, in no process
+      group either. Its parent link survives until that parent is signalled,
+      and this walk runs against the same pre-kill table, so the link is still
+      there to follow. No identity check applies or is needed: ancestry in the
+      current table *is* the identification, and it is only ever rooted at a
+      process already verified by group membership or by pid/birth/command, so
+      a reused pid never becomes a root to walk from.
 
-    The root pid, this process and pids <= 1 are never signalled. ``root_pid``
-    is excluded because it is reaped by its own caller, and a reaped pid can be
-    reused by anything.
+    The root pid, this process and pids <= 1 are never signalled, and the
+    descendant walk stops at both rather than descending through them.
+    ``root_pid`` is excluded because it is reaped by its own caller, and a
+    reaped pid can be reused by anything.
 
     Returns a report with ``killed``, ``kill_failed``, ``survivors_after`` and
     ``enumeration``, or ``None`` if the process table could not be read — the
     fail-open contract of :func:`sample_process_tree`. Never raises.
 
     Honest limit: a descendant that called ``setsid`` (leaving the group) *and*
-    whose parent chain died before any snapshot was taken is identified by
-    neither route and survives this call. It can no longer block the run — the
-    pipes it holds are no longer waited on — but it is not killed here.
+    whose parent chain was already dead when the table was sampled is identified
+    by none of the three routes and survives this call, as does one forked after
+    that sample. Neither can block the run — the pipes they hold are no longer
+    waited on — but neither is killed here.
     """
     try:
         table = sample_process_table(run_command=run_command, timeout=timeout)
@@ -623,11 +644,18 @@ def sweep_survivors(
         enumeration["snapshot_verified"] = sorted(set(snapshot_verified))
 
         protected = {root_pid, os.getpid()}
-        candidates = sorted(
+        identified = {
             pid
             for pid in set(group_members) | set(snapshot_verified)
             if pid > 1 and pid not in protected
-        )
+        }
+        late_descendants: set[int] = set()
+        for seed in sorted(identified):
+            for pid in descendant_pids(seed, table, stop=protected):
+                if pid > 1 and pid not in protected and pid not in identified:
+                    late_descendants.add(pid)
+        enumeration["late_descendants"] = sorted(late_descendants)
+        candidates = sorted(identified | late_descendants)
 
         killed: list[int] = []
         kill_failed: list[dict[str, Any]] = []

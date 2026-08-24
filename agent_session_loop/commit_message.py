@@ -22,12 +22,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import textwrap
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -457,8 +458,15 @@ def _git(
     args: Sequence[str],
     *,
     stdin_text: str | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run git without raising, mirroring the runner's subprocess pattern."""
+    """Run git without raising, mirroring the runner's subprocess pattern.
+
+    ``env`` overlays the ambient environment rather than replacing it, so a
+    caller can point one invocation at a throwaway ``GIT_INDEX_FILE`` without
+    stripping the credentials, locale, and git configuration every other call
+    inherits.
+    """
     argv = ["git", *args]
     try:
         return subprocess.run(
@@ -468,6 +476,7 @@ def _git(
             input=stdin_text,
             capture_output=True,
             check=False,
+            env=None if env is None else {**os.environ, **env},
         )
     except FileNotFoundError as error:
         return subprocess.CompletedProcess(argv, 127, stdout="", stderr=str(error))
@@ -606,6 +615,86 @@ def changes_are_all_binary(
     )
 
 
+def _staged_index_entries(cwd: Path, pathspec: Sequence[str]) -> str:
+    """The ``ls-files --stage`` listing of the named paths, NUL-separated.
+
+    This is the same listing :func:`pathspec_snapshot` digests, so what the
+    scoped commit is built from and what the snapshot token attests to are
+    read out of the index by the same command.
+    """
+    result = _git(cwd, ["ls-files", "--stage", "-z", "--", *pathspec])
+    if result.returncode != 0:
+        raise CommitMessageError(
+            f"failed to read the staged entries: {result.stderr.strip()}",
+            reason=REASON_COMMIT_FAILED,
+        )
+    return result.stdout
+
+
+def _paths_staged_for_deletion(
+    cwd: Path, pathspec: Sequence[str], staged_entries: str
+) -> list[str]:
+    """Named paths HEAD still tracks that the index no longer holds.
+
+    Seeding the scoped index from HEAD brings back every path HEAD carries,
+    including one the run staged as a *deletion*: no ``--index-info`` entry
+    exists to overwrite it, so it would silently survive into the commit.
+    Removing it explicitly is what makes a scoped deletion commit as one.
+    """
+    if not head_sha(cwd):
+        return []
+    tracked = _git(cwd, ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", *pathspec])
+    if tracked.returncode != 0:
+        raise CommitMessageError(
+            f"failed to read the tracked paths: {tracked.stderr.strip()}",
+            reason=REASON_COMMIT_FAILED,
+        )
+    # Each `ls-files --stage -z` record is `<mode> <sha> <stage>\t<path>\0`.
+    records = (entry.partition("\t") for entry in staged_entries.split("\0"))
+    staged = {path for _, tab, path in records if tab}
+    return [path for path in tracked.stdout.split("\0") if path and path not in staged]
+
+
+def _build_scoped_index(
+    cwd: Path, pathspec: Sequence[str], env: Mapping[str, str]
+) -> None:
+    """Fill the ``GIT_INDEX_FILE`` in ``env`` with HEAD plus the named paths.
+
+    Everything a scoped commit must carry already sits in the real index, so
+    the throwaway index is HEAD with those entries laid over it: a named path
+    the run staged takes its staged blob, one staged as a deletion is removed,
+    and every unrelated path keeps whatever HEAD holds.  Writing that overlay
+    into a separate file is what leaves the real index untouched.
+    """
+    if head_sha(cwd):
+        seeded = _git(cwd, ["read-tree", "HEAD"], env=env)
+        if seeded.returncode != 0:
+            raise CommitMessageError(
+                f"failed to seed the scoped index: {seeded.stderr.strip()}",
+                reason=REASON_COMMIT_FAILED,
+            )
+    staged_entries = _staged_index_entries(cwd, pathspec)
+    if staged_entries:
+        applied = _git(
+            cwd,
+            ["update-index", "-z", "--index-info"],
+            stdin_text=staged_entries,
+            env=env,
+        )
+        if applied.returncode != 0:
+            raise CommitMessageError(
+                f"failed to populate the scoped index: {applied.stderr.strip()}",
+                reason=REASON_COMMIT_FAILED,
+            )
+    for path in _paths_staged_for_deletion(cwd, pathspec, staged_entries):
+        removed = _git(cwd, ["update-index", "--force-remove", "--", path], env=env)
+        if removed.returncode != 0:
+            raise CommitMessageError(
+                f"failed to stage {path} for deletion: {removed.stderr.strip()}",
+                reason=REASON_COMMIT_FAILED,
+            )
+
+
 def commit_staged(
     cwd: Path,
     message: str,
@@ -619,17 +708,24 @@ def commit_staged(
     and the quoting hazards of a heredoc, so no message shape can change what
     git is asked to do.
 
-    With a ``pathspec``, ``--only`` commits those paths from the index and
-    disregards everything else staged, so an entry staged before the run is
-    neither committed nor unstaged by it.
+    A scoped commit is built from a throwaway index and committed with no
+    pathspec at all.  ``git commit --only`` would instead re-read the named
+    paths from the *worktree*, which reopens the window between the caller's
+    last snapshot check and the commit itself — an edit landing in that
+    interval gets committed unchecked.  Sourcing the content from an index
+    fixed before git is asked to commit closes that window by construction.
+    The real index is never written, so an entry staged before the run is
+    still neither committed nor unstaged by it.
     """
     argv = ["commit", "-F", "-"]
     if not verify:
         argv.append("--no-verify")
-    if pathspec:
-        argv.append("--only")
-        argv.extend(_pathspec_args(pathspec))
-    return _git(cwd, argv, stdin_text=message)
+    if not pathspec:
+        return _git(cwd, argv, stdin_text=message)
+    with tempfile.TemporaryDirectory(prefix="asl-commit-index-") as scratch:
+        env = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        _build_scoped_index(cwd, pathspec, env)
+        return _git(cwd, argv, stdin_text=message, env=env)
 
 
 def pathspec_snapshot(cwd: Path, pathspec: Sequence[str]) -> str:
@@ -654,11 +750,14 @@ def pathspec_snapshot(cwd: Path, pathspec: Sequence[str]) -> str:
 def worktree_drifted_paths(cwd: Path, pathspec: Sequence[str]) -> list[str]:
     """The named paths whose worktree side no longer matches the index.
 
-    ``git commit --only`` takes the named paths from the *worktree*, not from
-    the index, so index equality alone does not bound what a scoped commit
-    carries.  A porcelain entry drifts when its worktree column is not blank
-    (edited or deleted since staging) or when it is untracked altogether,
-    which is how a path staged as a deletion and then recreated is caught.
+    A scoped commit carries the index, so drift here does not change what is
+    committed — it changes whether the operator would recognize it.  Left
+    unreported, the run would commit a stale blob under a message describing
+    it while a newer edit sat on disk unmentioned, so drift is refused rather
+    than silently outrun.  A porcelain entry drifts when its worktree column
+    is not blank (edited or deleted since staging) or when it is untracked
+    altogether, which is how a path staged as a deletion and then recreated is
+    caught.
     """
     result = _git(cwd, ["status", "--porcelain", "-uall", *_pathspec_args(pathspec)])
     if result.returncode != 0:
@@ -683,8 +782,10 @@ def assert_pathspec_snapshot(cwd: Path, pathspec: Sequence[str], expected: str) 
     """Refuse a scoped commit whose named paths changed after capture.
 
     Passing this leaves worktree, index, and the captured diff in agreement
-    for every named path, so ``git commit --only`` commits exactly the
-    snapshot the message was generated from.
+    for every named path.  It is a report, not the guarantee: an edit landing
+    after it returns would still slip past, so what actually binds the commit
+    to ``expected`` is :func:`commit_staged` building its own index from those
+    same entries instead of letting git re-read the worktree.
     """
     drifted = worktree_drifted_paths(cwd, pathspec)
     if drifted:

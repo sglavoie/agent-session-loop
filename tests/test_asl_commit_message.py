@@ -1082,9 +1082,10 @@ class CommitHandlerTests(unittest.TestCase):
         self.assertNotIn("src/beta.py", self.recorded_turn()["prompt"])
 
     def test_pathspec_does_not_commit_post_capture_edits(self) -> None:
-        # `git commit --only` takes the named paths from the worktree, so an
-        # edit landing during the generation turn would otherwise enter the
-        # commit without appearing in the diff the message was written from.
+        # An edit landing during the generation turn leaves the worktree
+        # describing something the message was never written from, so the run
+        # refuses rather than committing the captured blob behind the
+        # operator's back.
         self.write("src/alpha.py", "print('alpha')\n")
         self.write("src/beta.py", "print('beta')\n")
         commit_message.stage_paths(self.repo, ["src/beta.py"])
@@ -1202,6 +1203,83 @@ class CommitHandlerTests(unittest.TestCase):
             "print('alpha')", git_stdout(self.repo, "show", "HEAD:src/alpha.py")
         )
         self.assertIn("A  src/beta.py", self.porcelain())
+
+    def test_pathspec_commit_outruns_an_edit_landing_after_validation(self) -> None:
+        # Every other drift test mutates the path early enough for a later
+        # check to see it.  This one lands the edit in the only window no
+        # check can cover: after the final validation returns and before git
+        # is asked to commit.  Nothing can re-check it, so the commit has to
+        # be built from content fixed before that window opens.
+        self.write("src/alpha.py", "print('alpha')\n")
+        self.write("src/beta.py", "print('beta')\n")
+        commit_message.stage_paths(self.repo, ["src/beta.py"])
+        validated = commit_message.assert_pathspec_snapshot
+
+        def smuggle(*args: object, **kwargs: object) -> None:
+            validated(*args, **kwargs)  # type: ignore[arg-type]
+            self.write("src/alpha.py", "print('smuggled')\n")
+
+        with mock.patch.object(
+            commit_message, "assert_pathspec_snapshot", side_effect=smuggle
+        ):
+            code, _out, err = self.run_commit(
+                str(self.repo), "--yes", "--pathspec", "src/alpha.py"
+            )
+
+        self.assertEqual(0, code, err)
+        committed = git_stdout(self.repo, "show", "--name-only", "--format=", "HEAD")
+        self.assertEqual(["src/alpha.py"], committed.splitlines())
+        # The commit carries the captured snapshot, not what the worktree held
+        # a moment later, and the message was never written from the latter.
+        self.assertEqual(
+            "print('alpha')", git_stdout(self.repo, "show", "HEAD:src/alpha.py")
+        )
+        self.assertNotIn("smuggled", self.recorded_turn()["prompt"])
+        # The late edit is not swallowed either: it stays on disk as an
+        # uncommitted modification for whoever made it.
+        self.assertEqual(
+            "print('smuggled')",
+            (self.repo / "src/alpha.py").read_text(encoding="utf-8").strip(),
+        )
+        self.assertEqual(
+            "print('alpha')", git_stdout(self.repo, "show", ":src/alpha.py")
+        )
+        # The unrelated pre-existing index entry survives the scoped commit.
+        self.assertIn("A  src/beta.py", self.porcelain())
+
+    def test_scoped_commit_carries_a_staged_deletion_as_a_deletion(self) -> None:
+        # Seeding the scoped index from HEAD reinstates every path HEAD
+        # carries, including one staged for deletion — no `--index-info` entry
+        # exists to overwrite it — so it needs removing again or it would
+        # quietly survive the commit meant to delete it.  Driven below the
+        # CLI: `--pathspec` stages its named paths with `git add`, which
+        # refuses a path already gone from the worktree.
+        self.write("src/alpha.py", "print('alpha')\n")
+        self.write("src/beta.py", "print('beta')\n")
+        commit_message.stage_paths(self.repo, ["src/alpha.py", "src/beta.py"])
+        git_stdout(self.repo, "commit", "-m", "seed", "--no-verify")
+
+        (self.repo / "src/alpha.py").unlink()
+        self.write("src/beta.py", "print('beta edited')\n")
+        commit_message.stage_paths(self.repo, ["src/alpha.py", "src/beta.py"])
+
+        committed = commit_message.commit_staged(
+            self.repo, "chore: drop alpha\n", pathspec=["src/alpha.py"]
+        )
+
+        self.assertEqual(0, committed.returncode, committed.stderr)
+        self.assertEqual(
+            ["src/alpha.py"],
+            git_stdout(
+                self.repo, "show", "--name-only", "--format=", "HEAD"
+            ).splitlines(),
+        )
+        self.assertNotIn(
+            "src/alpha.py",
+            git_stdout(self.repo, "ls-tree", "-r", "--name-only", "HEAD"),
+        )
+        # The unrelated staged edit is neither committed nor unstaged.
+        self.assertIn("M  src/beta.py", self.porcelain())
 
     def test_expect_snapshot_without_pathspec_is_refused(self) -> None:
         self.write("src/alpha.py", "print('alpha')\n")

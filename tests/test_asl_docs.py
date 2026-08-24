@@ -3361,7 +3361,9 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
     ) -> None:
         section = self.sweep_section()
         self.assertIn(
-            "is identified by neither route and\nsurvives the sweep.", section
+            "is identified by none of the three\nroutes and survives the sweep,"
+            " as does one forked after that read.",
+            section,
         )
         # Superseded by the sweep: the parallel-verification contract used to
         # present an escaped descendant as something the runner never chases.

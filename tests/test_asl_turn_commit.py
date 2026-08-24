@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import inspect
 import io
 import json
 import os
+import signal
 import sys
 import tempfile
 import time
@@ -621,6 +623,131 @@ class TurnCommitRunTests(unittest.TestCase):
         # detached descendant. The pre-kill snapshot is the only route to it.
         self.assertNotIn("pgid_skipped", sweep["enumeration"])
         self.assertNotIn(child_pid, sweep["enumeration"]["pgid_members"])
+
+    def test_outer_commit_timeout_kills_descendants_forked_after_the_snapshot(
+        self,
+    ) -> None:
+        # The test above forks its detached helper before the bound expires, so
+        # the pre-kill snapshot names it. A real harness keeps spawning, and a
+        # child born after that snapshot is in no snapshot and — being detached
+        # — in no process group either. Releasing the fork from inside the
+        # snapshot call is what makes the ordering a fact rather than a race:
+        # the late child provably cannot exist until the snapshot is taken.
+        repo = self.repositories["SVC"]
+        early_pid_path = self.tmp_path / "early-detached.pid"
+        late_pid_path = self.tmp_path / "late-detached.pid"
+        release_path = self.tmp_path / "fork-now"
+        forker = self.tmp_path / "late_forker.py"
+        forker.write_text(
+            "import os, subprocess, sys, time\n"
+            "release, late_pid_path = sys.argv[1], sys.argv[2]\n"
+            "while not os.path.exists(release):\n"
+            "    time.sleep(0.01)\n"
+            "child = subprocess.Popen(\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(600)'],\n"
+            "    start_new_session=True,\n"
+            ")\n"
+            "open(late_pid_path, 'w').write(str(child.pid))\n"
+            "time.sleep(600)\n",
+            encoding="utf-8",
+        )
+        stub = [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time;"
+            "child = subprocess.Popen("
+            "[sys.executable, sys.argv[1], sys.argv[2], sys.argv[3]],"
+            " start_new_session=True);"
+            "open(sys.argv[4], 'w').write(str(child.pid));"
+            "time.sleep(600)",
+            str(forker),
+            str(release_path),
+            str(late_pid_path),
+            str(early_pid_path),
+        ]
+        self.addCleanup(self._reap_recorded_pids, early_pid_path, late_pid_path)
+
+        take_snapshot = runner._snapshot_commit_descendants
+        captured: dict[str, Any] = {}
+
+        def fork_after_snapshot(root_pid: int) -> tuple[Any, ...]:
+            recorded = take_snapshot(root_pid)
+            captured["snapshot_pids"] = [entry["pid"] for entry in recorded]
+            release_path.write_text("go", encoding="utf-8")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not late_pid_path.exists():
+                time.sleep(0.01)
+            return recorded
+
+        started = time.monotonic()
+        with (
+            mock.patch.object(runner, "_asl_commit_argv", return_value=stub),
+            mock.patch.object(runner, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
+            mock.patch.object(
+                runner, "_snapshot_commit_descendants", fork_after_snapshot
+            ),
+        ):
+            commit = runner._run_asl_commit(
+                cwd=repo,
+                run_dir=self.tmp_path / "late-fork-run",
+                commit_index=1,
+                session_id="1",
+                repository_alias="SVC",
+                generation=runner._CommitGeneration(harness="codex", timeout=1),
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 120, "the commit subprocess outlived its bound")
+        # The late fork changes nothing about how the expiry reports: still
+        # exit 124, still the ordinary soft-failure path.
+        self.assertTrue(commit["timed_out"])
+        self.assertEqual(124, commit["returncode"])
+        self.assertEqual("nonzero-exit", commit["status_result"])
+        self.assertFalse(commit["success"])
+
+        self.assertTrue(late_pid_path.exists(), "the late child never forked")
+        early_pid = int(early_pid_path.read_text(encoding="utf-8").strip())
+        late_pid = int(late_pid_path.read_text(encoding="utf-8").strip())
+        # The premise of the test, asserted rather than assumed: the snapshot
+        # named the parent and could not have named the child.
+        self.assertIn(early_pid, captured["snapshot_pids"])
+        self.assertNotIn(late_pid, captured["snapshot_pids"])
+
+        sweep = commit["process_sweep"]
+        self.assertIsNotNone(sweep, "the backstop recorded no descendant sweep")
+        # Neither of the two pre-existing routes could reach the late child, so
+        # walking the live ancestry of a snapshot-verified process is what did.
+        self.assertNotIn(late_pid, sweep["enumeration"]["pgid_members"])
+        self.assertNotIn(late_pid, sweep["enumeration"]["snapshot_verified"])
+        self.assertIn(late_pid, sweep["enumeration"]["late_descendants"])
+        self.assertIn(late_pid, sweep["killed"])
+        # `survivors_after` is re-sampled inside the sweep, so an empty entry
+        # for the late child proves it was gone before the call returned.
+        self.assertNotIn(late_pid, sweep["survivors_after"])
+        self.assertFalse(
+            wait_for_process_exit(late_pid),
+            "a descendant forked after the snapshot outlived the outer backstop",
+        )
+        self.assertFalse(
+            wait_for_process_exit(early_pid),
+            "a detached commit descendant outlived the outer backstop",
+        )
+
+    def _reap_recorded_pids(self, *pid_paths: Path) -> None:
+        """Kill whatever a sweep regression left behind when it fails.
+
+        The stubs sleep for ten minutes, so a failing assertion would otherwise
+        leak processes into the rest of the suite rather than just reporting.
+        """
+        for pid_path in pid_paths:
+            if not pid_path.exists():
+                continue
+            try:
+                pid = int(pid_path.read_text(encoding="utf-8").strip())
+            except ValueError:
+                continue
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
 
     def test_ignored_evidence_is_recorded_but_never_staged(self) -> None:
         self._mark_repair_session()

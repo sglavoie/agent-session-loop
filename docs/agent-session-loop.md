@@ -3511,7 +3511,7 @@ The sweep is **on by default**. Set `ASL_PROCESS_SWEEP_DISABLED=1` (or `true`,
 enabled, so a mistyped opt-out never silently disables cleanup. With the sweep
 off, no process table is read and no report is produced.
 
-The two identification routes cover different escapes, and the paths differ in
+The three identification routes cover different escapes, and the paths differ in
 which routes they have:
 
 - **Process group members.** Positive identification, since a group is only
@@ -3531,11 +3531,23 @@ which routes they have:
   route: the nested `asl commit` starts its message harness in a session of its
   own, so the group kill aimed at the subprocess reaches the interpreter and
   nothing under it.
+- **Live descendants of the above** (reported as `late_descendants`). A
+  snapshot names only what was running at the instant it was taken, so a child
+  forked afterwards appears in no snapshot — and if it too called `setsid`, in
+  no process group either. Its parent link survives until that parent is
+  signalled, and the walk runs against the same pre-kill table read, so the
+  link is still there to follow. Nothing is re-verified here because nothing
+  can be forged: ancestry in the live table *is* the identification, and the
+  walk is only ever rooted at a process already identified by one of the two
+  routes above, so a reused pid never becomes a root to walk from. The walk
+  stops at the root pid and at the runner itself rather than descending
+  through either.
 
 The honest limit: a descendant that left the process group **and** whose parent
-chain died before any snapshot was taken is identified by neither route and
-survives the sweep. In practice that is a `setsid` descendant of a turn or check
-that exited normally while nothing had sampled its tree. It can no longer stall
+chain was already dead when the table was read is identified by none of the three
+routes and survives the sweep, as does one forked after that read. In practice
+that is a `setsid` descendant of a turn or check that exited normally while
+nothing had sampled its tree. It can no longer stall
 the run — the pipes it holds are no longer waited on, under the reader-join
 bounds above — but it is not killed. Work that must not outlive the turn or
 check that started it therefore must not be detached into a session of its own.
@@ -3545,7 +3557,8 @@ per turn and per swept check. Its payload carries `phase` (`turn` or
 `verification`), the run/turn/session identity, the `check` name for a
 verification sweep, and the report: `killed`, `kill_failed`, `survivors_after`,
 and an `enumeration` block with `expected_pgid`, `table_size`, `pgid_members`,
-`snapshot_size`, `snapshot_pid_reused`, `snapshot_verified`, `already_gone`, and
+`snapshot_size`, `snapshot_pid_reused`, `snapshot_verified`, `late_descendants`,
+`already_gone`, and
 `resampled`. A sweep
 that found nothing is the normal case and is not recorded, so a `process_sweep`
 event always means real cleanup happened. The auto-commit backstop's sweep is
