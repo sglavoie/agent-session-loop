@@ -475,13 +475,21 @@ def has_changes(cwd: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def has_staged_changes(cwd: Path) -> bool:
-    """True when the index differs from HEAD.
+def _pathspec_args(pathspec: Sequence[str] | None) -> list[str]:
+    """The ``-- <paths>`` tail that narrows a git command, or nothing."""
+    if not pathspec:
+        return []
+    return ["--", *pathspec]
+
+
+def has_staged_changes(cwd: Path, pathspec: Sequence[str] | None = None) -> bool:
+    """True when the index differs from HEAD, within ``pathspec`` when given.
 
     ``git diff --cached --quiet`` exits 1 for a difference and 0 for none;
     anything else is a git failure and must not read as staged content.
     """
-    return _git(cwd, ["diff", "--cached", "--quiet"]).returncode == 1
+    argv = ["diff", "--cached", "--quiet", *_pathspec_args(pathspec)]
+    return _git(cwd, argv).returncode == 1
 
 
 def stage_all(cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -514,9 +522,13 @@ def dequalify_paths(qualified: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def capture_staged_diff(cwd: Path) -> DiffResult:
-    """Capture the staged diff, reduced to the prompt budget."""
-    result = _git(cwd, ["diff", "--cached", "--no-ext-diff"])
+def capture_staged_diff(cwd: Path, pathspec: Sequence[str] | None = None) -> DiffResult:
+    """Capture the staged diff, reduced to the prompt budget.
+
+    ``pathspec`` narrows the capture to the paths this invocation owns, so an
+    unrelated entry staged before the run never reaches the prompt.
+    """
+    result = _git(cwd, ["diff", "--cached", "--no-ext-diff", *_pathspec_args(pathspec)])
     if result.returncode != 0:
         raise CommitMessageError(
             f"failed to capture staged diff: {result.stderr.strip()}",
@@ -543,7 +555,12 @@ def capture_commit_diff(sha: str, cwd: Path) -> DiffResult:
     return process_raw_diff(result.stdout)
 
 
-def changes_are_all_binary(cwd: Path, *, from_id: str | None = None) -> bool:
+def changes_are_all_binary(
+    cwd: Path,
+    *,
+    from_id: str | None = None,
+    pathspec: Sequence[str] | None = None,
+) -> bool:
     """True when every changed file is binary, so no text diff can exist.
 
     ``git --numstat`` reports a binary file as ``-\t-\t<path>``, which is how
@@ -555,7 +572,13 @@ def changes_are_all_binary(cwd: Path, *, from_id: str | None = None) -> bool:
     if from_id is not None:
         args = ["show", from_id, "--numstat", "--format=", "--no-renames"]
     else:
-        args = ["diff", "--cached", "--numstat", "--no-renames"]
+        args = [
+            "diff",
+            "--cached",
+            "--numstat",
+            "--no-renames",
+            *_pathspec_args(pathspec),
+        ]
     result = _git(cwd, args)
     if result.returncode != 0 or not result.stdout.strip():
         return False
@@ -571,16 +594,24 @@ def commit_staged(
     message: str,
     *,
     verify: bool = False,
+    pathspec: Sequence[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Commit the staged index, handing the message to git on stdin.
 
     ``git commit -F -`` avoids both the argv length limit a long body would hit
     and the quoting hazards of a heredoc, so no message shape can change what
     git is asked to do.
+
+    With a ``pathspec``, ``--only`` commits those paths from the index and
+    disregards everything else staged, so an entry staged before the run is
+    neither committed nor unstaged by it.
     """
     argv = ["commit", "-F", "-"]
     if not verify:
         argv.append("--no-verify")
+    if pathspec:
+        argv.append("--only")
+        argv.extend(_pathspec_args(pathspec))
     return _git(cwd, argv, stdin_text=message)
 
 
@@ -1086,11 +1117,12 @@ def _reject_empty_diff(
     repo_root: Path,
     *,
     from_id: str | None = None,
+    pathspec: Sequence[str] | None = None,
 ) -> None:
     """Refuse a diff with nothing to summarize, saying which kind of nothing."""
     if not diff_result.is_empty:
         return
-    if changes_are_all_binary(repo_root, from_id=from_id):
+    if changes_are_all_binary(repo_root, from_id=from_id, pathspec=pathspec):
         raise CommitMessageError(
             "all changed files are binary - no text diff to summarize",
             reason=REASON_ALL_BINARY,
@@ -1218,6 +1250,15 @@ def _emit_message_only(
     return 0
 
 
+def _commit_pathspec(args: argparse.Namespace) -> list[str] | None:
+    """The paths this invocation owns, or ``None`` when it owns the index.
+
+    ``--pathspec`` is the only mode that scopes the commit: ``--staged`` is
+    mutually exclusive with it and promises the whole index is intended.
+    """
+    return list(args.pathspec) if args.pathspec else None
+
+
 def _commit_and_report(
     args: argparse.Namespace,
     repo_root: Path,
@@ -1254,7 +1295,9 @@ def _commit_and_report(
     if not _confirm(args, "Commit with this message?"):
         raise CommitMessageError("commit declined", reason=REASON_CANCELLED)
 
-    committed = commit_staged(repo_root, message, verify=args.verify)
+    committed = commit_staged(
+        repo_root, message, verify=args.verify, pathspec=_commit_pathspec(args)
+    )
     if committed.returncode != 0:
         raise CommitMessageError(
             f"git commit failed: {(committed.stderr or committed.stdout).strip()}",
@@ -1310,7 +1353,7 @@ def _run_message_file(args: argparse.Namespace, repo_root: Path) -> int:
         raise CommitMessageError(
             "the supplied commit message is empty", reason=REASON_EMPTY_MESSAGE
         )
-    if not has_staged_changes(repo_root):
+    if not has_staged_changes(repo_root, _commit_pathspec(args)):
         raise CommitMessageError(
             "no staged changes to commit", reason=REASON_NO_STAGED_CHANGES
         )
@@ -1331,8 +1374,9 @@ def _run_message_file(args: argparse.Namespace, repo_root: Path) -> int:
 
 def _run_default(args: argparse.Namespace, repo_root: Path) -> int:
     """Capture, generate, format, and commit — the mode every flag defaults to."""
-    diff_result = capture_staged_diff(repo_root)
-    _reject_empty_diff(diff_result, repo_root)
+    pathspec = _commit_pathspec(args)
+    diff_result = capture_staged_diff(repo_root, pathspec)
+    _reject_empty_diff(diff_result, repo_root, pathspec=pathspec)
     if args.prepare_only:
         return _emit_prepare_only(args, diff_result)
 

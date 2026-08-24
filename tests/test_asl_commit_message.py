@@ -1052,6 +1052,27 @@ class CommitHandlerTests(unittest.TestCase):
         self.assertEqual(["src/alpha.py"], committed.splitlines())
         self.assertIn("?? src/beta.py", self.porcelain())
 
+    def test_pathspec_excludes_preexisting_staged_paths(self) -> None:
+        # The index is not empty when the scoped commit starts: `src/beta.py`
+        # was staged by whoever ran `asl commit --pathspec`, and the scoped
+        # contract says it must neither be committed nor unstaged.
+        self.write("src/alpha.py", "print('alpha')\n")
+        self.write("src/beta.py", "print('beta')\n")
+        commit_message.stage_paths(self.repo, ["src/beta.py"])
+
+        code, _out, err = self.run_commit(
+            str(self.repo), "--yes", "--pathspec", "src/alpha.py"
+        )
+
+        self.assertEqual(0, code, err)
+        committed = git_stdout(self.repo, "show", "--name-only", "--format=", "HEAD")
+        self.assertEqual(["src/alpha.py"], committed.splitlines())
+        # The pre-staged path stayed in the index, still staged against the new
+        # HEAD, and never reached the generation prompt.
+        self.assertIn("A  src/beta.py", self.porcelain())
+        self.assertNotIn("src/alpha.py", self.porcelain())
+        self.assertNotIn("src/beta.py", self.recorded_turn()["prompt"])
+
     def test_a_clean_worktree_is_refused_before_any_harness_turn(self) -> None:
         code, _out, err = self.run_commit(str(self.repo), "--yes")
 

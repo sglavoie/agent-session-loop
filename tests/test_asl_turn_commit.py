@@ -417,6 +417,40 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertEqual("dirty-after-commit", commit["status_result"])
         self.assertFalse(commit["success"])
 
+    def test_pathspec_commit_leaves_a_preexisting_index_entry_staged(self) -> None:
+        repo = self.repositories["SVC"]
+        (repo / "declared.txt").write_text("session work\n", encoding="utf-8")
+        (repo / "unrelated.txt").write_text("somebody else's edit\n", encoding="utf-8")
+        # Somebody staged their own work before the run's commit boundary.
+        runner._run_git(repo, ["add", "--", "unrelated.txt"])
+        env = fake_commit_harness_env(self.tmp_path)
+
+        with mock.patch.dict(os.environ, env):
+            commit = runner._run_asl_commit(
+                cwd=repo,
+                run_dir=self.tmp_path / "prestaged-run",
+                commit_index=1,
+                session_id="1",
+                repository_alias="SVC",
+                qualified_paths=["SVC:declared.txt"],
+                staging_paths=["SVC:declared.txt"],
+                generation=runner._CommitGeneration(harness="codex"),
+            )
+
+        self.assertEqual(0, commit["returncode"])
+        self.assertEqual(
+            ["declared.txt"],
+            runner._run_git(
+                repo, ["show", "--name-only", "--format=", "HEAD"]
+            ).stdout.split(),
+        )
+        # The pre-staged path was neither committed nor unstaged by the scoped
+        # commit; it is still staged, now against the new HEAD.
+        self.assertEqual(
+            "A  unrelated.txt",
+            runner._run_git(repo, ["status", "--porcelain"]).stdout.strip(),
+        )
+
     def test_ignored_evidence_is_recorded_but_never_staged(self) -> None:
         self._mark_repair_session()
         repo = self.repositories["SVC"]
