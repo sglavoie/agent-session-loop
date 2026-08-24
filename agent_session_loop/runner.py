@@ -5243,12 +5243,49 @@ def _asl_commit_env() -> dict[str, str]:
     return env
 
 
+def _snapshot_commit_descendants(root_pid: int) -> tuple[Mapping[str, Any], ...]:
+    """Record ``root_pid``'s descendants while the commit subprocess is alive.
+
+    Killing the group reparents a descendant that started a session of its own
+    to pid 1, after which no descendant walk can reach it. The snapshot is the
+    sweep's only route to such a process, so it must be taken before the kill
+    (mirrors :func:`harnesses._snapshot_descendants`).
+    """
+    if not process_tree.sweep_enabled():
+        return ()
+    table = process_tree.sample_process_table()
+    if table is None:
+        return ()
+    return tuple(table[pid] for pid in process_tree.descendant_pids(root_pid, table))
+
+
+def _sweep_commit_descendants(
+    process: subprocess.Popen,
+    prior_snapshot: tuple[Mapping[str, Any], ...],
+) -> dict[str, Any] | None:
+    """Kill whatever outlived the bounded commit, or ``None`` when off.
+
+    ``expected_pgid`` is the child's PID because the commit spawns with
+    ``start_new_session=True``. The caller reaps the child before this runs, so
+    the sweep excludes it rather than signalling a PID that may be reused; what
+    it reaches is the descendant the process-group kill could not — one that
+    called ``setsid`` and therefore never received the group signal.
+    """
+    if not process_tree.sweep_enabled():
+        return None
+    return process_tree.sweep_survivors(
+        root_pid=process.pid,
+        expected_pgid=process.pid,
+        prior_snapshot=prior_snapshot,
+    )
+
+
 def _run_bounded_asl_commit(
     argv: Sequence[str],
     *,
     cwd: Path,
     timeout: int,
-) -> tuple[subprocess.CompletedProcess[str], bool]:
+) -> tuple[subprocess.CompletedProcess[str], bool, dict[str, Any] | None]:
     """Run one ``asl commit`` under a wall-clock bound it cannot outlive.
 
     The nested command already bounds its own harness turn and exits with a
@@ -5259,12 +5296,19 @@ def _run_bounded_asl_commit(
 
     ``start_new_session=True`` makes the child's process group ID its own PID,
     so the expiry can kill the whole tree at once (mirrors
-    :func:`harnesses._kill_process_group`). A second, short bound covers the
-    drain that follows: a descendant that left the group survives the signal,
-    and waiting on it forever would reintroduce the stall the kill just ended.
-    Expiry is reported as exit 124 — the same code ``run_harness`` uses for a
-    timed-out turn — so it reads as a nonzero commit exit everywhere
-    downstream and lands on the normal soft-failure path.
+    :func:`harnesses._kill_process_group`). The group kill alone is not enough:
+    the harness the nested command starts runs in a session of its own, so its
+    tree never receives that signal. Expiry therefore snapshots the descendants
+    before killing and sweeps the survivors after, the same two-step
+    :meth:`HarnessAdapter.run` uses for a timed-out turn.
+
+    A second, short bound covers the drain between the two: a descendant that
+    left the group holds the captured pipes open, and waiting on it forever
+    would reintroduce the stall the kill just ended. The child is reaped before
+    the sweep so a pid the sweep might signal cannot be one this function is
+    still holding. Expiry is reported as exit 124 — the same code
+    ``run_harness`` uses for a timed-out turn — so it reads as a nonzero commit
+    exit everywhere downstream and lands on the normal soft-failure path.
     """
     process = subprocess.Popen(
         list(argv),
@@ -5278,6 +5322,7 @@ def _run_bounded_asl_commit(
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        prior_snapshot = _snapshot_commit_descendants(process.pid)
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except OSError:
@@ -5288,15 +5333,27 @@ def _run_bounded_asl_commit(
         try:
             stdout, stderr = process.communicate(timeout=_COMMIT_DRAIN_SECONDS)
         except subprocess.TimeoutExpired:
+            # The streams are held open by something that outlived the kill;
+            # abandon them, but still reap the signalled child so the sweep
+            # below sees its pid free rather than treating the group as a
+            # stranger's.
             stdout, stderr = "", ""
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    with contextlib.suppress(OSError):
+                        pipe.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=_COMMIT_DRAIN_SECONDS)
+        sweep = _sweep_commit_descendants(process, prior_snapshot)
         stderr = (
             f"{stderr}\nasl commit exceeded its {timeout}s bound and was "
             "terminated with its process group"
         ).lstrip()
-        return subprocess.CompletedProcess(list(argv), 124, stdout, stderr), True
+        return subprocess.CompletedProcess(list(argv), 124, stdout, stderr), True, sweep
     return (
         subprocess.CompletedProcess(list(argv), process.returncode, stdout, stderr),
         False,
+        None,
     )
 
 
@@ -5328,8 +5385,9 @@ def _run_asl_commit(
     started_at = _utc_now()
     exec_error = None
     timed_out = False
+    process_sweep: dict[str, Any] | None = None
     try:
-        result, timed_out = _run_bounded_asl_commit(
+        result, timed_out, process_sweep = _run_bounded_asl_commit(
             argv,
             cwd=canonical_cwd,
             timeout=subprocess_timeout,
@@ -5407,6 +5465,8 @@ def _run_asl_commit(
         "subprocess_timeout_seconds": subprocess_timeout,
         "timed_out": timed_out,
     }
+    if process_sweep is not None:
+        payload["process_sweep"] = process_sweep
     if exec_error is not None:
         payload["exec_error"] = exec_error
     if status_error is not None:

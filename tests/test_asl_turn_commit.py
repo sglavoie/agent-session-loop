@@ -563,6 +563,65 @@ class TurnCommitRunTests(unittest.TestCase):
             "a commit-subprocess descendant outlived the outer backstop",
         )
 
+    def test_outer_commit_timeout_kills_detached_descendants(self) -> None:
+        # The real nested harness starts a session of its own, so a group kill
+        # aimed at the commit subprocess never reaches it. The stub models that
+        # exactly: the helper spawns with `start_new_session=True`, leaving the
+        # group the backstop signals while still holding the captured pipes —
+        # which is also what makes the drain time out rather than return.
+        repo = self.repositories["SVC"]
+        pid_path = self.tmp_path / "detached-child.pid"
+        stub = [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time;"
+            "child = subprocess.Popen([sys.executable, '-c',"
+            " 'import time; time.sleep(600)'], start_new_session=True);"
+            f"open({str(pid_path)!r}, 'w').write(str(child.pid));"
+            "time.sleep(600)",
+        ]
+
+        started = time.monotonic()
+        with (
+            mock.patch.object(runner, "_asl_commit_argv", return_value=stub),
+            mock.patch.object(runner, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
+        ):
+            commit = runner._run_asl_commit(
+                cwd=repo,
+                run_dir=self.tmp_path / "detached-run",
+                commit_index=1,
+                session_id="1",
+                repository_alias="SVC",
+                generation=runner._CommitGeneration(harness="codex", timeout=1),
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 120, "the commit subprocess outlived its bound")
+        # The escaped descendant changes nothing about how the expiry reports:
+        # still exit 124, still the ordinary soft-failure path.
+        self.assertTrue(commit["timed_out"])
+        self.assertEqual(124, commit["returncode"])
+        self.assertEqual("nonzero-exit", commit["status_result"])
+        self.assertFalse(commit["success"])
+        stderr = Path(str(commit["stderr_path"])).read_text(encoding="utf-8")
+        self.assertIn("exceeded its 2s bound", stderr)
+
+        child_pid = int(pid_path.read_text(encoding="utf-8").strip())
+        self.assertFalse(
+            wait_for_process_exit(child_pid),
+            "a detached commit descendant outlived the outer backstop",
+        )
+        # The group kill could not have reached it, so the sweep is what did:
+        # assert on the report rather than only on the process being gone.
+        sweep = commit["process_sweep"]
+        self.assertIsNotNone(sweep, "the backstop recorded no descendant sweep")
+        self.assertIn(child_pid, sweep["killed"])
+        # The child is reaped before the sweep, so the group route is available
+        # rather than skipped as a stranger's — and it still does not list the
+        # detached descendant. The pre-kill snapshot is the only route to it.
+        self.assertNotIn("pgid_skipped", sweep["enumeration"])
+        self.assertNotIn(child_pid, sweep["enumeration"]["pgid_members"])
+
     def test_ignored_evidence_is_recorded_but_never_staged(self) -> None:
         self._mark_repair_session()
         repo = self.repositories["SVC"]

@@ -431,7 +431,10 @@ scoped to the paths the turn guard recorded. Every such invocation carries an
 explicit `--timeout`, and the run bounds the subprocess itself as a backstop, so
 a stalled message harness soft-fails instead of holding the session loop; the
 run's own `--timeout` is not what supplies that bound, since it is routinely
-unset. A commit that fails is recorded, retried, and reported instead of pausing
+unset. That backstop kills the subprocess's process group and then sweeps the
+descendants it snapshotted beforehand, because the nested command's own harness
+runs in a session of its own and would otherwise survive the group signal (see
+[Process sweep](#process-sweep)); the expiry reports exit 124 either way. A commit that fails is recorded, retried, and reported instead of pausing
 the run. A
 stop-after-current request before all sessions complete exits successfully
 (`reason: stopped`) without running the final `--commit-at-end` commit. A stop
@@ -3523,7 +3526,11 @@ which routes they have:
   turn timeout each take one; for a silent harness turn, the process tree the
   hang sentinel samples while diagnosing it serves as the same evidence, and
   that turn's sweep consumes it so a later turn handed the same root pid cannot
-  reuse a sample of a tree that is gone.
+  reuse a sample of a tree that is gone. The auto-commit subprocess backstop
+  takes one too, and there the snapshot is not a corner case but the main
+  route: the nested `asl commit` starts its message harness in a session of its
+  own, so the group kill aimed at the subprocess reaches the interpreter and
+  nothing under it.
 
 The honest limit: a descendant that left the process group **and** whose parent
 chain died before any snapshot was taken is identified by neither route and
@@ -3541,7 +3548,11 @@ and an `enumeration` block with `expected_pgid`, `table_size`, `pgid_members`,
 `snapshot_size`, `snapshot_pid_reused`, `snapshot_verified`, `already_gone`, and
 `resampled`. A sweep
 that found nothing is the normal case and is not recorded, so a `process_sweep`
-event always means real cleanup happened.
+event always means real cleanup happened. The auto-commit backstop's sweep is
+the exception to the event: it is not a turn or a check, so its report is
+carried on the commit result payload under the same `process_sweep` key —
+present whenever the outer bound fired and the sweep was enabled, whether or
+not it found anything — rather than appended to the event stream.
 
 ### CLI invocation trace
 
