@@ -1081,6 +1081,139 @@ class CommitHandlerTests(unittest.TestCase):
         self.assertNotIn("src/alpha.py", self.porcelain())
         self.assertNotIn("src/beta.py", self.recorded_turn()["prompt"])
 
+    def test_pathspec_does_not_commit_post_capture_edits(self) -> None:
+        # `git commit --only` takes the named paths from the worktree, so an
+        # edit landing during the generation turn would otherwise enter the
+        # commit without appearing in the diff the message was written from.
+        self.write("src/alpha.py", "print('alpha')\n")
+        self.write("src/beta.py", "print('beta')\n")
+        commit_message.stage_paths(self.repo, ["src/beta.py"])
+        before = self.commit_count()
+
+        code, _out, err = self.run_commit(
+            str(self.repo),
+            "--yes",
+            "--pathspec",
+            "src/alpha.py",
+            env={
+                "FAKE_CODEX_COMMIT_EDIT_PATH": "src/alpha.py",
+                "FAKE_CODEX_COMMIT_EDIT_TEXT": "print('smuggled')\n",
+            },
+        )
+
+        self.assertEqual(1, code)
+        self.assertIn("changed after the diff was captured", err)
+        self.assertIn("src/alpha.py", err)
+        self.assertEqual(before, self.commit_count())
+        # The generation prompt only ever saw the captured content, and the
+        # index still holds exactly that.
+        self.assertNotIn("smuggled", self.recorded_turn()["prompt"])
+        self.assertEqual(
+            "print('alpha')", git_stdout(self.repo, "show", ":src/alpha.py")
+        )
+        # The unrelated pre-existing index entry is neither committed nor
+        # discarded by the refusal.
+        self.assertIn("A  src/beta.py", self.porcelain())
+
+    def test_pathspec_reports_drift_as_its_own_reason(self) -> None:
+        self.write("src/alpha.py", "print('alpha')\n")
+
+        code, out, _err = self.run_commit(
+            str(self.repo),
+            "--yes",
+            "--json",
+            "--pathspec",
+            "src/alpha.py",
+            env={"FAKE_CODEX_COMMIT_EDIT_PATH": "src/alpha.py"},
+        )
+
+        self.assertEqual(1, code)
+        payload = json.loads(out)
+        self.assertEqual(commit_message.REASON_SNAPSHOT_DRIFTED, payload["reason"])
+        self.assertEqual(["src/alpha.py"], payload["details"]["paths"])
+
+    def test_two_step_pathspec_does_not_commit_post_capture_edits(self) -> None:
+        # The gitsummary skill prepares, writes the message from its own
+        # context, and then commits through a second invocation; the drift
+        # window spans the two calls.
+        self.write("src/alpha.py", "print('alpha')\n")
+        self.write("src/beta.py", "print('beta')\n")
+        commit_message.stage_paths(self.repo, ["src/beta.py"])
+
+        code, out, err = self.run_commit(
+            str(self.repo), "--prepare-only", "--pathspec", "src/alpha.py"
+        )
+        self.assertEqual(0, code, err)
+        snapshot = json.loads(out.partition("\n\n")[0])["snapshot"]
+        self.assertTrue(snapshot)
+
+        self.write("src/alpha.py", "print('smuggled')\n")
+        before = self.commit_count()
+
+        code, _out, err = self.run_commit(
+            str(self.repo),
+            "--yes",
+            "--pathspec",
+            "src/alpha.py",
+            "--expect-snapshot",
+            snapshot,
+            "--message-file",
+            "-",
+            stdin="feat: add the alpha module\n\nIt prints a greeting.\n",
+        )
+
+        self.assertEqual(1, code)
+        self.assertIn("changed after the diff was captured", err)
+        self.assertEqual(before, self.commit_count())
+        # Refusing came before staging, so the index still holds the prepared
+        # snapshot rather than the drifted content.
+        self.assertEqual(
+            "print('alpha')", git_stdout(self.repo, "show", ":src/alpha.py")
+        )
+        self.assertIn("A  src/beta.py", self.porcelain())
+
+    def test_two_step_pathspec_commits_the_captured_snapshot(self) -> None:
+        self.write("src/alpha.py", "print('alpha')\n")
+        self.write("src/beta.py", "print('beta')\n")
+        commit_message.stage_paths(self.repo, ["src/beta.py"])
+
+        code, out, err = self.run_commit(
+            str(self.repo), "--prepare-only", "--pathspec", "src/alpha.py"
+        )
+        self.assertEqual(0, code, err)
+        snapshot = json.loads(out.partition("\n\n")[0])["snapshot"]
+
+        code, _out, err = self.run_commit(
+            str(self.repo),
+            "--yes",
+            "--pathspec",
+            "src/alpha.py",
+            "--expect-snapshot",
+            snapshot,
+            "--message-file",
+            "-",
+            stdin="feat: add the alpha module\n\nIt prints a greeting.\n",
+        )
+
+        self.assertEqual(0, code, err)
+        committed = git_stdout(self.repo, "show", "--name-only", "--format=", "HEAD")
+        self.assertEqual(["src/alpha.py"], committed.splitlines())
+        self.assertEqual(
+            "print('alpha')", git_stdout(self.repo, "show", "HEAD:src/alpha.py")
+        )
+        self.assertIn("A  src/beta.py", self.porcelain())
+
+    def test_expect_snapshot_without_pathspec_is_refused(self) -> None:
+        self.write("src/alpha.py", "print('alpha')\n")
+
+        code, _out, err = self.run_commit(
+            str(self.repo), "--yes", "--expect-snapshot", "deadbeefdeadbeef"
+        )
+
+        self.assertEqual(1, code)
+        self.assertIn("--expect-snapshot", err)
+        self.assertIn("?? src/alpha.py", self.porcelain())
+
     def test_a_clean_worktree_is_refused_before_any_harness_turn(self) -> None:
         code, _out, err = self.run_commit(str(self.repo), "--yes")
 
@@ -1343,6 +1476,7 @@ class CommitHandlerTests(unittest.TestCase):
                 "is_truncated",
                 "truncation_notes",
                 "from_id",
+                "snapshot",
             ],
             list(header),
         )
@@ -1353,6 +1487,9 @@ class CommitHandlerTests(unittest.TestCase):
         self.assertFalse(header["is_truncated"])
         self.assertEqual("", header["truncation_notes"])
         self.assertIsNone(header["from_id"])
+        # An unscoped invocation commits the index it is handed, so it has no
+        # named-path snapshot to carry forward.
+        self.assertIsNone(header["snapshot"])
         self.assertIn("diff --git a/src/alpha.py b/src/alpha.py", body)
         # No harness turn is needed to prepare.
         self.assertFalse(self.record_path.exists())

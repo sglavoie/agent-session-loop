@@ -486,7 +486,7 @@ asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
 asl migrate-state PLAN_DIR --from OLD_PLAN_PATH [--state-dir DIR] [--apply] [--json]
 asl metrics [--since-days N] [--state-dir DIR] [--json]
-asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guidance TEXT] [--from-id SHA] [--pathspec PATH ...] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--prepare-only] [--message-file PATH] [--json]
+asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guidance TEXT] [--from-id SHA] [--pathspec PATH ...] [--expect-snapshot TOKEN] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--prepare-only] [--message-file PATH] [--json]
 asl bridge serve [--stdio] [--protocol VERSION] [--state-dir DIR] [--plan-root DIR]
 ```
 
@@ -507,9 +507,10 @@ modes:
 - **`--from-id SHA`** — print a message describing an existing commit. It never
   stages and never commits; apply it with `git commit --amend` if you want it.
 - **`--prepare-only`** — emit a single-line JSON header (`mode`, `yes`,
-  `no_verify`, `guidance`, `is_truncated`, `truncation_notes`, `from_id`), a
-  blank line, and the budgeted diff, then stop. No harness turn is taken; this
-  is how the `gitsummary` skill hands the diff to its own host agent.
+  `no_verify`, `guidance`, `is_truncated`, `truncation_notes`, `from_id`,
+  `snapshot`), a blank line, and the budgeted diff, then stop. No harness turn
+  is taken; this is how the `gitsummary` skill hands the diff to its own host
+  agent.
 - **`--message-file PATH`** — commit the supplied message instead of generating
   one, with `-` reading stdin. It is formatted and stripped of disallowed
   attribution trailers exactly as a generated message would be, and it is the
@@ -523,6 +524,19 @@ staged for a retry, and the failure is reported under reason
 `generation-timeout` — the same soft-failure path as any other refused commit,
 not a hang. `--from-id` and the default mode are the two modes the bound
 applies to; `--prepare-only` and `--message-file` take no harness turn at all.
+
+A scoped commit is also snapshot-checked. `git commit --only` takes the named
+paths from the worktree, not from the index, so the content it commits is
+whatever those paths hold at commit time — minutes after the diff the message
+describes was captured. Before committing, `--pathspec` re-checks that every
+named path still matches the captured snapshot and refuses with reason
+`snapshot-drifted` when one has been edited, deleted, or restaged in the
+meantime; nothing is committed and no index entry is changed. The two-step
+skill flow spans two processes, so `--prepare-only` reports that snapshot as
+the header's `snapshot` token and the committing call passes it back with
+`--expect-snapshot TOKEN`, which is checked before staging and again before
+committing. `--expect-snapshot` names a scoped snapshot and is refused without
+`--pathspec`.
 
 `--verify` runs git hooks; `--no-verify` is the default. Stdout carries the
 commit message and nothing else, so the command can be piped or redirected;

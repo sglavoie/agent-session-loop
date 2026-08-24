@@ -1168,6 +1168,15 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help=("Stage only this repo-relative path instead of every change; repeatable"),
     )
     commit_parser.add_argument(
+        "--expect-snapshot",
+        dest="expect_snapshot",
+        metavar="TOKEN",
+        help=(
+            "Refuse the commit unless the --pathspec paths still hold the "
+            "snapshot a previous --prepare-only call reported"
+        ),
+    )
+    commit_parser.add_argument(
         "--harness",
         choices=harnesses.HARNESS_NAMES,
         help="Agent harness that generates the message",

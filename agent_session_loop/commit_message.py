@@ -20,6 +20,7 @@ costs nothing but the standard library.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -85,6 +86,7 @@ REASON_EMPTY_MESSAGE = "empty-message"
 REASON_API_ERROR = "api-error"
 REASON_COMMIT_FAILED = "commit-failed"
 REASON_CANCELLED = "cancelled"
+REASON_SNAPSHOT_DRIFTED = "snapshot-drifted"
 
 COMMIT_COMMAND = "commit"
 
@@ -96,6 +98,11 @@ COMMIT_COMMAND = "commit"
 #: omission: :func:`generate_commit_message` defaults to this value and the
 #: ``--timeout`` flag only moves the bound, never removes it.
 DEFAULT_GENERATION_TIMEOUT_SECONDS = 900
+
+# Length of the ``--prepare-only`` snapshot token: long enough that no two
+# distinct index states collide in practice, short enough to travel through a
+# skill's shell command without wrapping.
+SNAPSHOT_TOKEN_LENGTH = 16
 
 # The two ``mode`` values the ``--prepare-only`` header carries, kept identical
 # to what the retired ``gitsummary-prepare.py`` emitted so the skill's parser is
@@ -625,6 +632,78 @@ def commit_staged(
     return _git(cwd, argv, stdin_text=message)
 
 
+def pathspec_snapshot(cwd: Path, pathspec: Sequence[str]) -> str:
+    """Name the staged content a scoped commit is about to summarize.
+
+    ``git ls-files --stage`` prints the mode, blob, stage, and path of every
+    index entry under ``pathspec``, so digesting that listing yields a token
+    that changes the moment any named path's staged content does and ignores
+    every unrelated index entry.  It is what lets a commit prove, minutes
+    later, that it is still committing what the message describes.
+    """
+    result = _git(cwd, ["ls-files", "--stage", "--", *pathspec])
+    if result.returncode != 0:
+        raise CommitMessageError(
+            f"failed to read the staged snapshot: {result.stderr.strip()}",
+            reason=REASON_DIFF_FAILED,
+        )
+    digest = hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
+    return digest[:SNAPSHOT_TOKEN_LENGTH]
+
+
+def worktree_drifted_paths(cwd: Path, pathspec: Sequence[str]) -> list[str]:
+    """The named paths whose worktree side no longer matches the index.
+
+    ``git commit --only`` takes the named paths from the *worktree*, not from
+    the index, so index equality alone does not bound what a scoped commit
+    carries.  A porcelain entry drifts when its worktree column is not blank
+    (edited or deleted since staging) or when it is untracked altogether,
+    which is how a path staged as a deletion and then recreated is caught.
+    """
+    result = _git(cwd, ["status", "--porcelain", "-uall", *_pathspec_args(pathspec)])
+    if result.returncode != 0:
+        raise CommitMessageError(
+            f"failed to probe the worktree: {result.stderr.strip()}",
+            reason=REASON_DIFF_FAILED,
+        )
+    drifted: list[str] = []
+    for line in result.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        if line.startswith("??") or line[1] != " ":
+            path = line[3:]
+            # A rename entry reads `R  old -> new`; the new name is the one a
+            # commit would carry.
+            _, arrow, renamed = path.partition(" -> ")
+            drifted.append(renamed if arrow else path)
+    return drifted
+
+
+def assert_pathspec_snapshot(cwd: Path, pathspec: Sequence[str], expected: str) -> None:
+    """Refuse a scoped commit whose named paths changed after capture.
+
+    Passing this leaves worktree, index, and the captured diff in agreement
+    for every named path, so ``git commit --only`` commits exactly the
+    snapshot the message was generated from.
+    """
+    drifted = worktree_drifted_paths(cwd, pathspec)
+    if drifted:
+        raise CommitMessageError(
+            "the worktree changed after the diff was captured: "
+            + ", ".join(sorted(drifted)),
+            reason=REASON_SNAPSHOT_DRIFTED,
+            details={"paths": sorted(drifted), "expected_snapshot": expected},
+        )
+    current = pathspec_snapshot(cwd, pathspec)
+    if current != expected:
+        raise CommitMessageError(
+            "the staged snapshot changed after the diff was captured "
+            f"({expected} -> {current})",
+            reason=REASON_SNAPSHOT_DRIFTED,
+            details={"expected_snapshot": expected, "actual_snapshot": current},
+        )
+
+
 def head_sha(cwd: Path) -> str:
     """The current HEAD commit, or an empty string when there is none."""
     result = _git(cwd, ["rev-parse", "HEAD"])
@@ -1116,6 +1195,11 @@ def _reject_conflicting_modes(args: argparse.Namespace) -> None:
                 f"{names} are mutually exclusive",
                 reason=REASON_INVALID_ARGUMENTS,
             )
+    if _expected_snapshot(args) and not args.pathspec:
+        raise CommitMessageError(
+            "--expect-snapshot names a scoped snapshot and needs --pathspec",
+            reason=REASON_INVALID_ARGUMENTS,
+        )
 
 
 def _resolve_repo_root(path: str | None) -> Path:
@@ -1218,13 +1302,18 @@ def _confirm(args: argparse.Namespace, question: str) -> bool:
 
 
 def _prepare_header(
-    args: argparse.Namespace, diff_result: DiffResult
+    args: argparse.Namespace,
+    diff_result: DiffResult,
+    snapshot: str | None = None,
 ) -> dict[str, Any]:
     """Build the ``--prepare-only`` header ``gitsummary-prepare.py`` used to emit.
 
     The key set and its order are the skill's parsing contract, and
     ``build_truncation_notice`` is the notice that contract carries — the
     prompt's looser ``build_truncation_note`` is a different string.
+    ``snapshot`` names the staged content this header describes so the skill's
+    second call can prove it is committing the same thing; it is ``None`` for
+    every unscoped invocation, which commits the index it is handed.
     """
     return {
         "mode": PREPARE_MODE_FROM_ID if args.from_id else PREPARE_MODE_COMMIT,
@@ -1234,17 +1323,19 @@ def _prepare_header(
         "is_truncated": diff_result.is_truncated,
         "truncation_notes": build_truncation_notice(diff_result),
         "from_id": args.from_id,
+        "snapshot": snapshot,
     }
 
 
 def _emit_prepare_only(
     args: argparse.Namespace,
     diff_result: DiffResult,
+    snapshot: str | None = None,
 ) -> int:
     """Emit a single-line JSON header, a blank line, and the budgeted diff."""
     from . import responses
 
-    header = _prepare_header(args, diff_result)
+    header = _prepare_header(args, diff_result, snapshot)
     if args.json:
         responses.print_json(
             responses.success_payload(
@@ -1336,11 +1427,17 @@ def _commit_and_report(
     *,
     mode: str,
     extra: dict[str, Any],
+    snapshot: str | None = None,
 ) -> int:
     """Print the message, then commit it unless the caller stopped short.
 
     Stdout carries the message and nothing else, so ``asl commit --dry-run >
     msg.txt`` is a usable command; progress and outcome go to stderr.
+
+    A scoped commit re-checks ``snapshot`` immediately before committing:
+    message generation is a harness turn that can take minutes, and
+    ``git commit --only`` would otherwise sweep in whatever the worktree holds
+    by the time it runs.
     """
     from . import responses
 
@@ -1365,9 +1462,10 @@ def _commit_and_report(
     if not _confirm(args, "Commit with this message?"):
         raise CommitMessageError("commit declined", reason=REASON_CANCELLED)
 
-    committed = commit_staged(
-        repo_root, message, verify=args.verify, pathspec=_commit_pathspec(args)
-    )
+    pathspec = _commit_pathspec(args)
+    if pathspec and snapshot is not None:
+        assert_pathspec_snapshot(repo_root, pathspec, snapshot)
+    committed = commit_staged(repo_root, message, verify=args.verify, pathspec=pathspec)
     if committed.returncode != 0:
         raise CommitMessageError(
             f"git commit failed: {(committed.stderr or committed.stdout).strip()}",
@@ -1417,6 +1515,16 @@ def _run_from_id(args: argparse.Namespace, repo_root: Path) -> int:
     return _emit_message_only(args, message, diff_result, settings)
 
 
+def _expected_snapshot(args: argparse.Namespace) -> str | None:
+    """The snapshot a two-step invocation was told to commit, if any.
+
+    ``getattr`` so an in-process caller assembling its own namespace need not
+    know about the flag.
+    """
+    expected = getattr(args, "expect_snapshot", None)
+    return cast(str | None, expected) or None
+
+
 def _run_message_file(args: argparse.Namespace, repo_root: Path) -> int:
     """Commit an operator-supplied message; the one mode that needs no harness."""
     text = _read_message_text(args.message_file)
@@ -1440,16 +1548,21 @@ def _run_message_file(args: argparse.Namespace, repo_root: Path) -> int:
         message,
         mode="message-file",
         extra={"message_file": args.message_file, "generated": False},
+        snapshot=_expected_snapshot(args),
     )
 
 
 def _run_default(args: argparse.Namespace, repo_root: Path) -> int:
     """Capture, generate, format, and commit — the mode every flag defaults to."""
     pathspec = _commit_pathspec(args)
+    # Ahead of the capture rather than after it, so an index mutation that
+    # races the capture itself reads as drift instead of being blessed by the
+    # token that follows it.
+    snapshot = pathspec_snapshot(repo_root, pathspec) if pathspec else None
     diff_result = capture_staged_diff(repo_root, pathspec)
     _reject_empty_diff(diff_result, repo_root, pathspec=pathspec)
     if args.prepare_only:
-        return _emit_prepare_only(args, diff_result)
+        return _emit_prepare_only(args, diff_result, snapshot)
 
     _warn_if_truncated(args, diff_result)
     settings = generation_settings(args.harness, args.model, args.effort)
@@ -1480,6 +1593,7 @@ def _run_default(args: argparse.Namespace, repo_root: Path) -> int:
             "truncation_notes": build_truncation_notice(diff_result),
             **settings,
         },
+        snapshot=snapshot,
     )
 
 
@@ -1492,6 +1606,12 @@ def _dispatch_commit(args: argparse.Namespace) -> int:
 
     if args.from_id:
         return _run_from_id(args, repo_root)
+
+    expected = _expected_snapshot(args)
+    if expected is not None:
+        # Ahead of staging, so a drifted path is reported without the index
+        # first being moved onto content this invocation is about to refuse.
+        assert_pathspec_snapshot(repo_root, list(args.pathspec), expected)
 
     _stage_for_commit(args, repo_root)
     if args.message_file:

@@ -569,12 +569,32 @@ def _hang_until_killed() -> int:
     return 0
 
 
+def _edit_during_commit_turn() -> None:
+    """Change a file while the commit message is being generated.
+
+    A generation turn is the window between capturing the diff and running
+    `git commit`, so writing here is how a test reproduces an edit that lands
+    after the message evidence was fixed. The path is relative to the
+    repository the turn runs in, which is `asl commit`'s own cwd.
+    """
+    target = os.environ.get("FAKE_CODEX_COMMIT_EDIT_PATH")
+    if not target:
+        return
+    path = Path.cwd() / target
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        os.environ.get("FAKE_CODEX_COMMIT_EDIT_TEXT", "edited during generation\n"),
+        encoding="utf-8",
+    )
+
+
 def _run_commit_message(prompt: str) -> int:
     """Answer an `asl commit` generation turn.
 
     Like the validation branch, this runs before the `--add-dir` requirement:
     the codex audit argv omits that flag, so a commit turn never carries one.
     """
+    _edit_during_commit_turn()
     record_path = os.environ.get("FAKE_CODEX_COMMIT_RECORD")
     if record_path:
         Path(record_path).write_text(
