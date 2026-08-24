@@ -46,7 +46,6 @@ from tests.support import (
     init_git_repo,
     install_fake_codex,
     install_fake_harness,
-    install_fake_spec,
     patched_env,
     read_jsonl,
     write_completed_review_plan,
@@ -1421,14 +1420,15 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def _install_fake_spec_on_path(self) -> tuple[Path, Path, dict[str, str]]:
-        fake_spec = install_fake_spec(self.tmp_path)
-        log_path = self.tmp_path / "fake-spec.jsonl"
-        env = {
-            "PATH": str(self.tmp_path) + os.pathsep + os.environ.get("PATH", ""),
-            "FAKE_SPEC_LOG": str(log_path),
-        }
-        return fake_spec, log_path, env
+    def _commit_log_env(self) -> tuple[Path, dict[str, str]]:
+        """Record every ``asl commit`` message turn this run drives.
+
+        The commit subprocess resolves its harness from the same
+        ``XDG_CONFIG_HOME`` the run already points at the fake fixtures, so
+        opting into the log is all a commit-observing test needs.
+        """
+        log_path = self.tmp_path / "fake-commit.jsonl"
+        return log_path, {"FAKE_CODEX_COMMIT_LOG": str(log_path)}
 
     def test_fresh_run_review_writes_final_review_via_fake_harness(self) -> None:
         # Exercise the new fake-harness review mode end-to-end: the implementation
@@ -1544,7 +1544,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 capture_output=True,
                 check=True,
             )
-        _fake_spec, _spec_log, spec_env = self._install_fake_spec_on_path()
+        _commit_log, commit_env = self._commit_log_env()
         review_body = (
             "## Findings\n"
             "- High issue in agent_session_loop/runner.py.\n"
@@ -1570,7 +1570,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             mode="success-with-review",
             review_harness="claude",
             extra_env={
-                **spec_env,
+                **commit_env,
                 "FAKE_CODEX_REVIEW_BODY": review_body,
                 "FAKE_CODEX_REVIEW_JSON": review_json,
             },
@@ -1658,13 +1658,13 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
 
     def test_findings_defer_broad_failure_until_repair_and_all_clear(self) -> None:
         self._setup_review_with_broad_gate_waiting_for_repair()
-        _fake_spec, spec_log, spec_env = self._install_fake_spec_on_path()
+        commit_log, commit_env = self._commit_log_env()
 
         completed, payload = self._run(
             mode="success-with-review",
             review_harness="claude",
             extra_env={
-                **spec_env,
+                **commit_env,
                 "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
             },
         )
@@ -1696,17 +1696,17 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual(1, len(finished))
         self.assertFalse(finished[0]["passed"])
         self.assertEqual([], payload["commits"])
-        self.assertFalse(spec_log.exists())
+        self.assertFalse(commit_log.exists())
 
     def test_generated_repair_commits_under_null_ordinary_mode(self) -> None:
         self._setup_review_with_broad_gate_waiting_for_repair()
-        _fake_spec, spec_log, spec_env = self._install_fake_spec_on_path()
+        commit_log, commit_env = self._commit_log_env()
 
         completed, payload = self._run(
             mode="success-with-review",
             review_harness="claude",
             extra_env={
-                **spec_env,
+                **commit_env,
                 "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
                 "FAKE_CODEX_REPAIR_MUTATION_PATH": "repair.txt",
             },
@@ -1717,7 +1717,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual(
             runner.REPAIR_COMMIT_MODE_PER_CHILD, payload["repair_commit_mode"]
         )
-        self.assertEqual(1, len(read_jsonl(spec_log)))
+        self.assertEqual(1, len(read_jsonl(commit_log)))
         self.assertEqual(
             ["2.1"], [commit["session_id"] for commit in payload["commits"]]
         )
@@ -1732,13 +1732,13 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
 
     def test_generated_repair_skips_runner_commit_after_worker_commit(self) -> None:
         self._setup_review_with_broad_gate_waiting_for_repair()
-        _fake_spec, spec_log, spec_env = self._install_fake_spec_on_path()
+        commit_log, commit_env = self._commit_log_env()
 
         completed, payload = self._run(
             mode="success-with-review",
             review_harness="claude",
             extra_env={
-                **spec_env,
+                **commit_env,
                 "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
                 "FAKE_CODEX_REPAIR_MUTATION_PATH": "repair.txt",
                 "FAKE_CODEX_REPAIR_COMMIT": "1",
@@ -1747,7 +1747,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertEqual([], payload["commits"])
-        self.assertFalse(spec_log.exists())
+        self.assertFalse(commit_log.exists())
         repair_turn = next(
             turn for turn in payload["turns"] if turn["session_id"] == "2.1"
         )
@@ -1755,15 +1755,21 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         changed = repair_turn["workspace_write_guard"]["changed"]
         self.assertTrue(next(iter(changed.values()))["head_changed"])
 
-    def test_generated_repair_missing_spec_pauses_before_child_execution(self) -> None:
+    def test_generated_repair_dirty_start_pauses_with_path_evidence(self) -> None:
+        # The review turn leaves a guard-excluded file behind, so the repair
+        # child inherits a dirty worktree it did not author. The preflight has
+        # to name that path and stop before the child is ever dispatched.
         self._setup_review_with_broad_gate_waiting_for_repair()
+        commit_log, commit_env = self._commit_log_env()
 
         completed, payload = self._run(
             mode="success-with-review",
             review_harness="claude",
+            review_guard_exclude=("dirty.txt",),
             extra_env={
-                "PATH": "/usr/bin:/bin",
+                **commit_env,
                 "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
+                "FAKE_CODEX_REVIEW_MUTATION_PATH": "dirty.txt",
             },
         )
 
@@ -1774,8 +1780,10 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             runner.REPAIR_COMMIT_MODE_PER_CHILD,
             payload["pause_details"]["repair_commit_mode"],
         )
-        self.assertIn("spec executable not found", payload["pause_message"])
+        dirty = payload["pause_details"]["dirty_repositories"]
+        self.assertEqual(["dirty.txt"], dirty[0]["dirty_paths"])
         self.assertEqual(["2"], [turn["session_id"] for turn in payload["turns"]])
+        self.assertFalse(commit_log.exists())
         self.assertEqual(
             "pending",
             plans.read_session_status(
@@ -1785,36 +1793,6 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 )
             ).status,
         )
-
-    def test_generated_repair_dirty_start_pauses_with_path_evidence(self) -> None:
-        self._setup_review_with_broad_gate_waiting_for_repair()
-        first, first_payload = self._run(
-            mode="success-with-review",
-            review_harness="claude",
-            extra_env={
-                "PATH": "/usr/bin:/bin",
-                "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
-            },
-        )
-        self.assertEqual(1, first.returncode)
-        self.assertEqual("commit-preflight", first_payload["pause_reason"])
-        (self.repo_root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
-        _fake_spec, _spec_log, spec_env = self._install_fake_spec_on_path()
-
-        completed, payload = self._run(
-            mode="success-with-review",
-            review_harness="claude",
-            extra_env={
-                **spec_env,
-                "FAKE_CODEX_REVIEW_OUTCOMES": "findings,all-clear",
-            },
-        )
-
-        self.assertEqual(1, completed.returncode)
-        self.assertEqual("commit-preflight", payload["pause_reason"])
-        dirty = payload["pause_details"]["dirty_repositories"]
-        self.assertEqual(["dirty.txt"], dirty[0]["dirty_paths"])
-        self.assertEqual([], payload["turns"])
 
     def test_all_clear_cannot_defer_a_broad_failure(self) -> None:
         review_session = self._setup_review_with_broad_gate_waiting_for_repair()
@@ -2480,13 +2458,20 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # --commit-per-session must commit after implementation sessions but
         # never after the generated review session.
         self._write_plan(("pending",), readiness="loop-ready")
-        _fake_spec, spec_log, spec_env = self._install_fake_spec_on_path()
+        commit_log, commit_env = self._commit_log_env()
 
         completed, payload = self._run(
             mode="success-with-review",
             review_harness="claude",
             commit_per_session=True,
-            extra_env=spec_env,
+            extra_env={
+                # The implementation turn has to leave a real change behind:
+                # `asl commit` refuses a clean worktree. Rewriting the same
+                # bytes on the review turn is a no-op, so the review guard
+                # still sees an untouched worktree afterwards.
+                **commit_env,
+                "FAKE_CODEX_MUTATION_PATH": "implemented.txt",
+            },
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
@@ -2494,11 +2479,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("all-complete", payload["reason"])
         self.assertTrue(payload["review_completed"])
         # Exactly one auto-commit fired: for the implementation session.
-        spec_records = read_jsonl(spec_log)
-        self.assertEqual(1, len(spec_records))
-        self.assertEqual(
-            ["commit", "--yes", "--no-verify"], spec_records[0]["argv"][1:]
-        )
+        commit_records = read_jsonl(commit_log)
+        self.assertEqual(1, len(commit_records))
+        self.assertEqual(str(self.repo_root.resolve()), commit_records[0]["cwd"])
         self.assertEqual(1, len(payload["commits"]))
         self.assertEqual("session", payload["commits"][0]["scope"])
         # The committed scope must reference the implementation session id (1),

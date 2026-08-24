@@ -16,6 +16,13 @@ STATUS_COMPLETE = "- **Status**: complete"
 HANDOFF_HEADING = "## Handoff"
 SESSION_FILE_RE = re.compile(r"^session-([1-9][0-9]*(?:\.[1-9][0-9]*)*)\.md$")
 VALIDATION_PACKET_PREFIX = "# ASL preparation validation packet"
+COMMIT_PROMPT_PREFIX = "You are a commit message generator."
+COMMIT_MESSAGE = (
+    "feat: add the fake codex commit branch\n"
+    "\n"
+    "Answer an `asl commit` generation turn with a stable conventional-commits "
+    "message so handler tests assert on content rather than on a live model.\n"
+)
 
 
 def _arg_value(flag: str) -> str | None:
@@ -163,6 +170,14 @@ def _apply_workspace_mutation_record(mutation: dict[str, object]) -> None:
             str(mutation.get("text", "mutated\n")),
             encoding="utf-8",
         )
+        return
+    if action == "append":
+        # Every turn leaves a distinct change, which is what a per-session
+        # commit mode needs: an overwrite with identical bytes would leave the
+        # second session's repository clean and its commit with nothing to do.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(str(mutation.get("text", "appended\n")))
         return
     if action == "delete":
         target.unlink()
@@ -482,6 +497,101 @@ def _validation_prompt() -> str | None:
     )
 
 
+def _commit_prompt() -> str | None:
+    return next(
+        (value for value in sys.argv[1:] if value.startswith(COMMIT_PROMPT_PREFIX)),
+        None,
+    )
+
+
+def _append_commit_log(mode: str) -> None:
+    """Append one line per commit-message turn to the opt-in JSONL log.
+
+    `asl commit` runs the generator with the repository as its cwd, so `cwd`
+    is what identifies which repository of a workspace this turn commits.
+    """
+    log_path = os.environ.get("FAKE_CODEX_COMMIT_LOG")
+    if log_path is None:
+        return
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {"argv": list(sys.argv), "cwd": str(Path.cwd()), "mode": mode},
+                sort_keys=True,
+            )
+        )
+        handle.write("\n")
+
+
+def _commit_failure_budget_spent() -> bool:
+    """Report whether a bounded failure streak has already been served.
+
+    `FAKE_CODEX_COMMIT_FAIL_LIMIT` turns an always-failing commit harness into
+    one that fails its first N turns and then succeeds, which is how a test
+    exercises a transient failure that heals when the run retries it. The
+    commit log doubles as the counter — it already records the mode of every
+    turn — so this knob needs `FAKE_CODEX_COMMIT_LOG` and is inert without it.
+    """
+    limit = os.environ.get("FAKE_CODEX_COMMIT_FAIL_LIMIT")
+    log_path = os.environ.get("FAKE_CODEX_COMMIT_LOG")
+    if limit is None or log_path is None:
+        return False
+    path = Path(log_path)
+    if not path.exists():
+        return False
+    served = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        if json.loads(line).get("mode") == "failure":
+            served += 1
+    return served >= int(limit)
+
+
+def _run_commit_message(prompt: str) -> int:
+    """Answer an `asl commit` generation turn.
+
+    Like the validation branch, this runs before the `--add-dir` requirement:
+    the codex audit argv omits that flag, so a commit turn never carries one.
+    """
+    record_path = os.environ.get("FAKE_CODEX_COMMIT_RECORD")
+    if record_path:
+        Path(record_path).write_text(
+            json.dumps({"argv": list(sys.argv), "prompt": prompt}),
+            encoding="utf-8",
+        )
+
+    mode = os.environ.get("FAKE_CODEX_COMMIT_MODE", "success")
+    fail_cwd = os.environ.get("FAKE_CODEX_COMMIT_FAIL_CWD_BASENAME")
+    if fail_cwd and Path.cwd().name == fail_cwd:
+        mode = "failure"
+    if mode == "failure" and _commit_failure_budget_spent():
+        mode = "success"
+    _append_commit_log(mode)
+    if mode == "failure":
+        print("fake codex commit failure", file=sys.stderr)
+        _write_last_message("fake codex commit failure\n")
+        return 7
+    if mode == "quota":
+        message = "usage limit reached; retry-after: 3600"
+        print(message, file=sys.stderr)
+        _write_last_message(message + "\n")
+        return 7
+    if mode == "empty":
+        _write_last_message("   \n")
+        return 0
+    if mode == "api-error":
+        _write_last_message(
+            'API Error: 500 {"type":"error","error":{"message":"overloaded"}}\n'
+        )
+        return 0
+
+    _write_last_message(os.environ.get("FAKE_CODEX_COMMIT_MESSAGE", COMMIT_MESSAGE))
+    return 0
+
+
 def _validation_plan_dir(prompt: str) -> Path | None:
     """Derive the plan directory from the rendered validation packet.
 
@@ -605,6 +715,10 @@ def main() -> int:
             print("missing shared context path in validation packet", file=sys.stderr)
             return 2
         return _run_prepare_validator(validation_plan_dir, validation_prompt)
+
+    commit_prompt = _commit_prompt()
+    if commit_prompt is not None:
+        return _run_commit_message(commit_prompt)
 
     plan_dir_arg = _arg_value("--add-dir")
     if plan_dir_arg is None:

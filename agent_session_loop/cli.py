@@ -1104,6 +1104,101 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     metrics_parser.set_defaults(handler_ref="metrics:metrics_from_args")
 
+    commit_parser = subparsers.add_parser(
+        "commit",
+        help=(
+            "Generate a Conventional Commits message from the diff and commit "
+            "it, standalone or inside a loop."
+        ),
+    )
+    commit_parser.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        metavar="PATH",
+        help="Path inside the git worktree to commit (default: current directory)",
+    )
+    commit_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Commit without asking for confirmation",
+    )
+    commit_parser.set_defaults(verify=False)
+    commit_parser.add_argument(
+        "--verify",
+        dest="verify",
+        action="store_true",
+        help="Run git hooks on commit",
+    )
+    commit_parser.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        help="Bypass git hooks on commit (default)",
+    )
+    commit_parser.add_argument(
+        "--staged",
+        action="store_true",
+        help="Commit only what is already staged, leaving the index untouched",
+    )
+    commit_parser.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Print the message and stop without committing",
+    )
+    commit_parser.add_argument(
+        "--guidance",
+        metavar="TEXT",
+        help="Extra instructions passed to the message generator",
+    )
+    commit_parser.add_argument(
+        "--from-id",
+        dest="from_id",
+        metavar="SHA",
+        help="Print a message describing an existing commit; never commits",
+    )
+    commit_parser.add_argument(
+        "--pathspec",
+        action="append",
+        metavar="PATH",
+        help=("Stage only this repo-relative path instead of every change; repeatable"),
+    )
+    commit_parser.add_argument(
+        "--harness",
+        choices=harnesses.HARNESS_NAMES,
+        help="Agent harness that generates the message",
+    )
+    commit_parser.add_argument(
+        "--model",
+        help="Harness model to request",
+    )
+    commit_parser.add_argument(
+        "--effort",
+        help="Harness reasoning effort to request",
+    )
+    commit_parser.add_argument(
+        "--prepare-only",
+        dest="prepare_only",
+        action="store_true",
+        help=(
+            "Emit a single-line JSON header, a blank line, and the budgeted "
+            "diff, then stop"
+        ),
+    )
+    commit_parser.add_argument(
+        "--message-file",
+        dest="message_file",
+        metavar="PATH",
+        help="Commit this message instead of generating one ('-' reads stdin)",
+    )
+    commit_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    commit_parser.set_defaults(handler_ref="commit_message:commit_from_args")
+
     unlock_parser = subparsers.add_parser(
         "unlock",
         help="Remove an operational lock for a plan directory.",

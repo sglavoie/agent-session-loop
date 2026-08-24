@@ -38,6 +38,7 @@ from . import (
     agent_mux_delivery,
     assurance_report,
     commit_groups,
+    commit_message,
     config,
     contracts,
     control_queue,
@@ -98,7 +99,22 @@ COMMIT_MODE_PER_SESSION = "per-session"
 COMMIT_MODE_END = "end"
 COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
 REPAIR_COMMIT_MODE_PER_CHILD = "per-child"
-COMMIT_ARGV: tuple[str, ...] = ("spec", "commit", "--yes", "--no-verify")
+#: The checkout this module was imported from. Auto-commit re-enters that same
+#: checkout as a subprocess rather than resolving a name on PATH, so a run
+#: always commits with the ``asl commit`` it ships with.
+CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
+COMMIT_SUBCOMMAND_ARGV: tuple[str, ...] = ("commit", "--yes", "--no-verify")
+#: The write-guard change categories `git add --` can stage. The other three
+#: `repository_evidence` categories cannot: `untracked_removed` names paths that
+#: no longer exist, `worktree_ignore` names paths git refuses to add outright,
+#: and `ignore_config` names exclusion sources that may live outside the
+#: worktree altogether. An allow-list is what keeps a new category from
+#: silently becoming stageable.
+STAGEABLE_CHANGE_CATEGORIES: tuple[str, ...] = (
+    "tracked",
+    "untracked_added",
+    "untracked_changed",
+)
 RUNNER_MANAGED_SESSION_ARG = "--runner-managed"
 SESSION_RUN_SKILL_NAME = "session-run"
 # Registered implementation turns are enabled only because every such turn is
@@ -4008,13 +4024,6 @@ def _validate_clean_git_status(cwd: Path) -> None:
         raise RunError("git status --porcelain must be empty before auto-commit")
 
 
-def _validate_spec_available() -> str:
-    spec_path = shutil.which("spec")
-    if spec_path is None:
-        raise RunError("spec executable not found on PATH")
-    return spec_path
-
-
 def _git_status_is_clean(cwd: Path) -> bool:
     result = _run_git(cwd, ["status", "--porcelain"])
     if result.returncode != 0:
@@ -4030,12 +4039,11 @@ def _validate_commit_preflight(
     *,
     verification_context: verification.VerificationContext | None = None,
 ) -> dict[str, Any]:
-    spec_path = _validate_spec_available()
     context = verification_context or verification.VerificationContext.legacy(cwd)
     if context.workspace is None:
         _validate_git_worktree(cwd)
         _validate_clean_git_status(cwd)
-        return {"spec_path": spec_path}
+        return {}
 
     repositories: list[dict[str, Any]] = []
     for repository in context.workspace.repositories:
@@ -4059,7 +4067,7 @@ def _validate_commit_preflight(
                 "git status --porcelain must be empty before auto-commit "
                 f"in repository {repository.alias}"
             )
-    return {"spec_path": spec_path, "repositories": repositories}
+    return {"repositories": repositories}
 
 
 def _porcelain_dirty_paths(output: str) -> list[str]:
@@ -4244,7 +4252,7 @@ def _repair_commit_preflight(
     plan_dir: Path | None = None,
     retained_scope_repair: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Require the commit tool and a clean writable set for one repair child.
+    """Require a clean writable set for one repair child.
 
     ``retained_scope_repair`` is the uncleared write-scope-violation record for
     this same child. On that path the runner is the author of *some* of the
@@ -4253,25 +4261,22 @@ def _repair_commit_preflight(
     writable set there dead-ends the very repair the retention exists to enable,
     so the sanction covers exactly the paths that turn is recorded as having
     written and still recorded as holding the content it left at them. The
-    sanction stops there. The repair child's commit is repository-wide, so any
-    other dirty path -- work an operator started after the pause in a repository
-    the child is about to touch, or an edit they made to a retained path itself
-    -- would be staged and committed under the repair's name; that case raises
-    here, before the harness starts, rather than riding along. Nothing escapes
-    review either: the retained-scope branch still judges every retained change
-    against the child's post-regeneration write scope before the turn starts,
-    and pauses when any of it falls outside.
+    sanction stops there. A legacy repair child's commit is still
+    repository-wide, so any other dirty path -- work an operator started after
+    the pause in a repository the child is about to touch, or an edit they made
+    to a retained path itself -- would be staged and committed under the
+    repair's name; that case raises here, before the harness starts, rather than
+    riding along. A registered child stages only the paths its own turn guard
+    recorded, but the gate stays uniform: dirt the child did not author is not
+    its to carry, whichever staging path it takes. Nothing escapes review
+    either: the retained-scope branch still judges every retained change against
+    the child's post-regeneration write scope before the turn starts, and pauses
+    when any of it falls outside.
     """
     details: dict[str, Any] = {
         "repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD,
         "repositories": [],
     }
-    try:
-        details["spec_path"] = _validate_spec_available()
-    except RunError as error:
-        details["error"] = str(error)
-        raise RepairCommitPreflightError(str(error), details) from error
-
     workspace = verification_context.workspace
     if workspace is None:
         selected = [(None, ".", cwd)]
@@ -5142,7 +5147,73 @@ def _write_commit_artifacts(
     _write_json_file(paths["result"], payload)
 
 
-def _run_spec_commit(
+@dataclass(frozen=True)
+class _CommitGeneration:
+    """Harness selection forwarded to one ``asl commit`` subprocess.
+
+    The run's *declared* implementation flags travel here, never its reported
+    model/effort payload: ``config.native_model_payload`` can answer
+    ``"native CLI default"``, which names no model any harness would accept.
+    """
+
+    harness: str | None = None
+    model: str | None = None
+    effort: str | None = None
+
+
+def _commit_generation(args: argparse.Namespace) -> _CommitGeneration:
+    """Resolve the commit-message harness selection for one run."""
+    harness = getattr(args, "harness", None)
+    if harness is None:
+        return _CommitGeneration()
+    return _CommitGeneration(
+        harness=harness,
+        model=_requested_model(args, harness=harness),
+        effort=_requested_effort(args, harness=harness),
+    )
+
+
+def _asl_commit_argv(
+    generation: _CommitGeneration,
+    staging_paths: Sequence[str] = (),
+) -> list[str]:
+    """Build the in-tree commit argv for one repository target.
+
+    Re-entering this interpreter with ``-m agent_session_loop`` removes the
+    PATH lookup entirely, so a run commits with the ``asl commit`` its own
+    checkout ships rather than with whatever another install put on PATH.
+    ``staging_paths`` arrive qualified as ``"<repository>:<path>"`` and only
+    the path half means anything to git; an empty list leaves ``asl commit``
+    on its ``git add -A`` default, which is what a legacy single-repository
+    target wants.
+    """
+    argv = [
+        sys.executable,
+        "-m",
+        "agent_session_loop",
+        *COMMIT_SUBCOMMAND_ARGV,
+    ]
+    if generation.harness is not None:
+        argv.extend(["--harness", generation.harness])
+    if generation.model is not None:
+        argv.extend(["--model", generation.model])
+    if generation.effort is not None:
+        argv.extend(["--effort", generation.effort])
+    for path in commit_message.dequalify_paths(list(staging_paths)):
+        argv.extend(["--pathspec", path])
+    return argv
+
+
+def _asl_commit_env() -> dict[str, str]:
+    """Make this checkout importable to the commit subprocess."""
+    env = dict(os.environ)
+    root = str(CHECKOUT_ROOT)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = f"{root}{os.pathsep}{existing}" if existing else root
+    return env
+
+
+def _run_asl_commit(
     *,
     cwd: Path,
     run_dir: Path,
@@ -5153,6 +5224,8 @@ def _run_spec_commit(
     repository_alias: str | None = None,
     repository_path: str = ".",
     qualified_paths: Sequence[str] = (),
+    staging_paths: Sequence[str] = (),
+    generation: _CommitGeneration | None = None,
 ) -> dict[str, Any]:
     canonical_cwd = plans.canonicalize_path(cwd)
     paths = _commit_paths(
@@ -5161,7 +5234,7 @@ def _run_spec_commit(
         session_id=session_id,
         repository_alias=repository_alias,
     )
-    argv = list(COMMIT_ARGV)
+    argv = _asl_commit_argv(generation or _CommitGeneration(), staging_paths)
     head_before_payload = _read_git_head(canonical_cwd)
     started_at = _utc_now()
     exec_error = None
@@ -5169,6 +5242,7 @@ def _run_spec_commit(
         result = subprocess.run(
             argv,
             cwd=canonical_cwd,
+            env=_asl_commit_env(),
             text=True,
             capture_output=True,
             check=False,
@@ -5219,6 +5293,7 @@ def _run_spec_commit(
         "repository_alias": repository_alias,
         "repository_path": repository_path,
         "qualified_paths": list(qualified_paths),
+        "staging_paths": list(staging_paths),
         "scope": "session" if session_id is not None else "end",
         **session_identity,
         "artifact_dir": str(paths["artifact_dir"]),
@@ -5267,6 +5342,8 @@ def _commit_started_payload(
     repository_alias: str | None = None,
     repository_path: str = ".",
     qualified_paths: Sequence[str] = (),
+    staging_paths: Sequence[str] = (),
+    generation: _CommitGeneration | None = None,
 ) -> dict[str, Any]:
     paths = _commit_paths(
         run_dir,
@@ -5288,13 +5365,14 @@ def _commit_started_payload(
         "repository_alias": repository_alias,
         "repository_path": repository_path,
         "qualified_paths": list(qualified_paths),
+        "staging_paths": list(staging_paths),
         "scope": "session" if session_id is not None else "end",
         **session_identity,
         "artifact_dir": str(paths["artifact_dir"]),
         "stdout_path": str(paths["stdout"]),
         "stderr_path": str(paths["stderr"]),
         "result_path": str(paths["result"]),
-        "argv": list(COMMIT_ARGV),
+        "argv": _asl_commit_argv(generation or _CommitGeneration(), staging_paths),
         "cwd": str(cwd),
     }
 
@@ -7274,11 +7352,42 @@ class _ProgressReporter:
             f"duration {format_duration_seconds(commit.get('duration_seconds'))})"
         )
 
+    def commit_failed(self, record: Mapping[str, Any]) -> None:
+        """Report a commit failure the run absorbed rather than paused on."""
+        detail = record.get("error") or record.get("message") or "unknown error"
+        disposition = (
+            "retrying this group at the next commit boundary"
+            if record.get("retrying")
+            else "leaving these changes uncommitted"
+        )
+        self._emit(
+            f"commit failed: {_unresolved_commit_group_label(record)}: {detail}; "
+            f"the run continues, {disposition}"
+        )
+
+    def commit_group_recovered(self, summary: Mapping[str, Any]) -> None:
+        self._emit(f"commit group recovered: {_unresolved_commit_group_label(summary)}")
+
     def run_finished(self, payload: dict[str, Any]) -> None:
         verb = "run finished" if payload["ok"] else "run paused"
         reason = payload.get("pause_reason") or payload.get("reason") or "unknown"
         for line in _note_lines(payload, prefix="note"):
             self._emit(line)
+        unresolved = payload.get(UNRESOLVED_COMMIT_GROUPS_KEY)
+        if isinstance(unresolved, list) and unresolved:
+            # A non-fatal warning, printed before the verdict line rather than
+            # instead of it: the run really did finish, and it really did lose
+            # these commits. Saying only one of the two would be a lie either
+            # way, so the summary says both.
+            labels = ", ".join(
+                _unresolved_commit_group_label(summary)
+                for summary in unresolved
+                if isinstance(summary, Mapping)
+            )
+            self._emit(
+                f"warning: {len(unresolved)} commit group(s) were never "
+                f"completed: {labels}; their changes are still uncommitted"
+            )
         self._emit(
             f"{verb}: "
             f"run {payload['run_id']}, "
@@ -9058,6 +9167,115 @@ def _upsert_commit_group(payload: dict[str, Any], group: Mapping[str, Any]) -> N
     groups.append(dict(group))
 
 
+#: Every soft-failed commit attempt this run made, in the order it made them.
+#: A commit failure no longer pauses the run, so this is the durable trace that
+#: one happened at all — including the attempt that failed before a durable
+#: group existed, which leaves no ``commit_groups`` row behind.
+COMMIT_FAILURES_KEY = "commit_failures"
+
+#: The commit groups still owed when the run ended, written once by
+#: ``terminalize``. It is the run's own admission that commits were lost, and
+#: the field the supervisor audit's commit-group-resolution check reads.
+UNRESOLVED_COMMIT_GROUPS_KEY = "unresolved_commit_groups"
+
+#: How many times one commit group is retried inside a single run before the
+#: run stops attempting it. A transient failure heals on the first retry; a
+#: repository that refuses every time must not turn the session loop into a
+#: commit loop, so the group is left owed for a later run to recover. Each
+#: attempt is a real harness call that writes the commit message, so the budget
+#: is small on purpose.
+MAX_COMMIT_GROUP_RETRIES = 2
+
+
+def _commit_failure_record(
+    *,
+    scope: str,
+    session_id: str | None,
+    group: Mapping[str, Any] | None,
+    commit: Mapping[str, Any] | None,
+    error: str | None,
+    message: str,
+) -> dict[str, Any]:
+    """Describe one commit failure the run absorbed instead of pausing on."""
+    return {
+        "scope": scope,
+        "session_id": session_id,
+        "group_id": group.get("group_id") if group is not None else None,
+        "failed_alias": group.get("failed_alias") if group is not None else None,
+        "message": message,
+        "error": error,
+        "commit": dict(commit) if commit is not None else None,
+        "commit_group": dict(group) if group is not None else None,
+        "recorded_at": _isoformat(_utc_now()),
+    }
+
+
+def _append_commit_failure(payload: dict[str, Any], record: Mapping[str, Any]) -> None:
+    failures = payload.setdefault(COMMIT_FAILURES_KEY, [])
+    failures.append(dict(record))
+
+
+def _unresolved_commit_groups(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Summarize every commit group this run never brought to ``complete``.
+
+    Two shapes of loss are reported side by side. A durable group that ended
+    ``failed`` or ``pending`` is named by its own row, because it is the one a
+    later run can still recover. An attempt that failed before any group was
+    created carries no row at all, so its recorded failure is summarized in
+    place — otherwise the only commit failure that leaves no durable evidence
+    would also be the only one a run could end silent about.
+    """
+    summaries: list[dict[str, Any]] = []
+    groups = payload.get("commit_groups")
+    if isinstance(groups, list):
+        for raw in groups:
+            if not isinstance(raw, Mapping):
+                continue
+            status = raw.get("status")
+            if status == commit_groups.GROUP_STATUS_COMPLETE:
+                continue
+            summaries.append(
+                {
+                    "group_id": raw.get("group_id"),
+                    "scope": raw.get("scope"),
+                    "session_id": raw.get("session_id"),
+                    "status": status,
+                    "failed_alias": raw.get("failed_alias"),
+                    "remaining_aliases": list(raw.get("remaining_aliases") or ()),
+                    "committed_aliases": [
+                        row.get("key")
+                        for row in raw.get("successful_repositories") or ()
+                        if isinstance(row, Mapping)
+                    ],
+                }
+            )
+    failures = payload.get(COMMIT_FAILURES_KEY)
+    if isinstance(failures, list):
+        for raw in failures:
+            if not isinstance(raw, Mapping) or raw.get("group_id") is not None:
+                continue
+            summaries.append(
+                {
+                    "group_id": None,
+                    "scope": raw.get("scope"),
+                    "session_id": raw.get("session_id"),
+                    "status": commit_groups.GROUP_STATUS_FAILED,
+                    "failed_alias": None,
+                    "remaining_aliases": [],
+                    "committed_aliases": [],
+                    "error": raw.get("error"),
+                }
+            )
+    return summaries
+
+
+def _unresolved_commit_group_label(summary: Mapping[str, Any]) -> str:
+    session_id = summary.get("session_id")
+    scope = "end-of-run" if session_id is None else f"session {session_id}"
+    alias = summary.get("failed_alias")
+    return f"{scope} ({alias})" if alias else scope
+
+
 def _persist_commit_group(
     *,
     event_path: Path,
@@ -9100,6 +9318,7 @@ def _commit_targets(
     *,
     aliases: Sequence[str] | None = None,
     qualified_paths: Mapping[str, Sequence[str]] | None = None,
+    staging_paths: Mapping[str, Sequence[str]] | None = None,
 ) -> list[dict[str, Any]]:
     workspace = verification_context.workspace
     if workspace is None:
@@ -9118,12 +9337,14 @@ def _commit_targets(
             + ", ".join(sorted(unknown))
         )
     path_map = qualified_paths or {}
+    staging_map = staging_paths or {}
     return [
         commit_groups.create_target(
             alias=repository.alias,
             root=repository.root,
             repository_path=repository.repository.path,
             qualified_paths=path_map.get(repository.alias, ()),
+            staging_paths=staging_map.get(repository.alias, ()),
         )
         for repository in workspace.repositories
         if repository.alias in selected
@@ -9149,6 +9370,8 @@ def _registered_session_commit_targets(
     if len(set(aliases)) != len(aliases):
         raise RunError("workspace write guard authorized aliases are duplicated")
     qualified: dict[str, Sequence[str]] = {}
+    staging: dict[str, list[str]] = {}
+    unscoped_aliases: set[str] = set()
     changed_aliases: set[str] = set()
     changed = guard.get("changed")
     if not isinstance(changed, Mapping):
@@ -9162,6 +9385,22 @@ def _registered_session_commit_targets(
             raise RunError("workspace write guard change record is malformed")
         changed_aliases.add(alias)
         qualified[alias] = [str(path) for path in paths]
+        bucket = staging.setdefault(alias, [])
+        if raw.get("worktree_of") is not None:
+            # A linked worktree's paths are relative to that checkout, not to
+            # the owning repository's root the commit runs in, so none of them
+            # can be named on a pathspec there. The alias keeps the
+            # repository-wide `git add -A` fallback instead of staging a
+            # subset that would leave the commit dirty afterwards.
+            unscoped_aliases.add(alias)
+            continue
+        for category in STAGEABLE_CHANGE_CATEGORIES:
+            values = raw.get(category)
+            if not isinstance(values, list):
+                continue
+            bucket.extend(f"{alias}:{path}" for path in values)
+    for alias in unscoped_aliases:
+        staging[alias] = []
     workspace = verification_context.workspace
     assert workspace is not None
     expected_aliases = [
@@ -9175,6 +9414,9 @@ def _registered_session_commit_targets(
         verification_context,
         aliases=aliases,
         qualified_paths=qualified,
+        staging_paths={
+            alias: list(dict.fromkeys(paths)) for alias, paths in staging.items()
+        },
     )
     return [target for target in targets if not _commit_target_is_clean(target)]
 
@@ -9208,6 +9450,14 @@ def _resolve_recovered_commit_targets(
         for row in rows
         if isinstance(row, Mapping) and isinstance(row.get("key"), str)
     }
+    # A group persisted before staging paths existed has no `staging_paths`
+    # row, which reads as an empty list and restores the repository-wide
+    # `git add -A` this recovery always used.
+    staging = {
+        str(row.get("key")): [str(path) for path in row.get("staging_paths", ())]
+        for row in rows
+        if isinstance(row, Mapping) and isinstance(row.get("key"), str)
+    }
     if verification_context.workspace is None:
         if keys != [commit_groups.LEGACY_REPOSITORY_KEY]:
             raise RunError("unresolved commit group does not match the repository")
@@ -9218,6 +9468,7 @@ def _resolve_recovered_commit_targets(
         verification_context,
         aliases=keys,
         qualified_paths=qualified,
+        staging_paths=staging,
     )
 
 
@@ -9231,6 +9482,7 @@ def _run_commit_group(
     run_id: str,
     session_id: str | None,
     targets: Sequence[Mapping[str, Any]],
+    generation: _CommitGeneration,
     recovered_group: Mapping[str, Any] | None = None,
     persistence: _RunPersistence | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -9286,6 +9538,8 @@ def _run_commit_group(
             ),
             repository_path=str(target["repository_path"]),
             qualified_paths=[str(path) for path in target.get("qualified_paths", ())],
+            staging_paths=[str(path) for path in target.get("staging_paths", ())],
+            generation=generation,
         )
         with persistence.lock:
             persistence.append_event(
@@ -9294,7 +9548,7 @@ def _run_commit_group(
             persistence.write_state(payload)
         progress.commit_started(commit_started)
 
-        commit_payload = _run_spec_commit(
+        commit_payload = _run_asl_commit(
             cwd=Path(str(target["root"])),
             run_dir=run_dir,
             commit_index=commit_index,
@@ -9306,6 +9560,8 @@ def _run_commit_group(
             ),
             repository_path=str(target["repository_path"]),
             qualified_paths=[str(path) for path in target.get("qualified_paths", ())],
+            staging_paths=[str(path) for path in target.get("staging_paths", ())],
+            generation=generation,
         )
         commit_finished = {"run_id": run_id, **commit_payload}
         with persistence.lock:
@@ -14921,6 +15177,10 @@ def _run_locked(
     mailbox_enabled = bool(mailbox_activation["enabled"])
     review_guard_excludes = _review_guard_excludes(args)
     review_guard_include_ignored = _review_guard_include_ignored(args)
+    # One selection for every commit this run makes, including the recovery of
+    # a group a previous process left unresolved: the declared implementation
+    # harness, not whichever harness a live switch moved a turn onto.
+    commit_generation = _commit_generation(args)
     audited_repositories, audited_registry_declared = _audited_repositories(
         verification_context
     )
@@ -15043,8 +15303,15 @@ def _run_locked(
         exit code each one already decided passes through untouched. Those
         refusals run before the control queue has a poller, so only the loop's
         own exit supplies ``cancel`` and ``poll``.
+
+        A commit failure no longer stops the run, so the last thing decided
+        before the audit runs is whether any group is still owed. The answer is
+        written into the payload here, ahead of ``_terminalize_run``, because
+        both readers that must not miss it — the assurance audit and the final
+        summary — are downstream of this point.
         """
         with persistence.lock:
+            payload[UNRESOLVED_COMMIT_GROUPS_KEY] = _unresolved_commit_groups(payload)
             outcome = _terminal_outcome(payload)
         return finish_run_locked(
             _terminalize_run(
@@ -15059,6 +15326,124 @@ def _run_locked(
                 poll=poll,
             ),
             payload,
+        )
+
+    #: The group this run still owes, carried between commit boundaries. A
+    #: commit failure soft-fails, so this is what makes the failure retryable
+    #: inside the same run instead of only after a restart.
+    owed_commit_group: dict[str, Any] | None = None
+    #: Retries already spent per group, so a repository that fails the same way
+    #: every time cannot turn the run loop into a commit loop.
+    owed_commit_group_attempts: dict[str, int] = {}
+
+    def soft_fail_commit(
+        *,
+        scope: str,
+        session_id: str | None,
+        group: Mapping[str, Any] | None,
+        commit: Mapping[str, Any] | None,
+        error: str | None,
+        message: str,
+    ) -> None:
+        """Absorb a commit failure: record it, warn, and keep the run going.
+
+        The group is already marked ``failed`` in ``commit_groups`` by the
+        coordinator, and the commit's own ``commit_finished`` record already
+        carries the outcome that classified it. What is added here is the
+        run-level admission — durable in state, visible in the progress output,
+        and retried at the next commit boundary.
+
+        The retry is bounded. An attempt that never built a group has nothing
+        durable to retry, and a group that has already spent its retries is
+        left owed rather than attempted forever; either way the group stays
+        ``failed`` in ``commit_groups``, so ``terminalize`` reports it and a
+        later run can still recover it.
+        """
+        nonlocal owed_commit_group
+        record = _commit_failure_record(
+            scope=scope,
+            session_id=session_id,
+            group=group,
+            commit=commit,
+            error=error,
+            message=message,
+        )
+        group_id = record["group_id"]
+        spent = (
+            owed_commit_group_attempts.get(group_id, 0)
+            if isinstance(group_id, str)
+            else MAX_COMMIT_GROUP_RETRIES
+        )
+        retrying = group is not None and spent < MAX_COMMIT_GROUP_RETRIES
+        record["retrying"] = retrying
+        with persistence.lock:
+            _append_commit_failure(payload, record)
+            persistence.write_state(payload)
+        progress.commit_failed(record)
+        if not retrying:
+            owed_commit_group = None
+            return
+        owed_commit_group_attempts[str(group_id)] = spent + 1
+        owed_commit_group = dict(group) if group is not None else None
+
+    def settle_owed_commit_group() -> None:
+        """Complete the group this run still owes before it commits anything else.
+
+        This is the restart invariant applied inside a single run: an
+        unresolved group is finished at the next commit boundary, ahead of the
+        next worker and ahead of the end-of-run commit, so a transient failure
+        heals without a human. A second failure re-arms the same retry rather
+        than escalating.
+        """
+        nonlocal owed_commit_group
+        group = owed_commit_group
+        if group is None:
+            return
+        owed_commit_group = None
+        session_id = (
+            str(group["session_id"]) if group.get("session_id") is not None else None
+        )
+        recovered_group: dict[str, Any] = dict(group)
+        failed_commit: dict[str, Any] | None = None
+        recovery_error: str | None = None
+        try:
+            recovered_group, failed_commit = _run_commit_group(
+                event_path=event_path,
+                payload=payload,
+                progress=progress,
+                verification_context=verification_context,
+                run_dir=run_dir,
+                run_id=run_id,
+                session_id=session_id,
+                targets=_resolve_recovered_commit_targets(group, verification_context),
+                generation=commit_generation,
+                recovered_group=group,
+                persistence=persistence,
+            )
+        except (RunError, commit_groups.CommitGroupError) as error:
+            recovery_error = str(error)
+        resolved = recovery_error is None and failed_commit is None
+        with persistence.lock:
+            payload["commit_group_recovery"] = {
+                "group_id": group.get("group_id"),
+                "success": resolved,
+                "error": recovery_error,
+                "group": recovered_group,
+            }
+            persistence.write_state(payload)
+        if resolved:
+            progress.commit_group_recovered(recovered_group)
+            return
+        soft_fail_commit(
+            scope=str(group.get("scope") or "session"),
+            session_id=session_id,
+            group=recovered_group,
+            commit=failed_commit,
+            error=recovery_error,
+            message=(
+                "unresolved auto-commit group could not be completed "
+                "before the next session"
+            ),
         )
 
     persistence.append_event(
@@ -15139,60 +15524,12 @@ def _run_locked(
                 "group": unresolved_commit_group,
             }
     elif unresolved_commit_group is not None:
-        try:
-            _validate_spec_available()
-            recovery_targets = _resolve_recovered_commit_targets(
-                unresolved_commit_group,
-                verification_context,
-            )
-            recovered_group, failed_commit = _run_commit_group(
-                event_path=event_path,
-                payload=payload,
-                progress=progress,
-                verification_context=verification_context,
-                run_dir=run_dir,
-                run_id=run_id,
-                session_id=(
-                    str(unresolved_commit_group["session_id"])
-                    if unresolved_commit_group.get("session_id") is not None
-                    else None
-                ),
-                targets=recovery_targets,
-                recovered_group=unresolved_commit_group,
-                persistence=persistence,
-            )
-        except (RunError, commit_groups.CommitGroupError) as error:
-            recovered_group = dict(unresolved_commit_group)
-            failed_commit = None
-            recovery_error = str(error)
-        else:
-            recovery_error = None
-        with persistence.lock:
-            payload["commit_group_recovery"] = {
-                "group_id": unresolved_commit_group.get("group_id"),
-                "success": recovery_error is None and failed_commit is None,
-                "error": recovery_error,
-                "group": recovered_group,
-            }
-        if recovery_error is not None or failed_commit is not None:
-            with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(snapshot)
-            _pause_run(
-                event_path,
-                payload,
-                reason="commit-failed",
-                message=(
-                    "unresolved auto-commit group could not be completed "
-                    "before the next session"
-                ),
-                details={
-                    "commit_group": recovered_group,
-                    "commit": failed_commit,
-                    "error": recovery_error,
-                },
-                persistence=persistence,
-            )
-            return terminalize(1)
+        # The restart half of the invariant: a group another run left owed is
+        # completed here, before this run launches a worker of its own. A
+        # second failure soft-fails like any other, so the group is retried
+        # again at this run's next commit boundary.
+        owed_commit_group = dict(unresolved_commit_group)
+        settle_owed_commit_group()
 
     review_requested = getattr(args, "review_harness", None) is not None
     max_review_fix_cycles = _max_review_fix_cycles(args)
@@ -15645,7 +15982,15 @@ def _run_locked(
                 # review creation. Refreshing the baseline in this one place
                 # covers every path, including ones added later.
                 runner_work_finished_at = _utc_now()
+            entering_first_pass = first_loop_pass
             first_loop_pass = False
+            if not entering_first_pass:
+                # One place covers both boundaries a still-owed group must be
+                # settled at: ahead of the next worker, and ahead of the
+                # end-of-run commit the all-complete branch below runs. The
+                # first pass is excluded because the recovery above the loop
+                # is that pass's boundary and has just run.
+                settle_owed_commit_group()
             pending_session = snapshot.next_pending
 
             if pending_session is None:
@@ -15682,6 +16027,7 @@ def _run_locked(
                             run_id=run_id,
                             session_id=None,
                             targets=end_targets,
+                            generation=commit_generation,
                             persistence=persistence,
                         )
                     except RunError as error:
@@ -15691,21 +16037,16 @@ def _run_locked(
                     else:
                         commit_error = None
                     if failed_commit is not None or commit_error is not None:
-                        _pause_run(
-                            event_path,
-                            payload,
-                            reason="commit-failed",
+                        soft_fail_commit(
+                            scope="end",
+                            session_id=None,
+                            group=commit_group,
+                            commit=failed_commit,
+                            error=commit_error,
                             message=(
                                 "final auto-commit failed after all sessions completed"
                             ),
-                            details={
-                                "commit_group": commit_group,
-                                "commit": failed_commit,
-                                "error": commit_error,
-                            },
-                            persistence=persistence,
                         )
-                        break
                     continue
 
                 if review_requested and not review_appended:
@@ -18293,6 +18634,7 @@ def _run_locked(
                             run_id=run_id,
                             session_id=session_id,
                             targets=session_targets,
+                            generation=commit_generation,
                             persistence=persistence,
                         )
                     else:
@@ -18322,43 +18664,36 @@ def _run_locked(
                         }
                         _write_json_file(paths["result"], turn_payload)
                 if failed_commit is not None or commit_error is not None:
+                    # The turn itself stands: it executed, it verified, and the
+                    # session it completed is still complete. Only the commit
+                    # of its changes failed, so the failure is recorded on the
+                    # turn and on the run, and the turn goes on to be committed
+                    # to the plan. Recording a `turn_rejected` here instead
+                    # would say a guard refused a turn the very next call
+                    # accepts.
                     with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(after)
-                    _record_turn_rejected(
-                        event_path=event_path,
-                        payload=payload,
-                        persistence=persistence,
-                        turn_payload=turn_payload,
+                        turn_payload["session_commit"] = {
+                            "guard": (
+                                "repair-session-commit"
+                                if repair_owned_commit
+                                else "session-commit"
+                            ),
+                            "reason": "commit-failed",
+                            "error": commit_error,
+                            "commit_group": commit_group,
+                            "commit": failed_commit,
+                        }
+                        _write_json_file(paths["result"], turn_payload)
+                    soft_fail_commit(
+                        scope="session",
                         session_id=session_id,
-                        guard=(
-                            "repair-session-commit"
-                            if repair_owned_commit
-                            else "session-commit"
-                        ),
-                        reason="commit-failed",
-                        detail={"error": commit_error},
-                    )
-                    _pause_run(
-                        event_path,
-                        payload,
-                        reason="commit-failed",
+                        group=commit_group,
+                        commit=failed_commit,
+                        error=commit_error,
                         message=(
                             f"auto-commit failed after session {session_id} completed"
                         ),
-                        details={
-                            **session_details,
-                            **(
-                                {"repair_commit_mode": (REPAIR_COMMIT_MODE_PER_CHILD)}
-                                if repair_owned_commit
-                                else {}
-                            ),
-                            "commit_group": commit_group,
-                            "commit": failed_commit,
-                            "error": commit_error,
-                        },
-                        persistence=persistence,
                     )
-                    break
 
             try:
                 committed_turn = _commit_turn(

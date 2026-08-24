@@ -22,7 +22,6 @@ files = [
     "agent_session_loop",
     "tests",
     "skills/asl/scripts",
-    "skills/gitsummary/scripts",
     "skills/session-resplit/scripts",
 ]
 ignore_missing_imports = true

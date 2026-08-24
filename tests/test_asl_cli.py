@@ -25,6 +25,7 @@ from agent_session_loop import (
     authoring,
     bridge,
     cli,
+    commit_message,
     config,
     contracts,
     control_cli,
@@ -58,8 +59,8 @@ from tests.support import (
     git_stdout,
     init_multi_repo_workspace,
     install_fake_codex,
-    install_fake_spec,
     patched_env,
+    read_jsonl,
     write_multi_repo_plan,
     write_plan,
     write_plan_with_ids,
@@ -4236,6 +4237,91 @@ class SplitCliTests(unittest.TestCase):
             self.assertTrue(Path(payload["output_dir"]).is_dir())
 
 
+class CommitCliTests(unittest.TestCase):
+    """`asl commit` parser wiring: defaults, dests, and lazy dispatch."""
+
+    def test_commit_subparser_is_wired_with_defaults(self) -> None:
+        parser = cli.build_parser()
+        parsed = parser.parse_args(["commit"])
+
+        self.assertEqual("commit_message:commit_from_args", parsed.handler_ref)
+        self.assertIs(cli.resolve_handler(parsed), commit_message.commit_from_args)
+        self.assertIsNone(parsed.path)
+        self.assertFalse(parsed.yes)
+        # Hooks are skipped unless `--verify` asks for them, matching the skill.
+        self.assertFalse(parsed.verify)
+        self.assertFalse(parsed.staged)
+        self.assertFalse(parsed.dry_run)
+        self.assertIsNone(parsed.guidance)
+        self.assertIsNone(parsed.from_id)
+        self.assertIsNone(parsed.pathspec)
+        self.assertIsNone(parsed.harness)
+        self.assertIsNone(parsed.model)
+        self.assertIsNone(parsed.effort)
+        self.assertFalse(parsed.prepare_only)
+        self.assertIsNone(parsed.message_file)
+        self.assertFalse(parsed.json)
+
+    def test_commit_flags_parse_into_their_handler_dests(self) -> None:
+        parser = cli.build_parser()
+        parsed = parser.parse_args(
+            [
+                "commit",
+                "/tmp/repo",
+                "--yes",
+                "--verify",
+                "--staged",
+                "--dry-run",
+                "--guidance",
+                "be terse",
+                "--harness",
+                "claude",
+                "--model",
+                "gpt-5",
+                "--effort",
+                "high",
+                "--prepare-only",
+                "--json",
+            ]
+        )
+
+        self.assertEqual("/tmp/repo", parsed.path)
+        self.assertTrue(parsed.yes)
+        self.assertTrue(parsed.verify)
+        self.assertTrue(parsed.staged)
+        self.assertTrue(parsed.dry_run)
+        self.assertEqual("be terse", parsed.guidance)
+        self.assertEqual("claude", parsed.harness)
+        self.assertEqual("gpt-5", parsed.model)
+        self.assertEqual("high", parsed.effort)
+        self.assertTrue(parsed.prepare_only)
+        self.assertTrue(parsed.json)
+
+    def test_verify_and_no_verify_share_one_dest(self) -> None:
+        parser = cli.build_parser()
+
+        self.assertTrue(parser.parse_args(["commit", "--verify"]).verify)
+        self.assertFalse(
+            parser.parse_args(["commit", "--verify", "--no-verify"]).verify
+        )
+
+    def test_pathspec_accumulates_and_from_id_takes_a_sha(self) -> None:
+        parser = cli.build_parser()
+        parsed = parser.parse_args(
+            ["commit", "--pathspec", "a.py", "--pathspec", "docs/b.md"]
+        )
+
+        self.assertEqual(["a.py", "docs/b.md"], parsed.pathspec)
+        self.assertEqual(
+            "abc1234", parser.parse_args(["commit", "--from-id", "abc1234"]).from_id
+        )
+
+    def test_an_unknown_harness_is_rejected_by_the_parser(self) -> None:
+        parser = cli.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["commit", "--harness", "nope"])
+
+
 class StatusLabelResolutionCliTests(unittest.TestCase):
     """End-to-end coverage for `asl status PLAN_DIR_OR_ID` label resolution."""
 
@@ -4939,16 +5025,14 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            install_fake_spec(tmp_dir)
-            spec_log = tmp_dir / "fake-spec.jsonl"
+            commit_log = tmp_dir / "fake-commit.jsonl"
             mutations = [
                 {"path": str(repositories[alias] / "changed.txt"), "text": alias}
                 for alias in ("SVC", "OAK")
             ]
             env = self._fake_codex_env(
                 tmp_dir,
-                PATH=str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
-                FAKE_SPEC_LOG=str(spec_log),
+                FAKE_CODEX_COMMIT_LOG=str(commit_log),
                 FAKE_CODEX_MUTATIONS_JSON=json.dumps(mutations),
             )
 
@@ -4973,7 +5057,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 ["SVC", "OAK"],
                 [row["alias"] for row in group["successful_repositories"]],
             )
-            records = [json.loads(line) for line in spec_log.read_text().splitlines()]
+            records = read_jsonl(commit_log)
             self.assertEqual(
                 [
                     str(repositories["SVC"].resolve()),
@@ -4999,14 +5083,12 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            install_fake_spec(tmp_dir)
             mutations = [
                 {"path": str(repositories[alias] / "end.txt"), "text": alias}
                 for alias in ("SVC", "OAK")
             ]
             env = self._fake_codex_env(
                 tmp_dir,
-                PATH=str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
                 FAKE_CODEX_MUTATIONS_JSON=json.dumps(mutations),
             )
 
@@ -5033,12 +5115,10 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             workspace_root, plan_dir, _repositories = self._workspace_plan(tmp_dir)
-            install_fake_spec(tmp_dir)
-            spec_log = tmp_dir / "fake-spec.jsonl"
+            commit_log = tmp_dir / "fake-commit.jsonl"
             env = self._fake_codex_env(
                 tmp_dir,
-                PATH=str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
-                FAKE_SPEC_LOG=str(spec_log),
+                FAKE_CODEX_COMMIT_LOG=str(commit_log),
             )
 
             completed = self._run(
@@ -5054,7 +5134,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertEqual([], payload["commits"])
             self.assertEqual([], payload["commit_groups"][0]["ordered_aliases"])
             self.assertEqual("complete", payload["commit_groups"][0]["status"])
-            self.assertFalse(spec_log.exists())
+            self.assertFalse(commit_log.exists())
 
     def test_multi_repo_per_session_commit_skips_harness_committed_head(
         self,
@@ -5062,13 +5142,11 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             workspace_root, plan_dir, repositories = self._workspace_plan(tmp_dir)
-            install_fake_spec(tmp_dir)
-            spec_log = tmp_dir / "fake-spec.jsonl"
+            commit_log = tmp_dir / "fake-commit.jsonl"
             head_before = git_stdout(repositories["SVC"], "rev-parse", "HEAD")
             env = self._fake_codex_env(
                 tmp_dir,
-                PATH=str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
-                FAKE_SPEC_LOG=str(spec_log),
+                FAKE_CODEX_COMMIT_LOG=str(commit_log),
                 FAKE_CODEX_MUTATION_PATH=str(repositories["SVC"]),
                 FAKE_CODEX_MUTATION_ACTION="commit-head",
             )
@@ -5090,18 +5168,14 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertEqual([], payload["commits"])
             self.assertEqual([], payload["commit_groups"][0]["ordered_aliases"])
             self.assertEqual("complete", payload["commit_groups"][0]["status"])
-            self.assertFalse(spec_log.exists())
+            self.assertFalse(commit_log.exists())
 
     def test_multi_repo_commit_preflight_requires_every_repository_clean(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             workspace_root, plan_dir, repositories = self._workspace_plan(tmp_dir)
-            install_fake_spec(tmp_dir)
             (repositories["OAK"] / "dirty.txt").write_text("dirty\n", encoding="utf-8")
-            env = self._fake_codex_env(
-                tmp_dir,
-                PATH=str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
-            )
+            env = self._fake_codex_env(tmp_dir)
 
             completed = self._run(
                 plan_dir,
@@ -5147,37 +5221,47 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             plans.save_workspace_plan_metadata(
                 plan_dir, workspace_root, registry.digest
             )
-            install_fake_spec(tmp_dir)
-            spec_log = tmp_dir / "fake-spec.jsonl"
+            commit_log = tmp_dir / "fake-commit.jsonl"
             state_dir = tmp_dir / "state"
             base_env = self._fake_codex_env(
                 tmp_dir,
-                PATH=str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
-                FAKE_SPEC_LOG=str(spec_log),
+                FAKE_CODEX_COMMIT_LOG=str(commit_log),
             )
             mutations = [
                 {"path": str(repositories[alias] / "changed.txt"), "text": alias}
                 for alias in ("SVC", "OAK")
             ]
+            # `--max-sessions 1` ends the first run while the group is still
+            # owed; without it the run would retry the group itself and the
+            # second process would have nothing to recover.
             first = self._run(
                 plan_dir,
                 workspace_root,
                 state_dir,
                 "--commit-per-session",
+                "--max-sessions",
+                "1",
                 env_overrides={
                     **base_env,
                     "FAKE_CODEX_MUTATIONS_JSON": json.dumps(mutations),
-                    "FAKE_SPEC_FAIL_CWD_BASENAME": repositories["OAK"].name,
+                    "FAKE_CODEX_COMMIT_FAIL_CWD_BASENAME": repositories["OAK"].name,
                 },
             )
 
-            self.assertEqual(1, first.returncode, first.stderr)
+            self.assertEqual(0, first.returncode, first.stderr)
             first_payload = json.loads(first.stdout)
-            self.assertEqual("commit-failed", first_payload["pause_reason"])
+            self.assertFalse(first_payload["paused"])
             first_group = first_payload["commit_groups"][0]
             self.assertEqual("failed", first_group["status"])
             self.assertEqual("OAK", first_group["failed_alias"])
             self.assertEqual(["OAK"], first_group["remaining_aliases"])
+            self.assertEqual(
+                ["OAK"],
+                [
+                    summary["failed_alias"]
+                    for summary in first_payload["unresolved_commit_groups"]
+                ],
+            )
 
             second = self._run(
                 plan_dir,
@@ -5192,10 +5276,14 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertTrue(second_payload["commit_group_recovery"]["success"])
             recovered = second_payload["commit_group_recovery"]["group"]
             self.assertEqual("complete", recovered["status"])
-            records = [json.loads(line) for line in spec_log.read_text().splitlines()]
+            records = read_jsonl(commit_log)
+            # SVC committed once; OAK refused twice in the first run — the
+            # commit itself and the in-run retry — and landed on the third
+            # turn, the one the second process ran before anything else.
             self.assertEqual(
                 [
                     repositories["SVC"].name,
+                    repositories["OAK"].name,
                     repositories["OAK"].name,
                     repositories["OAK"].name,
                 ],
@@ -5235,13 +5323,11 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             plans.save_workspace_plan_metadata(
                 plan_dir, workspace_root, registry.digest
             )
-            install_fake_spec(tmp_dir)
-            spec_log = tmp_dir / "fake-spec.jsonl"
+            commit_log = tmp_dir / "fake-commit.jsonl"
             state_dir = tmp_dir / "state"
             base_env = self._fake_codex_env(
                 tmp_dir,
-                PATH=str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
-                FAKE_SPEC_LOG=str(spec_log),
+                FAKE_CODEX_COMMIT_LOG=str(commit_log),
             )
             mutations = [
                 {"path": str(repositories[alias] / "changed.txt"), "text": alias}
@@ -5255,17 +5341,24 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 env_overrides={
                     **base_env,
                     "FAKE_CODEX_MUTATIONS_JSON": json.dumps(mutations),
-                    "FAKE_SPEC_FAIL_CWD_BASENAME": repositories["OAK"].name,
+                    "FAKE_CODEX_COMMIT_FAIL_CWD_BASENAME": repositories["OAK"].name,
                 },
             )
 
-            self.assertEqual(1, first.returncode, first.stderr)
+            self.assertEqual(0, first.returncode, first.stderr)
             first_payload = json.loads(first.stdout)
             self.assertIsNone(first_payload["commit_mode"])
             self.assertEqual("per-child", first_payload["repair_commit_mode"])
-            self.assertEqual("commit-failed", first_payload["pause_reason"])
+            self.assertFalse(first_payload["paused"])
             self.assertEqual(
                 ["OAK"], first_payload["commit_groups"][0]["remaining_aliases"]
+            )
+            self.assertEqual(
+                ["OAK"],
+                [
+                    summary["failed_alias"]
+                    for summary in first_payload["unresolved_commit_groups"]
+                ],
             )
 
             second = self._run(

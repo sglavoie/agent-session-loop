@@ -35,7 +35,6 @@ from tests.support import (
     init_multi_repo_workspace,
     install_fake_codex,
     install_fake_harness,
-    install_fake_spec,
     read_jsonl,
     write_multi_repo_plan,
     write_plan,
@@ -781,7 +780,6 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
         self.config_home = self.tmp_path / "config"
         self.fake_codex = install_fake_codex(self.tmp_path)
         self.fake_claude = install_fake_harness(self.tmp_path, "claude")
-        install_fake_spec(self.tmp_path)
         config_path = self.config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
@@ -1308,7 +1306,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
                 workspace, plan_dir, state_dir, repositories, _unregistered = (
                     self._prepare_case(name)
                 )
-                spec_log = self.tmp_path / f"{name}.jsonl"
+                commit_log = self.tmp_path / f"{name}.jsonl"
                 mutations = [
                     {
                         "path": str(repositories[alias] / "committed.txt"),
@@ -1333,7 +1331,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
                                 "2": [],
                             }
                         ),
-                        "FAKE_SPEC_LOG": str(spec_log),
+                        "FAKE_CODEX_COMMIT_LOG": str(commit_log),
                     },
                 )
                 self.assertEqual(0, completed.returncode, completed.stderr)
@@ -1353,14 +1351,14 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
                         str(repositories[alias].resolve())
                         for alias in ("SVC", "OAK", "OWL")
                     ],
-                    [record["cwd"] for record in read_jsonl(spec_log)],
+                    [record["cwd"] for record in read_jsonl(commit_log)],
                 )
 
     def test_partial_commit_failure_recovers_in_a_new_process(self) -> None:
         workspace, plan_dir, state_dir, repositories, _unregistered = (
             self._prepare_case("partial-commit")
         )
-        spec_log = self.tmp_path / "partial-commit.jsonl"
+        commit_log = self.tmp_path / "partial-commit.jsonl"
         mutations = [
             {
                 "path": str(repositories[alias] / "partial.txt"),
@@ -1384,12 +1382,21 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
                         ]
                     }
                 ),
-                "FAKE_SPEC_LOG": str(spec_log),
-                "FAKE_SPEC_FAIL_CWD_BASENAME": repositories["OAK"].name,
+                "FAKE_CODEX_COMMIT_LOG": str(commit_log),
+                "FAKE_CODEX_COMMIT_FAIL_CWD_BASENAME": repositories["OAK"].name,
             },
         )
-        self.assertEqual(1, first.returncode, first.stderr)
-        self.assertEqual("commit-failed", first_payload["pause_reason"])
+        # The refused commit no longer stops the run; it leaves the group owed
+        # and says so, which is what the next process recovers from.
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertFalse(first_payload["paused"])
+        self.assertEqual(
+            ["OAK"],
+            [
+                summary["failed_alias"]
+                for summary in first_payload["unresolved_commit_groups"]
+            ],
+        )
         failed_group = first_payload["commit_groups"][0]
         self.assertEqual("OAK", failed_group["failed_alias"])
         self.assertEqual(["OAK", "OWL"], failed_group["remaining_aliases"])
@@ -1405,7 +1412,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
             state_dir,
             "--resume",
             "--dry-run",
-            env_updates={"FAKE_SPEC_LOG": str(spec_log)},
+            env_updates={"FAKE_CODEX_COMMIT_LOG": str(commit_log)},
         )
         self.assertEqual(0, dry.returncode, dry.stderr)
         self.assertTrue(dry_payload["commit_group_recovery"]["pending"])
@@ -1415,18 +1422,23 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
             workspace,
             state_dir,
             "--resume",
-            env_updates={"FAKE_SPEC_LOG": str(spec_log)},
+            env_updates={"FAKE_CODEX_COMMIT_LOG": str(commit_log)},
         )
         self.assertEqual(0, resumed.returncode, resumed.stderr)
         self.assertTrue(resumed_payload["commit_group_recovery"]["success"])
+        # SVC committed once and OAK refused three times in the first run —
+        # the commit itself plus the two in-run retries the group is worth —
+        # before the second process completed the group it was still owed.
         self.assertEqual(
             [
                 repositories["SVC"].name,
                 repositories["OAK"].name,
                 repositories["OAK"].name,
+                repositories["OAK"].name,
+                repositories["OAK"].name,
                 repositories["OWL"].name,
             ],
-            [Path(record["cwd"]).name for record in read_jsonl(spec_log)],
+            [Path(record["cwd"]).name for record in read_jsonl(commit_log)],
         )
         self.assertEqual(svc_head, git_stdout(repositories["SVC"], "rev-parse", "HEAD"))
         for repository in repositories.values():

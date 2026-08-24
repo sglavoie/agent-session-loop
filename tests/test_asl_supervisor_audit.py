@@ -5152,7 +5152,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
     ) -> None:
         """Record one commit before the run's terminal record.
 
-        Shaped like ``runner._run_spec_commit``'s payload, which writes
+        Shaped like ``runner._run_asl_commit``'s payload, which writes
         ``success`` and ``status_result`` and no ``ok`` field. A helper that adds
         one grades a record no run emits, and hides that every commit failure but
         ``nonzero-exit`` is reached at exit zero.
@@ -5335,6 +5335,79 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn(
                 "failed without recording why",
                 results["commit-failure-accounting"].detail,
+            )
+
+    def _state_with(
+        self, history: tuple[Path, Path, Path, Path], **fields: Any
+    ) -> None:
+        payload = self._clean_state(history[0])
+        payload.update(fields)
+        self._write_state(history[2], payload)
+
+    def test_a_run_that_ended_owing_commits_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # A commit failure no longer pauses the run, so the audit is what
+            # makes the loss visible to a supervisor at all.
+            self._state_with(
+                history,
+                unresolved_commit_groups=[
+                    {
+                        "group_id": "g1",
+                        "scope": "session",
+                        "session_id": "2",
+                        "status": "failed",
+                        "failed_alias": "app",
+                        "remaining_aliases": ["app"],
+                        "committed_aliases": [],
+                    }
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["commit-group-resolution"].status)
+            self.assertIn("session 2 in app", results["commit-group-resolution"].detail)
+
+    def test_a_run_that_completed_every_group_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._state_with(
+                history,
+                unresolved_commit_groups=[],
+                commit_groups=[{"group_id": "g1", "status": "complete"}],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["commit-group-resolution"].status)
+            self.assertIn(
+                "reached completion", results["commit-group-resolution"].detail
+            )
+
+    def test_a_failed_group_is_read_from_an_older_run_that_names_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # A run recorded before the field existed still says what it owes,
+            # in the group rows themselves.
+            self._state_with(
+                history,
+                commit_groups=[
+                    {
+                        "group_id": "g1",
+                        "status": "failed",
+                        "session_id": None,
+                        "failed_alias": "app",
+                    }
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["commit-group-resolution"].status)
+            self.assertIn(
+                "the end-of-run commit in app",
+                results["commit-group-resolution"].detail,
             )
 
     def test_a_final_failure_is_accounted_for_by_its_classification(self) -> None:

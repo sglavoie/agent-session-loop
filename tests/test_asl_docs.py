@@ -327,6 +327,39 @@ class SkillInstructionTests(unittest.TestCase):
         for category in categories:
             self.assertIn(f"`{category}`", text)
 
+    def test_docs_name_every_preflight_category_and_no_retired_one(self) -> None:
+        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
+
+        for category in preflight.PREFLIGHT_CATEGORIES:
+            self.assertIn(f"`{category}`", text)
+        # `env-spec` was retired with the external `spec commit` dependency;
+        # the finding list must not keep advertising a category no run emits.
+        self.assertNotIn("env-spec", preflight.PREFLIGHT_CATEGORIES)
+        self.assertNotIn("env-spec", text)
+
+    def test_docs_document_every_asl_commit_mode(self) -> None:
+        text = (REPO_ROOT / "docs/agent-session-loop.md").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run]",
+            text,
+        )
+        self.assertIn("It is usable standalone, outside any loop or plan.", text)
+        # One command, four modes: the synopsis alone does not say which flag
+        # selects which behavior, so each is named in prose.
+        for mode in (
+            "**default**",
+            "**`--from-id SHA`**",
+            "**`--prepare-only`**",
+            "**`--message-file PATH`**",
+        ):
+            self.assertIn(mode, text)
+        self.assertIn("`--staged` trusts the index and\nnever touches it", text)
+        self.assertIn("budgeted to 150 KB", text)
+        self.assertIn("with `-` reading stdin", text)
+        # The retired external binary must not reappear in either spelling.
+        self.assertNotIn("spec commit", text)
+
     def test_session_run_documents_bounded_manual_auto_repair(self) -> None:
         text = (REPO_ROOT / "skills/session-run/SKILL.md").read_text(encoding="utf-8")
 
@@ -761,10 +794,17 @@ class HarnessDocsRegressionTests(unittest.TestCase):
     def test_docs_expose_only_role_specific_asl_model_flags(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         commands = docs.split("## Commands", 1)[1].split("\n## ", 1)[0]
+        # The guard is about commands that drive turns in more than one role:
+        # those must always name the role a model is forwarded to. `asl commit`
+        # runs exactly one turn in one role, so a plain `--model` there names
+        # nothing ambiguous and is excluded rather than weakening the rule.
+        multi_role = "\n".join(
+            line for line in commands.splitlines() if not line.startswith("asl commit ")
+        )
 
         self.assertIn("[--harness-model MODEL]", commands)
         self.assertIn("[--review-harness-model MODEL]", commands)
-        self.assertNotIn("[--model MODEL]", commands)
+        self.assertNotIn("[--model MODEL]", multi_role)
         self.assertIn(
             "ASL's `--harness-model` is forwarded only to turns using the "
             "implementation",

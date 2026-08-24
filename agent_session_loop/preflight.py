@@ -128,7 +128,6 @@ PreflightCategory = Literal[
     "env-repo-root",
     "env-git",
     "env-harness",
-    "env-spec",
     "env-lock",
     "env-amx",
     "env-turn-budget",
@@ -163,7 +162,6 @@ PREFLIGHT_CATEGORIES: tuple[PreflightCategory, ...] = (
     "env-repo-root",
     "env-git",
     "env-harness",
-    "env-spec",
     "env-lock",
     "env-amx",
     "env-turn-budget",
@@ -672,20 +670,6 @@ REPAIR_HINTS: dict[PreflightCategory, RepairHint] = {
         ),
         question_template=(
             "Harness CLI problem: {message}. Should I help configure harnesses.json?"
-        ),
-        fix_category="env-install",
-    ),
-    "env-spec": RepairHint(
-        category="env-spec",
-        check_id="env-spec.install",
-        severity_hint="red",
-        message=(
-            "Install `spec` on PATH, or omit `--commit-per-session` / "
-            "`--commit-at-end`."
-        ),
-        question_template=(
-            "spec is required for the requested commit mode. "
-            "Should I drop the commit-mode flag or help install spec?"
         ),
         fix_category="env-install",
     ),
@@ -2675,22 +2659,6 @@ def _check_env_harness(harness: str) -> tuple[PreflightFinding, ...]:
     return ()
 
 
-def _check_env_spec(commit_mode: CommitMode) -> tuple[PreflightFinding, ...]:
-    if shutil.which("spec") is None:
-        return (
-            _finding(
-                "red",
-                "env-spec",
-                (
-                    "spec executable not found on PATH "
-                    f"(required for commit-mode {commit_mode!r})"
-                ),
-                detail="install spec or omit --commit-per-session/--commit-at-end",
-            ),
-        )
-    return ()
-
-
 def _check_env_lock(
     plan_dir: Path,
     state_dir: str | Path | None,
@@ -2844,9 +2812,6 @@ def _run_environment_checks(
 
     if harness is not None:
         findings.extend(_check_env_harness(harness))
-
-    if commit_mode is not None:
-        findings.extend(_check_env_spec(commit_mode))
 
     findings.extend(_check_env_lock(plan_dir, state_dir))
     findings.extend(_check_env_amx())

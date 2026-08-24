@@ -264,7 +264,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         action="store_const",
         const="per-session",
         mutex_group="commit",
-        help="Run 'spec commit --yes --no-verify' after each completed session",
+        help="Run 'asl commit --yes --no-verify' after each completed session",
     ),
     RunFlag(
         dest="commit_mode",
@@ -272,7 +272,7 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         action="store_const",
         const="end",
         mutex_group="commit",
-        help="Run 'spec commit --yes --no-verify' once after all sessions complete",
+        help="Run 'asl commit --yes --no-verify' once after all sessions complete",
     ),
     RunFlag(
         dest="state_dir",

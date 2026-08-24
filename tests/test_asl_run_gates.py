@@ -44,11 +44,11 @@ from tests.support import (
     _load_script_module,
     _structured_review_finding,
     agent_mux_notify_enabled,
+    fake_commit_harness_env,
     init_git_repo,
     init_multi_repo_workspace,
     install_fake_amx,
     install_fake_codex,
-    install_fake_spec,
     patched_env,
     read_jsonl,
     write_completed_review_plan,
@@ -3085,8 +3085,7 @@ class _GeneratedRepairDispatchFixture(unittest.TestCase):
         self.state_dir = self.tmp_path / "state"
         self.child = self.plan_dir / "session-2.1.md"
         self.prompts: list[str] = []
-        install_fake_spec(self.tmp_path)
-        self.path_env = str(self.tmp_path) + os.pathsep + os.environ.get("PATH", "")
+        self.commit_env = fake_commit_harness_env(self.tmp_path)
 
     def _finding(
         self,
@@ -3220,7 +3219,7 @@ class _GeneratedRepairDispatchFixture(unittest.TestCase):
         lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
         try:
             with (
-                patched_env(PATH=self.path_env),
+                patched_env(**self.commit_env),
                 mock.patch.object(runner.harnesses, "run_harness", side_effect=harness),
             ):
                 return runner._run_locked(

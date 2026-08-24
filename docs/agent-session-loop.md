@@ -418,14 +418,17 @@ parent's read and write scope exactly. Resplitting never broadens authority;
 an explicit later plan edit may narrow a child's scope before fresh readiness
 validation.
 
-Optional auto-commit modes require `spec` on `PATH`. Legacy plans require their
+Legacy plans require their
 resolved Git worktree to be clean before the first harness turn; registered
 plans require every declared repository clean. Use `--commit-per-session` to
 commit after each verified completed session, or `--commit-at-end` to commit
 after all pending sessions complete in the same run. Registered per-session
 groups contain only changed write aliases proven by the turn guard; registered
 end groups contain every changed declared repository. Repositories are
-committed serially in manifest order with `spec commit --yes --no-verify`. A
+committed serially in manifest order with ASL's own `asl commit`, invoked as
+`python -m agent_session_loop commit --yes --no-verify` inside this checkout and
+scoped to the paths the turn guard recorded. A commit that fails is recorded,
+retried, and reported instead of pausing the run. A
 stop-after-current request before all sessions complete exits successfully
 (`reason: stopped`) without running the final `--commit-at-end` commit. A stop
 honored once every session is complete still runs that commit first, then stops
@@ -479,8 +482,39 @@ asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
 asl migrate-state PLAN_DIR --from OLD_PLAN_PATH [--state-dir DIR] [--apply] [--json]
 asl metrics [--since-days N] [--state-dir DIR] [--json]
+asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guidance TEXT] [--from-id SHA] [--pathspec PATH ...] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--prepare-only] [--message-file PATH] [--json]
 asl bridge serve [--stdio] [--protocol VERSION] [--state-dir DIR] [--plan-root DIR]
 ```
+
+`asl commit` writes Conventional Commits messages for the worktree containing
+`PATH` (default: the current directory), and is the same command the auto-commit
+groups above invoke. It is usable standalone, outside any loop or plan. Staging
+is chosen by flag before anything else happens: `--staged` trusts the index and
+never touches it, `--pathspec PATH` (repeatable) stages exactly what it names and
+leaves every other change alone, and the default stages everything. The captured
+diff is budgeted to 150 KB and always inlined into the prompt. One command, four
+modes:
+
+- **default** — capture the staged diff, generate the message in a single
+  read-only harness turn (`--harness`, `--model`, `--effort`, `--guidance`
+  steer it), format it, and commit. `--dry-run` prints the message and stops
+  without committing; `--yes` skips the confirmation prompt, as does any
+  non-interactive invocation.
+- **`--from-id SHA`** — print a message describing an existing commit. It never
+  stages and never commits; apply it with `git commit --amend` if you want it.
+- **`--prepare-only`** — emit a single-line JSON header (`mode`, `yes`,
+  `no_verify`, `guidance`, `is_truncated`, `truncation_notes`, `from_id`), a
+  blank line, and the budgeted diff, then stop. No harness turn is taken; this
+  is how the `gitsummary` skill hands the diff to its own host agent.
+- **`--message-file PATH`** — commit the supplied message instead of generating
+  one, with `-` reading stdin. It is formatted and stripped of disallowed
+  attribution trailers exactly as a generated message would be, and it is the
+  one mode that needs no harness at all.
+
+`--verify` runs git hooks; `--no-verify` is the default. Stdout carries the
+commit message and nothing else, so the command can be piped or redirected;
+progress, truncation warnings, and the resulting SHA go to stderr. `--json`
+replaces both with one scriptable payload.
 
 ## Live Mailbox and Future-Turn Model Control
 
@@ -1076,9 +1110,15 @@ SHAs, failed alias, and remaining aliases. If a process stops or a later
 repository fails, the next run reconstructs the unresolved group and completes
 it before launching a worker. Already successful repositories are never
 committed twice; unresolved repositories that are now clean are recorded as
-recovered or skipped. A failure retains earlier successful commits and pauses
-with repository-qualified commit artifacts. Legacy single-repository commits
-use the same coordinator, which also makes a failed per-session commit
+recovered or skipped. A failure retains earlier successful commits, records
+repository-qualified commit artifacts, and does not stop the run: the group is
+left owed, retried at the next commit boundary in the same run, and the loop
+continues to the next session. Each group is retried at most twice inside one
+run, so a repository that refuses every time does not turn the session loop
+into a commit loop; whatever is still owed when the run ends is reported in
+`commit_failures`, `unresolved_commit_groups`, the final summary, and the
+supervisor audit's `commit-group-resolution` check. Legacy single-repository
+commits use the same coordinator, which also makes a failed per-session commit
 retryable on resume.
 
 The runner is the last authority on which repositories a run may reach, and it
@@ -1876,7 +1916,7 @@ recreates them.
 
 Generated repair children use a mandatory runner-owned `per-child` commit
 policy even when ordinary `commit_mode` is null. Before each child launches,
-ASL requires `spec` and a clean set of that child's writable repositories;
+ASL requires a clean set of that child's writable repositories;
 failure pauses as `commit-preflight` with repository-qualified dirty paths and
 spends no harness turn. After verification, ASL commits only dirty aliases
 attributed by the write guard, in registry order. A no-change child or a child
@@ -1953,7 +1993,7 @@ The stable finding categories are `plan-structure`, `canonical-session-id`,
 `repository-origin`, `repository-overlap`, `repository-scope`,
 `repository-contract`, `repository-footprint`,
 `repository-registry-required`, `env-repo-root`, `env-git`,
-`env-harness`, `env-spec`, `env-lock`, `env-amx`, and `env-turn-budget`.
+`env-harness`, `env-lock`, `env-amx`, and `env-turn-budget`.
 Consumers should branch on these
 category values and the paired repair hint rather than parsing message prose.
 
@@ -3599,7 +3639,7 @@ The remaining runtime files live under a plan's hash directory:
   turn, including argv, status changes, runner signals, snapshots, and artifact
   paths.
 - `runs/<run_id>/commit-0001-session-<id>/stdout.log`: stdout from an automatic
-  per-session `spec commit --yes --no-verify` invocation.
+  per-session `asl commit --yes --no-verify` invocation.
 - `runs/<run_id>/commit-0001-session-<id>/stderr.log`: stderr from that commit.
 - `runs/<run_id>/commit-0001-session-<id>/result.json`: diagnostic commit
   result, including argv, cwd, return code, HEAD before/after, status result,
@@ -4084,8 +4124,10 @@ Commit payloads include `commit_index`, `scope`, `session`, `session_id`,
 and `stderr_chars`. Integer-only session commits also include
 `session_number`. `status_result` is `success` only when the command exits zero
 and changes `HEAD`; nonzero exits, missing `HEAD`, and unchanged `HEAD` are
-recorded as failed commit attempts. A failed commit is also copied into
-`pause_details.commit`.
+recorded as failed commit attempts. A failed commit is also copied into the
+`commit_failures` entry it produced and into that turn's `session_commit`
+record; when a pause carries a commit at all, it is copied into
+`pause_details.commit` as well.
 
 Dry-run `planned` payloads, harness invocation payloads, active turn state,
 events, and turn `result.json` artifacts include the same model and effort
@@ -4288,15 +4330,20 @@ Common pause reasons:
   are complete.
 - `commit-preflight`: auto-commit setup failed before the first harness turn or
   before a generated repair child,
-  such as a dirty initial worktree, missing `spec`, a non-git working
+  such as a dirty initial worktree, a non-git working
   directory, or an incompatible `--commit-at-end` and `--max-sessions`
   combination.
-- `commit-failed`: a durable commit group could not be reconstructed or a
-  repository's `spec commit --yes --no-verify` did not create a clean new
-  commit. This includes nonzero exits, zero-exit no-op commits that leave
-  `HEAD` unchanged, and a command that changes `HEAD` but leaves tracked or
-  untracked Git status behind. The pause details identify the failed alias,
-  successful repository SHAs, remaining aliases, and repo-qualified artifacts.
+- `commit-failed`: a durable commit group could not be reconstructed. An
+  unreadable ledger is the one commit failure that still pauses, because
+  continuing would risk committing work twice or losing the record of what
+  already landed. A repository's `asl commit --yes --no-verify` that does not
+  create a clean new commit — a nonzero exit, a zero-exit no-op that leaves
+  `HEAD` unchanged, or a command that changes `HEAD` but leaves tracked or
+  untracked Git status behind — no longer pauses; it is recorded, retried, and
+  reported. Runs recorded before that change, and the Recovery Center entries
+  built from them, still carry this reason with details identifying the failed
+  alias, successful repository SHAs, remaining aliases, and repo-qualified
+  artifacts.
 - `harness-unavailable`: a runtime-selected future harness could not be resolved
   before the next turn started. The previous completed turn remains recorded,
   the lock is released, and `pause_details` identifies the session, requested

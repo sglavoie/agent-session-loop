@@ -180,6 +180,90 @@ class CommitGroupCoordinatorTests(unittest.TestCase):
                 )
 
 
+class UnresolvedCommitGroupTests(unittest.TestCase):
+    """What a run says it still owes once a commit failure stops pausing it."""
+
+    def group(self, **overrides: object) -> dict[str, object]:
+        row: dict[str, object] = {
+            "group_id": "g1",
+            "scope": "session",
+            "session_id": "3",
+            "status": commit_groups.GROUP_STATUS_FAILED,
+            "failed_alias": "OAK",
+            "remaining_aliases": ["OAK", "OWL"],
+            "successful_repositories": [{"key": "SVC", "commit_sha": "s1"}],
+        }
+        row.update(overrides)
+        return row
+
+    def test_completed_groups_are_not_owed(self) -> None:
+        payload = {
+            "commit_groups": [
+                self.group(status=commit_groups.GROUP_STATUS_COMPLETE),
+            ]
+        }
+
+        self.assertEqual([], runner._unresolved_commit_groups(payload))
+
+    def test_failed_group_reports_what_landed_and_what_did_not(self) -> None:
+        payload = {"commit_groups": [self.group()]}
+
+        summary = runner._unresolved_commit_groups(payload)[0]
+
+        self.assertEqual("g1", summary["group_id"])
+        self.assertEqual("3", summary["session_id"])
+        self.assertEqual("OAK", summary["failed_alias"])
+        self.assertEqual(["OAK", "OWL"], summary["remaining_aliases"])
+        self.assertEqual(["SVC"], summary["committed_aliases"])
+        self.assertEqual(
+            "session 3 (OAK)", runner._unresolved_commit_group_label(summary)
+        )
+
+    def test_failure_without_a_durable_group_is_still_reported(self) -> None:
+        # A commit that fails before any group exists leaves no row behind, so
+        # the recorded failure is the only evidence the run can end honest on.
+        record = runner._commit_failure_record(
+            scope="end",
+            session_id=None,
+            group=None,
+            commit=None,
+            error="commit setup refused",
+            message="final auto-commit failed",
+        )
+        payload: dict[str, object] = {}
+        runner._append_commit_failure(payload, record)
+
+        summary = runner._unresolved_commit_groups(payload)[0]
+
+        self.assertIsNone(summary["group_id"])
+        self.assertEqual(commit_groups.GROUP_STATUS_FAILED, summary["status"])
+        self.assertEqual("commit setup refused", summary["error"])
+        self.assertEqual("end-of-run", runner._unresolved_commit_group_label(summary))
+
+    def test_a_group_that_failed_and_recovered_is_reported_once(self) -> None:
+        # The same group is written twice — failed, then complete — and only
+        # the final row decides, or a healed failure would be reported as loss.
+        payload = {
+            "commit_groups": [
+                self.group(
+                    status=commit_groups.GROUP_STATUS_COMPLETE, remaining_aliases=[]
+                )
+            ],
+            "commit_failures": [
+                runner._commit_failure_record(
+                    scope="session",
+                    session_id="3",
+                    group=self.group(),
+                    commit=None,
+                    error="refused once",
+                    message="auto-commit failed after session 3 completed",
+                )
+            ],
+        }
+
+        self.assertEqual([], runner._unresolved_commit_groups(payload))
+
+
 class DurableLedgerTests(unittest.TestCase):
     def test_event_append_fsyncs_before_returning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -45,14 +45,22 @@ def create_target(
     root: Path,
     repository_path: str,
     qualified_paths: Sequence[str] = (),
+    staging_paths: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """Return the canonical durable projection for one commit target."""
+    """Return the canonical durable projection for one commit target.
+
+    ``qualified_paths`` is the full change evidence for the target, ignored
+    files included.  ``staging_paths`` is the subset the runner may hand to
+    ``git add``; the two are separate because evidence must stay complete
+    while staging must not name a path git refuses to add.
+    """
     return {
         "key": repository_key(alias),
         "alias": alias,
         "root": str(root),
         "repository_path": repository_path,
         "qualified_paths": list(qualified_paths),
+        "staging_paths": list(staging_paths),
     }
 
 

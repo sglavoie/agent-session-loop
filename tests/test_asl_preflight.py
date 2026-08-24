@@ -2588,26 +2588,21 @@ class PreflightEnvironmentTests(unittest.TestCase):
         harness_findings = [f for f in report.findings if f.category == "env-harness"]
         self.assertEqual([], harness_findings)
 
-    def test_env_spec_missing_emits_red(self) -> None:
+    def test_commit_mode_needs_no_external_commit_executable(self) -> None:
+        # Auto-commit re-enters this checkout as `asl commit`, so an empty
+        # PATH can no longer withhold anything a commit mode depends on and
+        # preflight has nothing left to check for it.
         empty_path = self.tmp_path / "empty-path"
         empty_path.mkdir()
         with patched_env(PATH=str(empty_path)):
             report = preflight.run_environment_preflight(
                 self.plan_dir, commit_mode="per-session"
             )
-        spec_findings = [f for f in report.findings if f.category == "env-spec"]
-        self.assertEqual(1, len(spec_findings))
-        self.assertEqual("red", spec_findings[0].severity)
-        self.assertIn("spec executable not found", spec_findings[0].message)
-
-    def test_env_spec_present_is_silent(self) -> None:
-        path_str = self._path_with("spec")
-        with patched_env(PATH=path_str):
-            report = preflight.run_environment_preflight(
-                self.plan_dir, commit_mode="end"
-            )
-        spec_findings = [f for f in report.findings if f.category == "env-spec"]
-        self.assertEqual([], spec_findings)
+        self.assertEqual([], [f for f in report.findings if f.category == "env-spec"])
+        self.assertNotIn("env-spec", preflight.PREFLIGHT_CATEGORIES)
+        self.assertNotIn(
+            "spec", " ".join(finding.message for finding in report.findings)
+        )
 
     def test_env_lock_absent_emits_no_finding(self) -> None:
         report = preflight.run_environment_preflight(

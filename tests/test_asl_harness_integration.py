@@ -56,7 +56,6 @@ from tests.support import (
     install_fake_amx,
     install_fake_codex,
     install_fake_harness,
-    install_fake_spec,
     kill_marked_pids,
     patched_env,
     read_jsonl,
@@ -176,21 +175,35 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         write_plan_with_ids(plan_dir, statuses)
         return plan_dir, state_dir, config_home, fake_codex
 
-    def setup_fake_spec(
+    def setup_commit_harness(
         self,
         tmp_dir: Path,
         *,
         mode: str = "success",
-    ) -> tuple[Path, Path, dict[str, str]]:
-        fake_spec = install_fake_spec(tmp_dir)
-        log_path = tmp_dir / "fake-spec.jsonl"
-        env = {
-            "PATH": str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
-            "FAKE_SPEC_LOG": str(log_path),
-        }
+        mutation_path: str | None = "worked.txt",
+        fail_limit: int | None = None,
+    ) -> tuple[Path, dict[str, str]]:
+        """Give a run something to commit and log each commit-message turn.
+
+        Auto-commit re-enters this checkout as a subprocess that resolves its
+        generation harness from the run's own ``XDG_CONFIG_HOME``, so the fake
+        codex fixture answers a commit turn with no PATH shim. Unlike the fake
+        ``spec`` binary this replaces, ``asl commit`` refuses a clean worktree;
+        appending to ``mutation_path`` leaves every turn a distinct change to
+        commit. ``mutation_path=None`` is for a run whose cwd is dirtied by the
+        turn itself. ``fail_limit`` bounds a failing mode to its first N turns,
+        which is how a transient failure that heals on retry is staged.
+        """
+        log_path = tmp_dir / "fake-commit.jsonl"
+        env = {"FAKE_CODEX_COMMIT_LOG": str(log_path)}
         if mode != "success":
-            env["FAKE_SPEC_MODE"] = mode
-        return fake_spec, log_path, env
+            env["FAKE_CODEX_COMMIT_MODE"] = mode
+        if fail_limit is not None:
+            env["FAKE_CODEX_COMMIT_FAIL_LIMIT"] = str(fail_limit)
+        if mutation_path is not None:
+            env["FAKE_CODEX_MUTATION_PATH"] = mutation_path
+            env["FAKE_CODEX_MUTATION_ACTION"] = "append"
+        return log_path, env
 
     def event_index(
         self,
@@ -441,15 +454,24 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         run_id: str,
         review_outcomes: str,
         max_review_fix_cycles: int,
+        cwd: Path | None = None,
     ) -> tuple[int, dict[str, Any]]:
-        """Run one review-enabled loop in process over an existing plan."""
+        """Run one review-enabled loop in process over an existing plan.
+
+        ``cwd`` is the workspace the run guards and commits in. It defaults to
+        this checkout, which is fine for a run that only ever reads it; any run
+        that reaches a gate on repository cleanliness must pass its own
+        temporary repository instead, or it inherits whatever the developer
+        happens to have uncommitted here.
+        """
+        run_cwd = REPO_ROOT if cwd is None else cwd
         listener = FakeRunControlListener()
         real_state_dir = state.plan_state_dir(plan_dir, state_dir)
         listener.state_path = real_state_dir / events.STATE_FILE_NAME
         listener.events_path = real_state_dir / events.EVENTS_FILE_NAME
         args = argparse.Namespace(
             plan_dir=str(plan_dir),
-            cwd=str(REPO_ROOT),
+            cwd=str(run_cwd),
             harness="codex",
             review_harness="claude",
             state_dir=str(state_dir),
@@ -490,7 +512,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             try:
                 return runner._run_locked(
                     args=args,
-                    cwd=REPO_ROOT,
+                    cwd=run_cwd,
                     timeout=None,
                     max_sessions=None,
                     commit_mode=None,
@@ -2009,7 +2031,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             repo_dir = tmp_dir / "repo"
             init_git_repo(repo_dir)
-            _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
+            commit_log, commit_env = self.setup_commit_harness(tmp_dir)
             plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
                 statuses=("pending", "pending")
             )
@@ -2020,7 +2042,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 mode="streaming-success",
                 cwd=repo_dir,
                 commit_mode=runner.COMMIT_MODE_PER_SESSION,
-                extra_env=spec_env,
+                extra_env=commit_env,
             )
 
             output = self.read_run_pty_until(
@@ -2042,7 +2064,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 output=output,
             )
             payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
-            spec_records = read_jsonl(spec_log)
+            commit_records = read_jsonl(commit_log)
 
         self.assertEqual(0, process.returncode, output)
         self.assertIn("commit 1 finished (session 1, status success,", output)
@@ -2050,7 +2072,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertEqual([1], payload["completed_sessions"])
         self.assertEqual(1, len(payload["commits"]))
         self.assertTrue(payload["commits"][0]["success"])
-        self.assertEqual(1, len(spec_records))
+        self.assertEqual(1, len(commit_records))
         event_records = read_jsonl(Path(payload["events_path"]))
         commit_finished = self.event_index(
             event_records,
@@ -3071,7 +3093,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             repo_dir = tmp_dir / "repo"
             init_git_repo(repo_dir)
-            _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
+            commit_log, commit_env = self.setup_commit_harness(tmp_dir)
             listener = FakeRunControlListener(stop_requested=True)
 
             exit_code, payload, _plan_dir, _state_dir, _fake_codex = (
@@ -3081,17 +3103,17 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     listener=listener,
                     cwd=repo_dir,
                     commit_mode=runner.COMMIT_MODE_PER_SESSION,
-                    extra_env=spec_env,
+                    extra_env=commit_env,
                 )
             )
-            spec_records = read_jsonl(spec_log)
+            commit_records = read_jsonl(commit_log)
 
         self.assertEqual(0, exit_code)
         self.assertEqual("stopped", payload["reason"])
         self.assertEqual([1], payload["completed_sessions"])
         self.assertEqual(1, len(payload["commits"]))
         self.assertTrue(payload["commits"][0]["success"])
-        self.assertEqual(1, len(spec_records))
+        self.assertEqual(1, len(commit_records))
         event_records = read_jsonl(Path(payload["events_path"]))
         commit_finished = self.event_index(
             event_records,
@@ -3494,7 +3516,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             repo_dir = tmp_dir / "repo"
             init_git_repo(repo_dir)
-            _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
+            commit_log, commit_env = self.setup_commit_harness(tmp_dir)
             (repo_dir / "dirty.txt").write_text("dirty\n", encoding="utf-8")
 
             completed, payload, plan_dir, _state_dir, _fake_codex = self.run_loop(
@@ -3502,7 +3524,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 statuses=("pending",),
                 cwd=repo_dir,
                 commit_mode=runner.COMMIT_MODE_PER_SESSION,
-                extra_env=spec_env,
+                extra_env=commit_env,
             )
 
             self.assertEqual(1, completed.returncode)
@@ -3513,7 +3535,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertIn("git status --porcelain", payload["pause_message"])
             self.assertEqual([], payload["turns"])
             self.assertEqual([], payload["commits"])
-            self.assertFalse(spec_log.exists())
+            self.assertFalse(commit_log.exists())
             self.assertIn(
                 "- **Status**: pending",
                 (plan_dir / "session-1.md").read_text(encoding="utf-8"),
@@ -3524,7 +3546,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             repo_dir = tmp_dir / "repo"
             init_git_repo(repo_dir)
-            _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
+            commit_log, commit_env = self.setup_commit_harness(tmp_dir)
             initial_commit_count = int(
                 git_stdout(repo_dir, "rev-list", "--count", "HEAD")
             )
@@ -3534,7 +3556,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 statuses=("pending", "pending"),
                 cwd=repo_dir,
                 commit_mode=runner.COMMIT_MODE_PER_SESSION,
-                extra_env=spec_env,
+                extra_env=commit_env,
             )
 
             self.assertEqual(0, completed.returncode, completed.stderr)
@@ -3549,10 +3571,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
 
             expected_cwd = str(plans.canonicalize_path(repo_dir))
-            spec_records = read_jsonl(spec_log)
-            self.assertEqual(2, len(spec_records))
-            for record in spec_records:
-                self.assertEqual(["commit", "--yes", "--no-verify"], record["argv"][1:])
+            commit_records = read_jsonl(commit_log)
+            self.assertEqual(2, len(commit_records))
+            for record in commit_records:
                 self.assertEqual(expected_cwd, record["cwd"])
 
             self.assertEqual(2, len(payload["commits"]))
@@ -3562,8 +3583,22 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 self.assertEqual("session", commit["scope"])
                 self.assertEqual(expected_session, commit["session"])
                 self.assertEqual(expected_cwd, commit["cwd"])
+                # The run commits with the `asl commit` its own checkout
+                # ships, under the run's declared implementation harness --
+                # never with a `spec` resolved off PATH. A legacy target has
+                # no recorded write scope, so it stages repository-wide and
+                # carries no `--pathspec`.
                 self.assertEqual(
-                    ["spec", "commit", "--yes", "--no-verify"],
+                    [
+                        sys.executable,
+                        "-m",
+                        "agent_session_loop",
+                        "commit",
+                        "--yes",
+                        "--no-verify",
+                        "--harness",
+                        "codex",
+                    ],
                     commit["argv"],
                 )
                 self.assertTrue(Path(commit["result_path"]).exists())
@@ -3601,7 +3636,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             repo_dir = tmp_dir / "repo"
             init_git_repo(repo_dir)
-            _fake_spec, spec_log, spec_env = self.setup_fake_spec(tmp_dir)
+            commit_log, commit_env = self.setup_commit_harness(tmp_dir)
             initial_commit_count = int(
                 git_stdout(repo_dir, "rev-list", "--count", "HEAD")
             )
@@ -3611,7 +3646,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 statuses=("pending", "pending"),
                 cwd=repo_dir,
                 commit_mode=runner.COMMIT_MODE_END,
-                extra_env=spec_env,
+                extra_env=commit_env,
             )
 
             self.assertEqual(0, completed.returncode, completed.stderr)
@@ -3620,7 +3655,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(runner.COMMIT_MODE_END, payload["commit_mode"])
             self.assertEqual([1, 2], payload["completed_sessions"])
             self.assertEqual(1, len(payload["commits"]))
-            self.assertEqual(1, len(read_jsonl(spec_log)))
+            self.assertEqual(1, len(read_jsonl(commit_log)))
             self.assertEqual(
                 initial_commit_count + 1,
                 int(git_stdout(repo_dir, "rev-list", "--count", "HEAD")),
@@ -3652,12 +3687,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertLess(commit_started, commit_finished)
             self.assertLess(commit_finished, run_finished)
 
-    def test_commit_failure_pauses_with_failed_commit_payload(self) -> None:
+    def test_commit_failure_soft_fails_and_the_run_carries_on(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             repo_dir = tmp_dir / "repo"
             init_git_repo(repo_dir)
-            _fake_spec, spec_log, spec_env = self.setup_fake_spec(
+            commit_log, commit_env = self.setup_commit_harness(
                 tmp_dir,
                 mode="failure",
             )
@@ -3668,32 +3703,105 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 statuses=("pending", "pending"),
                 cwd=repo_dir,
                 commit_mode=runner.COMMIT_MODE_PER_SESSION,
-                extra_env=spec_env,
+                extra_env=commit_env,
             )
 
-            self.assertEqual(1, completed.returncode)
-            self.assertFalse(payload["ok"])
-            self.assertTrue(payload["paused"])
-            self.assertEqual("commit-failed", payload["pause_reason"])
-            self.assertEqual([], payload["completed_sessions"])
-            self.assertEqual(1, len(payload["turns"]))
-            self.assertEqual(1, len(payload["commits"]))
-            self.assertEqual(1, len(read_jsonl(spec_log)))
+            # A repository that refuses every commit costs the plan its
+            # commits, not its remaining sessions: the run finishes the work
+            # and reports the commits it never made.
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["paused"])
+            self.assertEqual("all-complete", payload["reason"])
+            self.assertEqual([1, 2], payload["completed_sessions"])
+            self.assertEqual(2, len(payload["turns"]))
+            self.assertTrue(read_jsonl(commit_log))
             self.assertEqual(initial_head, git_stdout(repo_dir, "rev-parse", "HEAD"))
 
+            self.assertFalse(any(commit["success"] for commit in payload["commits"]))
             commit = payload["commits"][0]
-            self.assertFalse(commit["success"])
             self.assertEqual("nonzero-exit", commit["status_result"])
-            self.assertEqual(23, commit["returncode"])
-            self.assertEqual(commit, payload["pause_details"]["commit"])
+            # `asl commit` reports every refusal as exit 1; the runner reads
+            # the reason out of the captured stderr, not out of the code.
+            self.assertEqual(1, commit["returncode"])
+
+            failures = payload["commit_failures"]
+            self.assertTrue(failures)
+            self.assertEqual({"session"}, {record["scope"] for record in failures})
+            # Both sessions tried and both retries tried, so each session is
+            # named at least once.
+            self.assertEqual({"1", "2"}, {record["session_id"] for record in failures})
+            self.assertEqual(
+                sorted({"1", "2"}),
+                sorted(
+                    {
+                        str(summary["session_id"])
+                        for summary in payload["unresolved_commit_groups"]
+                    }
+                ),
+            )
+
+            event_names = [
+                record["name"] for record in read_jsonl(Path(payload["events_path"]))
+            ]
+            self.assertNotIn("run_paused", event_names)
             self.assertIn(
                 "- **Status**: complete",
                 (plan_dir / "session-1.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "- **Status**: pending",
+                "- **Status**: complete",
                 (plan_dir / "session-2.md").read_text(encoding="utf-8"),
             )
+
+    def test_transient_commit_failure_heals_before_the_next_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            init_git_repo(repo_dir)
+            commit_log, commit_env = self.setup_commit_harness(
+                tmp_dir,
+                mode="failure",
+                fail_limit=1,
+            )
+            initial_commit_count = int(
+                git_stdout(repo_dir, "rev-list", "--count", "HEAD")
+            )
+
+            completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
+                mode="success",
+                statuses=("pending", "pending"),
+                cwd=repo_dir,
+                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                extra_env=commit_env,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual("all-complete", payload["reason"])
+            self.assertEqual([1, 2], payload["completed_sessions"])
+            # The one failure was retried inside the same run, so nothing is
+            # left owed and no human had to resume anything.
+            self.assertEqual(1, len(payload["commit_failures"]))
+            self.assertEqual([], payload["unresolved_commit_groups"])
+            self.assertTrue(payload["commit_group_recovery"]["success"])
+            self.assertEqual(
+                initial_commit_count + 2,
+                int(git_stdout(repo_dir, "rev-list", "--count", "HEAD")),
+            )
+            self.assertEqual("", git_stdout(repo_dir, "status", "--porcelain"))
+
+            event_records = read_jsonl(Path(payload["events_path"]))
+            names = [record["name"] for record in event_records]
+            self.assertNotIn("run_paused", names)
+            recovery_commit = [
+                index
+                for index, record in enumerate(event_records)
+                if record["name"] == events.COMMIT_FINISHED_EVENT
+                and record["payload"].get("session") == 1
+                and record["payload"].get("success")
+            ][-1]
+            turn_2_started = self.event_index(event_records, "turn_started", session=2)
+            self.assertLess(recovery_commit, turn_2_started)
 
     def test_legacy_failed_commit_is_retried_before_next_session_on_resume(
         self,
@@ -3737,34 +3845,46 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 capture_output=True,
                 check=True,
             )
-            _fake_spec, spec_log, failing_env = self.setup_fake_spec(
-                tmp_dir, mode="failure"
+            commit_log, failing_env = self.setup_commit_harness(
+                tmp_dir, mode="failure", mutation_path=None
             )
+            # `--max-sessions 1` ends the run while the group is still owed,
+            # which is the only way a failed commit now outlives its run: the
+            # retry that would otherwise heal it happens at the next commit
+            # boundary, and this run has none left.
             first, first_payload = self.run_loop_command(
                 mode="success",
                 plan_dir=plan_dir,
                 state_dir=state_dir,
                 config_home=config_home,
                 cwd=plan_dir,
+                max_sessions=1,
                 commit_mode=runner.COMMIT_MODE_PER_SESSION,
                 extra_env=failing_env,
             )
-            self.assertEqual(1, first.returncode, first.stderr)
-            self.assertEqual("commit-failed", first_payload["pause_reason"])
+            self.assertEqual(0, first.returncode, first.stderr)
+            self.assertFalse(first_payload["paused"])
+            self.assertEqual([1], first_payload["completed_sessions"])
+            self.assertEqual(
+                ["1"],
+                [
+                    str(summary["session_id"])
+                    for summary in first_payload["unresolved_commit_groups"]
+                ],
+            )
 
             env = os.environ.copy()
             env.update(
                 {
                     "XDG_CONFIG_HOME": str(config_home),
                     "FAKE_CODEX_MODE": "success",
-                    "FAKE_SPEC_LOG": str(spec_log),
-                    "PATH": str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
+                    "FAKE_CODEX_COMMIT_LOG": str(commit_log),
                     "PYTHONPATH": str(REPO_ROOT)
                     + os.pathsep
                     + os.environ.get("PYTHONPATH", ""),
                 }
             )
-            env.pop("FAKE_SPEC_MODE", None)
+            env.pop("FAKE_CODEX_COMMIT_MODE", None)
             dry_run = subprocess.run(
                 [
                     sys.executable,
@@ -3787,7 +3907,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(0, dry_run.returncode, dry_run.stderr)
             dry_payload = json.loads(dry_run.stdout)
             self.assertTrue(dry_payload["commit_group_recovery"]["pending"])
-            self.assertEqual(1, len(read_jsonl(spec_log)))
+            # The first run spent its in-run retry on the same group, so two
+            # refused turns are on the log and a dry run adds none.
+            self.assertEqual(2, len(read_jsonl(commit_log)))
 
             second = subprocess.run(
                 [
@@ -3812,7 +3934,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             second_payload = json.loads(second.stdout)
             self.assertTrue(second_payload["commit_group_recovery"]["success"])
             self.assertEqual([2], second_payload["completed_sessions"])
-            self.assertEqual(3, len(read_jsonl(spec_log)))
+            self.assertEqual([], second_payload["unresolved_commit_groups"])
+            self.assertEqual(4, len(read_jsonl(commit_log)))
             event_records = read_jsonl(Path(second_payload["events_path"]))
             recovery_commit = [
                 index
@@ -3822,41 +3945,6 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             ][-1]
             turn_2_started = self.event_index(event_records, "turn_started", session=2)
             self.assertLess(recovery_commit, turn_2_started)
-
-    def test_unchanged_head_commit_pauses_with_commit_failed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_dir = Path(tmp)
-            repo_dir = tmp_dir / "repo"
-            init_git_repo(repo_dir)
-            _fake_spec, spec_log, spec_env = self.setup_fake_spec(
-                tmp_dir,
-                mode="unchanged-head",
-            )
-            initial_head = git_stdout(repo_dir, "rev-parse", "HEAD")
-
-            completed, payload, _plan_dir, _state_dir, _fake_codex = self.run_loop(
-                mode="success",
-                statuses=("pending",),
-                cwd=repo_dir,
-                commit_mode=runner.COMMIT_MODE_PER_SESSION,
-                extra_env=spec_env,
-            )
-
-            self.assertEqual(1, completed.returncode)
-            self.assertFalse(payload["ok"])
-            self.assertTrue(payload["paused"])
-            self.assertEqual("commit-failed", payload["pause_reason"])
-            self.assertEqual([], payload["completed_sessions"])
-            self.assertEqual(1, len(payload["commits"]))
-            self.assertEqual(1, len(read_jsonl(spec_log)))
-
-            commit = payload["commits"][0]
-            self.assertFalse(commit["success"])
-            self.assertEqual("unchanged-head", commit["status_result"])
-            self.assertEqual(0, commit["returncode"])
-            self.assertEqual(initial_head, commit["head_before"])
-            self.assertEqual(initial_head, commit["head_after"])
-            self.assertIsNone(commit["commit_sha"])
 
     def test_default_run_does_not_require_or_create_commits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5467,6 +5555,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             statuses=("pending",)
         )
         self.enable_fake_review_harness(config_home, fake_codex)
+        # The repair child runs behind `_repair_commit_preflight`, which
+        # refuses to start on a dirty writable repository. Give the run its own
+        # clean repository so the gate answers to this test rather than to
+        # whatever is uncommitted in this checkout.
+        repo_dir = plan_dir.parent / "repo"
+        init_git_repo(repo_dir)
 
         _first_exit, first_payload = self.run_locked_review_run(
             plan_dir=plan_dir,
@@ -5475,6 +5569,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             run_id="repair-idle-seed",
             review_outcomes="findings,all-clear",
             max_review_fix_cycles=0,
+            cwd=repo_dir,
         )
         self.assertEqual(
             "higher-cap-required",
@@ -5500,6 +5595,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             run_id="repair-idle-resume",
             review_outcomes="findings,all-clear",
             max_review_fix_cycles=1,
+            cwd=repo_dir,
         )
 
         self.assertEqual(0, exit_code, payload)

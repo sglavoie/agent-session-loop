@@ -11,10 +11,12 @@ from __future__ import annotations
 import argparse
 import ast
 import inspect
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -33,8 +35,8 @@ from agent_session_loop import verification as verification_module
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     _contract_block,
+    fake_commit_harness_env,
     init_multi_repo_workspace,
-    install_fake_spec,
     read_jsonl,
     write_multi_repo_plan,
 )
@@ -320,7 +322,8 @@ class TurnCommitRunTests(unittest.TestCase):
             runner._run_git(self.repositories["SVC"], ["status", "--porcelain"]).stdout,
         )
 
-    def test_registered_repair_commits_only_changed_writable_aliases(self) -> None:
+    def _mark_repair_session(self) -> None:
+        """Make session 1 a review repair, which owns its own commit."""
         session_path = self.plan_dir / "session-1.md"
         session_path.write_text(
             review_repair.REVIEW_REPAIR_SESSION_MARKER
@@ -330,12 +333,15 @@ class TurnCommitRunTests(unittest.TestCase):
             + session_path.read_text(encoding="utf-8"),
             encoding="utf-8",
         )
+
+    def test_registered_repair_commits_only_changed_writable_aliases(self) -> None:
+        self._mark_repair_session()
         (self.repositories["OAK"] / "preexisting.txt").write_text(
             "read-only dirty state\n", encoding="utf-8"
         )
         oak_head = runner._read_git_head(self.repositories["OAK"])["head"]
-        fake_spec = install_fake_spec(self.tmp_path)
-        env = {"PATH": str(fake_spec.parent) + os.pathsep + os.environ.get("PATH", "")}
+        commit_log = self.tmp_path / "commit-turns.jsonl"
+        env = fake_commit_harness_env(self.tmp_path, log_path=commit_log)
 
         with (
             mock.patch.dict(os.environ, env),
@@ -353,6 +359,12 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertIsNone(payload["commit_mode"])
         self.assertEqual(1, len(payload["commits"]))
         self.assertEqual("SVC", payload["commits"][0]["repository_alias"])
+        # Only the writable alias ran a message-generation turn, and it ran
+        # with that repository as its cwd.
+        self.assertEqual(
+            [str(self.repositories["SVC"].resolve())],
+            [record["cwd"] for record in read_jsonl(commit_log)],
+        )
         self.assertEqual(
             "",
             runner._run_git(
@@ -367,6 +379,99 @@ class TurnCommitRunTests(unittest.TestCase):
             runner._run_git(
                 self.repositories["OAK"], ["status", "--porcelain"]
             ).stdout.strip()
+        )
+
+    def test_pathspec_commit_carries_only_the_paths_it_names(self) -> None:
+        repo = self.repositories["SVC"]
+        (repo / "declared.txt").write_text("session work\n", encoding="utf-8")
+        (repo / "unrelated.txt").write_text("somebody else's edit\n", encoding="utf-8")
+        env = fake_commit_harness_env(self.tmp_path)
+
+        with mock.patch.dict(os.environ, env):
+            commit = runner._run_asl_commit(
+                cwd=repo,
+                run_dir=self.tmp_path / "pathspec-run",
+                commit_index=1,
+                session_id="1",
+                repository_alias="SVC",
+                qualified_paths=["SVC:declared.txt"],
+                staging_paths=["SVC:declared.txt"],
+                generation=runner._CommitGeneration(harness="codex"),
+            )
+
+        self.assertEqual(0, commit["returncode"])
+        self.assertEqual(["--pathspec", "declared.txt"], commit["argv"][-2:])
+        self.assertEqual(
+            ["declared.txt"],
+            runner._run_git(
+                repo, ["show", "--name-only", "--format=", "HEAD"]
+            ).stdout.split(),
+        )
+        # A pathspec commit only promises the paths it names, so the file the
+        # turn never touched survives the commit as it was — which is also why
+        # the probe reports `dirty-after-commit` rather than success.
+        self.assertEqual(
+            "?? unrelated.txt",
+            runner._run_git(repo, ["status", "--porcelain"]).stdout.strip(),
+        )
+        self.assertEqual("dirty-after-commit", commit["status_result"])
+        self.assertFalse(commit["success"])
+
+    def test_ignored_evidence_is_recorded_but_never_staged(self) -> None:
+        self._mark_repair_session()
+        repo = self.repositories["SVC"]
+        # A `.gitignore` naming itself is invisible to the untracked scan, so
+        # rewriting it leaves `worktree_ignore` as its only evidence; the same
+        # goes for `.git/info/exclude`, which no worktree scan reaches at all.
+        ignore_path = repo / ".gitignore"
+        ignore_path.write_text(".gitignore\ncache/\n", encoding="utf-8")
+        exclude_path = repo / ".git" / "info" / "exclude"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        exclude_path.write_text("# baseline\n", encoding="utf-8")
+        self.assertEqual(
+            "", runner._run_git(repo, ["status", "--porcelain"]).stdout.strip()
+        )
+        commit_log = self.tmp_path / "commit-turns.jsonl"
+        env = fake_commit_harness_env(self.tmp_path, log_path=commit_log)
+        complete_session = self._harness(
+            writes="SVC:repair.txt", declares="SVC:repair.txt"
+        )
+
+        def run(*args: object, **kwargs: object) -> harnesses.HarnessResult:
+            ignore_path.write_text(".gitignore\ncache/\nbuild/\n", encoding="utf-8")
+            exclude_path.write_text("# baseline\n*.tmp\n", encoding="utf-8")
+            return complete_session(*args, **kwargs)
+
+        with (
+            mock.patch.dict(os.environ, env),
+            mock.patch.object(runner.harnesses, "run_harness", side_effect=run),
+        ):
+            exit_code, payload = self._invoke("ignored-evidence-commit")
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(1, len(payload["commits"]))
+        commit = payload["commits"][0]
+        # The guard still reports both ignore sources — dropping them from the
+        # evidence would let a turn hide behind the rules it writes.
+        self.assertEqual(
+            ["SVC:repair.txt", "SVC:.gitignore", "SVC:.git/info/exclude"],
+            commit["qualified_paths"],
+        )
+        self.assertEqual(["SVC:repair.txt"], commit["staging_paths"])
+        self.assertEqual(["--pathspec", "repair.txt"], commit["argv"][-2:])
+        self.assertEqual(
+            ["repair.txt"],
+            runner._run_git(
+                repo, ["show", "--name-only", "--format=", "HEAD"]
+            ).stdout.split(),
+        )
+        self.assertEqual("success", commit["status_result"])
+        self.assertEqual(
+            ".gitignore\ncache/\nbuild/\n", ignore_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            [str(self.repositories["SVC"].resolve())],
+            [record["cwd"] for record in read_jsonl(commit_log)],
         )
 
     def test_turn_finished_digest_matches_stored_result_json(self) -> None:
@@ -488,6 +593,295 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertEqual("no-status-change", rejections[0]["reason"])
         self.assertFalse(rejections[0]["reopened"])
         self.assertEqual([], self._payloads(events.SESSION_REOPENED_EVENT))
+
+
+class CommitFailureProgressTests(unittest.TestCase):
+    """What an operator watching the run is told when a commit is refused.
+
+    The failure used to announce itself by ending the run. Now the progress
+    journal is where it is announced, so these are the sentences that carry it.
+    """
+
+    def _emitted(self, call: Any) -> str:
+        stream = io.StringIO()
+        progress = runner._ProgressReporter(enabled=True)
+        with redirect_stderr(stream):
+            call(progress)
+        return stream.getvalue()
+
+    def test_a_retried_failure_says_the_run_continues(self) -> None:
+        text = self._emitted(
+            lambda progress: progress.commit_failed(
+                {
+                    "session_id": "2",
+                    "failed_alias": "SVC",
+                    "error": "spec commit refused",
+                    "retrying": True,
+                }
+            )
+        )
+
+        self.assertIn("commit failed: session 2 (SVC): spec commit refused", text)
+        self.assertIn("retrying this group at the next commit boundary", text)
+
+    def test_an_abandoned_failure_says_the_changes_are_uncommitted(self) -> None:
+        text = self._emitted(
+            lambda progress: progress.commit_failed(
+                {
+                    "session_id": None,
+                    "failed_alias": None,
+                    "message": "final auto-commit failed",
+                    "retrying": False,
+                }
+            )
+        )
+
+        self.assertIn("commit failed: end-of-run: final auto-commit failed", text)
+        self.assertIn("leaving these changes uncommitted", text)
+
+    def test_the_final_summary_warns_without_failing_the_run(self) -> None:
+        text = self._emitted(
+            lambda progress: progress.run_finished(
+                {
+                    "ok": True,
+                    "reason": "all-complete",
+                    "run_id": "run-1",
+                    "duration_seconds": 1.0,
+                    runner.UNRESOLVED_COMMIT_GROUPS_KEY: [
+                        {"session_id": "1", "failed_alias": "SVC"},
+                        {"session_id": None, "failed_alias": None},
+                    ],
+                }
+            )
+        )
+
+        self.assertIn(
+            "warning: 2 commit group(s) were never completed: "
+            "session 1 (SVC), end-of-run",
+            text,
+        )
+        # The warning is non-fatal: the run still reports that it finished.
+        self.assertIn("run finished: run run-1, reason all-complete", text)
+
+
+class CommitFailureSoftFailTests(unittest.TestCase):
+    """A refused commit costs a run its commits, not its remaining sessions.
+
+    Every assertion here is about a full two-session run, because the promise
+    is about what happens *after* the failure: the next session still runs, the
+    owed group is retried before it does, and a run that never recovers ends by
+    saying so instead of by stopping.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.workspace_root = self.tmp_path / "workspace"
+        self.repositories = init_multi_repo_workspace(self.workspace_root, SPECS)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        write_multi_repo_plan(
+            self.plan_dir,
+            ("pending", "pending"),
+            specs=SPECS,
+            contracts_by_id={
+                session: _contract_block(
+                    '{"type": "file_exists", "repo": "SVC", '
+                    '"path": "README.md", "name": "svc-readme"}',
+                    session=session,
+                )
+                for session in ("1", "2")
+            },
+        )
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        plans.save_workspace_plan_metadata(
+            self.plan_dir, self.workspace_root, registry.digest
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        self.context = verification_module.VerificationContext.from_plan(
+            self.plan_dir, self.workspace_root
+        )
+        self.commit_log = self.tmp_path / "commit-turns.jsonl"
+
+    def _harness(self, *_args: object, **_kwargs: object) -> harnesses.HarnessResult:
+        """Complete whichever session is pending with a change of its own."""
+        pending = next(
+            session
+            for session in plans.inspect_plan(self.plan_dir).sessions
+            if session.status == "pending"
+        )
+        relative = f"session-{pending.session_id}.txt"
+        (self.repositories["SVC"] / relative).write_text(
+            f"work for session {pending.session_id}\n", encoding="utf-8"
+        )
+        session_path = self.plan_dir / f"session-{pending.session_id}.md"
+        lines = session_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            if line.startswith(plans.STATUS_PREFIX):
+                lines[index] = f"{plans.STATUS_PREFIX} complete\n"
+            elif line.startswith(plans.HANDOFF_FILES_PREFIX):
+                lines[index] = f"{plans.HANDOFF_FILES_PREFIX} SVC:{relative}\n"
+        session_path.write_text("".join(lines), encoding="utf-8")
+        return harnesses.HarnessResult(
+            name="codex", argv=["fake"], returncode=0, stdout="ok\n", stderr=""
+        )
+
+    def _run(self, run_id: str, *, fail_limit: int | None = None) -> dict[str, Any]:
+        env = fake_commit_harness_env(self.tmp_path, log_path=self.commit_log)
+        env["FAKE_CODEX_COMMIT_MODE"] = "failure"
+        if fail_limit is not None:
+            env["FAKE_CODEX_COMMIT_FAIL_LIMIT"] = str(fail_limit)
+        args = argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.workspace_root),
+            harness="codex",
+            state_dir=str(self.state_dir),
+            json=True,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=runner.COMMIT_MODE_PER_SESSION,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        try:
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(
+                    runner.harnesses, "run_harness", side_effect=self._harness
+                ),
+            ):
+                exit_code, payload = runner._run_locked(
+                    args=args,
+                    cwd=self.workspace_root,
+                    timeout=None,
+                    max_sessions=None,
+                    commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                    lock_info=lock_info,
+                    run_id=run_id,
+                    verification_context=self.context,
+                )
+        finally:
+            state.release_lock(self.plan_dir, self.state_dir)
+        self.exit_code = exit_code
+        return payload
+
+    def _records(self) -> list[dict[str, Any]]:
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        return read_jsonl(event_path)
+
+    def test_a_refused_commit_advances_to_the_next_session(self) -> None:
+        payload = self._run("soft-fail-run")
+
+        self.assertEqual(0, self.exit_code)
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual([1, 2], payload["completed_sessions"])
+        self.assertEqual(
+            ["complete", "complete"],
+            [session.status for session in plans.inspect_plan(self.plan_dir).sessions],
+        )
+        names = [record["name"] for record in self._records()]
+        self.assertEqual(2, names.count(events.TURN_FINISHED_EVENT))
+        self.assertNotIn("run_paused", names)
+        # The turn executed, verified, and completed its session; only the
+        # commit of its changes failed, so no guard rejected it.
+        self.assertNotIn(events.TURN_REJECTED_EVENT, names)
+
+    def test_the_failure_is_recorded_on_the_turn_and_on_the_run(self) -> None:
+        payload = self._run("soft-fail-record-run")
+
+        failures = payload["commit_failures"]
+        self.assertEqual({"session"}, {record["scope"] for record in failures})
+        self.assertEqual({"1", "2"}, {record["session_id"] for record in failures})
+        first = failures[0]
+        self.assertIn("auto-commit failed after session 1", first["message"])
+        self.assertFalse(first["commit"]["success"])
+        self.assertEqual(
+            "session-commit", payload["turns"][0]["session_commit"]["guard"]
+        )
+        self.assertEqual(
+            "commit-failed", payload["turns"][0]["session_commit"]["reason"]
+        )
+
+    def test_an_unresolved_group_is_reported_by_the_run_that_lost_it(self) -> None:
+        payload = self._run("soft-fail-report-run")
+
+        summaries = payload["unresolved_commit_groups"]
+        self.assertEqual({"1", "2"}, {str(row["session_id"]) for row in summaries})
+        self.assertEqual({"session"}, {row["scope"] for row in summaries})
+        self.assertEqual({"SVC"}, {row["failed_alias"] for row in summaries})
+        # The same record reaches the state file the supervisor audit reads.
+        persisted = json.loads(
+            Path(str(payload["state_path"])).read_text(encoding="utf-8")
+        )
+        self.assertEqual(summaries, persisted["unresolved_commit_groups"])
+        self.assertEqual(
+            "SVC",
+            runner._unresolved_commit_groups(persisted)[0]["failed_alias"],
+        )
+
+    def test_a_transient_failure_heals_at_the_next_commit_boundary(self) -> None:
+        payload = self._run("soft-fail-retry-run", fail_limit=1)
+
+        self.assertEqual(0, self.exit_code)
+        self.assertEqual([1, 2], payload["completed_sessions"])
+        # One failure, retried before the next session ran, and nothing owed.
+        self.assertEqual(1, len(payload["commit_failures"]))
+        self.assertEqual([], payload["unresolved_commit_groups"])
+        self.assertTrue(payload["commit_group_recovery"]["success"])
+        self.assertEqual(
+            "complete", payload["commit_group_recovery"]["group"]["status"]
+        )
+        records = self._records()
+        recovered = [
+            index
+            for index, record in enumerate(records)
+            if record["name"] == events.COMMIT_FINISHED_EVENT
+            and record["payload"].get("success")
+        ][0]
+        session_2_started = [
+            index
+            for index, record in enumerate(records)
+            if record["name"] == "turn_started"
+            and str(record["payload"].get("session")) == "2"
+        ][0]
+        self.assertLess(recovered, session_2_started)
+        self.assertEqual(
+            "",
+            runner._run_git(
+                self.repositories["SVC"], ["status", "--porcelain"]
+            ).stdout.strip(),
+        )
+
+    def test_a_run_stops_retrying_one_group_after_its_budget(self) -> None:
+        payload = self._run("soft-fail-budget-run")
+
+        # A repository that refuses every time must not turn the session loop
+        # into a commit loop: each group is attempted its budget and no more.
+        by_group: dict[str, int] = {}
+        for record in payload["commit_failures"]:
+            group_id = str(record["group_id"])
+            by_group[group_id] = by_group.get(group_id, 0) + 1
+        self.assertTrue(by_group)
+        for attempts in by_group.values():
+            self.assertLessEqual(attempts, runner.MAX_COMMIT_GROUP_RETRIES + 1)
 
 
 class PublicationSnapshotTests(unittest.TestCase):

@@ -27,6 +27,7 @@ from unittest import mock
 
 from agent_session_loop import (
     authoring,
+    config,
     control_signal,
     events,
     plans,
@@ -59,9 +60,6 @@ def agent_mux_notify_enabled(mode: str = "auto"):
 
 
 FAKE_CODEX_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_codex.py"
-
-
-FAKE_SPEC_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_spec.py"
 
 
 HARNESS_FAILURE_FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "harness_failures"
@@ -238,11 +236,30 @@ def install_fake_amx(tmp_dir: Path) -> tuple[Path, Path]:
     return fake_path, log_path
 
 
-def install_fake_spec(tmp_dir: Path) -> Path:
-    fake_path = tmp_dir / "spec"
-    shutil.copyfile(FAKE_SPEC_FIXTURE, fake_path)
-    fake_path.chmod(fake_path.stat().st_mode | stat.S_IXUSR)
-    return fake_path
+def fake_commit_harness_env(
+    tmp_dir: Path, *, log_path: Path | None = None
+) -> dict[str, str]:
+    """Point the runner's `asl commit` subprocess at the fake codex harness.
+
+    Auto-commit re-enters this checkout as `python -m agent_session_loop
+    commit`, which resolves its message-generation harness from
+    `harnesses.json` under `XDG_CONFIG_HOME`. A test that does not otherwise
+    configure a harness home needs this or the commit would reach whatever
+    real CLI the developer has installed. `log_path` opts into the fixture's
+    per-commit JSONL record.
+    """
+    config_home = tmp_dir / "commit-config"
+    config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    fake_codex = install_fake_codex(tmp_dir)
+    config_path.write_text(
+        json.dumps({"codex": {"executable": str(fake_codex)}}),
+        encoding="utf-8",
+    )
+    env = {"XDG_CONFIG_HOME": str(config_home)}
+    if log_path is not None:
+        env["FAKE_CODEX_COMMIT_LOG"] = str(log_path)
+    return env
 
 
 def init_git_repo(repo_dir: Path) -> None:

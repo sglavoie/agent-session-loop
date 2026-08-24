@@ -57,6 +57,7 @@ from . import (
     assurance_models,
     assurance_projection,
     assurance_report,
+    commit_groups,
     durability,
     events,
     harness_failures,
@@ -1079,6 +1080,8 @@ _COMMIT_STATE_KEYS = (
     "commit_mode",
     "repair_commit_mode",
     "commit_groups",
+    "commit_failures",
+    "unresolved_commit_groups",
     "commits",
 )
 _COMMIT_DIR_PREFIX = "commit-"
@@ -4833,6 +4836,74 @@ def _check_commit_failure_accounting(context: _CheckContext) -> _Verdict:
     )
 
 
+def _unresolved_commit_group_rows(context: _CheckContext) -> list[dict[str, Any]]:
+    """The commit groups the run ended still owing, by its own account.
+
+    ``unresolved_commit_groups`` is the field the runner writes as it closes,
+    so its presence is the run stating the answer directly. A bundle without it
+    predates that field, and is read from the durable group rows instead —
+    restricted to groups the coordinator marked ``failed``, because a
+    ``pending`` row in an older bundle is as likely to be a group still in
+    flight as one that was lost.
+    """
+    section = context.section("commits")
+    if "unresolved_commit_groups" in section:
+        return [_mapping(row) for row in _sequence(section["unresolved_commit_groups"])]
+    return [
+        _mapping(row)
+        for row in _sequence(section.get("commit_groups"))
+        if _mapping(row).get("status") == commit_groups.GROUP_STATUS_FAILED
+    ]
+
+
+def _unresolved_group_label(row: Mapping[str, Any]) -> str:
+    session_id = row.get("session_id")
+    scope = "the end-of-run commit" if session_id is None else f"session {session_id}"
+    alias = row.get("failed_alias")
+    return f"{scope} in {alias}" if alias else scope
+
+
+def _check_commit_group_resolution(context: _CheckContext) -> _Verdict:
+    """Grade whether the run committed everything it set out to commit.
+
+    A failed commit no longer pauses the run: the group is marked failed,
+    retried at the next commit boundary, and the run carries on. That is only
+    safe while a group still owed when the run ends is impossible to miss, so
+    this check is where the loss is named. Without it the one failure mode
+    soft-fail introduces — a run that finishes reporting success while a
+    session's changes were never committed — would be graded by nothing.
+    """
+    unresolved = _unresolved_commit_group_rows(context)
+    references = [
+        str(attempt.get("reference"))
+        for attempt in _sequence(context.section("commits").get("attempts"))
+        if isinstance(attempt, Mapping)
+    ]
+    evidence = context.evidence(
+        context.section("state").get("reference"),
+        *references,
+    )
+    if unresolved:
+        return _Verdict(
+            "fail",
+            "the run ended owing commits it never made: "
+            f"{_joined([_unresolved_group_label(row) for row in unresolved])}",
+            evidence,
+        )
+    if not context.section("state"):
+        return _Verdict(
+            "unavailable",
+            "the run's state projection could not be read, so nothing says "
+            "whether the commits it owed were made",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        "every commit group the run opened reached completion",
+        evidence,
+    )
+
+
 def _check_resource_anomalies(context: _CheckContext) -> _Verdict:
     anomalies: list[str] = []
     references: list[str] = []
@@ -5167,6 +5238,26 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             ),
         ),
         _check_commit_failure_accounting,
+    ),
+    # Split from failure accounting rather than folded into it: that check asks
+    # whether a failed commit explained itself, this one asks whether the
+    # changes ever landed. A soft-failed commit can pass the first and fail
+    # this one, and the inbox must be able to tell those two defects apart.
+    (
+        CheckSpec(
+            check="commit-group-resolution",
+            lane="mutation-commit-guards",
+            category="guards",
+            component="commit-group-resolution",
+            invariant_key="guards.commit-group-resolution",
+            severity="high",
+            recommendation=(
+                "Commit the changes the named group still owes, or rerun the "
+                "plan so the recovery path completes that group, before "
+                "treating the run's changes as landed."
+            ),
+        ),
+        _check_commit_group_resolution,
     ),
     (
         CheckSpec(
