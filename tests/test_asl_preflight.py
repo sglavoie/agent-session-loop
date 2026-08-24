@@ -2604,6 +2604,16 @@ class PreflightEnvironmentTests(unittest.TestCase):
             "spec", " ".join(finding.message for finding in report.findings)
         )
 
+    def test_module_overview_omits_retired_spec_requirement(self) -> None:
+        # The module overview is the last place the retired external commit
+        # dependency could still be documented as a checked requirement.
+        overview = preflight.__doc__ or ""
+        self.assertNotEqual("", overview.strip())
+        self.assertNotIn("env-spec", overview)
+        self.assertNotIn("``spec``", overview)
+        self.assertNotIn("spec availability", overview)
+        self.assertIn("asl commit", overview)
+
     def test_env_lock_absent_emits_no_finding(self) -> None:
         report = preflight.run_environment_preflight(
             self.plan_dir, state_dir=self.xdg_state

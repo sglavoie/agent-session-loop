@@ -14,10 +14,13 @@ hygiene on contract ``path`` fields plus a scope lint for overly broad
 verification commands. Session 6 adds environment-aware
 checks that depend on the runtime working directory, the requested
 harness, the active commit mode, and the operational lock state: repo
-root, git worktree/dirty status, harness executable availability, ``spec``
-availability when commit modes are requested, stale or active locks,
+root, git worktree status plus a clean-tree check when a commit mode is
+requested, harness executable availability, stale or active locks,
 optional Agent Mux ``amx`` hook discovery, and a coarse turn-budget
-estimate based on pending session count. ``run_core_preflight`` remains
+estimate based on pending session count. Commit modes need no external
+executable check: auto-commit re-enters this checkout as ``asl commit``,
+so cleanliness of the tree is the only environment requirement left.
+``run_core_preflight`` remains
 environment-free; ``run_environment_preflight`` exposes only the
 environment findings; ``run_preflight`` aggregates both into a single
 report. Registered plans additionally resolve one workspace context, validate
