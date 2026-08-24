@@ -80,12 +80,22 @@ REASON_EMPTY_DIFF = "empty-diff"
 REASON_ALL_BINARY = "all-binary"
 REASON_NO_HARNESS = "no-harness"
 REASON_GENERATION_FAILED = "generation-failed"
+REASON_GENERATION_TIMEOUT = "generation-timeout"
 REASON_EMPTY_MESSAGE = "empty-message"
 REASON_API_ERROR = "api-error"
 REASON_COMMIT_FAILED = "commit-failed"
 REASON_CANCELLED = "cancelled"
 
 COMMIT_COMMAND = "commit"
+
+#: Wall-clock bound on the single harness turn that writes a commit message.
+#: Generation is one read-only turn over a diff that is already capped at
+#: 150 KB, so a turn still running after this long is stalled rather than
+#: working; a real stall of exactly that shape was observed twice while this
+#: command was being built. Unbounded is not an option a caller can reach by
+#: omission: :func:`generate_commit_message` defaults to this value and the
+#: ``--timeout`` flag only moves the bound, never removes it.
+DEFAULT_GENERATION_TIMEOUT_SECONDS = 900
 
 # The two ``mode`` values the ``--prepare-only`` header carries, kept identical
 # to what the retired ``gitsummary-prepare.py`` emitted so the skill's parser is
@@ -981,6 +991,35 @@ def _classified_harness_error(
     )
 
 
+def _generation_timeout_error(
+    harness: str,
+    result: harnesses.HarnessResult,
+    timeout: int | None,
+) -> CommitMessageError:
+    """Turn an expired commit-message turn into the shared failure vocabulary.
+
+    A stall is reported under its own reason rather than folded into
+    ``generation-failed``: the two ask for different responses, and only this
+    one says the harness never answered at all. The classification is still
+    attached, because ``run_harness`` may well have captured a transport error
+    before the turn wedged, and ``process_sweep`` travels with it as the
+    evidence that the turn's process tree was actually taken down.
+    """
+    from . import harness_failures
+
+    classification = harness_failures.classify_harness_failure(result)
+    bound = "its bound" if timeout is None else f"{timeout}s"
+    return CommitMessageError(
+        f"harness {harness!r} did not produce a commit message within {bound}",
+        reason=REASON_GENERATION_TIMEOUT,
+        details={
+            "classification": classification.to_dict(),
+            "timeout_seconds": timeout,
+            "process_sweep": result.process_sweep,
+        },
+    )
+
+
 def generate_commit_message(
     diff_result: DiffResult,
     *,
@@ -989,7 +1028,7 @@ def generate_commit_message(
     guidance: str | None = None,
     model: str | None = None,
     effort: str | None = None,
-    timeout: int | None = None,
+    timeout: int | None = DEFAULT_GENERATION_TIMEOUT_SECONDS,
 ) -> str:
     """Run one read-only harness turn and return the message it produced.
 
@@ -1004,6 +1043,14 @@ def generate_commit_message(
     a response that is empty or is an error body is rejected instead of being
     committed: headless, nobody is watching to notice that the "commit message"
     is a stack of JSON.
+
+    ``timeout`` bounds the turn by default. ``run_harness`` kills the turn's
+    whole process group and sweeps whatever escaped it before returning, so a
+    stalled harness that fanned out into helpers cannot outlive the bound; the
+    expiry then leaves here as an ordinary :class:`CommitMessageError`, which
+    is what puts a stall on the same soft-failure path as a refused commit.
+    Passing ``None`` is an explicit request for an unbounded turn and no
+    ``asl commit`` invocation can produce it.
     """
     from . import harnesses
 
@@ -1028,6 +1075,8 @@ def generate_commit_message(
                 reason=REASON_GENERATION_FAILED,
             ) from error
 
+    if result.timed_out:
+        raise _generation_timeout_error(harness, result, timeout)
     if result.returncode != 0:
         raise _classified_harness_error(harness, result)
 
@@ -1259,6 +1308,27 @@ def _commit_pathspec(args: argparse.Namespace) -> list[str] | None:
     return list(args.pathspec) if args.pathspec else None
 
 
+def _generation_timeout(args: argparse.Namespace) -> int:
+    """The bound this invocation puts on its one message-generation turn.
+
+    ``getattr`` rather than ``args.timeout`` so an in-process caller building
+    its own namespace still gets the bound instead of an ``AttributeError``;
+    the flag itself already defaults to it. A non-positive value is refused
+    rather than quietly read as "no bound": ``run_harness`` would treat 0 as an
+    immediate expiry and a negative number is not a bound at all.
+    """
+    timeout = getattr(args, "timeout", None)
+    if timeout is None:
+        return DEFAULT_GENERATION_TIMEOUT_SECONDS
+    timeout = int(timeout)
+    if timeout <= 0:
+        raise CommitMessageError(
+            "--timeout must be a positive number of seconds",
+            reason=REASON_INVALID_ARGUMENTS,
+        )
+    return timeout
+
+
 def _commit_and_report(
     args: argparse.Namespace,
     repo_root: Path,
@@ -1341,6 +1411,7 @@ def _run_from_id(args: argparse.Namespace, repo_root: Path) -> int:
             guidance=args.guidance,
             model=args.model,
             effort=args.effort,
+            timeout=_generation_timeout(args),
         )
     )
     return _emit_message_only(args, message, diff_result, settings)
@@ -1390,6 +1461,7 @@ def _run_default(args: argparse.Namespace, repo_root: Path) -> int:
             guidance=args.guidance,
             model=args.model,
             effort=args.effort,
+            timeout=_generation_timeout(args),
         )
     )
     if not message.strip():
@@ -1413,6 +1485,9 @@ def _run_default(args: argparse.Namespace, repo_root: Path) -> int:
 
 def _dispatch_commit(args: argparse.Namespace) -> int:
     _reject_conflicting_modes(args)
+    # Ahead of staging, so an unusable bound is refused before the invocation
+    # has touched the index rather than after.
+    _generation_timeout(args)
     repo_root = _resolve_repo_root(args.path)
 
     if args.from_id:

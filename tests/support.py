@@ -466,28 +466,34 @@ def write_process_tree_scripts(root: Path) -> tuple[Path, Path]:
     return parent, grandchild
 
 
-def assert_marked_pids_exited(
-    marker_dir: Path, *, label: str, timeout: float = 15.0
-) -> None:
-    """Assert every PID published under ``marker_dir`` is gone.
+def wait_for_process_exit(pid: int, *, timeout: float = 15.0) -> bool:
+    """Report whether ``pid`` is still alive after waiting up to ``timeout``.
 
     A killed process is reaped by its parent (or, once orphaned, by init)
     shortly after the signal lands, so this polls rather than reading the PID
-    table once.
+    table once. ``True`` means the process outlived the wait.
     """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        if time.monotonic() > deadline:
+            return True
+        time.sleep(0.02)
+
+
+def assert_marked_pids_exited(
+    marker_dir: Path, *, label: str, timeout: float = 15.0
+) -> None:
+    """Assert every PID published under ``marker_dir`` is gone."""
     for marker in sorted(marker_dir.iterdir()):
         pid = int(marker.read_text(encoding="utf-8"))
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-            if time.monotonic() > deadline:
-                raise AssertionError(
-                    f"{label} for {marker.name} (pid {pid}) is still alive"
-                )
-            time.sleep(0.02)
+        if wait_for_process_exit(pid, timeout=timeout):
+            raise AssertionError(
+                f"{label} for {marker.name} (pid {pid}) is still alive"
+            )
 
 
 def assert_marked_pids_alive(marker_dir: Path, *, label: str) -> None:

@@ -357,6 +357,10 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("`--staged` trusts the index and\nnever touches it", text)
         self.assertIn("budgeted to 150 KB", text)
         self.assertIn("with `-` reading stdin", text)
+        # The generation bound is a behavior an operator has to be able to find
+        # before a stall makes them go looking for it.
+        self.assertIn("`--timeout SECONDS` (default: 900)", text)
+        self.assertIn("`generation-timeout`", text)
         # The retired external binary must not reappear in either spelling.
         self.assertNotIn("spec commit", text)
 

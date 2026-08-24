@@ -30,6 +30,7 @@ from unittest import mock
 
 from agent_session_loop import (
     cli,
+    commit_message,
     config,
     contracts,
     control_queue,
@@ -3587,7 +3588,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 # ships, under the run's declared implementation harness --
                 # never with a `spec` resolved off PATH. A legacy target has
                 # no recorded write scope, so it stages repository-wide and
-                # carries no `--pathspec`.
+                # carries no `--pathspec`. The bound is on every run-owned
+                # commit argv, including this one: the run never leaves its
+                # nested message turn unbounded.
                 self.assertEqual(
                     [
                         sys.executable,
@@ -3596,6 +3599,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                         "commit",
                         "--yes",
                         "--no-verify",
+                        "--timeout",
+                        str(commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS),
                         "--harness",
                         "codex",
                     ],

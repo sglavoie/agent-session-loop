@@ -35,6 +35,9 @@ _CONTROL_DEFAULT_ABORT_GRACE_SECONDS = 120  # control_queue.DEFAULT_ABORT_GRACE_
 _CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS = (
     60.0  # control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS
 )
+_COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS = (
+    900  # commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS
+)
 _INTERRUPTED_EXIT = 130  # runner.INTERRUPTED_EXIT
 _BRIDGE_PROTOCOL_VERSION = 1  # bridge.PROTOCOL_VERSION
 
@@ -1176,6 +1179,16 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     commit_parser.add_argument(
         "--effort",
         help="Harness reasoning effort to request",
+    )
+    commit_parser.add_argument(
+        "--timeout",
+        type=int,
+        metavar="SECONDS",
+        default=_COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS,
+        help=(
+            "Bound the message-generation harness turn, in seconds "
+            f"(default: {_COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS})"
+        ),
     )
     commit_parser.add_argument(
         "--prepare-only",

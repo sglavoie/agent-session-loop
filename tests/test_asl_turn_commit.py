@@ -14,7 +14,9 @@ import inspect
 import io
 import json
 import os
+import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -23,6 +25,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    commit_message,
     events,
     harnesses,
     plans,
@@ -38,6 +41,7 @@ from tests.support import (
     fake_commit_harness_env,
     init_multi_repo_workspace,
     read_jsonl,
+    wait_for_process_exit,
     write_multi_repo_plan,
 )
 
@@ -449,6 +453,114 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertEqual(
             "A  unrelated.txt",
             runner._run_git(repo, ["status", "--porcelain"]).stdout.strip(),
+        )
+
+    def test_runner_commit_generation_is_bounded(self) -> None:
+        # Every run-owned commit carries a bound, including the default
+        # selection a run that named no harness produces: an unbounded nested
+        # commit is what turns one stalled message harness into a stalled loop.
+        default_argv = runner._asl_commit_argv(runner._CommitGeneration())
+        self.assertIn("--timeout", default_argv)
+        self.assertEqual(
+            str(commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS),
+            default_argv[default_argv.index("--timeout") + 1],
+        )
+        # The run's own `--timeout` bounds a session turn and is routinely
+        # unset, so it must not be what the commit bound depends on.
+        unset = argparse.Namespace(harness="codex", timeout=None, model=None)
+        self.assertEqual(
+            commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS,
+            runner._commit_generation(unset).timeout,
+        )
+
+        repo = self.repositories["SVC"]
+        (repo / "declared.txt").write_text("session work\n", encoding="utf-8")
+        pid_path = self.tmp_path / "hang-child.pid"
+        env = fake_commit_harness_env(self.tmp_path)
+        env["FAKE_CODEX_COMMIT_MODE"] = "hang"
+        env["FAKE_CODEX_COMMIT_HANG_CHILD_PID"] = str(pid_path)
+
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, env):
+            commit = runner._run_asl_commit(
+                cwd=repo,
+                run_dir=self.tmp_path / "bounded-run",
+                commit_index=1,
+                session_id="1",
+                repository_alias="SVC",
+                qualified_paths=["SVC:declared.txt"],
+                staging_paths=["SVC:declared.txt"],
+                generation=runner._CommitGeneration(harness="codex", timeout=2),
+            )
+        elapsed = time.monotonic() - started
+
+        # The nested command enforced its own bound and exited with a
+        # classified failure, so the run never reached its outer backstop.
+        self.assertLess(elapsed, 120, "the nested commit outlived its bound")
+        argv = list(commit["argv"])
+        self.assertEqual("2", argv[argv.index("--timeout") + 1])
+        self.assertEqual(2, commit["generation_timeout_seconds"])
+        self.assertFalse(commit["timed_out"])
+        self.assertNotEqual(0, commit["returncode"])
+        self.assertEqual("nonzero-exit", commit["status_result"])
+        self.assertFalse(commit["success"])
+        stderr = Path(str(commit["stderr_path"])).read_text(encoding="utf-8")
+        self.assertIn("did not produce a commit message within 2s", stderr)
+        # Nothing was committed, and the stalled harness's whole process tree
+        # went down with the bound rather than outliving the run.
+        self.assertEqual(commit["head_before"], commit["head_after"])
+        child_pid = int(pid_path.read_text(encoding="utf-8").strip())
+        self.assertFalse(
+            wait_for_process_exit(child_pid),
+            "a harness descendant outlived the nested commit bound",
+        )
+
+    def test_a_wedged_commit_subprocess_is_killed_by_the_outer_backstop(self) -> None:
+        # The nested bound cannot cover a commit process that never reaches its
+        # own timeout logic, so the run bounds the subprocess as well. The stub
+        # stands in for that: it spawns a helper into the same process group and
+        # then sleeps past anything the test would wait for.
+        repo = self.repositories["SVC"]
+        pid_path = self.tmp_path / "wedged-child.pid"
+        stub = [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, time;"
+            "child = subprocess.Popen([sys.executable, '-c',"
+            " 'import time; time.sleep(600)']);"
+            f"open({str(pid_path)!r}, 'w').write(str(child.pid));"
+            "time.sleep(600)",
+        ]
+
+        started = time.monotonic()
+        with (
+            mock.patch.object(runner, "_asl_commit_argv", return_value=stub),
+            mock.patch.object(runner, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
+        ):
+            commit = runner._run_asl_commit(
+                cwd=repo,
+                run_dir=self.tmp_path / "wedged-run",
+                commit_index=1,
+                session_id="1",
+                repository_alias="SVC",
+                generation=runner._CommitGeneration(harness="codex", timeout=1),
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 120, "the commit subprocess outlived its bound")
+        self.assertTrue(commit["timed_out"])
+        # 124 is `run_harness`'s timeout code, so a bounded-out commit reads as
+        # an ordinary nonzero commit exit everywhere downstream.
+        self.assertEqual(124, commit["returncode"])
+        self.assertEqual("nonzero-exit", commit["status_result"])
+        self.assertFalse(commit["success"])
+        self.assertEqual(2, commit["subprocess_timeout_seconds"])
+        stderr = Path(str(commit["stderr_path"])).read_text(encoding="utf-8")
+        self.assertIn("exceeded its 2s bound", stderr)
+        child_pid = int(pid_path.read_text(encoding="utf-8").strip())
+        self.assertFalse(
+            wait_for_process_exit(child_pid),
+            "a commit-subprocess descendant outlived the outer backstop",
         )
 
     def test_ignored_evidence_is_recorded_but_never_staged(self) -> None:

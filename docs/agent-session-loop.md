@@ -427,8 +427,12 @@ groups contain only changed write aliases proven by the turn guard; registered
 end groups contain every changed declared repository. Repositories are
 committed serially in manifest order with ASL's own `asl commit`, invoked as
 `python -m agent_session_loop commit --yes --no-verify` inside this checkout and
-scoped to the paths the turn guard recorded. A commit that fails is recorded,
-retried, and reported instead of pausing the run. A
+scoped to the paths the turn guard recorded. Every such invocation carries an
+explicit `--timeout`, and the run bounds the subprocess itself as a backstop, so
+a stalled message harness soft-fails instead of holding the session loop; the
+run's own `--timeout` is not what supplies that bound, since it is routinely
+unset. A commit that fails is recorded, retried, and reported instead of pausing
+the run. A
 stop-after-current request before all sessions complete exits successfully
 (`reason: stopped`) without running the final `--commit-at-end` commit. A stop
 honored once every session is complete still runs that commit first, then stops
@@ -482,7 +486,7 @@ asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
 asl migrate-state PLAN_DIR --from OLD_PLAN_PATH [--state-dir DIR] [--apply] [--json]
 asl metrics [--since-days N] [--state-dir DIR] [--json]
-asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guidance TEXT] [--from-id SHA] [--pathspec PATH ...] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--prepare-only] [--message-file PATH] [--json]
+asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guidance TEXT] [--from-id SHA] [--pathspec PATH ...] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--prepare-only] [--message-file PATH] [--json]
 asl bridge serve [--stdio] [--protocol VERSION] [--state-dir DIR] [--plan-root DIR]
 ```
 
@@ -510,6 +514,15 @@ modes:
   one, with `-` reading stdin. It is formatted and stripped of disallowed
   attribution trailers exactly as a generated message would be, and it is the
   one mode that needs no harness at all.
+
+The generation turn is bounded. `--timeout SECONDS` (default: 900) moves that
+bound and cannot remove it: a value of zero or less is refused as an invalid
+argument before anything is staged. When the bound expires, the harness process
+group is killed and swept, nothing is committed, whatever was staged is left
+staged for a retry, and the failure is reported under reason
+`generation-timeout` — the same soft-failure path as any other refused commit,
+not a hang. `--from-id` and the default mode are the two modes the bound
+applies to; `--prepare-only` and `--message-file` take no harness turn at all.
 
 `--verify` runs git hooks; `--no-verify` is the default. Stdout carries the
 commit message and nothing else, so the command can be piped or redirected;

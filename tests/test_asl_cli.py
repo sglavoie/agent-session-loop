@@ -1382,6 +1382,10 @@ class CommandAndConfigTests(unittest.TestCase):
             control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS,
             cli._CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS,
         )
+        self.assertEqual(
+            commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS,
+            cli._COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS,
+        )
         self.assertEqual(runner.INTERRUPTED_EXIT, cli._INTERRUPTED_EXIT)
         self.assertEqual(bridge.PROTOCOL_VERSION, cli._BRIDGE_PROTOCOL_VERSION)
 

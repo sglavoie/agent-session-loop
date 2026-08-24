@@ -550,6 +550,25 @@ def _commit_failure_budget_spent() -> bool:
     return served >= int(limit)
 
 
+def _hang_until_killed() -> int:
+    """Stall a commit turn the way a wedged harness does, helper and all.
+
+    A real stall is not one silent process: the harness has already fanned out
+    into children that inherit its process group and hold the captured pipes
+    open. The grandchild is what makes a test able to tell "the timeout killed
+    the process tree" apart from "the timeout killed the one process it
+    spawned"; its PID is published so the test can probe it after the kill.
+    """
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(600)"],
+    )
+    pid_path = os.environ.get("FAKE_CODEX_COMMIT_HANG_CHILD_PID")
+    if pid_path:
+        Path(pid_path).write_text(f"{child.pid}\n", encoding="utf-8")
+    time.sleep(float(os.environ.get("FAKE_CODEX_COMMIT_HANG_SECONDS", "600")))
+    return 0
+
+
 def _run_commit_message(prompt: str) -> int:
     """Answer an `asl commit` generation turn.
 
@@ -564,6 +583,8 @@ def _run_commit_message(prompt: str) -> int:
         )
 
     mode = os.environ.get("FAKE_CODEX_COMMIT_MODE", "success")
+    if mode == "hang":
+        return _hang_until_killed()
     fail_cwd = os.environ.get("FAKE_CODEX_COMMIT_FAIL_CWD_BASENAME")
     if fail_cwd and Path.cwd().name == fail_cwd:
         mode = "failure"

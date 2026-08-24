@@ -8,9 +8,11 @@ pinned here instead of imported from there.
 
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -18,7 +20,13 @@ from typing import Any, cast
 from unittest import mock
 
 from agent_session_loop import cli, commit_message, config
-from tests.support import git_stdout, init_git_repo, install_fake_codex, patched_env
+from tests.support import (
+    git_stdout,
+    init_git_repo,
+    install_fake_codex,
+    patched_env,
+    wait_for_process_exit,
+)
 
 
 def build_hunk(index: int, *, lines: int = 6) -> str:
@@ -1185,6 +1193,72 @@ class CommitHandlerTests(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual("nonzero-exit", payload["details"]["classification"]["reason"])
         self.assertIsNone(payload["details"]["retry_at"])
+
+    def test_generation_timeout_is_bounded(self) -> None:
+        # The bound is the command's own, not the caller's: `asl commit` with
+        # no `--timeout` still refuses to wait forever, which is what keeps a
+        # stalled message harness from hanging a standalone commit.
+        parser_default = cli.build_parser().parse_args(["commit"]).timeout
+        self.assertEqual(
+            commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS, parser_default
+        )
+        self.assertIsNotNone(parser_default)
+        self.assertEqual(
+            commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS,
+            inspect.signature(commit_message.generate_commit_message)
+            .parameters["timeout"]
+            .default,
+        )
+
+        self.write("src/alpha.py", "print('alpha')\n")
+        before = self.commit_count()
+        pid_path = self.tmp_path / "hang-child.pid"
+
+        started = time.monotonic()
+        code, out, _err = self.run_commit(
+            str(self.repo),
+            "--yes",
+            "--json",
+            "--timeout",
+            "2",
+            env={
+                "FAKE_CODEX_COMMIT_MODE": "hang",
+                "FAKE_CODEX_COMMIT_HANG_CHILD_PID": str(pid_path),
+            },
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(1, code)
+        # The bound is what ended the turn, not the fixture's own 600s sleep.
+        self.assertLess(elapsed, 120, "the harness turn outlived its bound")
+        payload = json.loads(out)
+        self.assertEqual(commit_message.REASON_GENERATION_TIMEOUT, payload["reason"])
+        self.assertEqual(2, payload["details"]["timeout_seconds"])
+        self.assertIn("did not produce a commit message within 2s", payload["error"])
+        # Nothing was committed and the staged change survives for a retry.
+        self.assertEqual(before, self.commit_count())
+        self.assertTrue(commit_message.has_staged_changes(self.repo))
+        # The whole process tree went down, not just the harness process: the
+        # grandchild inherited the turn's process group and is killed with it.
+        child_pid = int(pid_path.read_text(encoding="utf-8").strip())
+        self.assertFalse(
+            wait_for_process_exit(child_pid),
+            "a harness descendant outlived the generation timeout",
+        )
+
+    def test_a_non_positive_timeout_is_refused_before_staging(self) -> None:
+        self.write("src/alpha.py", "print('alpha')\n")
+
+        code, out, _err = self.run_commit(
+            str(self.repo), "--yes", "--json", "--timeout", "0"
+        )
+
+        self.assertEqual(1, code)
+        payload = json.loads(out)
+        self.assertEqual(commit_message.REASON_INVALID_ARGUMENTS, payload["reason"])
+        # Refused ahead of staging, so the index is untouched.
+        self.assertFalse(commit_message.has_staged_changes(self.repo))
+        self.assertFalse(self.record_path.exists())
 
     def test_an_empty_response_is_rejected(self) -> None:
         self.write("src/alpha.py", "print('alpha')\n")

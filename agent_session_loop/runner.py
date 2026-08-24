@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -104,6 +105,18 @@ REPAIR_COMMIT_MODE_PER_CHILD = "per-child"
 #: always commits with the ``asl commit`` it ships with.
 CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
 COMMIT_SUBCOMMAND_ARGV: tuple[str, ...] = ("commit", "--yes", "--no-verify")
+#: Grace the run allows a bounded ``asl commit`` beyond the ``--timeout`` it was
+#: handed. The nested command is expected to enforce its own bound and exit with
+#: a classified failure; this outer bound only covers the case where it cannot —
+#: a wedged interpreter, or a harness descendant that escaped the nested kill and
+#: still holds the captured pipes open. It is a backstop, so it is deliberately
+#: generous enough that it never fires ahead of the bound it is backing.
+COMMIT_SUBPROCESS_GRACE_SECONDS = 120
+#: How long a killed commit subprocess is given to flush what it had already
+#: written. A descendant that left the process group survives the kill and
+#: holds the pipes open, so this drain is bounded too; past it the streams are
+#: abandoned rather than waited on.
+_COMMIT_DRAIN_SECONDS = 5
 #: The write-guard change categories `git add --` can stage. The other three
 #: `repository_evidence` categories cannot: `untracked_removed` names paths that
 #: no longer exist, `worktree_ignore` names paths git refuses to add outright,
@@ -5154,15 +5167,25 @@ class _CommitGeneration:
     The run's *declared* implementation flags travel here, never its reported
     model/effort payload: ``config.native_model_payload`` can answer
     ``"native CLI default"``, which names no model any harness would accept.
+
+    ``timeout`` is the bound the nested command puts on its own generation
+    turn. It is always set: an unbounded commit turn stalls the session loop
+    behind it, which is exactly the failure the run cannot absorb.
     """
 
     harness: str | None = None
     model: str | None = None
     effort: str | None = None
+    timeout: int = commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS
 
 
 def _commit_generation(args: argparse.Namespace) -> _CommitGeneration:
-    """Resolve the commit-message harness selection for one run."""
+    """Resolve the commit-message harness selection for one run.
+
+    The run's own ``--timeout`` is deliberately *not* forwarded: it bounds a
+    session's implementation turn, is frequently unset, and would hand an
+    unbounded commit turn to every run that leaves it out.
+    """
     harness = getattr(args, "harness", None)
     if harness is None:
         return _CommitGeneration()
@@ -5186,12 +5209,19 @@ def _asl_commit_argv(
     the path half means anything to git; an empty list leaves ``asl commit``
     on its ``git add -A`` default, which is what a legacy single-repository
     target wants.
+
+    ``--timeout`` is always on the argv, including for a default
+    ``_CommitGeneration``: the bound is what keeps a stalled message harness
+    from holding the whole session loop, so it must not depend on the run
+    having named a harness.
     """
     argv = [
         sys.executable,
         "-m",
         "agent_session_loop",
         *COMMIT_SUBCOMMAND_ARGV,
+        "--timeout",
+        str(generation.timeout),
     ]
     if generation.harness is not None:
         argv.extend(["--harness", generation.harness])
@@ -5211,6 +5241,63 @@ def _asl_commit_env() -> dict[str, str]:
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = f"{root}{os.pathsep}{existing}" if existing else root
     return env
+
+
+def _run_bounded_asl_commit(
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    timeout: int,
+) -> tuple[subprocess.CompletedProcess[str], bool]:
+    """Run one ``asl commit`` under a wall-clock bound it cannot outlive.
+
+    The nested command already bounds its own harness turn and exits with a
+    classified failure, so this bound normally never fires. What it covers is
+    the case the nested bound cannot reach: a wedged interpreter, or a harness
+    descendant that escaped the nested kill and still holds the captured pipes
+    open — the exact shape that turns one stalled commit into a stalled run.
+
+    ``start_new_session=True`` makes the child's process group ID its own PID,
+    so the expiry can kill the whole tree at once (mirrors
+    :func:`harnesses._kill_process_group`). A second, short bound covers the
+    drain that follows: a descendant that left the group survives the signal,
+    and waiting on it forever would reintroduce the stall the kill just ended.
+    Expiry is reported as exit 124 — the same code ``run_harness`` uses for a
+    timed-out turn — so it reads as a nonzero commit exit everywhere
+    downstream and lands on the normal soft-failure path.
+    """
+    process = subprocess.Popen(
+        list(argv),
+        cwd=cwd,
+        env=_asl_commit_env(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            # The group is already empty, or the child left it for one of its
+            # own; the direct child is still reachable either way.
+            with contextlib.suppress(OSError):
+                process.kill()
+        try:
+            stdout, stderr = process.communicate(timeout=_COMMIT_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        stderr = (
+            f"{stderr}\nasl commit exceeded its {timeout}s bound and was "
+            "terminated with its process group"
+        ).lstrip()
+        return subprocess.CompletedProcess(list(argv), 124, stdout, stderr), True
+    return (
+        subprocess.CompletedProcess(list(argv), process.returncode, stdout, stderr),
+        False,
+    )
 
 
 def _run_asl_commit(
@@ -5234,18 +5321,18 @@ def _run_asl_commit(
         session_id=session_id,
         repository_alias=repository_alias,
     )
-    argv = _asl_commit_argv(generation or _CommitGeneration(), staging_paths)
+    resolved_generation = generation or _CommitGeneration()
+    argv = _asl_commit_argv(resolved_generation, staging_paths)
+    subprocess_timeout = resolved_generation.timeout + COMMIT_SUBPROCESS_GRACE_SECONDS
     head_before_payload = _read_git_head(canonical_cwd)
     started_at = _utc_now()
     exec_error = None
+    timed_out = False
     try:
-        result = subprocess.run(
+        result, timed_out = _run_bounded_asl_commit(
             argv,
             cwd=canonical_cwd,
-            env=_asl_commit_env(),
-            text=True,
-            capture_output=True,
-            check=False,
+            timeout=subprocess_timeout,
         )
     except FileNotFoundError as error:
         exec_error = str(error)
@@ -5316,6 +5403,9 @@ def _run_asl_commit(
         "duration_seconds": _duration_seconds(started_at, finished_at),
         "stdout_chars": len(result.stdout),
         "stderr_chars": len(result.stderr),
+        "generation_timeout_seconds": resolved_generation.timeout,
+        "subprocess_timeout_seconds": subprocess_timeout,
+        "timed_out": timed_out,
     }
     if exec_error is not None:
         payload["exec_error"] = exec_error
