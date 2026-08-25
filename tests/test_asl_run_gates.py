@@ -844,6 +844,71 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertEqual(2, report["git_root_count"])
         self.assertEqual(1, payload["pause_details"]["session"])
 
+    def _declare_source(self, source: Path, *, expansion_cites: str) -> None:
+        """Point the manifest at ``source`` and cite a path in an expansion note.
+
+        Readiness is rewritten last: both edits change the artifact digests the
+        readiness SHA covers.
+        """
+        manifest = self.plan_dir / "manifest.md"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8") + f"\n**Split from**: `{source}`\n",
+            encoding="utf-8",
+        )
+        (self.plan_dir / "session-1.expand.md").write_text(
+            f"# Session 1 Expansion\n\n- Restated from {expansion_cites}\n",
+            encoding="utf-8",
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+
+    def test_hard_gate_exempts_the_document_the_plan_was_split_from(self) -> None:
+        # The reported bug end to end: a plan citing where it came from, in
+        # prose an `asl expand-ingest` regenerates, is not a plan that reaches
+        # two repositories.
+        other_repo = self.tmp_path / "other"
+        init_git_repo(other_repo)
+        source = other_repo / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+        self._write_plan(("pending",))
+        self._declare_source(source, expansion_cites=f"{source}:209")
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertFalse(payload["paused"])
+        self.assertEqual("all-complete", payload["reason"])
+
+    def test_hard_gate_still_pauses_on_a_redirect_beside_the_source_document(
+        self,
+    ) -> None:
+        # The sharp pin: the exemption covers the source document and the
+        # directory holding it, never the rest of that repository.
+        other_repo = self.tmp_path / "other"
+        init_git_repo(other_repo)
+        source = other_repo / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+        self._write_plan(("pending",))
+        self._declare_source(source, expansion_cites=f"{other_repo}/src/new.py")
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual(
+            events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+            payload["pause_reason"],
+        )
+        report = payload["pause_details"]["repository_intent"]
+        self.assertEqual(2, report["git_root_count"])
+
     def test_run_rejects_mismatched_prepared_root_without_overwriting_binding(
         self,
     ) -> None:

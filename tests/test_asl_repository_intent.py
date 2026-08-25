@@ -327,6 +327,113 @@ class ResolveIntentTests(unittest.TestCase):
         }
         self.assertEqual("plan-artifact", exemptions["task-packet"])
 
+    def test_a_cited_source_document_is_exempt_wherever_prose_names_it(self) -> None:
+        source = self.second / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+
+        intent = self._resolve(
+            repository_intent.IntentCandidate(
+                value=str(self.first / "README.md"), surface="absolute-path"
+            ),
+            repository_intent.IntentCandidate(
+                value=f"{source}:209", surface="absolute-path", line=14
+            ),
+            provenance_roots=repository_intent.provenance_exempt_roots(source),
+        )
+
+        self.assertFalse(intent.registry_required)
+        self.assertEqual((self.first,), intent.git_roots)
+        exemptions = {
+            candidate.candidate.value: candidate.exemption
+            for candidate in intent.candidates
+        }
+        self.assertEqual("plan-provenance", exemptions[f"{source}:209"])
+
+    def test_a_sibling_of_the_source_document_is_exempt(self) -> None:
+        source = self.second / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+        sibling = source.parent / "other-plan.md"
+        sibling.write_text("# Other\n", encoding="utf-8")
+
+        intent = self._resolve(
+            repository_intent.IntentCandidate(
+                value=str(sibling), surface="absolute-path"
+            ),
+            provenance_roots=repository_intent.provenance_exempt_roots(source),
+        )
+
+        self.assertFalse(intent.registry_required)
+        self.assertEqual("plan-provenance", intent.candidates[0].exemption)
+
+    def test_the_rest_of_the_source_repository_still_requires_a_registry(self) -> None:
+        source = self.second / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+        skill = self.second / "skills" / "foo" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# Skill\n", encoding="utf-8")
+        settings = self.second / "settings.json"
+        settings.write_text("{}\n", encoding="utf-8")
+
+        for label, target in (("sibling directory", skill), ("repo root", settings)):
+            with self.subTest(label=label):
+                intent = self._resolve(
+                    repository_intent.IntentCandidate(
+                        value=str(target), surface="absolute-path"
+                    ),
+                    provenance_roots=repository_intent.provenance_exempt_roots(source),
+                )
+
+                self.assertTrue(intent.registry_required)
+                self.assertEqual((self.second,), intent.git_roots)
+
+    def test_a_deleted_source_document_is_still_exempt(self) -> None:
+        source = self.second / "plans" / "deleted.md"
+        source.parent.mkdir(parents=True)
+
+        intent = self._resolve(
+            repository_intent.IntentCandidate(
+                value=str(source), surface="absolute-path"
+            ),
+            provenance_roots=repository_intent.provenance_exempt_roots(source),
+        )
+
+        self.assertFalse(intent.registry_required)
+        self.assertEqual("plan-provenance", intent.candidates[0].exemption)
+
+    def test_a_source_inside_the_bound_repository_leaves_the_verdict_alone(
+        self,
+    ) -> None:
+        source = self.first / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+
+        intent = self._resolve(
+            repository_intent.IntentCandidate(
+                value=str(self.second / "README.md"), surface="absolute-path"
+            ),
+            provenance_roots=repository_intent.provenance_exempt_roots(source),
+        )
+
+        self.assertTrue(intent.registry_required)
+        self.assertEqual((self.second,), intent.git_roots)
+
+    def test_a_plan_artifact_keeps_its_label_when_it_is_also_the_source(self) -> None:
+        plan_dir = self.second / "plans" / "b766"
+        plan_dir.mkdir(parents=True)
+        source = plan_dir / "source.md"
+        source.write_text("# Source\n", encoding="utf-8")
+
+        intent = self._resolve(
+            repository_intent.IntentCandidate(value=str(source), surface="task-packet"),
+            exempt_roots=[plan_dir],
+            provenance_roots=repository_intent.provenance_exempt_roots(source),
+        )
+
+        self.assertEqual("plan-artifact", intent.candidates[0].exemption)
+
     def test_system_paths_and_unresolvable_backticks_are_exempt(self) -> None:
         intent = self._resolve(
             repository_intent.IntentCandidate(
@@ -363,6 +470,69 @@ class ResolveIntentTests(unittest.TestCase):
         self.assertEqual((), intent.git_roots)
 
 
+class ProvenanceExemptRootTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = canonicalize_filesystem_path(self._temp.name)
+        self.repository = self.root / "repo"
+        init_git_repo(self.repository)
+
+    def test_the_source_document_and_its_directory_are_exempt(self) -> None:
+        source = self.repository / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+
+        self.assertEqual(
+            (source, source.parent),
+            repository_intent.provenance_exempt_roots(source),
+        )
+
+    def test_a_relative_pointer_grants_nothing(self) -> None:
+        for value in ("plans/source.md", "./source.md", "", None):
+            with self.subTest(value=value):
+                self.assertEqual((), repository_intent.provenance_exempt_roots(value))
+
+    def test_a_directory_pointer_grants_nothing(self) -> None:
+        directory = self.repository / "plans"
+        directory.mkdir(parents=True)
+
+        self.assertEqual((), repository_intent.provenance_exempt_roots(directory))
+
+    def test_a_tilde_pointer_expands_before_the_absolute_test(self) -> None:
+        # Most manifests write `~/.claude/…`, which `Path.is_absolute` calls
+        # relative. Only the expansion is asserted here: whether the parent is
+        # also exempted depends on the machine's home directory.
+        home = canonicalize_filesystem_path(Path.home())
+
+        roots = repository_intent.provenance_exempt_roots("~/plans/source.md")
+
+        self.assertEqual(home / "plans" / "source.md", roots[0])
+
+    def test_a_source_at_a_repository_root_exempts_only_the_file(self) -> None:
+        source = self.repository / "source.md"
+        source.write_text("# Source\n", encoding="utf-8")
+
+        self.assertEqual((source,), repository_intent.provenance_exempt_roots(source))
+
+    def test_a_source_outside_any_repository_exempts_only_the_file(self) -> None:
+        # Widening to the parent here would exempt every repository that
+        # happens to live beneath it — including the bound root.
+        source = self.root / "sources" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+
+        self.assertEqual((source,), repository_intent.provenance_exempt_roots(source))
+
+    def test_a_source_directly_in_home_exempts_only_the_file(self) -> None:
+        home = canonicalize_filesystem_path(Path.home())
+
+        self.assertEqual(
+            (home / "source.md",),
+            repository_intent.provenance_exempt_roots(home / "source.md"),
+        )
+
+
 class IntentReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temp = tempfile.TemporaryDirectory()
@@ -397,6 +567,35 @@ class IntentReportTests(unittest.TestCase):
         self.assertEqual(str(self.repository / "README.md"), entry["resolved"])
         self.assertEqual(str(self.repository), entry["git_root"])
         self.assertIsNone(entry["exemption"])
+
+    def test_report_distinguishes_provenance_from_runner_bookkeeping(self) -> None:
+        plan_dir = self.repository / "plans" / "b766"
+        plan_dir.mkdir(parents=True)
+        source = self.root / "sources" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+
+        intent = repository_intent.resolve_intent(
+            [
+                repository_intent.IntentCandidate(
+                    value=str(plan_dir / "session-1.md"), surface="task-packet"
+                ),
+                repository_intent.IntentCandidate(
+                    value=str(source), surface="absolute-path"
+                ),
+            ],
+            root=self.repository,
+            exempt_roots=[plan_dir],
+            provenance_roots=repository_intent.provenance_exempt_roots(source),
+        )
+
+        exemptions = {
+            entry["surface"]: entry["exemption"]
+            for entry in repository_intent.intent_report(intent)["candidates"]
+        }
+
+        self.assertEqual("plan-artifact", exemptions["task-packet"])
+        self.assertEqual("plan-provenance", exemptions["absolute-path"])
 
     def test_report_names_the_shared_reason_when_a_registry_is_required(
         self,

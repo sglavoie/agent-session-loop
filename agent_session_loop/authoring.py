@@ -52,6 +52,7 @@ from . import (
     responses,
 )
 from .plans import (
+    SPLIT_FROM_PREFIX,
     PlanError,
     ReadinessMetadata,
     SessionId,
@@ -1025,7 +1026,12 @@ def _suggest_heading_repair(error: SourceHeadingError) -> str | None:
     return suggestion
 
 
-def lint_plan_document(text: str, *, cwd: str | Path | None = None) -> PlanLintResult:
+def lint_plan_document(
+    text: str,
+    *,
+    cwd: str | Path | None = None,
+    source_path: str | Path | None = None,
+) -> PlanLintResult:
     """Collect every malformed source heading instead of stopping at the first.
 
     :func:`parse_plan_document` fails fast, so repairing a plan through it costs
@@ -1036,7 +1042,8 @@ def lint_plan_document(text: str, *, cwd: str | Path | None = None) -> PlanLintR
     With ``cwd``, a registry-free plan is additionally judged against that root:
     a plan that reaches into a second repository is reported as
     :data:`LINT_MISSING_REPOSITORY_REGISTRY` rather than being split into a
-    legacy plan nothing can guard.
+    legacy plan nothing can guard. ``source_path`` names the document itself,
+    which that judgement must not count as somewhere the plan reaches.
     """
     findings: list[PlanLintFinding] = []
     session_ids: list[str] = []
@@ -1118,7 +1125,7 @@ def lint_plan_document(text: str, *, cwd: str | Path | None = None) -> PlanLintR
 
     footprint_payload: dict[str, Any] | None = None
     if not findings and registry is None and cwd is not None:
-        footprint_payload = plan_footprint_payload(text, cwd)
+        footprint_payload = plan_footprint_payload(text, cwd, source_path=source_path)
         if footprint_payload is not None:
             heading_line = min(first_id_lines.values(), default=1)
             findings.append(
@@ -1151,12 +1158,17 @@ def plan_footprint_payload(
     cwd: str | Path,
     *,
     contracts_by_id: Any = None,
+    source_path: str | Path | None = None,
 ) -> dict[str, Any] | None:
     """Judge a source plan against ``cwd``, returning ``None`` when it fits.
 
     ``contracts_by_id`` is the raw ``--contracts-file`` object: its check
     ``path``/``cwd`` values are the strongest evidence of what a session will
     touch, and they never appear in the plan prose ``--check`` sees.
+
+    ``source_path`` is the document being split. A plan that cites its own
+    location is not a plan that reaches a second repository, and at this point
+    no plan directory exists yet to exempt it as an artifact.
     """
     try:
         plan = parse_plan_document(text)
@@ -1171,6 +1183,7 @@ def plan_footprint_payload(
     footprint = repository_scope.resolve_footprint(
         [target for targets in targets_by_session.values() for target in targets],
         cwd,
+        provenance_roots=repository_intent.provenance_exempt_roots(source_path),
     )
     return repository_scope.footprint_payload(
         targets_by_session, footprint, registry_present=plan.registry is not None
@@ -1594,7 +1607,7 @@ def render_manifest(spec: ManifestSpec) -> str:
     lines: list[str] = [
         f"# {spec.plan_title}",
         "",
-        f"**Split from**: `{spec.source_path}`",
+        f"{SPLIT_FROM_PREFIX} `{spec.source_path}`",
         f"**Output directory**: `{spec.output_dir}`",
         f"**Plan ID**: `{spec.plan_id}`",
         f"**Source fingerprint**: `{spec.source_fingerprint}`",
@@ -2400,7 +2413,7 @@ def check_from_args(args: Any) -> int:
             )
 
     check_cwd = getattr(args, "cwd", None)
-    result = lint_plan_document(text, cwd=check_cwd)
+    result = lint_plan_document(text, cwd=check_cwd, source_path=source_path)
     footprint_fields: dict[str, Any] = {}
     if result.repository_footprint is not None:
         footprint_fields["repository_footprint"] = result.repository_footprint
@@ -2410,7 +2423,11 @@ def check_from_args(args: Any) -> int:
     # contract-aware write path, which also sees the contracts file.
     registry_required = False
     if check_cwd is not None and result.registry is None:
-        intent = repository_intent.plan_intent(text, root=check_cwd)
+        intent = repository_intent.plan_intent(
+            text,
+            root=check_cwd,
+            provenance_roots=repository_intent.provenance_exempt_roots(source_path),
+        )
         registry_required = intent.registry_required
         if registry_required:
             footprint_fields["repository_intent"] = repository_intent.intent_report(
@@ -2568,7 +2585,10 @@ def split_from_args(args: Any) -> int:
                 f"cannot read source plan {source_path}: {error}",
             )
         footprint = plan_footprint_payload(
-            plan_text, split_cwd, contracts_by_id=contracts_by_id
+            plan_text,
+            split_cwd,
+            contracts_by_id=contracts_by_id,
+            source_path=source_path,
         )
         if footprint is not None:
             footprint_fields["repository_footprint"] = footprint
@@ -2578,7 +2598,10 @@ def split_from_args(args: Any) -> int:
         # conclusive where `--check` was not. It runs before the output
         # directory is resolved, so a refusal leaves nothing behind.
         intent = repository_intent.plan_intent(
-            plan_text, root=split_cwd, contracts_by_id=contracts_by_id
+            plan_text,
+            root=split_cwd,
+            contracts_by_id=contracts_by_id,
+            provenance_roots=repository_intent.provenance_exempt_roots(source_path),
         )
         if intent.registry_required and not registry_declared:
             footprint_fields["repository_intent"] = repository_intent.intent_report(

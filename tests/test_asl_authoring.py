@@ -1766,6 +1766,46 @@ class SplitRepositoryFootprintTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertNotIn("repository_footprint", payload)
 
+    def test_a_plan_citing_its_own_path_is_not_a_second_repository(self) -> None:
+        # No plan directory exists yet at `--check` time, so the source
+        # document can only be exempted as the source document.
+        plan_file = self.second / "plans" / "plan.md"
+        plan_file.parent.mkdir(parents=True)
+        plan_file.write_text(
+            "# Plan\n\n"
+            "## Session 1: First\n\n"
+            f"Edit {self.first}/README.md carefully.\n\n"
+            "## Session 2: Second\n\n"
+            f"The wording comes from {plan_file}:14.\n",
+            encoding="utf-8",
+        )
+
+        payload = self._check(plan_file, self.first)
+
+        self.assertTrue(payload["ok"])
+        self.assertNotIn("repository_footprint", payload)
+        self.assertNotIn("repository_intent", payload)
+
+    def test_a_plan_reaching_elsewhere_in_its_own_repository_is_refused(self) -> None:
+        plan_file = self.second / "plans" / "plan.md"
+        plan_file.parent.mkdir(parents=True)
+        plan_file.write_text(
+            "# Plan\n\n"
+            "## Session 1: First\n\n"
+            f"Edit {self.first}/README.md carefully.\n\n"
+            "## Session 2: Second\n\n"
+            f"Then update {self.second}/README.md too.\n",
+            encoding="utf-8",
+        )
+
+        payload = self._check(plan_file, self.first)
+
+        self.assertEqual(authoring.SPLIT_REASON_REGISTRY_REQUIRED, payload["reason"])
+        self.assertEqual(
+            self._canonical_roots(),
+            sorted(payload["repository_intent"]["git_roots"]),
+        )
+
     def test_a_non_git_path_outside_the_root_still_checks_clean(self) -> None:
         loose = self.root / "loose.txt"
         loose.write_text("x\n", encoding="utf-8")

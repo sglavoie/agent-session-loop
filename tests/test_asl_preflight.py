@@ -1683,6 +1683,119 @@ class RepositoryIntentPreflightTests(unittest.TestCase):
         self.assertEqual([], self._intent_findings(report))
         self.assertFalse(report.repository_intent.registry_required)
 
+    def _declare_source(
+        self, value: str, *, cited_in_session: str | None = None
+    ) -> None:
+        """Record a `**Split from**` pointer, optionally citing it in prose."""
+        manifest = self.plan_dir / "manifest.md"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8") + f"\n**Split from**: `{value}`\n",
+            encoding="utf-8",
+        )
+        if cited_in_session is not None:
+            session = self.plan_dir / "session-1.md"
+            session.write_text(
+                session.read_text(encoding="utf-8")
+                + f"\nRestated from {cited_in_session} for context.\n",
+                encoding="utf-8",
+            )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        plans.save_plan_metadata(self.plan_dir, str(self.first))
+
+    def _footprint_findings(
+        self, report: preflight.PreflightReport
+    ) -> list[preflight.PreflightFinding]:
+        return [
+            finding
+            for finding in report.findings
+            if finding.category == "repository-footprint"
+        ]
+
+    def test_source_plan_cited_in_session_prose_is_not_a_second_target(
+        self,
+    ) -> None:
+        source = self.second / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+        self._write_plan(self.first / "README.md", self.first / "src" / "new.py")
+        self._declare_source(str(source), cited_in_session=f"{source}:209")
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        self.assertEqual([], self._intent_findings(report))
+        self.assertEqual([], self._footprint_findings(report))
+        self.assertFalse(report.repository_intent.registry_required)
+
+    def test_sibling_of_the_source_plan_is_not_a_second_target(self) -> None:
+        source = self.second / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+        sibling = source.parent / "companion.md"
+        sibling.write_text("# Companion\n", encoding="utf-8")
+        self._write_plan(self.first / "README.md")
+        self._declare_source(str(source), cited_in_session=str(sibling))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        self.assertEqual([], self._intent_findings(report))
+        self.assertEqual([], self._footprint_findings(report))
+
+    def test_a_write_elsewhere_in_the_source_repository_still_needs_a_registry(
+        self,
+    ) -> None:
+        source = self.second / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+        self._write_plan(
+            self.first / "README.md", self.second / "src" / "new_module.py"
+        )
+        self._declare_source(str(source), cited_in_session=str(source))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        findings = self._intent_findings(report)
+        self.assertEqual(1, len(findings))
+        self.assertIn("2 git repositories", findings[0].message)
+
+    def test_a_relative_split_from_leaves_the_gate_intact(self) -> None:
+        source = self.second / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+        self._write_plan(self.first / "README.md")
+        self._declare_source("plans/source.md", cited_in_session=str(source))
+
+        report = preflight.run_core_preflight(self.plan_dir)
+
+        findings = self._intent_findings(report)
+        self.assertEqual(1, len(findings))
+        self.assertIn("2 git repositories", findings[0].message)
+
+    def test_footprint_gate_does_not_count_the_cited_source_plan(self) -> None:
+        source = self.second / "plans" / "source.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Source\n", encoding="utf-8")
+        self._write_plan(self.first / "README.md")
+        self._declare_source(str(source), cited_in_session=str(source))
+
+        footprint, payload = preflight.plan_repository_footprint(
+            self.plan_dir, self.first
+        )
+
+        self.assertEqual((), footprint.out_of_root)
+        self.assertEqual(
+            (workspaces.canonicalize_filesystem_path(self.first),),
+            footprint.repo_roots,
+        )
+        # ``None`` is the payload's way of saying there is nothing to report.
+        self.assertIsNone(payload)
+
     def test_registered_multi_repository_plan_passes(self) -> None:
         write_multi_repo_plan(
             self.plan_dir, ("pending",), specs=DEFAULT_MULTI_REPO_SPECS[:2]

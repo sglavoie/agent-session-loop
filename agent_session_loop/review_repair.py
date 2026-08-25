@@ -941,11 +941,15 @@ def _validate_children_footprint(
     }
     if plans.read_repository_registry(plan_dir) is not None:
         return clean
+    provenance_roots = preflight.plan_provenance_exempt_roots(plan_dir)
     blockers: list[str] = []
     for group_plan in group_plans:
         child = group_plan.proposed_child_id.value
         footprint = repository_scope.resolve_footprint(
-            _child_footprint_targets(group_plan), cwd, plan_dir=plan_dir
+            _child_footprint_targets(group_plan),
+            cwd,
+            plan_dir=plan_dir,
+            provenance_roots=provenance_roots,
         )
         for target in footprint.out_of_root:
             blockers.append(

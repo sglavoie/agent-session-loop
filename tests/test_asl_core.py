@@ -1768,6 +1768,73 @@ class ParserAndStateTests(unittest.TestCase):
             ):
                 plans.parse_readiness_metadata(text)
 
+    def test_parse_split_from_reads_a_backticked_pointer(self) -> None:
+        manifest_text = "\n".join(
+            [
+                "# Plan",
+                "",
+                "**Split from**: `~/.claude/plans/source.md`",
+                "**Sessions**: 2",
+                "",
+                "## Sessions",
+                "",
+            ]
+        )
+
+        self.assertEqual(
+            "~/.claude/plans/source.md", plans.parse_split_from(manifest_text)
+        )
+
+    def test_parse_split_from_drops_prose_beside_the_pointer(self) -> None:
+        cases = (
+            (
+                "annotated backtick span",
+                "- **Split from**: `plans/source.md` (harness plan store)",
+                "plans/source.md",
+            ),
+            (
+                "bare value with trailing prose",
+                "**Split from**: /srv/plans/source.md at revision abc123",
+                "/srv/plans/source.md",
+            ),
+        )
+
+        for label, line, expected in cases:
+            with self.subTest(label=label):
+                manifest_text = f"# Plan\n\n{line}\n\n## Sessions\n"
+                self.assertEqual(expected, plans.parse_split_from(manifest_text))
+
+    def test_parse_split_from_ignores_a_pointer_below_the_first_heading(self) -> None:
+        manifest_text = "\n".join(
+            [
+                "# Plan",
+                "",
+                "**Sessions**: 1",
+                "",
+                "## Sessions",
+                "",
+                "**Split from**: `/quoted/in/a/narrative.md`",
+                "",
+            ]
+        )
+
+        self.assertIsNone(plans.parse_split_from(manifest_text))
+
+    def test_parse_split_from_returns_none_when_absent_or_empty(self) -> None:
+        cases = (
+            ("absent", "# Plan\n\n**Sessions**: 1\n\n## Sessions\n"),
+            ("empty value", "# Plan\n\n**Split from**:\n\n## Sessions\n"),
+            ("empty backticks", "# Plan\n\n**Split from**: ``\n\n## Sessions\n"),
+        )
+
+        for label, text in cases:
+            with self.subTest(label=label):
+                self.assertIsNone(plans.parse_split_from(text))
+
+    def test_read_split_from_survives_a_missing_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(plans.read_split_from(Path(tmp) / "absent"))
+
     def test_write_readiness_metadata_inserts_after_front_matter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"

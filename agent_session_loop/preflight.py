@@ -91,6 +91,7 @@ from .plans import (
     progress_path,
     read_progress_entries,
     read_repository_registry,
+    read_split_from,
     stable_readiness_sha256,
     write_readiness_metadata,
 )
@@ -1771,6 +1772,7 @@ def plan_repository_footprint(
         [target for targets in targets_by_session.values() for target in targets],
         root,
         plan_dir=canonical_dir,
+        provenance_roots=plan_provenance_exempt_roots(canonical_dir),
     )
     payload = repository_scope.footprint_payload(
         targets_by_session, footprint, registry_present=False
@@ -1794,15 +1796,20 @@ def _check_repository_footprint(
     if registry is not None:
         return (), None
     targets_by_session = _footprint_targets_by_session(contracts_by_session, snapshot)
+    provenance_roots = plan_provenance_exempt_roots(plan_dir)
     footprint = repository_scope.resolve_footprint(
         [target for targets in targets_by_session.values() for target in targets],
         root,
         plan_dir=plan_dir,
+        provenance_roots=provenance_roots,
     )
     findings: list[PreflightFinding] = []
     for session_id in sorted(targets_by_session):
         session_footprint = repository_scope.resolve_footprint(
-            targets_by_session[session_id], footprint.root, plan_dir=plan_dir
+            targets_by_session[session_id],
+            footprint.root,
+            plan_dir=plan_dir,
+            provenance_roots=provenance_roots,
         )
         for target in session_footprint.out_of_root:
             findings.append(
@@ -1877,6 +1884,18 @@ def _repository_intent_candidates(
     return tuple(candidates)
 
 
+def plan_provenance_exempt_roots(plan_dir: str | Path | None) -> tuple[Path, ...]:
+    """Trees a plan's declared source pointer exempts from the intent gate.
+
+    Public because the runner's per-turn packet gate needs the same answer the
+    plan-level gate reaches, and both must derive it from the manifest rather
+    than from a filter applied to one line shape.
+    """
+    if plan_dir is None:
+        return ()
+    return repository_intent.provenance_exempt_roots(read_split_from(plan_dir))
+
+
 def _check_repository_intent(
     contracts_by_session: dict[str, CompletionContract],
     snapshot: PlanSnapshot | None,
@@ -1896,6 +1915,7 @@ def _check_repository_intent(
         _repository_intent_candidates(plan_dir, contracts_by_session, snapshot, root),
         root=root,
         exempt_roots=() if plan_dir is None else (plan_dir,),
+        provenance_roots=plan_provenance_exempt_roots(plan_dir),
     )
     if not intent.registry_required:
         return (), intent
@@ -1943,6 +1963,7 @@ def plan_repository_intent(
         ),
         root=root,
         exempt_roots=(canonical_dir, *extra_exempt_roots),
+        provenance_roots=plan_provenance_exempt_roots(canonical_dir),
     )
     if not intent.registry_required:
         return intent, None

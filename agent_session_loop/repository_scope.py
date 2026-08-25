@@ -298,15 +298,24 @@ def resolve_footprint(
     root: str | Path,
     *,
     plan_dir: str | Path | None = None,
+    provenance_roots: Iterable[str | Path] = (),
 ) -> RepositoryFootprint:
     """Judge ``targets`` against ``root``, the single root the plan is bound to.
 
     ``plan_dir`` names the plan's own directory. ASL's generated review
     contracts verify plan artifacts that live there, so a target under it
     describes the plan, not a second repository.
+
+    ``provenance_roots`` names the document the plan was split from and the
+    directory holding it, as bounded by
+    :func:`repository_intent.provenance_exempt_roots`. A plan citing where it
+    came from is not a plan that reaches there.
     """
     bound_root = canonicalize_filesystem_path(root)
     plan_root = canonicalize_filesystem_path(plan_dir) if plan_dir is not None else None
+    provenance = tuple(
+        canonicalize_filesystem_path(entry) for entry in provenance_roots
+    )
     git_root_cache: dict[Path, Path | None] = {}
     repo_roots: dict[Path, None] = {}
     out_of_root: list[PathTarget] = []
@@ -320,6 +329,10 @@ def resolve_footprint(
             continue
         if plan_root is not None and is_descendant(
             resolved, plan_root, allow_equal=True
+        ):
+            continue
+        if any(
+            is_descendant(resolved, entry, allow_equal=True) for entry in provenance
         ):
             continue
         if target.confidence == "soft":

@@ -97,6 +97,11 @@ UNREADABLE_ARTIFACT_DIGEST = "unreadable"
 READINESS_PREFIX = "**Readiness**:"
 READINESS_SHA_PREFIX = "**Readiness SHA-256**:"
 READINESS_CHECKED_PREFIX = "**Readiness checked at**:"
+#: Manifest metadata naming the document a plan was split from. Read by the
+#: repository-intent gate to exempt that document — and the directory holding
+#: it — wherever the plan happens to mention it. Interpolated by
+#: :func:`authoring.render_manifest` so writer and reader cannot drift.
+SPLIT_FROM_PREFIX = "**Split from**:"
 SESSION_ID_PATTERN = r"[1-9][0-9]*(?:\.[1-9][0-9]*)*"
 SESSION_ID_RE = re.compile(rf"^{SESSION_ID_PATTERN}$")
 SESSION_FILE_RE = re.compile(rf"^session-({SESSION_ID_PATTERN})\.md$")
@@ -1965,6 +1970,23 @@ def _strip_inline_code_ticks(value: str) -> str:
     return text
 
 
+def _leading_inline_code_or_token(value: str) -> str:
+    """Return the first inline-code span, else the first whitespace token.
+
+    :func:`_strip_inline_code_ticks` requires the *whole* value to be one span,
+    which readiness metadata guarantees and hand-annotated provenance does not:
+    ``` `plans/x.md` (harness plan store) ``` is the shape operators actually
+    write. Only the location is wanted; the annotation beside it is prose.
+    """
+    text = value.strip()
+    if text.startswith("`"):
+        closing = text.find("`", 1)
+        if closing != -1:
+            return text[1:closing].strip()
+    tokens = text.split()
+    return tokens[0] if tokens else ""
+
+
 def parse_readiness_state(value: str) -> ReadinessState:
     """Parse and validate a readiness state name."""
     normalized = value.strip().lower()
@@ -2018,6 +2040,33 @@ def parse_readiness_metadata(manifest_text: str) -> ReadinessMetadata | None:
     return ReadinessMetadata(state=state, readiness_sha256=sha, checked_at=checked_at)
 
 
+def parse_split_from(manifest_text: str) -> str | None:
+    """Parse the `**Split from**` pointer out of a manifest's header block.
+
+    Scanning stops at the first `## ` heading — the same header-block boundary
+    :func:`_find_readiness_insertion_index` uses — so a `**Split from**` line
+    quoted inside a session narrative can never widen the exemption this value
+    grants. The first match wins.
+
+    The raw string is returned; expansion and canonicalization belong to the
+    exemption layer, which is where the policy about what a pointer may exempt
+    already lives. This never raises: readiness metadata is authoritative and
+    must fail a malformed plan loudly, but provenance is advisory, so a value
+    that cannot be parsed narrows the exemption instead of breaking the plan.
+    """
+    for raw_line in manifest_text.splitlines():
+        if raw_line.startswith("## "):
+            return None
+        line = raw_line.strip()
+        if line.startswith(("- ", "* ")):
+            line = line[2:].lstrip()
+        if not line.startswith(SPLIT_FROM_PREFIX):
+            continue
+        value = _leading_inline_code_or_token(line[len(SPLIT_FROM_PREFIX) :])
+        return value or None
+    return None
+
+
 def read_readiness_metadata(plan_dir: str | Path) -> ReadinessMetadata | None:
     """Read readiness metadata from `manifest.md` in a plan directory."""
     recover_pending_plan_transaction(plan_dir)
@@ -2030,6 +2079,24 @@ def read_readiness_metadata(plan_dir: str | Path) -> ReadinessMetadata | None:
     except OSError as error:
         _raise_read_error(manifest_path, error)
     return parse_readiness_metadata(text)
+
+
+def read_split_from(plan_dir: str | Path) -> str | None:
+    """Read the `**Split from**` pointer from a plan directory's manifest.
+
+    Returns ``None`` when the manifest is missing, unreadable, or carries no
+    pointer. Unlike :func:`read_readiness_metadata` this deliberately does not
+    call :func:`recover_pending_plan_transaction`: the per-turn packet gate is
+    a caller, and it must neither take the transaction lock nor write. Failing
+    to recover fails *closed* — a stale manifest yields no exemption, which is
+    the stricter gate.
+    """
+    manifest_path = canonicalize_path(plan_dir) / "manifest.md"
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return parse_split_from(text)
 
 
 def _render_readiness_metadata_lines(metadata: ReadinessMetadata) -> list[str]:

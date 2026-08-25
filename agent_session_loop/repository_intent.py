@@ -61,8 +61,19 @@ SourceSurface = Literal[
     "task-packet",
 ]
 
-#: Why a candidate cannot count toward the repository verdict.
-Exemption = Literal["system-path", "plan-artifact", "unresolved", "non-git"]
+#: Why a candidate cannot count toward the repository verdict. ``plan-artifact``
+#: and ``plan-provenance`` are kept apart on purpose: the bounded report is an
+#: operator's only window into a verdict, and conflating "ASL owns this tree"
+#: with "this is where the plan came from" would make a wrongly exempted
+#: candidate indistinguishable from runner bookkeeping during exactly the
+#: incident where the two need telling apart.
+Exemption = Literal[
+    "system-path",
+    "plan-artifact",
+    "plan-provenance",
+    "unresolved",
+    "non-git",
+]
 
 #: Upper bound on the candidates, roots, and non-Git paths one report renders.
 #: A broad plan can name hundreds of locations; the verdict never depends on
@@ -344,20 +355,96 @@ def _deduplicate(
 # ---------------------------------------------------------------------------
 
 
+def provenance_exempt_roots(
+    *values: str | os.PathLike[str] | None,
+) -> tuple[Path, ...]:
+    """Resolve declared plan sources into trees this gate must not count.
+
+    A plan that says where it came from is not a plan that reaches there. The
+    line-shaped filter in :func:`candidates_from_plan_document` only catches
+    the metadata field; resolving the pointer to a path instead exempts it
+    wherever it is named — session prose, an expansion note, a handoff, a
+    regenerated artifact.
+
+    Scope is the source file *and its parent directory*, so sibling plans in
+    the same store — routine in multi-plan groups — stop tripping the gate too.
+    Two guards keep that bounded:
+
+    * a value that is itself a directory exempts nothing. Its parent is
+      meaningless and exempting the directory would hand out an unbounded
+      subtree.
+    * the parent is exempted only when it sits *strictly inside* a Git
+      repository — never when it is that repository's root, ``$HOME``, the
+      filesystem root, or a directory in no repository at all. A source plan
+      at a repository root would otherwise disable the gate for the whole
+      repository, and one in a plain directory would exempt every repository
+      that happens to live beneath it. A store outside any repository needs no
+      widening anyway: nothing under it resolves to a Git root, so it cannot
+      force a registry in the first place.
+
+    A source path that no longer exists is exempted deliberately: resolution
+    walks a deleted file up to its nearest existing ancestor and would name
+    that ancestor's repository, which is the case that most needs the
+    exemption. ``realpath`` does not require existence, so a declared value and
+    a candidate naming it canonicalize identically either way.
+    """
+    home = canonicalize_filesystem_path(Path.home())
+    git_root_cache: dict[Path, Path | None] = {}
+    roots: dict[Path, None] = {}
+    for value in values:
+        if not value:
+            continue
+        # Expansion comes first: most manifests write `~/.claude/…`, which
+        # `Path.is_absolute` calls relative.
+        expanded = os.path.expanduser(os.fspath(value))
+        if not os.path.isabs(expanded):
+            continue
+        source = canonicalize_filesystem_path(expanded)
+        if source.is_dir():
+            continue
+        roots[source] = None
+        parent = source.parent
+        parent_git_root = repository_scope.nearest_git_root(parent, git_root_cache)
+        if (
+            parent in (source, home)
+            or parent_git_root is None
+            or parent_git_root == parent
+        ):
+            continue
+        roots[parent] = None
+    return tuple(roots)
+
+
 def resolve_intent(
     candidates: Iterable[IntentCandidate],
     *,
     root: str | Path,
     exempt_roots: Iterable[str | Path] = (),
+    provenance_roots: Iterable[str | Path] = (),
 ) -> RepositoryIntent:
     """Resolve every candidate and report which repositories it reaches.
 
     ``root`` anchors relative candidates. ``exempt_roots`` names trees that are
     not plan-owned source — the plan directory, the state directory, a run
     directory — so a runner-owned artifact never counts as a second repository.
+    ``provenance_roots`` names the document a plan was split from and the
+    directory holding it, already bounded by :func:`provenance_exempt_roots`;
+    it is exempted under its own label so the report keeps the two reasons
+    apart.
     """
     bound_root = canonicalize_filesystem_path(root)
-    exempt = tuple(canonicalize_filesystem_path(entry) for entry in exempt_roots)
+    # Plan artifacts are listed first so a source plan that lives inside the
+    # plan directory keeps the stronger label.
+    exempt: tuple[tuple[Path, Exemption], ...] = tuple(
+        [
+            (canonicalize_filesystem_path(entry), "plan-artifact")
+            for entry in exempt_roots
+        ]
+        + [
+            (canonicalize_filesystem_path(entry), "plan-provenance")
+            for entry in provenance_roots
+        ]
+    )
     git_root_cache: dict[Path, Path | None] = {}
     bound_git_root = repository_scope.nearest_git_root(bound_root, git_root_cache)
     resolved_candidates: list[ResolvedCandidate] = []
@@ -394,13 +481,21 @@ def resolve_intent(
                 )
             )
             continue
-        if any(is_descendant(canonical, entry, allow_equal=True) for entry in exempt):
+        exemption = next(
+            (
+                label
+                for entry, label in exempt
+                if is_descendant(canonical, entry, allow_equal=True)
+            ),
+            None,
+        )
+        if exemption is not None:
             resolved_candidates.append(
                 ResolvedCandidate(
                     candidate=candidate,
                     resolved=canonical,
                     git_root=None,
-                    exemption="plan-artifact",
+                    exemption=exemption,
                 )
             )
             continue
@@ -521,6 +616,7 @@ def plan_intent(
     root: str | Path,
     contracts_by_id: Any = None,
     exempt_roots: Iterable[str | Path] = (),
+    provenance_roots: Iterable[str | Path] = (),
 ) -> RepositoryIntent:
     """Resolve a source plan's intent, optionally including its contracts.
 
@@ -530,4 +626,9 @@ def plan_intent(
     """
     candidates = list(candidates_from_text(text))
     candidates.extend(candidates_from_contract_payloads(contracts_by_id))
-    return resolve_intent(candidates, root=root, exempt_roots=exempt_roots)
+    return resolve_intent(
+        candidates,
+        root=root,
+        exempt_roots=exempt_roots,
+        provenance_roots=provenance_roots,
+    )

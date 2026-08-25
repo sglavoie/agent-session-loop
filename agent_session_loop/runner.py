@@ -3797,6 +3797,7 @@ def _task_packet_repository_intent_report(
     root: Path,
     artifact_paths: Sequence[Path],
     exempt_roots: Sequence[Path],
+    provenance_roots: Sequence[Path] = (),
 ) -> dict[str, Any] | None:
     """Re-derive the verdict from what this turn actually hands the worker.
 
@@ -3806,18 +3807,26 @@ def _task_packet_repository_intent_report(
     through the rendered prompt or through the files it points at. Reading
     them here is what stops a location that no plan file declared from
     redirecting a legacy turn into a second repository.
+
+    The artifacts read here are plan documents, so provenance metadata is
+    filtered exactly as the plan-level scan filters it, and
+    ``provenance_roots`` carries the declared source document forward. A turn
+    quoting where the plan came from is not a turn that redirects anywhere.
     """
-    candidates = list(repository_intent.candidates_from_text(prompt))
+    candidates = list(repository_intent.candidates_from_plan_document(prompt))
     candidates.extend(repository_intent.candidates_from_task_packet(artifact_paths))
     for path in artifact_paths:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        candidates.extend(repository_intent.candidates_from_text(text))
+        candidates.extend(repository_intent.candidates_from_plan_document(text))
     candidates.extend(repository_intent.candidates_from_execution_roots([root]))
     intent = repository_intent.resolve_intent(
-        candidates, root=root, exempt_roots=exempt_roots
+        candidates,
+        root=root,
+        exempt_roots=exempt_roots,
+        provenance_roots=provenance_roots,
     )
     if not intent.registry_required:
         return None
@@ -17224,6 +17233,9 @@ def _run_locked(
                     ),
                     exempt_roots=_runner_owned_roots(
                         before.plan_dir, args.state_dir, run_dir=run_dir
+                    ),
+                    provenance_roots=preflight.plan_provenance_exempt_roots(
+                        before.plan_dir
                     ),
                 )
             )

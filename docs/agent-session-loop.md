@@ -2056,11 +2056,35 @@ created yet, which `repository-footprint` structurally cannot see because it
 only counts paths that already exist. Candidates are collected from session
 prose, `context.md`, `manifest.md`, parsed contracts, and stored plan
 metadata, resolved through symlinks to the nearest existing ancestor, and
-anchored to the plan's stored `cwd` or an explicit `--cwd`. Provenance metadata
-is excluded: a `**Split from**:` line records the document a plan was split
-from, which the split and iterate skills refuse to modify, so a source plan kept
-in a versioned home directory is not evidence the plan reaches a second
-repository. Every other line of the same document is scanned normally. Its repair hint
+anchored to the plan's stored `cwd` or an explicit `--cwd`. The document a plan
+was split from is excluded, and so is the directory holding it. `manifest.md`
+records that document in a `**Split from**:` line; the gate resolves that
+pointer to a path and exempts it, rather than filtering the line it appears on,
+so the source document stops counting *wherever it is named* — the metadata
+field, session prose, an expansion note, a handoff, or an artifact
+`asl expand-ingest` regenerates. Exempting the parent directory as well means
+sibling plans in the same store, routine in multi-plan groups, do not trip the
+gate either. The split and iterate skills refuse to modify the source, which is
+what makes the whole exemption safe.
+
+Two guards bound it. A pointer that names a directory exempts nothing: its
+parent is meaningless and the subtree would be unbounded. The parent directory
+is exempted only when it sits strictly inside a Git repository — never when it
+is that repository's root, `$HOME`, the filesystem root, or a directory in no
+repository at all — so a source plan at a repository root cannot disable the
+gate for that repository, and one kept in a plain directory cannot exempt every
+repository beneath it. A source path that no longer exists is still exempt,
+which is deliberate: resolution would otherwise walk it up to its nearest
+existing ancestor and name that ancestor's repository. Everything else in the
+source repository still requires a registry, and the report labels these
+candidates `plan-provenance` rather than `plan-artifact` so a wrongly exempted
+path stays distinguishable from runner bookkeeping.
+
+What this deliberately hides is a plan whose source document lives in another
+repository *and* which intends to rewrite that document, or a sibling beside
+it, in place. Such a plan reads as single-repository here. The skills' refusal
+to modify the source is the reason that trade is acceptable; a plan that really
+must edit its own source needs a registry declaring that repository. Its repair hint
 (`repository-registry-required.declare`) names `asl register-repositories` and
 the three declarations that command derives from disk: a top-level
 `## Repositories` table, per-session `**Reads repositories**:` and
