@@ -3204,18 +3204,31 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
 class ReopenedReadinessProjectionTests(_RunHistoryFixture, unittest.TestCase):
     """The re-gate verdict that licenses a grown plan has to reach the audit."""
 
-    def _regated_bundle(self, tmp: str) -> dict[str, Any]:
+    def _regated_bundle(
+        self,
+        tmp: str,
+        *,
+        trigger: str = events.REVIEW_REPAIR_REOPENED_EVENT,
+        repair_session_ids: list[str] | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         history = self._history(Path(tmp))
         payload = self._read_state(history[2])
         payload["readiness_gate"] = {"ok": True, "core_skipped": True, "findings": []}
-        payload["readiness_gate_reopened"] = {
-            "trigger": events.REVIEW_REPAIR_REOPENED_EVENT,
+        gate: dict[str, Any] = {
+            "trigger": trigger,
             "ok": True,
             "total_sessions": 20,
             "pending_sessions": 3,
-            "repair_session_ids": ["7.1", "7.2", "7.3"],
+            "repair_session_ids": (
+                ["7.1", "7.2", "7.3"]
+                if repair_session_ids is None
+                else repair_session_ids
+            ),
             "findings": [],
         }
+        gate.update(details or {})
+        payload["readiness_gate_reopened"] = gate
         self._write_state(history[2], payload)
         return self._bundle(history).payload
 
@@ -3229,6 +3242,28 @@ class ReopenedReadinessProjectionTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual(["7.1", "7.2", "7.3"], gate["repair_session_ids"])
             # The stale gate stays visible beside it: an auditor that sees only
             # core_skipped cannot tell a re-gated plan from an unauthorized one.
+            self.assertTrue(status["readiness_gate"]["core_skipped"])
+
+    def test_the_review_append_regate_verdict_reaches_the_audit(self) -> None:
+        # Appending a generated review session grows the plan the same way
+        # materializing repairs does, and it re-gates under its own trigger.
+        # An auditor reading the bundle has to be able to tell which growth
+        # the verdict authorized, so the trigger has to survive the projection.
+        with tempfile.TemporaryDirectory() as tmp:
+            status = self._regated_bundle(
+                tmp,
+                trigger=events.REVIEW_SESSION_CREATED_EVENT,
+                repair_session_ids=[],
+                details={"review_session_id": "20"},
+            )["status"]
+
+            gate = status["readiness_gate_reopened"]
+            self.assertEqual(events.REVIEW_SESSION_CREATED_EVENT, gate["trigger"])
+            self.assertNotEqual(events.REVIEW_REPAIR_REOPENED_EVENT, gate["trigger"])
+            self.assertTrue(gate["ok"])
+            # No repair children grew this plan; the appended review did.
+            self.assertEqual([], gate["repair_session_ids"])
+            self.assertEqual("20", gate["review_session_id"])
             self.assertTrue(status["readiness_gate"]["core_skipped"])
 
     def test_a_run_that_never_reopened_projects_no_regate(self) -> None:

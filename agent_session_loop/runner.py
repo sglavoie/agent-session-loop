@@ -10837,14 +10837,21 @@ def _reopened_plan_gate_payload(
     *,
     max_pending_sessions: int | None,
     repair_session_ids: Sequence[str],
+    trigger: str = events.REVIEW_REPAIR_REOPENED_EVENT,
 ) -> dict[str, Any]:
-    """Re-evaluate the plan-size half of the readiness gate after a reopen."""
+    """Re-evaluate the plan-size half of the readiness gate after a reopen.
+
+    ``trigger`` names which growth path asked, because the control plane has
+    two: repair children materialized from a review, and the generated review
+    session itself. The verdicts are otherwise identical, so without it an
+    audit reading one gate payload cannot tell which growth it authorized.
+    """
     findings = preflight.check_env_turn_budget(
         snapshot, max_pending_sessions=max_pending_sessions
     )
     blocking = [finding for finding in findings if finding.severity != "green"]
     return {
-        "trigger": events.REVIEW_REPAIR_REOPENED_EVENT,
+        "trigger": trigger,
         "ok": not blocking,
         "total_sessions": len(snapshot.sessions),
         "pending_sessions": sum(
@@ -10872,20 +10879,28 @@ def _regate_reopened_plan(
     snapshot: plans.PlanSnapshot,
     repair_session_ids: Sequence[str],
     details: Mapping[str, Any],
+    trigger: str = events.REVIEW_REPAIR_REOPENED_EVENT,
+    growth: str | None = None,
 ) -> bool:
-    """Re-gate a plan that review repairs just grew; True when it may proceed.
+    """Re-gate a plan the control plane just grew; True when it may proceed.
 
-    The startup readiness gate runs once, against the plan as authored. Review
-    repairs reopen sessions while the run is live, so a run authorized by "all
-    sessions complete; no turns required" can go on to execute a plan several
-    times the size that gate saw. Turn budget and session inventory are the two
-    findings plan growth invalidates, so they are recomputed here and honour
-    the same ``--allow-not-loop-ready`` escape hatch as the startup gate.
+    The startup readiness gate runs once, against the plan as authored. The
+    control plane then grows that plan while the run is live by two routes --
+    review repairs reopening sessions, and appending the generated review
+    session itself -- so a run authorized by "all sessions complete; no turns
+    required" can go on to execute a plan the gate never saw. Turn budget and
+    session inventory are the two findings plan growth invalidates, so they are
+    recomputed here for either route and honour the same
+    ``--allow-not-loop-ready`` escape hatch as the startup gate.
+
+    ``growth`` names what grew, for the pause message; it defaults to the
+    repair wording ``trigger`` also defaults to.
     """
     gate = _reopened_plan_gate_payload(
         snapshot,
         max_pending_sessions=getattr(args, "max_pending_sessions", None),
         repair_session_ids=repair_session_ids,
+        trigger=trigger,
     )
     with persistence.lock:
         payload["readiness_gate_reopened"] = gate
@@ -10895,6 +10910,9 @@ def _regate_reopened_plan(
     blocking = next(
         finding for finding in gate["findings"] if finding["severity"] != "green"
     )
+    grew = growth or (
+        f"review repairs reopened {len(gate['repair_session_ids'])} session(s)"
+    )
     with persistence.lock:
         payload["final_snapshot"] = _snapshot_payload(snapshot)
     _pause_run(
@@ -10902,7 +10920,7 @@ def _regate_reopened_plan(
         payload,
         reason="not-loop-ready",
         message=(
-            f"review repairs reopened {len(gate['repair_session_ids'])} session(s); "
+            f"{grew}; "
             f"the reopened plan no longer passes the readiness gate: "
             f"{blocking['message']}"
         ),
@@ -13131,6 +13149,76 @@ def _capture_legacy_implementation_snapshot(
     )
 
 
+def _legacy_unobserved_repositories(
+    *,
+    cwd: Path,
+    artifact_paths: Sequence[Path],
+    exempt_roots: Sequence[Path],
+    provenance_roots: Sequence[Path],
+    limit: int = repository_intent.INTENT_REPORT_LIMIT,
+) -> dict[str, dict[str, Any]]:
+    """Name every repository this turn reached that the snapshot never saw.
+
+    :func:`_capture_legacy_implementation_snapshot` fingerprints exactly one
+    repository, the one containing ``cwd``. A write landing anywhere else
+    therefore produces no ``changed`` entry, no added or removed repository,
+    and nothing ``unavailable`` -- so the guard reported ``passed: True`` while
+    an edit landed in a repository it had never looked at. Silence about a
+    place you did not look is not evidence of no change.
+
+    The repositories a turn reaches are re-derived here from the same intent
+    machinery the ``identity.repository-intent`` check reads, so the two stop
+    contradicting each other. The pre-turn packet gate scans what the runner
+    hands the worker; this scan runs after the turn over what came back --
+    plan artifacts the worker just rewrote and the message it signed off with
+    -- because that is where a write the fingerprint could not see gets named.
+
+    Only the exemptions the pre-turn gate already honors apply: runner-owned
+    trees, the document the plan was split from, non-Git paths, and system
+    paths. Whatever survives that and is not the bound repository is reported
+    through ``unavailable``, the guard's existing fail-closed lane.
+    """
+    candidates: list[repository_intent.IntentCandidate] = []
+    for path in artifact_paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            # An artifact that cannot be read names no repository. The turn is
+            # still judged on every artifact that can be, and a missing
+            # fingerprint is caught by the comparison, not by this scan.
+            continue
+        candidates.extend(repository_intent.candidates_from_plan_document(text))
+    candidates.extend(repository_intent.candidates_from_execution_roots([cwd]))
+    intent = repository_intent.resolve_intent(
+        candidates,
+        root=cwd,
+        exempt_roots=exempt_roots,
+        provenance_roots=provenance_roots,
+    )
+    unobserved = [root for root in intent.git_roots if root != intent.bound_git_root]
+    reported, omitted = workspaces.bounded_repository_rows(unobserved, limit=limit)
+    observed = (
+        repository_intent.redact_credentials(str(intent.bound_git_root))
+        if intent.bound_git_root is not None
+        else None
+    )
+    payload: dict[str, dict[str, Any]] = {}
+    for root in reported:
+        payload[repository_intent.redact_credentials(str(root))] = {
+            "reason": "repository-not-observed",
+            "observed_repository": observed,
+        }
+    if omitted:
+        # The count matters more than the names once the list is truncated:
+        # the guard fails closed on the first entry either way.
+        payload["<omitted>"] = {
+            "reason": "repository-not-observed",
+            "observed_repository": observed,
+            "omitted_repositories": omitted,
+        }
+    return payload
+
+
 def _annotate_history_transitions(
     comparison: dict[str, Any],
     *,
@@ -13379,8 +13467,18 @@ def _legacy_implementation_write_guard_evidence(
     comparison: Mapping[str, Any],
     exclude: tuple[str, ...],
     include_ignored: bool,
+    unobserved: Mapping[str, Mapping[str, Any]] = MappingProxyType({}),
 ) -> dict[str, Any]:
-    """Project a legacy single-repository comparison into the guard schema."""
+    """Project a legacy single-repository comparison into the guard schema.
+
+    ``unobserved`` carries the repositories this turn reached that the
+    single-repository snapshot never fingerprinted. They join ``unavailable``
+    rather than ``violations`` because the guard has no observation to
+    classify: it did not see the repository at all, which is the fail-closed
+    lane's exact meaning. The comparison's own entries win a key collision --
+    a repository that failed to fingerprint has a more specific reason than
+    one that was never fingerprinted.
+    """
     raw_changed = comparison.get("changed")
     changed = (
         {str(key): dict(value) for key, value in raw_changed.items()}
@@ -13388,11 +13486,13 @@ def _legacy_implementation_write_guard_evidence(
         else {}
     )
     unavailable = comparison.get("unavailable")
-    unavailable_payload = (
-        {str(key): value for key, value in unavailable.items()}
-        if isinstance(unavailable, Mapping)
-        else {}
-    )
+    unavailable_payload: dict[str, Any] = {
+        str(key): dict(value) for key, value in unobserved.items()
+    }
+    if isinstance(unavailable, Mapping):
+        unavailable_payload.update(
+            {str(key): value for key, value in unavailable.items()}
+        )
     added = list(comparison.get("added") or ())
     removed = list(comparison.get("removed") or ())
     violations = [
@@ -13922,6 +14022,8 @@ def _enforce_legacy_implementation_write_guard(
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
     plan_cache: plans.PlanSnapshotCache,
+    state_dir_arg: str | None,
+    run_dir: Path | None = None,
 ) -> bool:
     """Fail closed around every legacy implementation turn, in every mode."""
     snapshot_after = _capture_legacy_implementation_snapshot(
@@ -13942,6 +14044,17 @@ def _enforce_legacy_implementation_write_guard(
         comparison=comparison,
         exclude=exclude,
         include_ignored=include_ignored,
+        unobserved=_legacy_unobserved_repositories(
+            cwd=cwd,
+            artifact_paths=(
+                *_task_packet_artifact_paths(before.plan_dir, session_id, None),
+                paths["last_message"],
+            ),
+            exempt_roots=_runner_owned_roots(
+                before.plan_dir, state_dir_arg, run_dir=run_dir
+            ),
+            provenance_roots=preflight.plan_provenance_exempt_roots(before.plan_dir),
+        ),
     )
     if evidence["passed"]:
         with persistence.lock:
@@ -16744,6 +16857,33 @@ def _run_locked(
                         break
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(snapshot)
+                    # Appending the review session grows the plan exactly the way
+                    # materializing repair children does, and reaches here under
+                    # the same reused readiness report -- the one that said every
+                    # session was complete and no turns were required. Re-gate the
+                    # grown plan before its turn launches, so the authority the
+                    # review runs under describes the plan that now exists rather
+                    # than the one the startup gate saw. A reused pending review
+                    # session was already authorized when it was created, so only
+                    # a fresh append is re-gated.
+                    if review_created and not _regate_reopened_plan(
+                        event_path=event_path,
+                        payload=payload,
+                        persistence=persistence,
+                        args=args,
+                        snapshot=snapshot,
+                        repair_session_ids=[],
+                        details={
+                            "review_session_id": review_file.session_id.value,
+                            "review_session_path": str(review_file.path),
+                        },
+                        trigger=events.REVIEW_SESSION_CREATED_EVENT,
+                        growth=(
+                            "a generated review session "
+                            f"({review_file.session_id.value}) was appended"
+                        ),
+                    ):
+                        break
                     running_success, running_error = _write_readiness_state(
                         snapshot.plan_dir, "running"
                     )
@@ -17952,6 +18092,8 @@ def _run_locked(
                     turn_payload=turn_payload,
                     paths=paths,
                     plan_cache=plan_cache,
+                    state_dir_arg=args.state_dir,
+                    run_dir=run_dir,
                 ):
                     break
             if (
@@ -19091,6 +19233,8 @@ def _run_locked(
                         turn_payload=turn_payload,
                         paths=guard_context["paths"],
                         plan_cache=plan_cache,
+                        state_dir_arg=args.state_dir,
+                        run_dir=run_dir,
                     )
                 else:
                     _enforce_workspace_write_guard(

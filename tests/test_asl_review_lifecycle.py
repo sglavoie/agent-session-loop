@@ -867,6 +867,51 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         ]
         self.assertEqual([], created_events)
 
+    def test_appending_the_review_session_regates_the_grown_plan(self) -> None:
+        # The audit's complaint: a reused readiness report saying every session
+        # was complete and no turns were required authorized a turn on a session
+        # that report never saw. The re-gate is what makes the recorded
+        # authority describe the plan that actually ran.
+        self._write_plan(("pending",), readiness="loop-ready")
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._precreate_final_review()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        gate = payload["readiness_gate_reopened"]
+        self.assertEqual(events.REVIEW_SESSION_CREATED_EVENT, gate["trigger"])
+        self.assertTrue(gate["ok"])
+        # The appended review session is the one pending session the startup
+        # gate could not have counted.
+        self.assertEqual(1, gate["pending_sessions"])
+        self.assertEqual(2, gate["total_sessions"])
+        # No repair children were materialized, so naming any here would be a
+        # different growth than the one that happened.
+        self.assertEqual([], gate["repair_session_ids"])
+
+    def test_a_reused_review_session_is_not_regated(self) -> None:
+        # It was authorized when it was created; re-gating it would restate an
+        # authority that already exists and blur which growth was licensed.
+        self._write_plan(("complete",), readiness=None)
+        (self.repo_root / "README.md").write_text("readme\n", encoding="utf-8")
+        self._write_pending_review_session()
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-06-19T00:00:00Z",
+            ),
+        )
+        self._precreate_final_review()
+
+        completed, payload = self._run(review_harness="claude")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["review_completed"])
+        self.assertNotIn("readiness_gate_reopened", payload)
+
     def test_resumed_delta_review_is_rescoped_for_a_late_untracked_file(
         self,
     ) -> None:

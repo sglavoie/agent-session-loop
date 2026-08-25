@@ -100,14 +100,28 @@ _FAILURE_CLASSIFICATION_RULES: tuple[tuple[str, str, bool, re.Pattern[str]], ...
         ),
     ),
     (
+        # Matched on the word stem rather than the noun: a harness that says
+        # "Failed to authenticate" reports the same condition as one that says
+        # "authentication failed", and the literal noun let the verb form fall
+        # through to the fail-closed ``nonzero-exit``. That is not a cosmetic
+        # miss — an auth failure that lands there projects ``user_action:
+        # reply``, and no mailbox answer can refresh a harness's credentials.
+        # ``oauth`` and an expired session join the expired token for the same
+        # reason: they name the credential, not the request.
+        #
+        # Position is load-bearing and unchanged. ``usage-limit`` still
+        # precedes this rule, so a quota message that also mentions a session
+        # keeps its own category, and the ``CONTEXT_OVERFLOW_MARKER`` rule
+        # still precedes both.
         "authentication",
         events.PAUSE_REASON_AUTH_FAILED,
         False,
         re.compile(
-            r"\b401\b|unauthorized|authentication|not logged in|"
+            r"\b401\b|unauthorized|authenticat\w*|not logged in|"
             r"invalid api key|invalid_api_key|missing api key|api key|"
             r"please (?:log ?in|sign in)|login required|"
-            r"permission denied|forbidden|\b403\b|token expired|"
+            r"permission denied|forbidden|\b403\b|"
+            r"(?:token|session) expired|oauth|"
             r"credentials",
             re.IGNORECASE,
         ),

@@ -45,6 +45,7 @@ from agent_session_loop import (
     runner,
     startup_context,
     state,
+    supervisor_audit,
     verification,
     workbench,
 )
@@ -3585,6 +3586,31 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
         self.assertIn(
             "per-role `model_projection` is authoritative", self.package_readme
         )
+
+    def test_the_auditor_is_told_a_null_failure_diagnostic_is_the_boundary(
+        self,
+    ) -> None:
+        # The auditor kept refiling a null `failure_diagnostic` on an authored
+        # `ci` gate as a defect. The observation is true and the fix it asked
+        # for would reverse the fence that keeps application output out of
+        # control-plane text, so the prompt has to explain the fence instead.
+        prompt = supervisor_audit.AUDIT_PROMPT_TEMPLATE
+
+        self.assertIn("`failure_diagnostic` of `null`", prompt)
+        self.assertIn("check ASL did not generate", prompt)
+        self.assertIn("retained stderr artifact", prompt)
+        self.assertIn("only if a", prompt)
+
+    def test_docs_state_why_an_authored_gate_reports_no_failure_diagnostic(
+        self,
+    ) -> None:
+        for phrase in (
+            "`failure_diagnostic`",
+            "`null` for\nevery check ASL did not generate itself",
+            "never a generated gate",
+            "`stderr_artifact_path` retains the full text",
+        ):
+            self.assertIn(phrase, self.docs)
 
 
 if __name__ == "__main__":

@@ -5689,6 +5689,15 @@ Rules the answer must satisfy:
   `broad:*` replay under a valid findings verdict. Treat that deferral as
   accounted for only if the recorded review cycles then materialize repairs and
   a later review reaches all-clear; otherwise report the contradiction.
+- A `failure_diagnostic` of `null` on a check ASL did not generate is the
+  content boundary working, not a lost diagnostic. Only a gate the runner
+  rendered itself may promote its last stderr line into control-plane text, so
+  a `ci` command — or any other command authored in a plan's
+  `## Completion Contract` — reports `null` by design, however much output it
+  retained. The rejection survives in the retained stderr artifact, which the
+  bundle indexes for every failed check. Report a defect here only if a
+  generated gate lost its diagnostic, or if that stderr artifact is itself
+  missing from the evidence index.
 
 Every finding carries exactly one `identity` object, and there is no default:
 

@@ -349,6 +349,19 @@ verification failure,
 the skill reverts the session handoff back to `pending` and the runner pauses
 with `reason: verify-failed`.
 
+A failed command check also carries `failure_diagnostic`, and it is `null` for
+every check ASL did not generate itself. Promoting a command's last stderr line
+into ASL's own schema is a claim about provenance, and only `generated_gate` —
+stamped in process by the runner on the recipe it rendered, unsettable from a
+session file — can establish it. A `ci` command, or any other command authored
+in a `## Completion Contract`, is therefore never a generated gate, so its
+`failure_diagnostic` is `null` no matter how much output it retained. That is
+the content boundary working, not a lost diagnostic: without it, arbitrary
+application output would travel as control-plane text. The rejection itself is
+not lost — the check's `stderr_artifact_path` retains the full text, and the
+supervisor bundle indexes that artifact for every failed check, so an auditor
+reads the diagnostic from the evidence index instead.
+
 For a registered plan, pass its workspace root to `--cwd`; ASL resolves and
 validates the declared registry locally before dispatching each check to its
 alias. A legacy plan continues to interpret `--cwd` as one repository root.

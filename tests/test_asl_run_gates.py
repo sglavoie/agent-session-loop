@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import dataclasses
 import io
 import json
 import os
@@ -35,6 +36,7 @@ from agent_session_loop import (
     session_overview,
     state,
     verification,
+    workspaces,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -2349,6 +2351,48 @@ class LegacyImplementationGuardTests(unittest.TestCase):
             "refs/heads/backup/pre-rewrite",
             [entry["ref"] for entry in changes["refs_added"]],
         )
+
+    def test_a_write_into_an_unobserved_repository_fails_the_guard_closed(
+        self,
+    ) -> None:
+        # ASI-19. The legacy snapshot fingerprints `cwd` and nothing else, so
+        # this edit produces no change, no added or removed repository and
+        # nothing unavailable -- the three inputs `passed` was computed from.
+        # The turn used to be recorded as clean work.
+        other_root = self.tmp_path / "other"
+        init_git_repo(other_root)
+
+        def edit_elsewhere(*_args: object, **_kwargs: object) -> Any:
+            (other_root / "README.md").write_text("edited away\n", encoding="utf-8")
+            result = self._mark_complete()
+            return dataclasses.replace(
+                result,
+                last_message=f"Done. I edited {other_root / 'README.md'}.\n",
+            )
+
+        with mock.patch.object(
+            runner.harnesses, "run_harness", side_effect=edit_elsewhere
+        ):
+            exit_code, payload = self._invoke("legacy-unobserved-repository")
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            payload["pause_reason"],
+        )
+        guard = payload["turns"][0]["workspace_write_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual("legacy-single-repository", guard["scope_mode"])
+        entry = guard["unavailable"][
+            str(workspaces.canonicalize_filesystem_path(other_root))
+        ]
+        self.assertEqual("repository-not-observed", entry["reason"])
+        # Nothing inside `cwd` moved, which is exactly why the old guard passed.
+        self.assertEqual({}, guard["changed"])
+        self.assertEqual([], guard["violations"])
+        # The session the turn claimed goes back to pending: a completion the
+        # guard cannot vouch for is not a completion.
+        self.assertTrue(guard["reverted_to_pending"])
 
     def test_non_git_legacy_scope_refuses_before_harness(self) -> None:
         shutil.rmtree(self.repo_root / ".git")

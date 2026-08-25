@@ -79,6 +79,14 @@ OBSERVED_SOCKET_CLOSURE = (
     "information, pass `verbose: true` in the second argument to fetch()"
 )
 
+# The exact message the harness returned in run 20260825T004049070293Z-54505
+# (turn-0001-session-1/last-message.txt). The classifier's literal
+# "authentication" alternative did not match the verb form, so it fell through
+# to the fail-closed ``nonzero-exit`` and the pause projected ``reply`` (ASI-135).
+OBSERVED_AUTH_EXPIRY = (
+    "Failed to authenticate: OAuth session expired and could not be refreshed"
+)
+
 # The launch-time diagnostic every observed Codex turn opens with: its MCP
 # client dies, the turn runs to completion anyway (ASI-1).
 OBSERVED_LAUNCH_CLOSURE = (
@@ -8281,6 +8289,85 @@ class HarnessTransportClassificationTests(unittest.TestCase):
                 self._result(returncode=0, stderr="OpenAI Codex v0.147.0\n")
             )
         )
+
+
+class HarnessAuthenticationClassificationTests(unittest.TestCase):
+    """Credential failures reach the category no reply can clear."""
+
+    def _result(self, **overrides: Any) -> harnesses.HarnessResult:
+        fields: dict[str, Any] = {
+            "name": "claude",
+            "argv": ["claude"],
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "",
+            "last_message": "",
+        }
+        fields.update(overrides)
+        return harnesses.HarnessResult(**fields)
+
+    def test_the_observed_oauth_expiry_is_auth_failed_not_a_nonzero_exit(self) -> None:
+        classification = runner.classify_harness_failure(
+            self._result(last_message=OBSERVED_AUTH_EXPIRY)
+        )
+
+        self.assertEqual(events.PAUSE_REASON_AUTH_FAILED, classification.reason)
+        self.assertEqual("authentication", classification.marker)
+        self.assertFalse(classification.retryable)
+
+    def test_an_expired_credential_asks_for_inspection_not_a_reply(self) -> None:
+        # The point of the category: an operator cannot refresh a harness's
+        # OAuth session by answering a mailbox question, so the pause has to
+        # escalate rather than hold the turn open waiting for one.
+        classification = runner.classify_harness_failure(
+            self._result(last_message=OBSERVED_AUTH_EXPIRY)
+        )
+
+        policy = pause_policy.classify_pause(classification.reason)
+
+        self.assertFalse(policy["recoverable"])
+        self.assertTrue(policy["requires_user"])
+        self.assertEqual(pause_policy.USER_ACTION_INSPECT, policy["user_action"])
+
+    def test_every_authenticate_word_form_reaches_the_same_category(self) -> None:
+        for text in (
+            "Failed to authenticate",
+            "the request was not authenticated",
+            "authenticating with the provider failed",
+            "authentication failed",
+            "user is unauthenticated",
+        ):
+            with self.subTest(text=text):
+                classification = runner.classify_harness_failure(
+                    self._result(stderr=text)
+                )
+                self.assertEqual(events.PAUSE_REASON_AUTH_FAILED, classification.reason)
+
+    def test_oauth_and_an_expired_session_join_the_expired_token(self) -> None:
+        for text in (
+            "oauth token could not be refreshed",
+            "your session expired",
+            "token expired",
+        ):
+            with self.subTest(text=text):
+                classification = runner.classify_harness_failure(
+                    self._result(stderr=text)
+                )
+                self.assertEqual(events.PAUSE_REASON_AUTH_FAILED, classification.reason)
+
+    def test_the_rules_that_outrank_authentication_still_win(self) -> None:
+        # Widening the pattern must not reorder the table: the oversized-request
+        # rule and the quota rule both precede it, and both describe requests an
+        # auth message may legitimately mention.
+        overflow = runner.classify_harness_failure(
+            self._result(last_message="Prompt is too long; failed to authenticate")
+        )
+        self.assertEqual(harness_failures.CONTEXT_OVERFLOW_MARKER, overflow.marker)
+
+        quota = runner.classify_harness_failure(
+            self._result(stderr="usage limit reached; please authenticate again")
+        )
+        self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, quota.reason)
 
 
 if __name__ == "__main__":

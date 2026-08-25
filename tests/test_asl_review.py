@@ -2644,6 +2644,30 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         self.assertEqual(4, regated["total_sessions"])
         self.assertEqual(repair_session_ids, regated["repair_session_ids"])
         self.assertEqual("env-turn-budget", regated["findings"][0]["category"])
+        # Unstamped, the gate is the repairs one. The review-session append is
+        # the other growth path and has to be distinguishable from this.
+        self.assertEqual(events.REVIEW_REPAIR_REOPENED_EVENT, regated["trigger"])
+
+    def test_the_two_growth_paths_stamp_distinguishable_triggers(self) -> None:
+        # Same verdict shape from both routes, so the trigger is the only thing
+        # that tells an audit which growth a gate authorized.
+        self._write_plan([self._finding("F1", "runner")])
+        snapshot = plans.inspect_plan(self.plan_dir)
+
+        repairs = runner._reopened_plan_gate_payload(
+            snapshot, max_pending_sessions=1, repair_session_ids=["2.1"]
+        )
+        review_append = runner._reopened_plan_gate_payload(
+            snapshot,
+            max_pending_sessions=1,
+            repair_session_ids=[],
+            trigger=events.REVIEW_SESSION_CREATED_EVENT,
+        )
+
+        self.assertEqual(events.REVIEW_REPAIR_REOPENED_EVENT, repairs["trigger"])
+        self.assertEqual(events.REVIEW_SESSION_CREATED_EVENT, review_append["trigger"])
+        self.assertNotEqual(repairs["trigger"], review_append["trigger"])
+        self.assertEqual(repairs["total_sessions"], review_append["total_sessions"])
 
     def test_continuation_projects_disabled_and_exhausted_cap_boundaries(
         self,
