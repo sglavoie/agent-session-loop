@@ -1504,12 +1504,21 @@ def _unresolved_materialization_blocker(
     behind and the continuation would call them eligible while the run is still
     paused on the refusal. Readiness is the resolution signal: the refusal left
     the plan at ``draft``, and clearing it is what re-marks it loop-ready.
+
+    ``running`` clears it too. A run that reaches this projection has already
+    passed its own startup readiness gate and, on the strength of that pass,
+    transitioned the plan from ``loop-ready`` to ``running`` before entering the
+    session loop. Demanding ``loop-ready`` here would therefore refuse every
+    resumed run whose children were left pending by an earlier refusal -- the
+    operator marks the plan loop-ready, the run demotes it, and the same blocker
+    returns. The SHA comparison below is what keeps ``running`` honest: it still
+    proves the plan is structurally the one that was gated.
     """
     if disposition != REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY:
         return None
     try:
         readiness = plans.read_readiness_metadata(plan_dir)
-        if readiness is None or readiness.state != "loop-ready":
+        if readiness is None or readiness.state not in ("loop-ready", "running"):
             return REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
         if readiness.readiness_sha256 != plans.stable_readiness_sha256(plan_dir):
             return REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
