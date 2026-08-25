@@ -19,8 +19,10 @@ from . import events, harnesses, retry_hints
 # positively recognized transport failures are retryable; quota, auth, and
 # invalid-model failures are always non-retryable; and anything unrecognized
 # stays ``nonzero-exit`` (non-retryable) so legacy and novel failures never
-# get retried automatically. Reset/retry timestamps are parsed when present but
-# never gate the retryability decision.
+# get retried automatically. A recognized category may still be ``nonzero-exit``
+# when the pause reason genuinely is that and only the marker carries new
+# information — ``context-overflow`` is the case. Reset/retry timestamps are
+# parsed when present but never gate the retryability decision.
 
 # Upper bound on the bounded evidence preview kept on a classification. Long
 # harness output must never bloat a turn result or pause event.
@@ -39,6 +41,11 @@ MODEL_CAPACITY_MARKER = "model-capacity"
 #: :data:`MODEL_CAPACITY_MARKER` so a caller records the degradation without
 #: re-matching the harness text.
 TRANSPORT_DEGRADATION_MARKER = "transport-degradation"
+
+#: Marker of the oversized-input rule. A caller that can shrink what it sent and
+#: try again recognizes the refusal here rather than by re-reading the text, the
+#: way :data:`MODEL_CAPACITY_MARKER` is recognized.
+CONTEXT_OVERFLOW_MARKER = "context-overflow"
 
 # How much of stderr counts as launch time. The closure is a diagnostic the
 # harness prints before it starts the turn; everything after it is the turn's
@@ -61,6 +68,24 @@ _TRANSPORT_DEGRADATION_RE = re.compile(
 # broader transient-transport rule. Markers are stable slugs used to build the
 # normalized fingerprint.
 _FAILURE_CLASSIFICATION_RULES: tuple[tuple[str, str, bool, re.Pattern[str]], ...] = (
+    (
+        # First, for the same reason ``invalid-model`` precedes
+        # ``model-capacity``: the refusal is about the request the caller built,
+        # and a turn whose input is a transcript of ASL itself will quote "api
+        # key", "quota", and "rate limit" often enough that a later rule would
+        # win the race and mislabel a call that never reached the model. Staying
+        # ``nonzero-exit`` and non-retryable is deliberate — nothing here can be
+        # relaunched unchanged; only the marker changes, so a caller that can
+        # send less has something stable to branch on.
+        CONTEXT_OVERFLOW_MARKER,
+        events.PAUSE_REASON_NONZERO_EXIT,
+        False,
+        re.compile(
+            r"prompt is too long|exceeds the maximum|"
+            r"context (?:window )?(?:length )?exceeded",
+            re.IGNORECASE,
+        ),
+    ),
     (
         "usage-limit",
         events.PAUSE_REASON_QUOTA_EXHAUSTED,
@@ -255,9 +280,11 @@ def classify_harness_failure(
 ) -> FailureClassification:
     """Classify a nonzero harness turn into a stable failure category.
 
-    Recognizes quota/session exhaustion, authentication failures, invalid
-    models, transient transport failures, and interruption; everything else
-    fails closed as ``nonzero-exit``. Only transport failures are retryable.
+    Recognizes an over-long prompt, quota/session exhaustion, authentication
+    failures, invalid models, transient transport failures, and interruption;
+    everything else fails closed as ``nonzero-exit``. Only transport failures
+    are retryable, and an over-long prompt keeps the ``nonzero-exit`` reason —
+    it is named by its marker so a caller that can send less can act on it.
     """
     returncode = result.returncode
     if result.interrupted:

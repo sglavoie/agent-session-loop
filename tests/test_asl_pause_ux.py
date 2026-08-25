@@ -170,6 +170,116 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 self.assertEqual(pause_policy.USER_ACTION_REPLY, policy["user_action"])
                 self.assertEqual(0, policy["max_retries"])
 
+    def test_workspace_blocked_pauses_are_inspect_not_reply(self) -> None:
+        """ASI-114: a pause no reply can clear stopped calling itself `reply`.
+
+        `commit-preflight` names 30+ dirty repositories in its details; no
+        mailbox answer makes them clean. Classifying it `reply` sent the runner
+        into a mailbox wait that could only ever time out.
+        """
+        for reason in pause_policy.ENVIRONMENT_BLOCKED_PAUSE_REASONS:
+            with self.subTest(reason=reason):
+                self.assertIn(reason, events.PAUSE_REASONS)
+                payload: dict[str, object] = {}
+                runner._set_pause(payload, reason=reason, message="blocked")
+                policy = payload["pause_policy"]
+                self.assertFalse(policy["recoverable"])
+                self.assertTrue(policy["requires_user"])
+                self.assertEqual(
+                    pause_policy.USER_ACTION_INSPECT, policy["user_action"]
+                )
+                self.assertEqual(0, policy["max_retries"])
+                self.assertEqual(
+                    pause_policy.USER_ACTION_INSPECT,
+                    payload["action_required"]["user_action"],
+                )
+
+    def test_policy_version_marks_the_changed_user_action_meaning(self) -> None:
+        # `user_action` changed meaning for reasons that already ship, so a
+        # consumer diffing a persisted v2 block must not read it as agreement.
+        self.assertEqual(3, pause_policy.POLICY_VERSION)
+        self.assertEqual(
+            pause_policy.POLICY_VERSION,
+            pause_policy.classify_pause("commit-preflight")["policy_version"],
+        )
+
+    def test_a_blocked_pause_carries_remediation_from_its_reason(self) -> None:
+        """ASI-114: `remediation: []` told an operator to inspect, not where.
+
+        A runner-side refusal carries findings but no repair hints in its
+        details, so the stable reason has to resolve one instead.
+        """
+        for reason in pause_policy.ENVIRONMENT_BLOCKED_PAUSE_REASONS:
+            with self.subTest(reason=reason):
+                payload: dict[str, object] = {
+                    "plan_dir": "/plans/demo",
+                    "cwd": "/repo",
+                }
+                runner._set_pause(payload, reason=reason, message="blocked")
+                remediation = payload["action_required"]["remediation"]
+                self.assertEqual(1, len(remediation))
+                entry = remediation[0]
+                self.assertEqual(f"runtime.{reason}", entry["check_id"])
+                self.assertEqual(reason, entry["category"])
+                self.assertTrue(entry["message"])
+                self.assertNotIn("<plan-dir>", entry["message"])
+                self.assertNotIn("<repo-root>", entry["message"])
+
+    def test_details_repair_hints_still_win_over_the_reason_fallback(self) -> None:
+        # The gate that raised the pause resolved its own findings, so its
+        # hints are more specific than anything the bare reason can say.
+        carried = [
+            {
+                "check_id": "manifest-readiness.state-not-loop-ready",
+                "category": "manifest-readiness",
+                "fix_category": "manifest-update",
+                "message": "mark it loop-ready",
+            }
+        ]
+        payload: dict[str, object] = {"plan_dir": "/plans/demo", "cwd": "/repo"}
+        runner._set_pause(
+            payload,
+            reason="not-loop-ready",
+            message="gate refused",
+            details={"readiness_gate": {"repair_hints": carried}},
+        )
+
+        self.assertEqual(carried, payload["action_required"]["remediation"])
+
+    def test_a_pause_reason_with_no_hint_keeps_an_empty_remediation(self) -> None:
+        payload: dict[str, object] = {"plan_dir": "/plans/demo", "cwd": "/repo"}
+        runner._set_pause(payload, reason="blocked", message="needs an answer")
+
+        self.assertEqual([], payload["action_required"]["remediation"])
+        self.assertEqual(
+            pause_policy.USER_ACTION_REPLY,
+            payload["action_required"]["user_action"],
+        )
+
+    def test_a_blocked_pause_never_waits_for_a_mailbox_reply(self) -> None:
+        # The gate the runner uses to decide whether to hold the turn open for
+        # an answer reads the same classification, so moving the reason moves
+        # the wait with it.
+        result = harnesses.HarnessResult(
+            argv=["codex"], returncode=0, stdout="", stderr=""
+        )
+        for reason in pause_policy.ENVIRONMENT_BLOCKED_PAUSE_REASONS:
+            with self.subTest(reason=reason):
+                self.assertFalse(
+                    runner._runner_pause_can_wait_for_mailbox_reply(
+                        mailbox_enabled=True,
+                        pause_reason=reason,
+                        result=result,
+                    )
+                )
+        self.assertTrue(
+            runner._runner_pause_can_wait_for_mailbox_reply(
+                mailbox_enabled=True,
+                pause_reason="blocked",
+                result=result,
+            )
+        )
+
     def test_new_waits_emit_the_rolling_ceiling_and_not_a_hard_deadline(
         self,
     ) -> None:

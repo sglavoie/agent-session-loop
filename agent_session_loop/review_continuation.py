@@ -18,7 +18,15 @@ from functools import cache
 from pathlib import Path
 from typing import Any, Literal
 
-from . import events, plans, review, review_repair, session_overview, workspaces
+from . import (
+    events,
+    pause_policy,
+    plans,
+    review,
+    review_repair,
+    session_overview,
+    workspaces,
+)
 
 REVIEW_CYCLE_DISPOSITION_ALL_CLEAR = "all-clear"
 REVIEW_CYCLE_DISPOSITION_REPAIRS = "repairs-materialized"
@@ -214,6 +222,64 @@ def read_review_events(event_path: str | Path) -> tuple[ReviewEventRecord, ...]:
                     )
                 )
     return tuple(records)
+
+
+def read_standing_pause_reason(event_path: str | Path) -> str | None:
+    """The reason the newest run stands paused on, or ``None`` if it does not.
+
+    The event log is per-plan and append-only, so the newest run is the span
+    after the last ``run_started``. Within that span a ``run_paused`` record is
+    terminal: every runner pause site leaves the session loop, and the paused
+    flag it sets is never cleared inside the same run. A ``run_finished``
+    therefore does not clear the pause -- the runner appends one for paused runs
+    too -- but a later ``run_started`` does, which is what lets this projection
+    heal when the operator simply reruns the plan rather than rewriting history.
+    """
+    reason: str | None = None
+    try:
+        event_file = Path(event_path).open(  # noqa: SIM115 - opened here so OSError returns None; closed by the with below
+            "r", encoding="utf-8"
+        )
+    except OSError:
+        return None
+    with event_file:
+        for line in event_file:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError, ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            name = record.get("name")
+            if name == events.RUN_STARTED_EVENT:
+                reason = None
+                continue
+            if name != events.RUN_PAUSED_EVENT:
+                continue
+            payload = record.get("payload")
+            if isinstance(payload, dict):
+                reason = _nonempty_str(payload.get("reason")) or reason
+    return reason
+
+
+def _standing_environment_pause_blocker(event_path: str | Path) -> str | None:
+    """The environment precondition a pending repair run would re-hit at once.
+
+    A pause blocked on the workspace rather than on an answer survives the run
+    that hit it: the dirty repository, the unregistered repo, the plan marked
+    draft are all still there when the next run opens. Calling the pending
+    children eligible while that pause stands publishes a contradiction inside
+    one ``state.json`` -- the same file says the run is paused on it. Pauses an
+    operator can clear by replying are deliberately excluded: those resolve
+    within the run and say nothing about whether the next one can proceed.
+    """
+    reason = read_standing_pause_reason(event_path)
+    if reason is None or reason not in pause_policy.ENVIRONMENT_BLOCKED_PAUSE_REASONS:
+        return None
+    return reason
 
 
 def read_prior_review_cycles(event_path: str | Path) -> list[dict[str, Any]]:
@@ -1660,6 +1726,9 @@ def evaluate_review_continuation(
         blocker = _unresolved_materialization_blocker(snapshot.plan_dir, disposition)
         if blocker is not None:
             return result("run-repairs", False, blocker, planning=planning)
+        standing_pause = _standing_environment_pause_blocker(event_path)
+        if standing_pause is not None:
+            return result("run-repairs", False, standing_pause, planning=planning)
         scope_gaps = _pending_repair_scope_gaps(durable_scopes(), pending_ids, planning)
         if scope_gaps:
             return result(

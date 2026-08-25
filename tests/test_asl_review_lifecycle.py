@@ -1793,6 +1793,19 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 )
             ).status,
         )
+        # The one payload has to agree with itself: no answer clears a dirty
+        # worktree, so the pause asks for an inspection and names the fix, and
+        # the continuation refuses the child it just declined to dispatch
+        # instead of reporting it eligible (ASI-114 / ASI-6).
+        action = payload["action_required"]
+        self.assertEqual("commit-preflight", action["reason"])
+        self.assertEqual(pause_policy.USER_ACTION_INSPECT, action["user_action"])
+        self.assertTrue(action["remediation"])
+        resume = payload["review_resume"]
+        self.assertEqual("run-repairs", resume["action"])
+        self.assertFalse(resume["eligible"])
+        self.assertEqual("commit-preflight", resume["blocker"])
+        self.assertEqual(["2.1"], resume["pending_repair_session_ids"])
 
     def test_all_clear_cannot_defer_a_broad_failure(self) -> None:
         review_session = self._setup_review_with_broad_gate_waiting_for_repair()

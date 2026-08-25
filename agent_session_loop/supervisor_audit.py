@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -48,7 +49,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Any, Literal, cast, get_args
 
 from . import (
     __version__,
@@ -888,6 +889,16 @@ AUDIT_INPUT_SCHEMA_VERSION = 1
 #: ``assurance_models.MAX_ARTIFACT_BYTES`` ceiling the writer enforces.
 AUDIT_INPUT_MAX_BYTES = 512 * 1024
 
+#: How much of a refused bundle the oversized-input retry keeps. A ratio rather
+#: than a smaller fixed ceiling because the observed refusals were not at one
+#: size — 357 KB was refused where 550 KB went through — so the provider's limit
+#: is in tokens, which bytes only approximate. Halving whatever was actually
+#: refused moves it decisively under that limit without asserting a byte figure
+#: the evidence does not support, and lowering
+#: :data:`AUDIT_INPUT_MAX_BYTES` for every run would pay that cost on the runs
+#: that never had the problem.
+AUDIT_INPUT_OVERFLOW_SHRINK_RATIO = 0.5
+
 #: Per-side preview budget for a captured log or last message.
 PREVIEW_HEAD_BYTES = 2 * 1024
 PREVIEW_TAIL_BYTES = 2 * 1024
@@ -1054,7 +1065,7 @@ _ANOMALY_EVENT_NAMES = frozenset(
     }
 )
 
-_RUN_STARTED_EVENT = "run_started"
+_RUN_STARTED_EVENT = events.RUN_STARTED_EVENT
 _TERMINAL_EVENT_NAMES = frozenset({events.RUN_FINISHED_EVENT, events.RUN_PAUSED_EVENT})
 
 #: State keys copied verbatim (after redaction) into each projection.
@@ -1287,6 +1298,28 @@ class _Omissions:
         entry["count"] += 1
         entry["digest"].update(assurance_models.canonical_json_bytes(payload))
 
+    def seed(self, entries: Iterable[Mapping[str, Any]]) -> None:
+        """Adopt already-rendered omissions so a later pass extends them.
+
+        A rendered entry carries a digest, not the payloads it was built from,
+        so the running hash is re-opened over that digest: the result still
+        identifies exactly one set of withheld payloads, and whatever the next
+        pass drops extends it. Counts stay exact, which is what a reader of the
+        bundle acts on.
+        """
+        for entry in entries:
+            section = str(entry.get("section") or "")
+            reason = str(entry.get("reason") or "")
+            count = entry.get("count")
+            digest = hashlib.sha256()
+            digest.update(assurance_models.canonical_json_bytes(entry.get("sha256")))
+            self._entries[(section, reason)] = {
+                "section": section,
+                "reason": reason,
+                "count": count if isinstance(count, int) and count > 0 else 0,
+                "digest": digest,
+            }
+
     def to_list(self) -> list[dict[str, Any]]:
         return [
             {
@@ -1431,8 +1464,15 @@ class _Collector:
 
     # -- files -----------------------------------------------------------
 
-    def file_digest(self, path: Path, *, kind: str) -> dict[str, Any]:
-        """Describe a file by identity alone: locator, size, and digest."""
+    def file_digest(
+        self, path: Path, *, kind: str, section: str | None = None
+    ) -> dict[str, Any]:
+        """Describe a file by identity alone: locator, size, and digest.
+
+        ``section`` names the omission bucket an absent or unreadable file is
+        counted under. Evidence kinds are a closed vocabulary, so a caller that
+        wants a narrower bucket than its kind says so here.
+        """
         record: dict[str, Any] = {"reference": None, "available": False}
         try:
             data = path.read_bytes()
@@ -1450,7 +1490,7 @@ class _Collector:
             )
             return record
         record["reference"] = self.locator(path)
-        self.omissions.record(kind, record["reason"], str(path))
+        self.omissions.record(section or kind, record["reason"], str(path))
         return record
 
     def file_preview(self, path: Path, *, kind: str) -> dict[str, Any]:
@@ -1526,6 +1566,25 @@ class _Collector:
             self.omissions.record("previews", REASON_SIZE_CAP, record.get("sha256"))
             changed = True
         return changed
+
+    def adopt_previews(self, payload: Any) -> None:
+        """Register the previews already inside ``payload`` as shrinkable.
+
+        A collector that did not build the payload has no preview list, and
+        :meth:`shrink_previews` would then silently shrink nothing — leaving a
+        second shedding pass to drop whole turns where trimming their text would
+        have done. Recovering them from the payload keeps the give-up order
+        intact across passes.
+        """
+        if isinstance(payload, Mapping):
+            if isinstance(payload.get("preview"), str) and "sha256" in payload:
+                self._previews.append(cast(dict[str, Any], payload))
+                return
+            for value in payload.values():
+                self.adopt_previews(value)
+        elif isinstance(payload, list):
+            for value in payload:
+                self.adopt_previews(value)
 
     @property
     def previews(self) -> list[dict[str, Any]]:
@@ -2720,10 +2779,12 @@ def collect_audit_input(
         "repository": _repository_section(collector, workspace_snapshot),
         "versions": _versions_section(),
     }
+    # Digest rather than merely name each artifact: a locator alone cannot tell
+    # the auditor whether the file it points at is the one the run produced.
     for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS:
         candidate = run_dir / name
         if candidate.exists():
-            collector.reference(candidate, kind="artifact")
+            collector.file_digest(candidate, kind="artifact")
     # The review cycle records these two paths and their digests, so an index
     # that never mentions them leaves the auditor unable to tell a review that
     # produced no artifact from one whose artifact was simply never indexed.
@@ -2732,17 +2793,35 @@ def collect_audit_input(
         review.final_review_output_path(plan_dir),
         review.final_review_artifact_path(plan_dir),
     ):
-        if candidate.exists():
-            collector.reference(candidate, kind="artifact")
-        else:
-            collector.omissions.record(
-                "review.artifacts", REASON_MISSING, str(candidate)
-            )
+        collector.file_digest(candidate, kind="artifact", section="review.artifacts")
 
     payload["evidence"] = collector.evidence()
     payload["omissions"] = collector.omissions.to_list()
     _shed(payload, collector, max_bytes=max_bytes)
     payload["evidence"] = collector.evidence()
+    payload["omissions"] = collector.omissions.to_list()
+    return AuditInput(payload=payload)
+
+
+def tighten_audit_input(bundle: AuditInput, *, max_bytes: int) -> AuditInput:
+    """Shed an already-collected bundle down to a smaller ceiling.
+
+    Shed again rather than collected again: collecting reads the run directory,
+    which by the time this is needed holds the audit's own input artifact and
+    attempt records, so a second collection would describe a different run than
+    the first one did — including a reference to its own predecessor. Shedding
+    the payload already in hand keeps the result a strictly smaller view of the
+    same evidence, given up in the same least-useful-first order, and leaves the
+    canonical bundle on disk the one the deterministic verdicts were read from.
+
+    The evidence index is not shed, so the locators an auditor may cite are the
+    same either way.
+    """
+    payload = copy.deepcopy(bundle.payload)
+    collector = _Collector(EvidenceRoots(roots=()))
+    collector.omissions.seed(payload.get("omissions") or ())
+    collector.adopt_previews(payload)
+    _shed(payload, collector, max_bytes=max_bytes)
     payload["omissions"] = collector.omissions.to_list()
     return AuditInput(payload=payload)
 
@@ -6895,6 +6974,20 @@ def _delivery_is_retryable(attempt: AuditAttemptResult) -> bool:
     return classification is None or classification.retryable
 
 
+def _refused_for_size(attempt: AuditAttemptResult) -> bool:
+    """Say whether the provider rejected this attempt's request as too large.
+
+    Read off the classification the launch already carried rather than by
+    re-matching the harness text, so the rule that recognises the refusal lives
+    in one place and the audit and the session loop agree about what happened.
+    """
+    classification = attempt.classification
+    return (
+        classification is not None
+        and classification.marker == harness_failures.CONTEXT_OVERFLOW_MARKER
+    )
+
+
 def _record_capacity_outage(
     attempt: AuditAttemptResult,
     *,
@@ -6964,6 +7057,16 @@ def run_agent_audit(
     evidence because an agent misbehaved would be a second failure, not a
     consequence of the first.
 
+    A third budget,
+    :data:`assurance_models.MAX_AUDIT_SHRINK_ATTEMPTS`, covers the one failure
+    that is the caller's own: a provider that refuses the request for size
+    before the agent runs. That attempt is retried with the bundle shed to
+    :data:`AUDIT_INPUT_OVERFLOW_SHRINK_RATIO` of the size that was refused. Only
+    the prompt shrinks — the canonical bundle, the deterministic verdicts read
+    from it, and the locators the answer is validated against all stay the ones
+    written to the run directory, so the retry sends less without grading a
+    different run.
+
     A candidate retry comes out of the answer budget rather than adding to it. An
     answer that is malformed once and then identity-ambiguous therefore never
     sees the candidate list, and the audit lands ``unavailable`` under
@@ -6999,13 +7102,18 @@ def run_agent_audit(
     unavailable_reason = REASON_AGENT_UNAVAILABLE
     answers_spent = 0
     deliveries_spent = 0
+    shrinks_spent = 0
+    # What the prompt is built from, which the oversized-input retry may narrow.
+    # ``bundle`` itself never moves: it is the artifact on disk, the input the
+    # deterministic verdicts were read from, and the source of ``declared``.
+    prompt_bundle = bundle
 
     while True:
         if abort is not None and abort.armed:
             raise AuditCancelled(REASON_INTERRUPTED)
         number = len(attempts) + 1
         prompt = build_audit_prompt(
-            bundle, catalog=catalog, correction=correction, candidates=candidates
+            prompt_bundle, catalog=catalog, correction=correction, candidates=candidates
         )
         attempt = run_restricted_audit(
             role,
@@ -7087,6 +7195,26 @@ def run_agent_audit(
                 catalog=catalog,
                 identity_selections=_identity_selections(agent, rendered.findings),
             )
+        if _refused_for_size(attempt) and (
+            shrinks_spent < assurance_models.MAX_AUDIT_SHRINK_ATTEMPTS
+        ):
+            # The provider refused the request before the agent ran, so there is
+            # no answer to correct and no outage to wait out: what has to change
+            # is how much was sent. Retry immediately with a bundle shed further,
+            # and only if shedding actually gave something up — an unshrinkable
+            # bundle would otherwise buy a second, identically refused request.
+            # Measured in bytes, which is what the provider refused, rather than
+            # by digest: a pass that drops nothing still restates the omissions
+            # it inherited, so digests differ where the evidence does not.
+            refused_bytes = len(prompt_bundle.to_bytes())
+            tightened = tighten_audit_input(
+                prompt_bundle,
+                max_bytes=int(refused_bytes * AUDIT_INPUT_OVERFLOW_SHRINK_RATIO),
+            )
+            if len(tightened.to_bytes()) < refused_bytes:
+                shrinks_spent += 1
+                prompt_bundle = tightened
+                continue
         if outcome in RETRYABLE_DELIVERY_OUTCOMES and _delivery_is_retryable(attempt):
             # The agent never saw this prompt, so nothing about it is corrected
             # and no candidate offer is consumed: the next launch repeats it

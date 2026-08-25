@@ -28,7 +28,8 @@ from . import events
 # (``events.RETRYABLE_HARNESS_FAILURE_REASONS``). Unclassified ``nonzero-exit``
 # is fail-closed (never retried), and the quota/auth/invalid-model categories
 # are deliberately absent so quota and session-limit exhaustion are never
-# relaunched. Every other pause (a question/blocked state) needs a reply.
+# relaunched. Every other pause needs a human: a reply when an answer clears it,
+# otherwise an inspection (:data:`INSPECT_PAUSE_REASONS`).
 RECOVERABLE_PAUSE_REASONS: tuple[str, ...] = (
     "verify-failed",
     events.PAUSE_REASON_TRANSPORT_FAILED,
@@ -48,6 +49,39 @@ USER_REQUIRED_HARNESS_FAILURE_REASONS: tuple[str, ...] = (
     events.PAUSE_REASON_INVALID_MODEL,
 )
 
+# Pauses blocked on a workspace or environment precondition rather than on a
+# missing answer. The dividing principle: a pause is ``reply`` iff an operator's
+# mailbox answer can make the run proceed. None of these clear that way — a
+# dirty worktree stays dirty however the operator answers — so waiting for a
+# reply only burns the mailbox lease before escalating anyway.
+#
+# Membership is justified per reason by that reason's own clearing path, never
+# by symmetry with a neighbour:
+#
+# - ``commit-preflight`` / ``commit-failed``: the working tree (or the commit
+#   harness) has to change on disk before the same gate can pass.
+# - ``repository-registry-required``: the plan must declare a ``## Repositories``
+#   registry and re-derive its workspace binding — a plan edit plus
+#   ``asl register-repositories``, not an answer.
+# - ``workspace-repository-contention``: another live run already claims the
+#   repository; one of the two processes has to stop.
+# - ``not-loop-ready``: preflight has to reach ``loop-ready``, which means
+#   repairing the plan or the environment its findings name.
+ENVIRONMENT_BLOCKED_PAUSE_REASONS: tuple[str, ...] = (
+    "commit-preflight",
+    "commit-failed",
+    events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
+    events.PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION,
+    "not-loop-ready",
+)
+
+# Every pause an operator must inspect rather than answer, from either source:
+# a harness failure carrying no question context, or a blocked precondition.
+INSPECT_PAUSE_REASONS: tuple[str, ...] = (
+    *USER_REQUIRED_HARNESS_FAILURE_REASONS,
+    *ENVIRONMENT_BLOCKED_PAUSE_REASONS,
+)
+
 # What a human is supposed to do about a pause. Each pause carries exactly one:
 # ``reply`` when an operator answer can clear it, ``inspect`` when no answer can
 # and the environment has to change instead, ``None`` when the pause is
@@ -58,8 +92,12 @@ USER_ACTION_INSPECT = "inspect"
 # Bumped whenever the block's key set or the meaning of a key changes, so a
 # consumer diffing a persisted block against a fresh classification can tell a
 # schema difference from a real contradiction. v1 blocks carry no version and
-# classify ``requires_user`` as the harness-failure set alone.
-POLICY_VERSION = 2
+# classify ``requires_user`` as the harness-failure set alone. v2 classified
+# every non-recoverable pause outside the harness-failure set as ``reply``; v3
+# reserves ``reply`` for pauses an answer can actually clear and routes
+# :data:`ENVIRONMENT_BLOCKED_PAUSE_REASONS` to ``inspect``, so the meaning of
+# ``user_action`` changed for reasons that already ship.
+POLICY_VERSION = 3
 
 # How many times a supervisor relaunches the same session for a given
 # recoverable pause reason before giving up and surfacing the pause.
@@ -89,10 +127,11 @@ def classify_pause(reason: str | None) -> dict[str, Any]:
       prove a machine can retry needs one, so this is the negation of
       ``recoverable`` rather than a set membership;
     - ``user_action``: what that human does — :data:`USER_ACTION_REPLY` when an
-      operator answer can clear the pause, :data:`USER_ACTION_INSPECT` for the
-      non-retryable harness failures that carry no useful question context
-      (:data:`USER_REQUIRED_HARNESS_FAILURE_REASONS`), ``None`` when
-      recoverable;
+      operator answer can clear the pause, :data:`USER_ACTION_INSPECT` when none
+      can and the environment has to change instead
+      (:data:`INSPECT_PAUSE_REASONS`: the non-retryable harness failures that
+      carry no useful question context, plus the pauses blocked on a workspace
+      precondition), ``None`` when recoverable;
     - ``max_retries``: the same-session retry budget (``DEFAULT_MAX_RETRIES``
       when recoverable, else ``0``);
     - ``backoff_seconds``: the per-retry backoff schedule — the
@@ -102,7 +141,7 @@ def classify_pause(reason: str | None) -> dict[str, Any]:
     recoverable = reason in RECOVERABLE_PAUSE_REASONS
     if recoverable:
         user_action: str | None = None
-    elif reason in USER_REQUIRED_HARNESS_FAILURE_REASONS:
+    elif reason in INSPECT_PAUSE_REASONS:
         user_action = USER_ACTION_INSPECT
     else:
         user_action = USER_ACTION_REPLY

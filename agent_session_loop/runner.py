@@ -10032,8 +10032,54 @@ _PAUSE_REMEDIATION_PATHS: tuple[tuple[str, ...], ...] = (
 )
 
 
-def _pause_remediation(details: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Remediation hints a pause's own details already carry."""
+def _optional_str(value: Any) -> str | None:
+    """``value`` when it is a non-empty string, else ``None``."""
+    return value if isinstance(value, str) and value else None
+
+
+def _runtime_reason_remediation(
+    reason: str, *, plan_dir: str | None, cwd: str | None
+) -> dict[str, Any] | None:
+    """The repair hint a stable pause reason resolves to, if it has one.
+
+    Shaped like ``_readiness_repair_hints`` entries so a consumer reads one
+    remediation vocabulary whichever source produced it. The plan directory and
+    repository root are substituted when the payload knows them, leaving the
+    placeholders intact rather than quoting them when it does not.
+    """
+
+    hint = preflight.runtime_repair_hint(reason)
+    if hint is None:
+        return None
+    message = hint.message
+    if plan_dir:
+        message = preflight.repair_hint_payload(hint, plan_dir=plan_dir, cwd=cwd)[
+            "message"
+        ]
+    return {
+        "check_id": hint.check_id,
+        "category": hint.category,
+        "fix_category": hint.fix_category,
+        "message": message,
+    }
+
+
+def _pause_remediation(
+    details: Mapping[str, Any],
+    *,
+    reason: str,
+    plan_dir: str | None = None,
+    cwd: str | None = None,
+) -> list[dict[str, Any]]:
+    """Remediation for a pause: its own details first, else its reason.
+
+    A gate that already resolved its findings to repair hints carries them in
+    the pause details, and those are the most specific guidance available. A
+    runner-side refusal carries findings but no hints, so the stable pause
+    reason resolves one from ``preflight.RUNTIME_REPAIR_HINTS`` instead. Without
+    that fallback an ``inspect`` pause tells an operator to look without saying
+    where, which is what the audit filed against `commit-preflight`.
+    """
 
     for path in _PAUSE_REMEDIATION_PATHS:
         current: Any = details
@@ -10041,7 +10087,8 @@ def _pause_remediation(details: Mapping[str, Any]) -> list[dict[str, Any]]:
             current = current.get(key) if isinstance(current, Mapping) else None
         if isinstance(current, list) and current:
             return [entry for entry in current if isinstance(entry, Mapping)]
-    return []
+    fallback = _runtime_reason_remediation(reason, plan_dir=plan_dir, cwd=cwd)
+    return [] if fallback is None else [fallback]
 
 
 def _set_pause(
@@ -10076,7 +10123,12 @@ def _set_pause(
             "message": message,
             "source": "pause",
             "user_action": policy["user_action"],
-            "remediation": _pause_remediation(payload["pause_details"]),
+            "remediation": _pause_remediation(
+                payload["pause_details"],
+                reason=reason,
+                plan_dir=_optional_str(payload.get("plan_dir")),
+                cwd=_optional_str(payload.get("cwd")),
+            ),
         }
 
 
@@ -15613,7 +15665,7 @@ def _run_locked(
 
     persistence.append_event(
         event_path,
-        "run_started",
+        events.RUN_STARTED_EVENT,
         {
             "plan_dir": str(snapshot.plan_dir),
             "harness": args.harness,

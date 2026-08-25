@@ -1064,6 +1064,100 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
         ),
         fix_category="session-recipe-edit",
     ),
+    # Pauses blocked on a workspace or environment precondition
+    # (``pause_policy.ENVIRONMENT_BLOCKED_PAUSE_REASONS``). These refusals come
+    # from the runner's own gates, whose pause details carry findings rather
+    # than repair hints, so the reason is the only key available and each hint
+    # has to name the workspace change that lets the same gate pass next run.
+    "commit-preflight": RepairHint(
+        category="commit-preflight",
+        check_id="runtime.commit-preflight",
+        severity_hint="red",
+        message=(
+            "Commit preflight refused to start the run: the repositories it "
+            "would commit are not in the state it requires — most often "
+            "uncommitted changes already present before the run. Inspect "
+            "`git -C <repo-root> status --short` plus each repository the "
+            "pause names under `details.dirty_repositories`, then commit, "
+            "stash, or discard that work and re-run. No reply can clear this: "
+            "the worktree has to change."
+        ),
+        question_template=(
+            "Runner paused: commit preflight found the workspace unready "
+            "({message}). Should I walk through the dirty repositories?"
+        ),
+        fix_category="env-state",
+    ),
+    "commit-failed": RepairHint(
+        category="commit-failed",
+        check_id="runtime.commit-failed",
+        severity_hint="red",
+        message=(
+            "The session's commit did not land. Re-run the failing `git` "
+            "command in <repo-root> to see the error in full: a hook that "
+            "rejected the commit, an unresolved merge/rebase state, or an "
+            "index lock left by another process. Clear that condition and "
+            "re-run; the run resumes from the same session."
+        ),
+        question_template=(
+            "Runner paused: the commit failed ({message}). "
+            "Should I diagnose the git error?"
+        ),
+        fix_category="env-state",
+    ),
+    "repository-registry-required": RepairHint(
+        category="repository-registry-required",
+        check_id="runtime.repository-registry-required",
+        severity_hint="red",
+        message=(
+            "This plan reaches more than one Git repository, so it cannot run "
+            "in legacy single-repository mode. Run `asl register-repositories "
+            "<plan-dir> --cwd <repo-root>` to derive and write the "
+            "`## Repositories` registry, then the `asl prepare <plan-dir> "
+            "--resume --rebind-workspace` command it prints. Where the plan "
+            "need not reach the second repository at all, retarget its paths "
+            "into the bound one instead — that is the cheaper fix."
+        ),
+        question_template=(
+            "Runner paused: the plan reaches several repositories with no "
+            "registry ({message}). Should I run the migration?"
+        ),
+        fix_category="plan-edit",
+    ),
+    "workspace-repository-contention": RepairHint(
+        category="workspace-repository-contention",
+        check_id="runtime.workspace-repository-contention",
+        severity_hint="red",
+        message=(
+            "Another live run already claims a repository this run declares, "
+            "and two agents writing one working tree cannot be made safe. "
+            "Wait for the other run to finish, stop it, or move this plan to "
+            "its own git worktree and re-derive the binding with `asl prepare "
+            "<plan-dir> --resume --rebind-workspace`."
+        ),
+        question_template=(
+            "Runner paused: a repository is claimed by another live run "
+            "({message}). Should I find the other run?"
+        ),
+        fix_category="env-state",
+    ),
+    "not-loop-ready": RepairHint(
+        category="not-loop-ready",
+        check_id="runtime.not-loop-ready",
+        severity_hint="red",
+        message=(
+            "The readiness gate refused the plan. Run `asl preflight "
+            "<plan-dir> --cwd <repo-root> --json`, clear every red finding it "
+            "reports, then `asl preflight <plan-dir> --json "
+            "--mark-loop-ready`. The gate payload on this pause already lists "
+            "the blocking findings and their own repair hints."
+        ),
+        question_template=(
+            "Runner paused: the plan is not loop-ready ({message}). "
+            "Should I drive the preflight repairs?"
+        ),
+        fix_category="manifest-update",
+    ),
 }
 
 

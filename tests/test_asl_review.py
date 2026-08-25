@@ -24,6 +24,7 @@ from agent_session_loop import (
     config,
     contracts,
     events,
+    pause_policy,
     plans,
     progress_repair,
     review,
@@ -2878,6 +2879,114 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         )
 
         self.assertEqual("run-repairs", resume.action)
+        self.assertTrue(resume.eligible)
+        self.assertIsNone(resume.blocker)
+
+    def _pending_repairs_ready_to_run(self) -> Path:
+        """A plan whose pending repair children the continuation calls eligible."""
+        self._write_plan([self._finding("F1", "runner")])
+        self.assertTrue(self._materialize().ok)
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "disposition": "not-loop-ready",
+                "repair_session_ids": ["2.1"],
+                "max_review_fix_cycles": 1,
+            }
+        )
+        plans.write_readiness_metadata(
+            self.plan_dir,
+            plans.ReadinessMetadata(
+                state="loop-ready",
+                readiness_sha256=plans.stable_readiness_sha256(self.plan_dir),
+                checked_at="2026-08-17T00:00:00Z",
+            ),
+        )
+        baseline = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+        self.assertTrue(baseline.eligible, baseline.blocker)
+        return event_path
+
+    def _append_run(self, event_path: Path, run_id: str, *, paused: str | None) -> None:
+        """Record a run that opened and, optionally, paused the way runs do."""
+        events.append_event(
+            event_path, events.Event(events.RUN_STARTED_EVENT, {"run_id": run_id})
+        )
+        if paused is not None:
+            events.append_event(
+                event_path,
+                events.Event(
+                    events.RUN_PAUSED_EVENT, {"run_id": run_id, "reason": paused}
+                ),
+            )
+
+    def test_a_standing_workspace_pause_blocks_the_pending_repairs(self) -> None:
+        event_path = self._pending_repairs_ready_to_run()
+        eligible_log = event_path.read_text(encoding="utf-8")
+        for reason in pause_policy.ENVIRONMENT_BLOCKED_PAUSE_REASONS:
+            with self.subTest(reason=reason):
+                event_path.write_text(eligible_log, encoding="utf-8")
+                self._append_run(event_path, "run-1", paused=reason)
+
+                resume = review_continuation.evaluate_review_continuation(
+                    plans.inspect_plan(self.plan_dir), event_path
+                )
+
+                # The children are on disk and runnable, but the precondition the
+                # run stopped on is still true, so the same state.json cannot
+                # honestly call them eligible while it reports the pause.
+                self.assertEqual("run-repairs", resume.action)
+                self.assertFalse(resume.eligible)
+                self.assertEqual(reason, resume.blocker)
+                self.assertEqual(("2.1",), resume.pending_repair_session_ids)
+
+    def test_a_later_run_start_clears_the_standing_pause_blocker(self) -> None:
+        event_path = self._pending_repairs_ready_to_run()
+        self._append_run(event_path, "run-1", paused="commit-preflight")
+        self._append_run(event_path, "run-2", paused=None)
+
+        resume = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+
+        # Rerunning the plan after fixing the workspace is the whole remedy, and
+        # it is also what keeps the blocker inert for a run still in flight.
+        self.assertEqual("run-repairs", resume.action)
+        self.assertTrue(resume.eligible)
+        self.assertIsNone(resume.blocker)
+
+    def test_finishing_the_paused_run_leaves_the_blocker_standing(self) -> None:
+        event_path = self._pending_repairs_ready_to_run()
+        self._append_run(event_path, "run-1", paused="commit-preflight")
+        events.append_event(
+            event_path,
+            events.Event(events.RUN_FINISHED_EVENT, {"run_id": "run-1", "ok": False}),
+        )
+
+        resume = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+
+        # The runner closes paused runs with run_finished too, so treating that
+        # record as the all-clear would make the blocker unreachable in practice.
+        self.assertFalse(resume.eligible)
+        self.assertEqual("commit-preflight", resume.blocker)
+
+    def test_a_pause_an_answer_can_clear_does_not_block_the_repairs(self) -> None:
+        event_path = self._pending_repairs_ready_to_run()
+        self._append_run(event_path, "run-1", paused="needs-decision")
+        self.assertEqual(
+            pause_policy.USER_ACTION_REPLY,
+            pause_policy.classify_pause("needs-decision")["user_action"],
+        )
+
+        resume = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+
+        # A pause waiting on a mailbox answer says nothing about whether the
+        # workspace can host the next run, so it is not this blocker's business.
         self.assertTrue(resume.eligible)
         self.assertIsNone(resume.blocker)
 

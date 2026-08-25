@@ -47,6 +47,7 @@ from agent_session_loop.assurance_models import (
     MAX_AUDIT_ATTEMPT_RECORDS,
     MAX_AUDIT_ATTEMPTS,
     MAX_AUDIT_DELIVERY_ATTEMPTS,
+    MAX_AUDIT_SHRINK_ATTEMPTS,
     RUBRIC_LANES,
     AssuranceError,
     AuditAttempt,
@@ -286,13 +287,20 @@ class AuditRoleResolutionTests(unittest.TestCase):
             supervisor_audit.attempt_timeouts(role),
         )
 
-    def test_answer_and_delivery_budgets_are_separate(self) -> None:
-        # A bad answer is the agent's doing and stays cheap; an undelivered
-        # request is the provider's and gets its own, longer budget.
+    def test_answer_delivery_and_shrink_budgets_are_separate(self) -> None:
+        # Three different failures, three budgets: a bad answer is the agent's
+        # doing and stays cheap, an undelivered request is the provider's and
+        # gets its own longer budget, and a request refused for size is the
+        # caller's own and buys exactly one smaller retry. The record cap admits
+        # all three spent in full, so no attempt an audit really made is
+        # unrecordable.
         self.assertEqual(2, MAX_AUDIT_ATTEMPTS)
         self.assertEqual(4, MAX_AUDIT_DELIVERY_ATTEMPTS)
+        self.assertEqual(1, MAX_AUDIT_SHRINK_ATTEMPTS)
         self.assertEqual(
-            MAX_AUDIT_ATTEMPTS + MAX_AUDIT_DELIVERY_ATTEMPTS,
+            MAX_AUDIT_ATTEMPTS
+            + MAX_AUDIT_DELIVERY_ATTEMPTS
+            + MAX_AUDIT_SHRINK_ATTEMPTS,
             MAX_AUDIT_ATTEMPT_RECORDS,
         )
 
@@ -1888,6 +1896,59 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertIn(events.RUN_FINISHED_EVENT, names)
             self.assertIn("run_started", names)
 
+    def test_tightening_a_bundle_sends_less_of_the_same_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self._collect(*self._history(Path(tmp), event_count=20000))
+            size = len(bundle.to_bytes())
+            digest = bundle.sha256
+
+            tightened = supervisor_audit.tighten_audit_input(
+                bundle, max_bytes=size // 2
+            )
+
+            self.assertLess(len(tightened.to_bytes()), size)
+            # The canonical bundle does not move: it stays the artifact on disk,
+            # the input the deterministic verdicts were read from, and the source
+            # of the locators an answer is validated against.
+            self.assertEqual(digest, bundle.sha256)
+            self.assertEqual(
+                [ref.locator for ref in bundle.evidence],
+                [ref.locator for ref in tightened.evidence],
+            )
+
+    def test_tightening_extends_the_omissions_it_inherited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = self._collect(*self._history(Path(tmp), event_count=20000))
+            before = {
+                (entry["section"], entry["reason"]): entry for entry in bundle.omissions
+            }
+
+            tightened = supervisor_audit.tighten_audit_input(
+                bundle, max_bytes=len(bundle.to_bytes()) // 2
+            )
+            after = {
+                (entry["section"], entry["reason"]): entry
+                for entry in tightened.omissions
+            }
+
+            # Nothing the first pass gave up is forgotten by the second: every
+            # bucket survives, its count only grows, and it still carries a
+            # digest identifying exactly one set of withheld payloads.
+            self.assertTrue(before)
+            self.assertLessEqual(set(before), set(after))
+            for key, entry in before.items():
+                self.assertGreaterEqual(after[key]["count"], entry["count"], key)
+                self.assertEqual(64, len(after[key]["sha256"]), key)
+            events_cap = ("events", supervisor_audit.REASON_SIZE_CAP)
+            self.assertGreater(after[events_cap]["count"], before[events_cap]["count"])
+            # And the second pass gives up in the same order the first would
+            # have: previews are trimmed before whole turns are dropped, which
+            # only holds because the previews inside the payload were recovered
+            # as shrinkable rather than left invisible to it.
+            previews_cap = ("previews", supervisor_audit.REASON_SIZE_CAP)
+            self.assertNotIn(previews_cap, before)
+            self.assertIn(previews_cap, after)
+
     def test_application_source_and_diffs_are_excluded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bundle = self._collect(*self._history(Path(tmp)))
@@ -2512,9 +2573,22 @@ class EvidenceBundleTests(unittest.TestCase):
 
             payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
 
-            locators = {entry["locator"] for entry in payload["evidence"]}
-            self.assertIn(f"plan/{review.FINAL_REVIEW_FILENAME}", locators)
-            self.assertIn(f"plan/{review.FINAL_REVIEW_ARTIFACT_FILENAME}", locators)
+            digests = {
+                entry["locator"]: entry["digest"] for entry in payload["evidence"]
+            }
+            self.assertIn(f"plan/{review.FINAL_REVIEW_FILENAME}", digests)
+            self.assertIn(f"plan/{review.FINAL_REVIEW_ARTIFACT_FILENAME}", digests)
+            # A locator alone cannot tell the auditor whether the indexed file
+            # is the one this run produced, so every row carries the digest of
+            # the bytes on disk.
+            for path in (
+                review.final_review_output_path(plan_dir),
+                review.final_review_artifact_path(plan_dir),
+            ):
+                self.assertEqual(
+                    artifacts.sha256_hex(path.read_bytes()),
+                    digests[f"plan/{path.name}"],
+                )
             self.assertEqual(
                 [],
                 [
@@ -2523,6 +2597,23 @@ class EvidenceBundleTests(unittest.TestCase):
                     if entry["section"] == "review.artifacts"
                 ],
             )
+
+    def test_canonical_audit_artifacts_are_indexed_with_their_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
+            written = {}
+            for name in assurance_models.CANONICAL_AUDIT_ARTIFACTS:
+                body = f"{name} body".encode()
+                (run_dir / name).write_bytes(body)
+                written[name] = artifacts.sha256_hex(body)
+
+            payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
+
+            digests = {
+                entry["locator"]: entry["digest"] for entry in payload["evidence"]
+            }
+            for name, digest in written.items():
+                self.assertEqual(digest, digests[f"run/{name}"])
 
     def test_absent_final_review_artifacts_are_explained_by_an_omission(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6140,6 +6231,103 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
                 ["transport-error"], [item.outcome for item in outcome.attempts]
             )
             self.assertEqual([], sleeps)
+
+    def _refused_for_size(self) -> dict[str, object]:
+        """The provider's refusal of a request larger than its context window."""
+        return {
+            "message": "",
+            "returncode": 1,
+            "stderr": (
+                "API Error: 400 "
+                '{"type":"invalid_request_error","message":'
+                '"prompt is too long: 517143 tokens > 200000 maximum"}'
+            ),
+        }
+
+    def test_a_request_refused_for_size_is_retried_with_less_of_the_bundle(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            bundle = self._bundle(history)
+            auditor = _ScriptedAuditor(
+                self._refused_for_size(),
+                self._reply(self._lanes(bundle.evidence[0].locator)),
+            )
+            sleeps: list[float] = []
+
+            outcome = self._run(history, auditor, bundle=bundle, sleeps=sleeps)
+
+            # The refusal is the caller's own doing, so the retry changes what
+            # was sent instead of waiting for a provider to recover, and the
+            # audit still earns its verdict.
+            self.assertTrue(outcome.agent_covered)
+            self.assertEqual("all-clear", outcome.audit.state)
+            self.assertEqual(
+                ["transport-error", "ok"], [item.outcome for item in outcome.attempts]
+            )
+            self.assertEqual(2, len(auditor.prompts))
+            self.assertLess(len(auditor.prompts[1]), len(auditor.prompts[0]))
+            self.assertEqual([], sleeps)
+
+            attempt_dir = history[3] / assurance_models.attempt_dir_name(1)
+            recorded = json.loads(
+                (attempt_dir / supervisor_audit.ATTEMPT_OUTCOME_FILE).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                harness_failures.CONTEXT_OVERFLOW_MARKER,
+                recorded["classification"]["marker"],
+            )
+
+    def test_a_shrink_does_not_spend_the_delivery_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            auditor = _ScriptedAuditor(
+                self._refused_for_size(),
+                {"message": "", "returncode": 1, "stderr": "socket hang up"},
+            )
+
+            outcome = self._run(history, auditor, sleeps=[])
+
+            # One oversized bundle must not cost the retries a real outage is
+            # owed: the transport failures that follow still get all of theirs.
+            self.assertEqual(
+                ["transport-error"] * (MAX_AUDIT_DELIVERY_ATTEMPTS + 1),
+                [item.outcome for item in outcome.attempts],
+            )
+
+    def test_a_shrink_does_not_spend_the_answer_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            auditor = _ScriptedAuditor(self._refused_for_size(), "{not json")
+
+            outcome = self._run(history, auditor)
+
+            self.assertEqual(
+                ["transport-error"] + ["malformed-output"] * MAX_AUDIT_ATTEMPTS,
+                [item.outcome for item in outcome.attempts],
+            )
+
+    def test_an_unshrinkable_bundle_does_not_buy_a_second_refusal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # Already shed as far as it goes, so a tighter ceiling changes
+            # nothing and a second launch would be refused identically.
+            bundle = supervisor_audit.tighten_audit_input(
+                self._bundle(history), max_bytes=1
+            )
+            auditor = _ScriptedAuditor(self._refused_for_size())
+
+            outcome = self._run(history, auditor, bundle=bundle)
+
+            self.assertFalse(outcome.agent_covered)
+            self.assertEqual("unavailable", outcome.audit.state)
+            self.assertEqual(
+                ["transport-error"], [item.outcome for item in outcome.attempts]
+            )
+            self.assertEqual(1, len(auditor.prompts))
 
     def test_delivery_failures_do_not_spend_the_answer_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

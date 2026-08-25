@@ -604,6 +604,53 @@ class HarnessFailureClassificationTests(unittest.TestCase):
         self.assertEqual(events.PAUSE_REASON_INVALID_MODEL, classification.reason)
         self.assertFalse(classification.retryable)
 
+    def test_oversized_prompt_is_named_without_becoming_retryable(self) -> None:
+        for text in (
+            "API Error: 400 {'message': 'prompt is too long: 210000 tokens'}",
+            "input length exceeds the maximum of 200000 tokens",
+            "context window exceeded",
+            "Context length exceeded for this model",
+        ):
+            with self.subTest(text=text):
+                classification = runner.classify_harness_failure(
+                    self._result(stderr=text)
+                )
+                # Nothing here can be relaunched unchanged, so the reason and the
+                # retryability are the fail-closed ones. Only the marker is new,
+                # and it is stable rather than exit-code-derived so a caller that
+                # can send less has something to branch on.
+                self.assertEqual(
+                    events.PAUSE_REASON_NONZERO_EXIT, classification.reason
+                )
+                self.assertFalse(classification.retryable)
+                self.assertEqual(
+                    harness_failures.CONTEXT_OVERFLOW_MARKER, classification.marker
+                )
+                self.assertEqual(
+                    f"{events.PAUSE_REASON_NONZERO_EXIT}:"
+                    f"{harness_failures.CONTEXT_OVERFLOW_MARKER}",
+                    classification.fingerprint,
+                )
+
+    def test_oversized_prompt_outranks_the_vocabulary_it_carries(self) -> None:
+        # The audit sends a transcript of ASL itself, so the refused request can
+        # quote every word the quota and auth rules match on. The refusal is
+        # about the request, not about the account, and must win the race.
+        classification = runner.classify_harness_failure(
+            self._result(
+                stderr=(
+                    "prompt is too long: 517000 tokens > 200000 maximum\n"
+                    "context: turn quoted 'rate limit reached' and 'invalid api "
+                    "key' and 'connection closed' from the run under audit"
+                )
+            )
+        )
+        self.assertEqual(
+            harness_failures.CONTEXT_OVERFLOW_MARKER, classification.marker
+        )
+        self.assertEqual(events.PAUSE_REASON_NONZERO_EXIT, classification.reason)
+        self.assertFalse(classification.retryable)
+
     def test_transport_failures_are_retryable(self) -> None:
         for text in (
             "read ECONNRESET",

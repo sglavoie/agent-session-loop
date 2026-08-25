@@ -32,6 +32,7 @@ from agent_session_loop import (
     mailbox,
     mailbox_cli,
     metrics,
+    pause_policy,
     plans,
     preflight,
     prepare,
@@ -3083,6 +3084,50 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
                 normalized_section,
             )
 
+    def test_inspect_pause_docs_enumerate_the_policy_set(self) -> None:
+        """Every `inspect` reason is named in prose, and nothing else is.
+
+        `user_action` is what a supervising agent branches on, so a reason that
+        moves between `reply` and `inspect` without the docs moving with it
+        leaves an operator reading instructions the code no longer follows.
+        """
+        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
+        marker = "Two kinds of pause are `inspect`"
+        for name, surface in (
+            ("docs/agent-session-loop.md", self.docs),
+            ("skills/asl/SKILL.md", skill),
+        ):
+            with self.subTest(surface=name):
+                self.assertIn(marker, surface, f"{name} never enumerates the set")
+                section = surface.split(marker, 1)[1].split("\n\n", 1)[0]
+                named = re.findall(r"`([^`]+)`", section)
+                for reason in pause_policy.INSPECT_PAUSE_REASONS:
+                    self.assertIn(
+                        reason,
+                        named,
+                        f"{name} never names inspect reason {reason!r}",
+                    )
+                # A reason listed here but classified `reply` would be worse
+                # than an omission: it reads as authoritative and is wrong.
+                for reason in named:
+                    if reason not in events.PAUSE_REASONS:
+                        continue
+                    self.assertIn(
+                        reason,
+                        pause_policy.INSPECT_PAUSE_REASONS,
+                        f"{name} lists {reason!r} as inspect, but it is not",
+                    )
+
+    def test_pause_policy_version_matches_the_documented_revision(self) -> None:
+        skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
+        expected = f"`policy_version: {pause_policy.POLICY_VERSION}`"
+        for name, surface in (
+            ("docs/agent-session-loop.md", self.docs),
+            ("skills/asl/SKILL.md", skill),
+        ):
+            with self.subTest(surface=name):
+                self.assertIn(expected, surface)
+
     def test_worker_hung_docs_match_runner_and_autopilot(self) -> None:
         module_path = REPO_ROOT / "skills" / "asl" / "scripts" / "asl_autopilot.py"
         spec = importlib.util.spec_from_file_location(
@@ -3147,6 +3192,10 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             "higher-cap-required",
             "artifact-invalid",
             *sorted(review_continuation.TERMINAL_REVIEW_DISPOSITIONS),
+            # A standing environment-blocked pause becomes the blocker verbatim,
+            # so every member of that policy set is part of the public blocker
+            # vocabulary and has to be named here (see ASI-6).
+            *pause_policy.ENVIRONMENT_BLOCKED_PAUSE_REASONS,
             "repair-sessions-missing",
             "repair-sessions-not-runnable",
             "unknown-disposition",

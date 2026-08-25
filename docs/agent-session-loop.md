@@ -4126,7 +4126,9 @@ may ignore this block. `action` is one of `initial-review`,
 `materialize-repairs`, `run-repairs`, `rereview`, or `terminal`; `eligible`
 describes the persisted/effective-cap evaluation, and `blocker` is `null`,
 `review-harness-required`, `higher-cap-required`, `artifact-invalid`,
-`not-loop-ready`, `repair-scope-stale`, a terminal disposition (`all-clear`,
+`not-loop-ready`, `repair-scope-stale`, a standing environment-blocked pause
+reason (`commit-preflight`, `commit-failed`, `repository-registry-required`, or
+`workspace-repository-contention`), a terminal disposition (`all-clear`,
 `repair-group-exhausted`, `findings-repeated`, or `unstructured-findings`), or
 a non-disposition terminal blocker (`repair-sessions-missing`,
 `repair-sessions-not-runnable`, or `unknown-disposition`). Repair children are
@@ -4149,7 +4151,19 @@ repair child, widens every child the `repair_scope_gaps` block names — not onl
 the one about to run, since one stale sibling blocks the plan-wide projection —
 and reprojects. A child the second projection still refuses is never launched;
 the run pauses as `malformed-review-repair` carrying the blocker and the
-missing-alias evidence. An unrecognized recorded disposition is retained in
+missing-alias evidence. A `run-repairs` continuation also reports
+`eligible: false` with the standing pause reason as its blocker when the newest
+run in the event log paused on one of the environment preconditions
+`pause_policy` classifies as `inspect` — the pauses a workspace fix clears
+rather than a mailbox answer. Those conditions outlive the run that hit them: a
+dirty repository, an unregistered one, or a plan left at `draft` is still there
+when the next run opens, so calling the pending children eligible would
+contradict the paused state recorded in the same `state.json`. The signal is
+the run's own terminal record, not a live `git status`, so the projection stays
+reproducible from the log alone. A later `run_started` clears it, which means
+rerunning the plan after fixing the workspace is enough and nothing has to be
+rewritten; a `run_finished` does not, because the runner appends one for paused
+runs too. An unrecognized recorded disposition is retained in
 `source_disposition` for diagnosis and maps to the stable
 `unknown-disposition` blocker. The projection includes source lineage,
 historical/required/selected cap values, pending and completed repair IDs,
@@ -4722,12 +4736,22 @@ An unclassified `nonzero-exit` pause is never retried. Which pauses are worth
 escalating comes from the persisted `pause_policy` block: `requires_user` is true
 for every pause a machine cannot retry, and `user_action` names what the human is
 supposed to do about it — `reply` when an operator answer can clear the pause,
-`inspect` when no answer can and the environment has to change instead
-(`quota-exhausted`, `auth-required`, `invalid-model`), and `null` for the
-recoverable pauses that need no human at all. The helper escalates `inspect`
-pauses immediately and routes `reply` pauses through the mailbox wait. The block
-also carries `policy_version`, which lets a consumer diffing a persisted block
-against a fresh classification tell a schema change from a real contradiction.
+`inspect` when no answer can and the environment has to change instead, and
+`null` for the recoverable pauses that need no human at all. The helper
+escalates `inspect` pauses immediately and routes `reply` pauses through the
+mailbox wait. Two kinds of pause are `inspect`: the non-retryable harness
+failures that carry no question context (`quota-exhausted`, `auth-failed`,
+`invalid-model`), and the pauses blocked on a workspace or environment
+precondition (`commit-preflight`, `commit-failed`,
+`repository-registry-required`, `workspace-repository-contention`,
+`not-loop-ready`). The dividing principle is whether a mailbox answer can make
+the run proceed: a dirty worktree stays dirty however the operator answers, so
+waiting for a reply would only burn the mailbox lease before escalating anyway.
+A reason joins the set on its own clearing path, never on symmetry with a
+neighbour. The block also carries `policy_version`, which lets a consumer
+diffing a persisted block against a fresh classification tell a schema change
+from a real contradiction; `policy_version: 3` is the revision that moved the
+blocked-precondition reasons off `reply`.
 
 Every pause with `requires_user` also populates the state payload's
 `action_required` block (`source: pause`), echoing the pause reason, message,
@@ -4736,9 +4760,12 @@ preflight repair hint (`check_id`, `category`, `fix_category`, `message`) with
 its plan-directory and repository-root placeholders already substituted, so a
 readiness pause names the exact command that clears it — for example
 `asl baseline <plan-dir> --cwd <repo-root>` for missing baseline evidence. A
-pause whose evidence carries no such hint still gets the block, with an empty
-`remediation` list; a live intervention signal the turn already raised is the
-more specific record of the same ask and is left in place.
+runner-side refusal carries findings rather than hints in its details, so the
+stable pause reason resolves one from `preflight.RUNTIME_REPAIR_HINTS` instead —
+that fallback is what keeps an `inspect` pause from telling an operator to look
+without saying where. A pause whose reason has no hint either still gets the
+block, with an empty `remediation` list; a live intervention signal the turn
+already raised is the more specific record of the same ask and is left in place.
 
 When a pause genuinely needs an answer, the result carries `needs_agent_reply`
 with a `questions` block (resolver prompt, the paused agent's last message, pause

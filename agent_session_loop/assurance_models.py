@@ -258,9 +258,20 @@ MAX_AUDIT_ATTEMPTS = 2
 #: lasting minutes must not consume the answer retries or fail the audit.
 MAX_AUDIT_DELIVERY_ATTEMPTS = 4
 
-#: Upper bound on recorded attempts: both budgets can be spent in full within
+#: Budget for attempts the provider refused before the agent ran because the
+#: request itself was too large. Neither the agent nor the provider is at fault
+#: — the caller sent too much — so it is charged here rather than to either of
+#: the budgets above, which would let one oversized bundle spend the retries a
+#: real bad answer or a real outage is owed. One retry only: the shed order
+#: gives up the least useful evidence first, so a second, smaller bundle would
+#: start trading away the terminal evidence the audit exists to read.
+MAX_AUDIT_SHRINK_ATTEMPTS = 1
+
+#: Upper bound on recorded attempts: every budget can be spent in full within
 #: one audit, and every attempt is recorded.
-MAX_AUDIT_ATTEMPT_RECORDS = MAX_AUDIT_ATTEMPTS + MAX_AUDIT_DELIVERY_ATTEMPTS
+MAX_AUDIT_ATTEMPT_RECORDS = (
+    MAX_AUDIT_ATTEMPTS + MAX_AUDIT_DELIVERY_ATTEMPTS + MAX_AUDIT_SHRINK_ATTEMPTS
+)
 
 
 # ---------------------------------------------------------------------------

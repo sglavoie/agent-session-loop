@@ -5846,7 +5846,9 @@ class ParserAndStateTests(unittest.TestCase):
         action = payload["action_required"]
         self.assertEqual("not-loop-ready", action["reason"])
         self.assertEqual("pause", action["source"])
-        self.assertEqual(pause_policy.USER_ACTION_REPLY, action["user_action"])
+        # A readiness gate is blocked on the plan and its environment, not on
+        # an answer, so the ask is to inspect (see ASI-114 / policy v3).
+        self.assertEqual(pause_policy.USER_ACTION_INSPECT, action["user_action"])
         hint = action["remediation"][0]
         self.assertEqual("baseline-missing.refresh", hint["check_id"])
         self.assertIn(

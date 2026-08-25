@@ -21,6 +21,7 @@ EVENT_SCHEMA_VERSION = 2
 
 RUNNER_STATUS_PREFIX = "Runner status:"
 RUNNER_PAUSE_PREFIX = "RUNNER_PAUSE:"
+RUN_STARTED_EVENT = "run_started"
 RUN_PAUSED_EVENT = "run_paused"
 RUN_FINISHED_EVENT = "run_finished"
 # ``run_finished.outcome`` for a run reconstructed from proof of death rather
