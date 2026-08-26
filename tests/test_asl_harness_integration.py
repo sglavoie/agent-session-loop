@@ -44,6 +44,7 @@ from agent_session_loop import (
     run_control,
     runner,
     state,
+    turn_execution,
     verification,
 )
 from tests.support import (
@@ -628,8 +629,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 side_effect=notify_started,
             ),
             mock.patch.object(
-                runner,
-                "_notify_agent_mux_loop_turn_started",
+                turn_execution,
+                "notify_turn_started",
                 side_effect=notify_turn_started,
             ),
             mock.patch.object(
@@ -825,8 +826,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner,
-                "_notify_agent_mux_loop_turn_started",
+                turn_execution,
+                "notify_turn_started",
                 side_effect=notify_turn_started,
             ),
             mock.patch.object(
@@ -5927,7 +5928,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             delayed_once = False
             thread_errors: list[BaseException] = []
             original_write_json = runner._write_json_file
-            original_preview_text = runner._preview_text
+            original_preview_text = turn_execution.preview_text
             state_write_count = 0
 
             def delayed_write_json(
@@ -6010,7 +6011,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 )
 
                 with mock.patch.object(
-                    runner, "_preview_text", side_effect=delayed_preview
+                    turn_execution, "preview_text", side_effect=delayed_preview
                 ):
                     activity_thread = threading.Thread(target=record_latest_activity)
                     activity_thread.start()

@@ -403,9 +403,13 @@ schemas for **projection v1** (the `agent_mux` block in `state.json`),
 **lifecycle hook v2** (the payload piped to `amx hook-indicator`), and **bridge
 protocol v2** (the NDJSON frames `asl bridge serve` writes), each beside
 positive fixtures the schema must accept and negative fixtures it must reject
-for a named reason at a named JSON pointer. Publishing the contract is not
-adopting it: nothing in this corpus activates v2 behavior, and the bridge still
-serves protocol 1.
+for a named reason at a named JSON pointer. Publishing the contract was not
+adopting it, and the three components adopted it separately: the projection and
+the lifecycle hook emitted from the corpus first, and the bridge followed by
+cutting to protocol 2 and retiring its own parallel fixture set into this one.
+All three are now pinned by the single contract-set ID, which is why the bridge
+hello carries that ID rather than a version per component — listing them
+separately is what would let them drift.
 
 Four properties are structural rather than conventional. Every object declares
 `additionalProperties: false`, every string carries an enum, const, format, or
@@ -556,6 +560,7 @@ asl migrate-state PLAN_DIR [--from OLD_PLAN_PATH] [--state-dir DIR] [--apply] [-
 asl metrics [--since-days N] [--state-dir DIR] [--json]
 asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guidance TEXT] [--from-id SHA] [--pathspec PATH ...] [--expect-snapshot TOKEN] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--prepare-only] [--message-file PATH] [--json]
 asl bridge serve [--stdio] [--protocol VERSION] [--state-dir DIR] [--plan-root DIR]
+asl agent-mux pairing [--state-dir DIR] [--migrate] [--json]
 ```
 
 `asl commit` writes Conventional Commits messages for the worktree containing
@@ -4028,7 +4033,9 @@ afterwards. It is appended after `result.json` has been written and fsynced,
 so the durable record of a turn ending can never name artifacts that are not
 on disk, and it stays separate from `turn_finished`, which additionally means
 the turn was accepted.
-`turn_finished` is emitted from exactly one function, `runner._commit_turn`,
+`turn_finished` is emitted from exactly one function,
+`turn_execution.commit_turn` — reached through `TurnExecutor.commit`, and still
+re-exported as `runner._commit_turn` —
 and only after every post-execution guard has passed: the workspace and review
 mutation guards, the mailbox completion guard, session verification, the
 progress journal append, the derived status ledger sync, and any per-session
@@ -6338,15 +6345,51 @@ a runner cleanup window should retry once before opening a bug.
 
 ## Supervision Bridge
 
-`asl bridge serve --stdio --protocol 1` streams ASL's active-run
+`asl bridge serve --stdio --protocol 2` streams ASL's active-run
 projection to an external supervision client over stdin/stdout and
 accepts the intervention set an operator can already reach from the CLI
 and the Workbench: reply, resolve, resume, stop-after-current, abort,
 and a Workbench deep link. Every one of those goes through the same
 `agent_session_loop.intervention` service layer the other two surfaces
-use, so a rule can never hold on one surface and not another. Protocol 1
-is the only supported version; requesting another exits 2 with a stderr
-diagnostic and serves nothing.
+use, so a rule can never hold on one surface and not another. Protocol 2
+is the only supported version; requesting another — including the retired
+protocol 1 — exits 2 with a stderr diagnostic and serves nothing.
+
+### Compatibility is identity, not negotiation
+
+The server-first `hello` carries a `contract_set_id`: the digest over the
+canonical corpus that defines these frames, the lifecycle hook payload,
+and the projection at once. One identifier pins every component version,
+so the components cannot drift apart, and the frame is closed against
+unknown properties so a fourth cannot be added without moving the
+identifier. The hello also declares `handshake_required`, the ordered
+method list, the event list, and the mutating subset of the methods —
+protocol 1 published methods and events in one array, which left "can I
+call this?" and "will I be sent this?" indistinguishable.
+
+Mutations are gated behind `session.handshake`. It accepts only an exact
+contract-set match together with a snapshot digest the bridge still
+holds, and answers `{contract_set_id, handshake_id, mutations_enabled,
+snapshot_digest}`. A foreign contract set is refused once as
+`contract-set-mismatch` with `retryable` false: retrying cannot fix a
+build-time disagreement, and there is no protocol-1 parser left to fall
+back to. The refusal message is a fixed string rather than an
+interpolation of whatever the client sent, because a compatibility reason
+reaches an operator's screen verbatim. Reads survive a mismatch, so a
+stale cockpit can still render what it has and explain itself.
+
+A handshake against a projection that has since moved is answered rather
+than refused: `mutations_enabled` is false and the response names the
+digest to refresh to. A mutation attempted against a stale handshake
+fails as `stale-snapshot`, retryable in the narrow sense that refreshing
+and handshaking again is the fix. This complements the action token
+rather than duplicating it: the token proves the *plan* has not moved
+since the client read it, and the handshake proves the client read it
+from a projection this bridge produced and still holds. The gate runs
+before the request is parsed, so an unauthorized client is refused rather
+than coached on its parameters, and it is enforced from the declared
+mutating-method list rather than inside each handler, so a method added
+to that list is gated by construction.
 
 ### Transport and framing
 
@@ -6655,27 +6698,37 @@ or stderr line the bridge can emit.
 
 The protocol has two implementations in two languages, so the wire shape
 is pinned in a checked-in fixture corpus rather than described twice.
-`tests/fixtures/asl_bridge_protocol_v1/` holds one canonical frame per
-message — hello, snapshot, `runs.changed`, question body, operation
-receipt, `operation.updated`, error response, Workbench link — beside a
-`manifest.json` that pins the protocol vocabulary (capabilities, error
-codes, operation statuses, Workbench focus keys, context kinds, the frame
-ceiling, the poll interval), a SHA-256 per frame file, and a combined
-digest over all of them.
+Protocol 2 retired the bridge's own fixture directory into the contract
+corpus, because two corpora describing the same wire is exactly the drift
+a corpus exists to prevent.
+`tests/fixtures/agent_mux_contract/fixtures/bridge-protocol-v2/` holds one
+canonical document per message — hello, handshake accepted, handshake
+read-only, snapshot, `runs.changed`, question body, operation receipt,
+`operation.updated`, error response, Workbench link — beside documents the
+schema must reject for a named reason at a named JSON pointer. The
+corpus's `manifest.json` pins the protocol vocabulary (methods, the
+mutating subset, events, error codes), a SHA-256 per file, and the corpus
+digest the contract-set ID is derived from.
 
-This repository is the source of truth. Agent Mux carries a byte-identical
-copy at `internal/aslbridge/testdata/protocol_v1/` and decodes the same
-frames in Go with unknown fields rejected. Both sides recompute the
-combined digest, so a one-sided edit fails on whichever side drifted
-instead of surfacing as a runtime mismatch against an installed pair.
-`tests/test_asl_bridge_fixtures.py` additionally checks the frames against
-what `agent_session_loop.bridge` actually produces, which is what keeps
-the corpus from becoming a self-consistent fiction. The change procedure
-is in the corpus's own `README.md`.
+This repository is the source of truth. Agent Mux vendors a byte-identical
+copy at `internal/aslcontract/corpus/` and validates the same documents in
+Go with unknown fields rejected. Both sides recompute the corpus digest, so
+a one-sided edit fails on whichever side drifted instead of surfacing as a
+runtime mismatch against an installed pair.
+`tests/test_asl_bridge_fixtures.py` additionally validates what
+`agent_session_loop.bridge` actually produces — its hello, its snapshot, its
+handshake, and both new refusals — against those schemas, which is what
+keeps the corpus from becoming a self-consistent fiction. The change
+procedure is in the corpus's own `README.md`.
 
-The frames are illustrative wire shapes rather than derived records:
+The documents are illustrative wire shapes rather than derived records:
 `plan_dir`, `row_id`, and `action_token` are fixed fixture strings, not
-values recomputed from a live corpus.
+values recomputed from a live corpus. They also cannot name the live
+contract set — a digest computed over corpus bytes cannot appear in those
+bytes — so they carry the placeholder `asl-amx-1.0000000000000000` and the
+test substitutes the real identifier when it compares a served frame
+against a checked-in one. A fixture containing the real identifier is
+itself a failure.
 
 ### Client rollout order
 
@@ -6691,8 +6744,65 @@ the mailbox, or the control queue.
 Capabilities are additive and ordered, and a client feature-detects by
 membership rather than by position, so a newer bridge serving more methods
 than a client knows about is not a version conflict. A client asking for a
-protocol other than 1 is: the server exits 2 with a stderr diagnostic and
+protocol other than 2 is: the server exits 2 with a stderr diagnostic and
 serves nothing rather than degrading into a guess.
+
+## Agent Mux Pairing
+
+`asl agent-mux pairing [--state-dir DIR] [--migrate] [--json]` is the
+surface `amx config asl-sync` reads before it is allowed to rewrite Agent
+Mux's configuration. Pairing is a promise about a whole installation —
+one executable, one contract set, one state root — and every other ASL
+command that knows those things is keyed by a single plan directory
+(`asl contract-check --agent-mux`, `asl migrate-state`,
+`asl compact-state`). This one takes no plan argument and answers for the
+root.
+
+It reports the absolute path of the entry point that is running, the
+contract-set ID this build implements, the bridge protocol it speaks, the
+canonical state root, the current state schema version, and a
+classification of every plan state directory under that root:
+
+| Classification | Meaning |
+| --- | --- |
+| `compatible` | already at the current state schema |
+| `migratable` | inactive, and upgradable in place |
+| `active-incompatible` | locked by a live run whose state this build cannot pair with |
+| `unprojectable` | too little run identity to build a projection from |
+| `unreadable` | `state.json` is not a JSON object |
+| `empty` | a state directory with no state record |
+
+The executable is made absolute but deliberately **not** canonicalized.
+The launcher on `PATH` is usually the stable name — `~/.local/bin/asl` —
+pointing at a target an upgrade replaces, so following the link would
+persist the path that churns rather than the one that does not. When the
+entry point cannot be named at all (an embedded or `python -c`
+invocation) the field is null rather than a bare `asl`, because a bare
+name would put an interactive shell's `PATH` back in the loop, which is
+exactly what pairing exists to remove.
+
+### An active incompatible run refuses the whole pairing
+
+`--migrate` upgrades every `migratable` plan in place. It is refused
+outright — nothing is written anywhere under the root — while any plan is
+classified `active-incompatible`, and the offending runs are named with
+their plan directory, run ID, and PID.
+
+The refusal is whole-root rather than per-plan because the promise is
+whole-root: a live legacy run keeps publishing state and lifecycle hooks
+that the configuration about to be written does not cover. Such a run is
+never stopped and never migrated underneath. It holds its state payload
+in memory and rewrites the whole file on its next transition, so an
+upgrade beneath it is reverted at best; stopping someone else's run to
+finish a configuration change is not a decision this command gets to
+make. It names the run and leaves it to its operator.
+
+Exit reasons are part of the contract, and each names a distinct operator
+action: `ok`, `active-incompatible-runs` (stop the named runs),
+`migration-failed` (a named plan could not be upgraded),
+`state-root-error` (the root exists but cannot be scanned). Every outcome
+presents the same keys, so a consumer branches on `reason` alone and
+never on which fields are present.
 
 ## Verification
 
@@ -6724,16 +6834,17 @@ test exactly once. Individual modules still run directly, for example
 
 The bridge's cross-language contract is checked from both sides.
 `tests/test_asl_bridge_fixtures.py` runs in `just test-fast` and verifies that
-`tests/fixtures/asl_bridge_protocol_v1/` still matches what
-`agent_session_loop.bridge` produces and that the manifest digest matches the
-frame files beside it. The other half runs in the client repository: after
-copying the frames across unchanged, `just asl-integration` in Agent Mux
-launches the installed `asl bridge serve --stdio --protocol 1` against a
-throwaway plan and state root and checks the handshake, the capability list
-against the manifest, snapshot decoding, body-free action and receipt shapes,
-the Workbench URL shape, and a clean exit. That recipe is opt-in there and
-fails rather than skips when ASL is missing or incompatible, so an unrun check
-is never mistaken for a passing one.
+`tests/fixtures/agent_mux_contract/` still describes what
+`agent_session_loop.bridge` produces and that the manifest digests match the
+files beside them. The other half runs in the client repository: after copying
+the corpus across unchanged, `just asl-integration` in Agent Mux launches the
+installed `asl bridge serve --stdio --protocol 2` against a throwaway plan and
+state root and checks the hello, the contract-set ID against the vendored
+corpus, the method and mutation lists against the manifest, the handshake and
+its mutation gate, snapshot decoding, body-free action and receipt shapes, the
+Workbench URL shape, and a clean exit. That recipe is opt-in there and fails
+rather than skips when ASL is missing or incompatible, so an unrun check is
+never mistaken for a passing one.
 
 Use a synthetic plan directory for manual smoke tests so generated state, locks,
 and logs do not touch an active project plan.

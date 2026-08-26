@@ -70,14 +70,14 @@ class TurnFinalizationShapeTests(unittest.TestCase):
 
     def test_execution_event_precedes_turn_finished_in_run_loop(self) -> None:
         source = inspect.getsource(runner._run_locked)
-        finalize = source.index("_finalize_turn_execution(")
-        finished = source.index("_commit_turn(")
+        finalize = source.index("turn_executor.finalize(")
+        finished = source.index("turn_executor.commit(")
         self.assertLess(finalize, finished)
 
     def test_turn_result_is_written_durably(self) -> None:
         source = inspect.getsource(runner._write_turn_artifacts)
         self.assertIn(
-            '_write_json_file(paths["result"], payload, durable=True)', source
+            'durability.write_json_file(paths["result"], payload, durable=True)', source
         )
 
 

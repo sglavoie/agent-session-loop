@@ -13,16 +13,19 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
-from . import agent_mux_projection
+from . import agent_mux_projection, clock, events
 
 START_EVENT = "AgentSessionLoopStarted"
 TURN_START_EVENT = "AgentSessionLoopTurnStarted"
@@ -693,3 +696,95 @@ def notify(
             return outcome
     except Exception:  # noqa: BLE001 - AgentMux is never a run dependency
         return None
+
+
+class StatePersistence(Protocol):
+    """The run's serialized state writer, as the notification seam needs it.
+
+    Declared structurally so the turn-execution boundary and this transport can
+    allocate sequences and record outcomes without importing the runner that
+    owns the concrete implementation.
+    """
+
+    @property
+    def lock(self) -> AbstractContextManager[Any]: ...
+
+    def append_event(
+        self, event_path: Path, name: str, payload: dict[str, Any]
+    ) -> None: ...
+
+    def write_state(self, payload: dict[str, Any]) -> None: ...
+
+
+def allocate_sequence(
+    payload: dict[str, Any],
+    persistence: StatePersistence,
+) -> int:
+    """Allocate the next per-run AgentMux sequence and persist it.
+
+    Allocation happens at the persistence lock seam so the counter in
+    ``state.json`` stays monotonic across every producer thread.
+    """
+    with persistence.lock:
+        sequence = int(payload.get("agent_mux_sequence") or 0) + 1
+        payload["agent_mux_sequence"] = sequence
+        persistence.write_state(payload)
+    return sequence
+
+
+def notify_loop(
+    event_name: str,
+    payload: dict[str, Any],
+    *,
+    reason: str,
+    active_turn: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+    persistence: StatePersistence | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    """Emit one run-lifecycle notification from a live run payload.
+
+    This is the seam every phase of a run notifies through, so sequence
+    allocation and outcome recording are decided once rather than per emitter.
+    Without a ``persistence`` the sequence is bumped on the in-memory payload
+    only, which is what an unpersisted run (tests, ``--no-state``) needs.
+    """
+
+    def allocate() -> int:
+        if persistence is not None:
+            return allocate_sequence(payload, persistence)
+        sequence = int(payload.get("agent_mux_sequence") or 0) + 1
+        payload["agent_mux_sequence"] = sequence
+        return sequence
+
+    def record_outcome(outcome: dict[str, Any]) -> None:
+        raw_event_path = payload.get("events_path") or payload.get("event_path")
+        if not isinstance(raw_event_path, str | Path) or not str(raw_event_path):
+            return
+        event_path = Path(raw_event_path)
+        if persistence is not None:
+            persistence.append_event(
+                event_path, events.AGENT_MUX_DELIVERY_EVENT, outcome
+            )
+        else:
+            events.append_event(
+                event_path,
+                events.Event(name=events.AGENT_MUX_DELIVERY_EVENT, payload=outcome),
+            )
+
+    notify(
+        event_name,
+        payload,
+        reason=reason,
+        active_turn=active_turn,
+        extra=extra,
+        enabled=notify_enabled(),
+        timeout=notify_timeout(),
+        allocate_sequence=allocate,
+        record_outcome=record_outcome,
+        resolve_binary=shutil.which,
+        run_command=subprocess.run,
+        sleep=retry_sleep,
+        emitted_at=clock.utc_now,
+        cancelled=cancelled,
+    )

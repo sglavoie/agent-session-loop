@@ -35,6 +35,7 @@ from agent_session_loop import (
     runner,
     session_overview,
     state,
+    turn_execution,
     verification,
     workspaces,
 )
@@ -2688,8 +2689,8 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
                 side_effect=self._completed_harness_result,
             ),
             mock.patch.object(
-                runner,
-                "_write_turn_artifacts",
+                turn_execution,
+                "write_turn_artifacts",
                 side_effect=mutate_then_exit,
             ),
             self.assertRaises(SystemExit) as raised,
@@ -2720,8 +2721,8 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
                 side_effect=self._completed_harness_result,
             ),
             mock.patch.object(
-                runner,
-                "_write_turn_artifacts",
+                turn_execution,
+                "write_turn_artifacts",
                 side_effect=mutate_then_interrupt,
             ),
         ):

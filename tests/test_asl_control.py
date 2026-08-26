@@ -49,6 +49,7 @@ from agent_session_loop import (
     runner,
     state,
     supervision_liveness,
+    turn_execution,
 )
 from tests.support import (
     REPO_ROOT,
@@ -5382,12 +5383,12 @@ class HangSentinelTests(unittest.TestCase):
             clock["now"] = 100.0  # past the 45s result grace
 
             with (
-                mock.patch.object(runner, "_notify_agent_mux_loop_turn_heartbeat"),
+                mock.patch.object(turn_execution, "notify_turn_heartbeat"),
                 mock.patch.object(
-                    runner, "_notify_agent_mux_loop_turn_hang_suspected"
+                    turn_execution, "notify_turn_hang_suspected"
                 ) as suspected_notify,
                 mock.patch.object(
-                    runner, "_notify_agent_mux_loop_turn_hang_cleared"
+                    turn_execution, "notify_turn_hang_cleared"
                 ) as cleared_notify,
             ):
                 # Two warm-up ticks bring the zero-CPU streak up to the
@@ -5439,12 +5440,12 @@ class HangSentinelTests(unittest.TestCase):
             clock["now"] = 100.0
 
             with (
-                mock.patch.object(runner, "_notify_agent_mux_loop_turn_heartbeat"),
+                mock.patch.object(turn_execution, "notify_turn_heartbeat"),
                 mock.patch.object(
-                    runner, "_notify_agent_mux_loop_turn_hang_suspected"
+                    turn_execution, "notify_turn_hang_suspected"
                 ) as suspected_notify,
                 mock.patch.object(
-                    runner, "_notify_agent_mux_loop_turn_hang_cleared"
+                    turn_execution, "notify_turn_hang_cleared"
                 ) as cleared_notify,
             ):
                 # Ticks 1-2 confirm the flat CPU streak; tick 3 announces.
@@ -11855,7 +11856,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             with (
                 patched_env(ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS="30"),
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -11922,7 +11925,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             completed = self.accepted_delivery()
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -11930,7 +11935,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 ) as run,
             ):
                 runner._notify_agent_mux_loop_started(payload)
-                runner._notify_agent_mux_loop_turn_started(payload, active_turn)
+                turn_execution.notify_turn_started(payload, active_turn)
 
             self.assertEqual(2, run.call_count)
             start_args, start_kwargs = run.call_args_list[0]
@@ -11969,7 +11974,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.shutil,
+                    runner.agent_mux_delivery.shutil,
                     "which",
                     return_value="/opt/amx",
                 ) as which,
@@ -12028,7 +12033,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
     def test_finish_notification_skips_when_amx_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                mock.patch.object(runner.shutil, "which", return_value=None),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value=None
+                ),
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
                 runner._notify_agent_mux_loop_finished(self.finish_payload(Path(tmp)))
@@ -12048,7 +12055,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 with (
                     self.subTest(failure=type(failure).__name__),
                     mock.patch.object(
-                        runner.shutil,
+                        runner.agent_mux_delivery.shutil,
                         "which",
                         return_value="/opt/amx",
                     ),
@@ -12092,7 +12099,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload = self.finish_payload(Path(tmp))
             with (
                 patched_env(ASL_AGENT_MUX_NOTIFY="off"),
-                mock.patch.object(runner.shutil, "which") as which,
+                mock.patch.object(runner.agent_mux_delivery.shutil, "which") as which,
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
                 runner._notify_agent_mux_loop_finished(payload)
@@ -12109,7 +12116,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     with (
                         patched_env(ASL_AGENT_MUX_NOTIFY=raw),
                         mock.patch.object(
-                            runner.shutil, "which", return_value="/opt/amx"
+                            runner.agent_mux_delivery.shutil,
+                            "which",
+                            return_value="/opt/amx",
                         ),
                         mock.patch.object(
                             runner.subprocess, "run", return_value=completed
@@ -12147,21 +12156,17 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             }
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess, "run", return_value=completed
                 ) as run,
             ):
                 runner._notify_agent_mux_loop_started(payload, persistence)
-                runner._notify_agent_mux_loop_turn_started(
-                    payload, active_turn, persistence
-                )
-                runner._notify_agent_mux_loop_turn_heartbeat(
-                    payload, active_turn, persistence
-                )
-                runner._notify_agent_mux_loop_turn_finished(
-                    payload, active_turn, persistence
-                )
+                turn_execution.notify_turn_started(payload, active_turn, persistence)
+                turn_execution.notify_turn_heartbeat(payload, active_turn, persistence)
+                turn_execution.notify_turn_finished(payload, active_turn, persistence)
                 runner._notify_agent_mux_loop_paused(payload, persistence)
                 runner._notify_agent_mux_loop_finished(payload, persistence)
 
@@ -12240,7 +12245,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             accepted = self.accepted_delivery("trace-attempt-3")
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -12308,7 +12315,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload = self.finish_payload(tmp_dir)
             payload["events_path"] = str(tmp_dir / "events.jsonl")
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess, "run", return_value=duplicate
                 ) as run,
@@ -12340,7 +12349,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload = self.finish_payload(tmp_dir)
             payload["events_path"] = str(tmp_dir / "events.jsonl")
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess, "run", return_value=permanent
                 ) as run,
@@ -12371,7 +12382,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload["events_path"] = str(tmp_dir / "events.jsonl")
             persistence = runner._RunPersistence()
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -12421,7 +12434,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload = self.finish_payload(tmp_dir)
             payload["events_path"] = str(tmp_dir / "events.jsonl")
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess, "run", return_value=retryable
                 ) as run,
@@ -12446,7 +12461,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             persistence = runner._RunPersistence()
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess, "run", return_value=completed
                 ) as run,
@@ -12481,7 +12498,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             persistence = runner._RunPersistence()
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess, "run", return_value=completed
                 ) as run,
@@ -12503,7 +12522,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             persistence = runner._RunPersistence()
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
                 runner._notify_agent_mux_loop(
@@ -12526,7 +12547,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             persistence = runner._RunPersistence()
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value=None),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value=None
+                ),
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
                 runner._notify_agent_mux_loop_finished(payload, persistence)
@@ -12557,7 +12580,7 @@ class AgentMuxSuiteIsolationTests(unittest.TestCase):
 
     def test_notify_helpers_short_circuit_under_suite_default(self) -> None:
         with (
-            mock.patch.object(runner.shutil, "which") as which,
+            mock.patch.object(runner.agent_mux_delivery.shutil, "which") as which,
             mock.patch.object(runner.subprocess, "run") as run,
         ):
             runner._notify_agent_mux_loop_started({"run_id": "run-x"})

@@ -38,6 +38,7 @@ from agent_session_loop import (
     runner,
     state,
     supervisor_audit,
+    turn_execution,
 )
 from agent_session_loop import verification as verification_module
 from tests.support import (
@@ -55,48 +56,55 @@ SPECS = DEFAULT_MULTI_REPO_SPECS[:2]
 
 
 def _turn_finished_emitters() -> set[str]:
-    """Names of the runner functions that mention the turn_finished event."""
-    module = ast.parse(Path(inspect.getsourcefile(runner) or "").read_text("utf-8"))
+    """Names of the functions that mention the turn_finished event.
+
+    Both the runner and the turn-execution boundary are scanned: the emitter
+    moved behind the boundary, and the invariant is that it stayed singular
+    across the split rather than gaining a second copy in the run loop.
+    """
     emitters: set[str] = set()
-    for node in ast.walk(module):
-        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        for inner in ast.walk(node):
-            names_event = (
-                isinstance(inner, ast.Attribute) and inner.attr == "TURN_FINISHED_EVENT"
-            ) or (isinstance(inner, ast.Name) and inner.id == "TURN_FINISHED_EVENT")
-            names_literal = (
-                isinstance(inner, ast.Constant) and inner.value == "turn_finished"
-            )
-            if names_event or names_literal:
-                emitters.add(node.name)
-                break
+    for scanned in (runner, turn_execution):
+        source = Path(inspect.getsourcefile(scanned) or "").read_text("utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for inner in ast.walk(node):
+                names_event = (
+                    isinstance(inner, ast.Attribute)
+                    and inner.attr == "TURN_FINISHED_EVENT"
+                ) or (isinstance(inner, ast.Name) and inner.id == "TURN_FINISHED_EVENT")
+                names_literal = (
+                    isinstance(inner, ast.Constant) and inner.value == "turn_finished"
+                )
+                if names_event or names_literal:
+                    emitters.add(node.name)
+                    break
     return emitters
 
 
 class TurnCommitSourceTests(unittest.TestCase):
     def test_only_the_commit_function_names_the_turn_finished_event(self) -> None:
-        self.assertEqual({"_commit_turn"}, _turn_finished_emitters())
+        self.assertEqual({"commit_turn"}, _turn_finished_emitters())
 
     def test_commit_persists_the_result_and_state_before_the_event(self) -> None:
-        source = inspect.getsource(runner._commit_turn)
-        written = source.index('_write_json_file(paths["result"]')
+        source = inspect.getsource(turn_execution.commit_turn)
+        written = source.index('durability.write_json_file(paths["result"]')
         state_written = source.index("persistence.write_state(payload)")
         appended = source.index("TURN_FINISHED_EVENT")
         self.assertLess(written, state_written)
         self.assertLess(state_written, appended)
 
     def test_commit_notifies_consumers_after_the_durable_event(self) -> None:
-        source = inspect.getsource(runner._commit_turn)
+        source = inspect.getsource(turn_execution.commit_turn)
         appended = source.index("TURN_FINISHED_EVENT")
         reported = source.index("progress.turn_finished(")
-        notified = source.index("_notify_agent_mux_loop_turn_finished(")
+        notified = source.index("notify_turn_finished(")
         self.assertLess(appended, reported)
         self.assertLess(appended, notified)
 
     def test_the_run_loop_commits_after_every_guard(self) -> None:
         source = inspect.getsource(runner._run_locked)
-        commit = source.index("_commit_turn(")
+        commit = source.index("turn_executor.commit(")
         for earlier in (
             "_enforce_workspace_write_guard(",
             "_enforce_review_mutation_guard(",
@@ -119,7 +127,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
 
     def _commit(self, turn_payload: dict[str, Any]) -> Any:
         payload: dict[str, Any] = {"run_id": "run-1", "turns": [turn_payload]}
-        return runner._commit_turn(
+        commit = runner._commit_turn(
             event_path=self.tmp_path / "events.jsonl",
             payload=payload,
             persistence=runner._RunPersistence(write_state=False),
@@ -129,7 +137,27 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
             accepted=self.snapshot,
             plan_cache=plans.PlanSnapshotCache(),
             paths={"result": self.tmp_path / "result.json"},
-        ), payload
+        )
+        return commit.record, payload
+
+    def test_commit_returns_the_published_snapshot_it_recorded(self) -> None:
+        turn_payload = {"turn_index": 1, "session": "1"}
+        payload: dict[str, Any] = {"run_id": "run-1", "turns": [turn_payload]}
+        commit = runner._commit_turn(
+            event_path=self.tmp_path / "events.jsonl",
+            payload=payload,
+            persistence=runner._RunPersistence(write_state=False),
+            progress=runner._ProgressReporter(enabled=False),
+            turn_payload=turn_payload,
+            live_turn=dict(turn_payload),
+            accepted=self.snapshot,
+            plan_cache=plans.PlanSnapshotCache(),
+            paths={"result": self.tmp_path / "result.json"},
+        )
+        self.assertIsInstance(commit, turn_execution.TurnCommit)
+        self.assertEqual(
+            plans.snapshot_payload(commit.published), commit.record["after"]
+        )
 
     def test_committed_turn_cannot_be_rewritten(self) -> None:
         committed, _payload = self._commit({"turn_index": 1, "session": "1"})
@@ -899,7 +927,9 @@ class TurnCommitRunTests(unittest.TestCase):
                     writes="SVC:README.md", declares="SVC:README.md"
                 ),
             ),
-            mock.patch.object(runner, "_publication_snapshot", side_effect=rejection),
+            mock.patch.object(
+                turn_execution, "publication_snapshot", side_effect=rejection
+            ),
         ):
             exit_code, payload = self._invoke("drift-run")
 

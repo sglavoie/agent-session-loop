@@ -34,6 +34,7 @@ from agent_session_loop import (
     qna,
     runner,
     state,
+    turn_execution,
 )
 from tests.support import (
     REPO_ROOT,
@@ -785,9 +786,12 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     "run_harness",
                     side_effect=fake_run_harness,
                 ),
+                # The wait and turn notifications now reach AgentMux from two
+                # modules, so the shared delivery entry point is the only place
+                # that sees the whole lifecycle in order.
                 mock.patch.object(
-                    runner,
-                    "_notify_agent_mux_loop",
+                    agent_mux_delivery,
+                    "notify_loop",
                     side_effect=record_notification,
                 ),
             ):
@@ -3608,7 +3612,9 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
             payload = self._wait_payload(Path(tmp))
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -3638,7 +3644,9 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
             payload = self._wait_payload(Path(tmp))
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
@@ -3669,7 +3677,11 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
                 payload = self._wait_payload(Path(tmp))
 
                 with (
-                    mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                    mock.patch.object(
+                        runner.agent_mux_delivery.shutil,
+                        "which",
+                        return_value="/opt/amx",
+                    ),
                     mock.patch.object(
                         runner.subprocess,
                         "run",
@@ -3698,7 +3710,9 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
             events_path = Path(str(payload["events_path"]))
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value=None),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value=None
+                ),
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
                 runner._notify_agent_mux_loop_wait_started(
@@ -3781,14 +3795,16 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
             payload = self._hang_payload(Path(tmp))
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
                     return_value=self._accepted_delivery(),
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_turn_hang_suspected(
+                turn_execution.notify_turn_hang_suspected(
                     payload,
                     self._active_turn(),
                     hang_reason="result_received_process_alive",
@@ -3816,14 +3832,16 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
             payload = self._hang_payload(Path(tmp))
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
                     return_value=self._accepted_delivery(),
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_turn_hang_cleared(
+                turn_execution.notify_turn_hang_cleared(
                     payload,
                     self._active_turn(),
                     hang_reason="output_resumed",
@@ -3846,14 +3864,16 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
             payload = self._hang_payload(Path(tmp))
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value="/opt/amx"),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                ),
                 mock.patch.object(
                     runner.subprocess,
                     "run",
                     return_value=self._accepted_delivery(),
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_turn_hang_suspected(
+                turn_execution.notify_turn_hang_suspected(
                     payload,
                     self._active_turn(),
                     hang_reason="zero_cpu_ceiling",
@@ -3873,17 +3893,19 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
             events_path = Path(str(payload["events_path"]))
 
             with (
-                mock.patch.object(runner.shutil, "which", return_value=None),
+                mock.patch.object(
+                    runner.agent_mux_delivery.shutil, "which", return_value=None
+                ),
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
-                runner._notify_agent_mux_loop_turn_hang_suspected(
+                turn_execution.notify_turn_hang_suspected(
                     payload,
                     self._active_turn(),
                     hang_reason="result_received_process_alive",
                     hang_idle_seconds=90.0,
                     harness_pid=4242,
                 )
-                runner._notify_agent_mux_loop_turn_hang_cleared(
+                turn_execution.notify_turn_hang_cleared(
                     payload,
                     self._active_turn(),
                     hang_reason="output_resumed",
