@@ -2150,6 +2150,19 @@ class JsonCliTests(unittest.TestCase):
             code = cli.main(["plans", *argv])
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def _run_plans_at(self, *argv: str, now: datetime) -> tuple[int, str, str]:
+        """Run ``plans`` through the real parser against a pinned clock.
+
+        Goes through ``build_parser`` rather than a hand-built namespace so the
+        flags under test keep their real types and defaults, and calls the
+        handler directly because that is where the command clock is injected.
+        """
+        args = cli.build_parser(prog="asl").parse_args(["plans", *argv])
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = workbench.plans_from_args(args, now=now)
+        return code, stdout.getvalue(), stderr.getvalue()
+
     def test_status_and_dry_run_json_outputs_include_contract_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -2333,10 +2346,18 @@ class JsonCliTests(unittest.TestCase):
             recent = share_root / "recent-plan"
             write_plan(abandoned, ("pending",))
             write_plan(recent, ("pending",))
+            # Both timestamps are relative to the moment the test runs. Fixed
+            # calendar dates encode an expiry: a "recent" plan dated far enough
+            # in the past eventually drifts past the --stale-days cutoff and the
+            # test starts failing on a day nobody touched the code. Anchoring to
+            # now keeps the fixture's meaning -- long abandoned versus just
+            # finished -- true on every future run. Cutoff arithmetic itself is
+            # pinned deterministically in the injected-clock tests below.
+            now = datetime.now(UTC)
             self._write_readiness(
                 abandoned,
                 state_value="reviewed",
-                checked_at="2026-07-01T00:00:00+00:00",
+                checked_at=(now - timedelta(days=400)).isoformat(),
             )
             _write_state_payload(
                 plans.canonicalize_path(recent),
@@ -2345,8 +2366,8 @@ class JsonCliTests(unittest.TestCase):
                     "ok": True,
                     "paused": False,
                     "run_id": "20260810T120000Z-9",
-                    "run_started_at": "2026-08-10T12:00:00+00:00",
-                    "run_finished_at": "2026-08-11T12:45:00+00:00",
+                    "run_started_at": (now - timedelta(hours=2)).isoformat(),
+                    "run_finished_at": (now - timedelta(hours=1)).isoformat(),
                     "active_turn": None,
                     "active_verification": None,
                 },
@@ -2388,6 +2409,221 @@ class JsonCliTests(unittest.TestCase):
             self.assertEqual(
                 [str(plans.canonicalize_path(abandoned))],
                 [entry["plan_dir"] for entry in never_run_payload["plans"]],
+            )
+
+    def _stale_days_verdict(
+        self,
+        *,
+        checked_at: str,
+        now: datetime,
+        stale_days: str,
+    ) -> bool:
+        """Report whether ``--stale-days`` keeps a plan with this activity."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            data_home = tmp_dir / "data"
+            share_root = data_home / "agent-plans"
+            share_root.mkdir(parents=True)
+            for name in ("config", "tmp", "home"):
+                (tmp_dir / name).mkdir()
+
+            plan_dir = share_root / "plan"
+            write_plan(plan_dir, ("pending",))
+            # No run state on disk, so effective activity falls back to the
+            # readiness check stamp -- the only date this case controls.
+            self._write_readiness(
+                plan_dir,
+                state_value="reviewed",
+                checked_at=checked_at,
+            )
+
+            with patched_env(
+                HOME=str(tmp_dir / "home"),
+                XDG_CONFIG_HOME=str(tmp_dir / "config"),
+                XDG_DATA_HOME=str(data_home),
+                TMPDIR=str(tmp_dir / "tmp"),
+            ):
+                code, stdout, stderr = self._run_plans_at(
+                    "--state-dir",
+                    str(tmp_dir / "state"),
+                    "--stale-days",
+                    stale_days,
+                    "--json",
+                    now=now,
+                )
+            self.assertEqual(0, code, stderr)
+            self.assertEqual("", stderr)
+            return json.loads(stdout)["plan_count"] == 1
+
+    def test_plans_stale_filter_pins_calendar_edges_against_injected_clock(
+        self,
+    ) -> None:
+        """Cutoff, timezone, leap-day, and year-boundary cases are exact.
+
+        Every case names both instants outright, so each verdict is a fact
+        about the arithmetic rather than about the day the suite happens to
+        run. ``--stale-days`` keeps a plan when its activity is *at least*
+        that many days old, so the exact cutoff is stale and anything younger
+        is not.
+        """
+        cases: tuple[tuple[str, str, str, str, bool], ...] = (
+            # (label, checked_at, now, stale_days, expected_stale)
+            (
+                "cutoff lands exactly on the threshold",
+                "2028-03-01T00:00:00+00:00",
+                "2028-03-15T00:00:00+00:00",
+                "14",
+                True,
+            ),
+            (
+                "cutoff misses by a microsecond",
+                "2028-03-01T00:00:00.000001+00:00",
+                "2028-03-15T00:00:00+00:00",
+                "14",
+                False,
+            ),
+            (
+                "fractional days are honoured",
+                "2028-03-01T00:00:00+00:00",
+                "2028-03-01T12:00:00+00:00",
+                "0.5",
+                True,
+            ),
+            (
+                "zulu suffix is the same instant as +00:00",
+                "2028-03-01T00:00:00Z",
+                "2028-03-15T00:00:00+00:00",
+                "14",
+                True,
+            ),
+            (
+                "a naive stamp is read as UTC",
+                "2028-03-01T00:00:00",
+                "2028-03-15T00:00:00+00:00",
+                "14",
+                True,
+            ),
+            (
+                "an eastern offset resolves to the same instant",
+                "2028-03-01T05:30:00+05:30",
+                "2028-03-15T00:00:00+00:00",
+                "14",
+                True,
+            ),
+            (
+                "a western offset resolves to the same instant",
+                "2028-02-29T19:00:00-05:00",
+                "2028-03-15T00:00:00+00:00",
+                "14",
+                True,
+            ),
+            (
+                "a western offset keeps a same-looking date inside the cutoff",
+                "2028-03-01T00:00:00-05:00",
+                "2028-03-15T00:00:00+00:00",
+                "14",
+                False,
+            ),
+            (
+                "activity on a leap day ages a full fortnight",
+                "2028-02-29T00:00:00+00:00",
+                "2028-03-14T00:00:00+00:00",
+                "14",
+                True,
+            ),
+            (
+                "activity on a leap day is not yet stale a day earlier",
+                "2028-02-29T00:00:00+00:00",
+                "2028-03-13T00:00:00+00:00",
+                "14",
+                False,
+            ),
+            (
+                "a leap February makes the span twenty-nine days",
+                "2028-02-15T00:00:00+00:00",
+                "2028-03-15T00:00:00+00:00",
+                "29",
+                True,
+            ),
+            (
+                "the same span in a common year is only twenty-eight",
+                "2027-02-15T00:00:00+00:00",
+                "2027-03-15T00:00:00+00:00",
+                "29",
+                False,
+            ),
+            (
+                "a span across new year is counted in days, not years",
+                "2027-12-25T00:00:00+00:00",
+                "2028-01-05T00:00:00+00:00",
+                "11",
+                True,
+            ),
+            (
+                "a span across new year stops one day short",
+                "2027-12-25T00:00:00+00:00",
+                "2028-01-05T00:00:00+00:00",
+                "12",
+                False,
+            ),
+        )
+
+        for label, checked_at, now, stale_days, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(
+                    expected,
+                    self._stale_days_verdict(
+                        checked_at=checked_at,
+                        now=datetime.fromisoformat(now),
+                        stale_days=stale_days,
+                    ),
+                )
+
+    def test_plans_stale_filter_defaults_to_the_wall_clock(self) -> None:
+        """Omitting the injected clock still filters against the real now."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            data_home = tmp_dir / "data"
+            share_root = data_home / "agent-plans"
+            share_root.mkdir(parents=True)
+            for name in ("config", "tmp", "home"):
+                (tmp_dir / name).mkdir()
+
+            stale = share_root / "stale-plan"
+            fresh = share_root / "fresh-plan"
+            write_plan(stale, ("pending",))
+            write_plan(fresh, ("pending",))
+            now = datetime.now(UTC)
+            self._write_readiness(
+                stale,
+                state_value="reviewed",
+                checked_at=(now - timedelta(days=30)).isoformat(),
+            )
+            self._write_readiness(
+                fresh,
+                state_value="reviewed",
+                checked_at=(now - timedelta(minutes=5)).isoformat(),
+            )
+
+            with patched_env(
+                HOME=str(tmp_dir / "home"),
+                XDG_CONFIG_HOME=str(tmp_dir / "config"),
+                XDG_DATA_HOME=str(data_home),
+                TMPDIR=str(tmp_dir / "tmp"),
+            ):
+                code, stdout, stderr = self._run_plans(
+                    "--state-dir",
+                    str(tmp_dir / "state"),
+                    "--stale-days",
+                    "14",
+                    "--json",
+                )
+
+            self.assertEqual(0, code, stderr)
+            payload = json.loads(stdout)
+            self.assertEqual(
+                [str(plans.canonicalize_path(stale))],
+                [entry["plan_dir"] for entry in payload["plans"]],
             )
 
     def test_dry_run_reports_mailbox_activation_and_opt_out(self) -> None:

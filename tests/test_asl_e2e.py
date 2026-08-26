@@ -11,7 +11,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,90 @@ from tests.support import (
     write_multi_repo_plan,
     write_plan,
 )
+
+# Completing a child run
+# ----------------------
+#
+# These tests drive the real CLI as a child process. What they assert is *what*
+# a run does: which sessions it ran, what its JSON payload says, and what the
+# durable run state and event log record afterwards. How long that takes is a
+# property of the machine. The suite runs its shards in parallel, so a healthy
+# run routinely takes several times its quiet-machine wall clock, and a build
+# in another window does the same again.
+#
+# Encoding those quiet-machine wall clocks as per-call subprocess timeouts made
+# contention indistinguishable from a hang: a run that would have completed
+# correctly was killed mid-flight and reported as a failure of the code under
+# test. So the ceiling below is a hang detector -- generous by design, shared by
+# every call -- and completion is decided by two things the run owns: the child
+# exiting, and the terminal record the run wrote for itself.
+#
+# The budgets did not disappear. Set ASL_E2E_TIME_BUDGETS=1 -- as
+# `just reliability-stress` does, on an otherwise quiet machine -- to assert
+# each call's budget and surface a genuine performance regression.
+E2E_HANG_CEILING_SECONDS = 900
+E2E_TIME_BUDGET_ENV = "ASL_E2E_TIME_BUDGETS"
+
+
+def time_budgets_enforced() -> bool:
+    """Report whether measured call durations are asserted this run."""
+    return os.environ.get(E2E_TIME_BUDGET_ENV) == "1"
+
+
+def run_to_completion(
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    budget_seconds: float,
+    label: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run a CLI child to completion under the shared hang ceiling.
+
+    ``budget_seconds`` is what this call is expected to take on a quiet
+    machine. It never bounds the wait -- only ``E2E_HANG_CEILING_SECONDS``
+    does -- and is asserted only when time budgets are enforced.
+    """
+    started = time.monotonic()
+    completed = subprocess.run(
+        list(argv),
+        cwd=cwd,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=E2E_HANG_CEILING_SECONDS,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+    if time_budgets_enforced() and elapsed > budget_seconds:
+        raise AssertionError(
+            f"{label} took {elapsed:.1f}s, over its {budget_seconds}s budget"
+        )
+    return completed
+
+
+def assert_run_reached_terminal_state(
+    testcase: unittest.TestCase,
+    plan_dir: Path,
+    state_dir: Path,
+) -> dict[str, Any]:
+    """Assert the run's own durable state records a finished run.
+
+    This is the state-based half of completion. A child that exited proves the
+    process is gone; only ``run_finished_at`` with no turn or verification
+    still open proves the run reached its end rather than being cut short, and
+    it is the same record every other ASL consumer reads.
+    """
+    state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
+    testcase.assertTrue(state_path.is_file(), f"no run state at {state_path}")
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    testcase.assertIsNotNone(
+        payload.get("run_finished_at"),
+        f"run state at {state_path} never recorded run_finished_at: {payload}",
+    )
+    testcase.assertIsNone(payload.get("active_turn"), payload)
+    testcase.assertIsNone(payload.get("active_verification"), payload)
+    return payload
 
 
 class EndToEndQATests(unittest.TestCase):
@@ -127,14 +213,12 @@ class EndToEndQATests(unittest.TestCase):
         env = self._base_env()
         if path_value is not None:
             env["PATH"] = path_value
-        completed = subprocess.run(
+        completed = run_to_completion(
             argv,
             cwd=REPO_ROOT,
             env=env,
-            text=True,
-            capture_output=True,
-            timeout=20,
-            check=False,
+            budget_seconds=20,
+            label="preflight",
         )
         payload = json.loads(completed.stdout) if completed.stdout else {}
         return completed, payload
@@ -174,16 +258,16 @@ class EndToEndQATests(unittest.TestCase):
         env = self._base_env(mode=mode)
         if review_outcomes is not None:
             env["FAKE_CODEX_REVIEW_OUTCOMES"] = review_outcomes
-        completed = subprocess.run(
+        completed = run_to_completion(
             argv,
             cwd=REPO_ROOT,
             env=env,
-            text=True,
-            capture_output=True,
-            timeout=20,
-            check=False,
+            budget_seconds=20,
+            label="run",
         )
         payload = json.loads(completed.stdout)
+        if completed.returncode == 0:
+            assert_run_reached_terminal_state(self, self.plan_dir, self.state_dir)
         return completed, payload
 
     def _run_autopilot_review(
@@ -226,7 +310,7 @@ class EndToEndQATests(unittest.TestCase):
                 "--json",
             ]
         )
-        completed = subprocess.run(
+        completed = run_to_completion(
             [
                 sys.executable,
                 str(REPO_ROOT / "skills" / "asl" / "scripts" / "asl-autopilot.py"),
@@ -236,12 +320,12 @@ class EndToEndQATests(unittest.TestCase):
             ],
             cwd=REPO_ROOT,
             env=self._base_env(mode="success-with-review"),
-            text=True,
-            capture_output=True,
-            timeout=60,
-            check=False,
+            budget_seconds=60,
+            label="autopilot review",
         )
         payload = json.loads(completed.stdout) if completed.stdout else {}
+        if completed.returncode == 0:
+            assert_run_reached_terminal_state(self, self.plan_dir, self.state_dir)
         return completed, payload
 
     def test_completed_review_reopens_and_rereviews_through_cli(self) -> None:
@@ -743,14 +827,12 @@ class EndToEndQATests(unittest.TestCase):
             str(self.repo_root),
             "--json",
         ]
-        verify_completed = subprocess.run(
+        verify_completed = run_to_completion(
             verify_argv,
             cwd=REPO_ROOT,
             env=self._base_env(),
-            text=True,
-            capture_output=True,
-            timeout=20,
-            check=False,
+            budget_seconds=20,
+            label="verify",
         )
         self.assertEqual(0, verify_completed.returncode, verify_completed.stderr)
         verify_payload = json.loads(verify_completed.stdout)
@@ -809,16 +891,14 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
         self,
         *args: str,
         env_updates: dict[str, str] | None = None,
-        timeout: int = 60,
+        budget_seconds: float = 60,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
-        completed = subprocess.run(
+        completed = run_to_completion(
             [sys.executable, "-m", "agent_session_loop", *args],
             cwd=REPO_ROOT,
             env=self._env(**(env_updates or {})),
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            budget_seconds=budget_seconds,
+            label=f"cli {args[0] if args else ''}".strip(),
         )
         payload = json.loads(completed.stdout) if completed.stdout else {}
         return completed, payload
@@ -1014,7 +1094,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
             "--state-dir",
             str(state_dir),
             "--json",
-            timeout=120,
+            budget_seconds=120,
         )
         self.assertEqual(0, prepared.returncode, prepared.stderr or prepared.stdout)
         self.assertTrue(prepared_payload["marked_loop_ready"])
@@ -1042,7 +1122,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
             "--json",
             *extra,
             env_updates=env_updates,
-            timeout=120,
+            budget_seconds=120,
         )
 
     @staticmethod
@@ -1076,7 +1156,7 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
             str(state_dir),
             "--json",
             env_updates=env_updates,
-            timeout=120,
+            budget_seconds=120,
         )
 
     def test_four_repository_public_core_lifecycle(self) -> None:
@@ -1654,7 +1734,7 @@ class KilnTwinCloneRegressionTests(unittest.TestCase):
                 **(env_updates or {}),
             }
         )
-        completed = subprocess.run(
+        completed = run_to_completion(
             [
                 sys.executable,
                 "-m",
@@ -1672,10 +1752,8 @@ class KilnTwinCloneRegressionTests(unittest.TestCase):
             ],
             cwd=REPO_ROOT,
             env=env,
-            text=True,
-            capture_output=True,
-            timeout=120,
-            check=False,
+            budget_seconds=120,
+            label="run",
         )
         payload = json.loads(completed.stdout) if completed.stdout else {}
         return completed, payload
@@ -1993,14 +2071,12 @@ class VerificationRepairLoopTests(unittest.TestCase):
         )
         if worker_mode is not None:
             env["ASL_WORKER_MODE"] = worker_mode
-        completed = subprocess.run(
+        completed = run_to_completion(
             argv,
             cwd=REPO_ROOT,
             env=env,
-            text=True,
-            capture_output=True,
-            timeout=20,
-            check=False,
+            budget_seconds=20,
+            label="run",
         )
         return completed, json.loads(completed.stdout)
 

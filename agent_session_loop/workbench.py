@@ -1269,8 +1269,17 @@ def _print_plan_listing(
             print(f"  - {warning}")
 
 
-def plans_from_args(args: Any) -> int:
-    """List discovered plans with stale, never-run, and readiness filters."""
+def plans_from_args(args: Any, *, now: datetime | None = None) -> int:
+    """List discovered plans with stale, never-run, and readiness filters.
+
+    ``now`` is the command clock. The calendar arithmetic itself already lives
+    in the pure ``_plan_matches_stale_days`` helper; injecting the clock here
+    too means every ``--stale-days`` decision the command makes is reproducible
+    from its inputs. Tests can then pin a moment -- a leap day, a year
+    boundary, either side of the cutoff -- instead of writing fixed timestamps
+    that quietly expire as the real calendar advances past them.
+    """
+    moment = datetime.now(UTC) if now is None else now
     stale_days = getattr(args, "stale_days", None)
     if stale_days is not None and stale_days < 0:
         return _plans_error(
@@ -1308,7 +1317,6 @@ def plans_from_args(args: Any) -> int:
         state_dir=getattr(args, "state_dir", None),
     )
     warnings = list(discovery.warnings)
-    now = datetime.now(UTC)
     rows: list[tuple[WorkbenchSummary, dict[str, str] | None]] = []
     payloads: list[dict[str, Any]] = []
 
@@ -1333,7 +1341,7 @@ def plans_from_args(args: Any) -> int:
         if stale_days is not None and not _plan_matches_stale_days(
             summary,
             stale_days=stale_days,
-            now=now,
+            now=moment,
             readiness=readiness,
         ):
             continue
