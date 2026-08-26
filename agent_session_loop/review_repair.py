@@ -24,18 +24,27 @@ Planning is read-only, and materialization is deterministic and atomic:
 - Every child carries the versioned review-repair marker so later cycles can
   recognize generated repair sessions.
 - Before anything is staged, the rendered children are judged against the bound
-  repository root; a child whose repair targets reach a repository the plan does
-  not register is refused while the plan is still untouched, rather than being
-  committed and then rejected by the post-authoring gate.
+  repository root *and* against the plan's own verification context: a child
+  whose repair targets reach an unregistered repository, or whose verification
+  checks name a ``repo``/``cwd`` the contract cannot resolve, is refused while
+  the plan is still untouched rather than committed and then rejected by the
+  post-authoring gate.
 - All child files, the manifest table/count refresh, and any predecessor
   reference repoint are staged in a single
   :class:`~agent_session_loop.authoring.PlanTransaction` and committed
   atomically, so a failed materialization leaves no partially authored plan.
+- Every durable write happens inside a publication window
+  (:data:`REPAIR_PUBLICATION_DIR_NAME`) whose rollback image is fsynced before
+  the first destination byte moves. A publication that cannot finish — because
+  the executability gate refused the children, or because the process died —
+  is undone rather than left behind, so the plan is always either the one the
+  publication started from or a fully loop-ready one with the children in it.
 - After authoring, readiness is refreshed to ``draft``. When a repository
   ``cwd`` is supplied, targeted baselines plus ``asl preflight`` run and, if
-  clean, mark the plan loop-ready so the new children become executable; a
-  blocked gate leaves valid pending children at ``draft`` with structured
-  blockers rather than executing an unverified plan.
+  clean, mark the plan loop-ready so the new children become executable. A
+  blocked gate withdraws the children through the publication window and
+  reports its blockers, because a pending child no run may select is worse
+  than no child at all (ASI-136).
 
 The canonical review-finding grammar lives in
 :mod:`agent_session_loop.review`; contract construction/validation and the
@@ -44,11 +53,15 @@ atomic transaction live in :mod:`agent_session_loop.authoring`.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import json
 import os
 import re
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -56,12 +69,14 @@ from . import (
     authoring,
     baseline,
     contracts,
+    durability,
     plans,
     preflight,
     progress_repair,
     repository_scope,
     review,
     state,
+    verification,
     workspaces,
 )
 from .authoring import ManifestSession, PlanTransaction
@@ -138,9 +153,14 @@ class ReviewRepairResult:
     :data:`REVIEW_REPAIR_REASON_MALFORMED` and ``error`` explains why.
 
     ``children`` is empty with ``reason``
-    :data:`REVIEW_REPAIR_REASON_NOT_LOOP_READY` when the pre-authoring
-    footprint gate refused the rendered children: the refusal is a gate
-    verdict rather than a malformed artifact, and the plan is untouched.
+    :data:`REVIEW_REPAIR_REASON_NOT_LOOP_READY` when the pre-authoring gate
+    refused the rendered children: the refusal is a gate verdict rather than a
+    malformed artifact, and the plan is untouched.
+
+    ``rolled_back`` reports that children *were* authored and then withdrawn
+    because the executability gate refused them. The plan is back in the state
+    it held before the materialization, so ``children`` is empty here too: a
+    child a run may not select is not a child the plan has.
     """
 
     ok: bool
@@ -153,6 +173,8 @@ class ReviewRepairResult:
     blockers: tuple[str, ...] = ()
     baseline_summary: dict[str, Any] | None = None
     non_bypassable_blockers: tuple[str, ...] = ()
+    rolled_back: bool = False
+    rollback: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -975,6 +997,71 @@ def _validate_children_footprint(
     }
 
 
+def _validate_children_contract(
+    plan_dir: Path,
+    cwd: str | Path,
+    group_plans: Sequence[RepairGroupPlan],
+) -> list[str]:
+    """Resolve every proposed check against the effective verification context.
+
+    ASI-136: a repair check whose ``repo``/``cwd`` cannot resolve is rejected by
+    preflight's ``repository-contract`` finding — but that ran only *after* the
+    children were on disk, so an unmaterializable check produced a permanently
+    non-loop-ready pending child. The same resolution runs here, against the
+    same context preflight builds, while the plan is still untouched.
+
+    A context that cannot be established at all is not judged here: that is the
+    run gate's business, and the post-authoring gate (with its rollback) still
+    covers it.
+    """
+    try:
+        context = verification.VerificationContext.from_plan(plan_dir, cwd)
+    except PlanError:
+        return []
+    blockers: list[str] = []
+    for group_plan in group_plans:
+        child = group_plan.proposed_child_id.value
+        for check in group_plan.contract.verify.checks:
+            try:
+                context.resolve_check(check)
+            except PlanError as error:
+                blockers.append(
+                    f"repository-contract: repair group "
+                    f"{group_plan.repair_group!r} would author session {child} "
+                    f"with verification check {check.name!r} that cannot "
+                    f"resolve: {error}"
+                )
+    return blockers
+
+
+def _validate_children_before_authoring(
+    plan_dir: Path,
+    cwd: str | Path,
+    group_plans: Sequence[RepairGroupPlan],
+) -> dict[str, Any]:
+    """Judge rendered children on every rule that can be applied before a write.
+
+    Two independent pre-write rules share one verdict: the repository footprint
+    (which repositories a child would reach) and the contract's own resolution
+    (whether each check can execute where it says it will). Both fail closed as
+    non-bypassable: a child neither rule can accept is one no run could ever
+    execute, so authoring it would only strand the plan.
+    """
+    footprint = _validate_children_footprint(plan_dir, cwd, group_plans)
+    contract_blockers = _validate_children_contract(plan_dir, cwd, group_plans)
+    if footprint["loop_ready"] and not contract_blockers:
+        return footprint
+    non_bypassable = list(footprint["non_bypassable_blockers"])
+    if contract_blockers and "repository-contract" not in non_bypassable:
+        non_bypassable.append("repository-contract")
+    return {
+        "loop_ready": False,
+        "blockers": [*footprint["blockers"], *contract_blockers],
+        "non_bypassable_blockers": non_bypassable,
+        "baseline_summary": None,
+    }
+
+
 def _make_children_executable(
     plan_dir: Path,
     cwd: str | Path,
@@ -1059,6 +1146,252 @@ def _make_children_executable(
         "non_bypassable_blockers": [],
         "baseline_summary": baseline_summary,
     }
+
+
+# ---------------------------------------------------------------------------
+# Durable publication window (crash-safe rollback)
+# ---------------------------------------------------------------------------
+
+#: Marker directory holding the pre-publication image of every file a repair
+#: materialization is about to change. Its presence means a publication was
+#: interrupted; recovery restores the image and removes it.
+REPAIR_PUBLICATION_DIR_NAME = ".asl-review-repair-publication"
+REPAIR_PUBLICATION_JOURNAL_NAME = "journal.json"
+REPAIR_PUBLICATION_SCHEMA_VERSION = 1
+
+#: Ordered publication phases. They are evidence, not control flow: recovery
+#: rolls back from every one of them, because the only state a crashed
+#: publication can be trusted to reproduce is the one it started from.
+PUBLICATION_PHASE_AUTHORING = "authoring"
+PUBLICATION_PHASE_VALIDATING = "validating"
+PUBLICATION_PHASE_PUBLISHING = "publishing"
+
+
+@dataclass(frozen=True)
+class _PublicationWindow:
+    """The open rollback image for one in-flight repair publication."""
+
+    directory: Path
+    plan_dir: Path
+    journal: dict[str, Any]
+
+    @property
+    def journal_path(self) -> Path:
+        return self.directory / REPAIR_PUBLICATION_JOURNAL_NAME
+
+
+def _read_bytes_or_none(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _write_publication_journal(directory: Path, journal: Mapping[str, Any]) -> None:
+    """Publish the journal itself atomically, payloads already durable."""
+    temp_path = directory / f".{REPAIR_PUBLICATION_JOURNAL_NAME}.tmp"
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(dict(journal), handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        durability.fullsync(handle.fileno())
+    os.replace(temp_path, directory / REPAIR_PUBLICATION_JOURNAL_NAME)
+    plans._fsync_directory(directory)
+
+
+def _open_publication_window(
+    canonical_dir: Path,
+    *,
+    review_id: SessionId,
+    child_filenames: Sequence[str],
+    restore_paths: Sequence[Path],
+    now: datetime | None = None,
+) -> _PublicationWindow:
+    """Record the pre-publication image of every file about to change.
+
+    The image is durable before the first destination byte moves, so a crash at
+    any later boundary is recoverable to the state the plan was in when the
+    publication began.
+    """
+    directory = canonical_dir / REPAIR_PUBLICATION_DIR_NAME
+    shutil.rmtree(directory, ignore_errors=True)
+    try:
+        directory.mkdir(parents=True)
+        entries: list[dict[str, Any]] = []
+        ordered = sorted({path for path in restore_paths}, key=str)
+        for index, path in enumerate(ordered):
+            relative = path.relative_to(canonical_dir).as_posix()
+            original = _read_bytes_or_none(path)
+            if original is None:
+                entries.append({"path": relative, "payload": None})
+                continue
+            payload_name = f"{index:06d}.bin"
+            with (directory / payload_name).open("wb") as handle:
+                handle.write(original)
+                handle.flush()
+                durability.fullsync(handle.fileno())
+            entries.append(
+                {
+                    "path": relative,
+                    "payload": payload_name,
+                    "sha256": hashlib.sha256(original).hexdigest(),
+                }
+            )
+        journal = {
+            "version": REPAIR_PUBLICATION_SCHEMA_VERSION,
+            "review_session_id": review_id.value,
+            "children": list(child_filenames),
+            "phase": PUBLICATION_PHASE_AUTHORING,
+            "opened_at": (now or datetime.now(UTC)).isoformat(),
+            "pid": os.getpid(),
+            "entries": entries,
+        }
+        _write_publication_journal(directory, journal)
+    except OSError as error:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise PlanError(
+            f"failed to record the repair publication rollback image: {error}"
+        ) from error
+    plans._fsync_directory(canonical_dir)
+    return _PublicationWindow(
+        directory=directory, plan_dir=canonical_dir, journal=journal
+    )
+
+
+def _advance_publication_phase(window: _PublicationWindow, phase: str) -> None:
+    """Record how far a publication got, for post-crash forensics."""
+    window.journal["phase"] = phase
+    # The phase is forensic evidence; losing it never changes what recovery does.
+    with contextlib.suppress(OSError):
+        _write_publication_journal(window.directory, window.journal)
+
+
+def _close_publication_window(window: _PublicationWindow) -> None:
+    """Retire a completed publication: the new state is now the valid one."""
+    shutil.rmtree(window.directory, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        plans._fsync_directory(window.plan_dir)
+
+
+def _restore_publication_image(
+    canonical_dir: Path, journal: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Put every recorded file back exactly as the publication found it."""
+    directory = canonical_dir / REPAIR_PUBLICATION_DIR_NAME
+    entries = journal.get("entries")
+    entries = entries if isinstance(entries, Sequence) else ()
+    restored: list[str] = []
+    removed: list[str] = []
+    errors: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        relative = entry.get("path")
+        if not isinstance(relative, str):
+            continue
+        destination = canonical_dir / relative
+        payload = entry.get("payload")
+        try:
+            if payload is None:
+                if destination.exists():
+                    destination.unlink()
+                    removed.append(relative)
+                continue
+            content = (directory / str(payload)).read_bytes()
+            temp_path = destination.with_name(
+                f".{destination.name}.asl-repair-rollback.tmp"
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with temp_path.open("wb") as handle:
+                handle.write(content)
+                handle.flush()
+                durability.fullsync(handle.fileno())
+            os.replace(temp_path, destination)
+            restored.append(relative)
+        except OSError as error:
+            errors.append(f"{relative}: {error}")
+    with contextlib.suppress(OSError):
+        plans._fsync_directory(canonical_dir)
+    return {
+        "restored": restored,
+        "removed": removed,
+        "errors": errors,
+        "phase": journal.get("phase"),
+        "review_session_id": journal.get("review_session_id"),
+        "children": list(journal.get("children") or ()),
+    }
+
+
+def _rollback_publication_window(window: _PublicationWindow) -> dict[str, Any]:
+    """Undo an in-flight publication and retire its window."""
+    record = _restore_publication_image(window.plan_dir, window.journal)
+    if not record["errors"]:
+        shutil.rmtree(window.directory, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            plans._fsync_directory(window.plan_dir)
+    return record
+
+
+def recover_review_repair_publication(plan_dir: str | Path) -> dict[str, Any] | None:
+    """Roll an interrupted repair publication back to its starting state.
+
+    A publication is only valid once its children are loop-ready, and nothing
+    on disk can prove that a crashed one would have got there. So recovery is
+    always a rollback: the plan returns to the state it held before the
+    materialization, which is a state a run can execute. The findings that
+    prompted the repair are still in the review artifact, so the next cycle
+    re-plans and re-materializes rather than inheriting a half-published child.
+
+    Returns ``None`` when there is nothing to recover. Callers must hold the
+    plan lock: this writes plan files.
+    """
+    canonical_dir = canonicalize_path(plan_dir)
+    directory = canonical_dir / REPAIR_PUBLICATION_DIR_NAME
+    journal_path = directory / REPAIR_PUBLICATION_JOURNAL_NAME
+    if not directory.is_dir():
+        return None
+    try:
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    except OSError, json.JSONDecodeError:
+        journal = None
+    if not isinstance(journal, Mapping):
+        # The journal is published atomically *before* the first destination
+        # byte moves, so a window without one is a window that never opened:
+        # there is nothing to restore. It is still removed, because leaving it
+        # would make every later publication believe a recovery is pending.
+        shutil.rmtree(directory, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            plans._fsync_directory(canonical_dir)
+        return {
+            "recovered": True,
+            "reason": "unopened-publication-window",
+            "restored": [],
+            "removed": [],
+            "errors": [],
+        }
+    if journal.get("version") != REPAIR_PUBLICATION_SCHEMA_VERSION:
+        # A window written by a different schema may name files this code would
+        # restore wrongly. Leave it in place and report it: an operator (or a
+        # matching ASL version) resolves it, and every caller keeps failing
+        # closed until then.
+        return {
+            "recovered": False,
+            "reason": "unsupported-publication-schema",
+            "version": journal.get("version"),
+            "restored": [],
+            "removed": [],
+            "errors": [],
+        }
+    # A repair publication straddles the plan transaction, so the transaction's
+    # own roll-forward runs first: restoring an image over a half-installed
+    # generation would leave the transaction to re-install it afterwards.
+    plans.recover_pending_plan_transaction(canonical_dir)
+    record = _restore_publication_image(canonical_dir, journal)
+    if not record["errors"]:
+        shutil.rmtree(directory, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            plans._fsync_directory(canonical_dir)
+    return {"recovered": not record["errors"], "reason": "rolled-back", **record}
 
 
 # ---------------------------------------------------------------------------
@@ -1286,6 +1619,7 @@ def materialize_review_repair_sessions(
     cwd: str | Path | None = None,
     state_dir: str | Path | None = None,
     hold_lock: bool = True,
+    allow_not_loop_ready: bool = False,
     now: datetime | None = None,
 ) -> ReviewRepairResult:
     """Materialize validated review findings into serial repair children.
@@ -1301,6 +1635,13 @@ def materialize_review_repair_sessions(
     enables the targeted-baseline + preflight gate that marks the plan
     loop-ready. ``hold_lock`` acquires the plan lock around the mutation; pass
     ``False`` when the caller already holds it (e.g. the runner).
+
+    Children that reach disk but fail the loop-ready gate are withdrawn: the
+    publication rolls back to the plan it started from, so a selected repair
+    child is always loop-ready. ``allow_not_loop_ready=True`` is the operator
+    opt-out (the runner's ``--allow-not-loop-ready``): it retains children
+    blocked only by bypassable findings. Non-bypassable blockers always
+    withdraw, and an interrupted publication always rolls back.
     """
     canonical_dir = canonicalize_path(plan_dir)
 
@@ -1315,11 +1656,25 @@ def materialize_review_repair_sessions(
     else:
         lock_info = state.read_lock_info(canonical_dir, state_dir)
     try:
+        # An earlier publication that died mid-flight owns this plan's files
+        # until it is rolled back. Recover before planning so the plan being
+        # read is the one a run could execute, and refuse outright when the
+        # rollback did not land: publishing over an unrecovered window would
+        # destroy the only image of the state it was meant to restore.
+        recovery = recover_review_repair_publication(canonical_dir)
+        if recovery is not None and not recovery.get("recovered"):
+            return _malformed(
+                None,
+                "an interrupted review repair publication could not be rolled "
+                f"back: {recovery.get('reason')}",
+                detail=json.dumps(recovery, sort_keys=True),
+            )
         return _materialize(
             canonical_dir,
             review_session_id=review_session_id,
             cwd=cwd,
             state_dir=state_dir,
+            allow_not_loop_ready=allow_not_loop_ready,
             now=now,
             lock_info=lock_info,
         )
@@ -1334,6 +1689,7 @@ def _materialize(
     review_session_id: int | str | SessionId | None,
     cwd: str | Path | None,
     state_dir: str | Path | None,
+    allow_not_loop_ready: bool = False,
     now: datetime | None,
     lock_info: state.LockInfo | None,
 ) -> ReviewRepairResult:
@@ -1357,22 +1713,22 @@ def _materialize(
         )
 
     if cwd is not None:
-        footprint_gate = _validate_children_footprint(
+        pre_authoring_gate = _validate_children_before_authoring(
             canonical_dir, cwd, repair_plan.repair_groups
         )
-        if not footprint_gate["loop_ready"]:
+        if not pre_authoring_gate["loop_ready"]:
             return ReviewRepairResult(
                 ok=True,
                 reason=REVIEW_REPAIR_REASON_NOT_LOOP_READY,
                 review_session_id=review_id,
                 error=(
                     "review repair children were refused before authoring: "
-                    "their repair targets need a repository the plan does not "
-                    "register"
+                    "they carry repair targets or verification checks the "
+                    "plan's repository contract cannot satisfy"
                 ),
-                blockers=tuple(footprint_gate["blockers"]),
+                blockers=tuple(pre_authoring_gate["blockers"]),
                 non_bypassable_blockers=tuple(
-                    footprint_gate["non_bypassable_blockers"]
+                    pre_authoring_gate["non_bypassable_blockers"]
                 ),
             )
 
@@ -1439,31 +1795,87 @@ def _materialize(
             if changed:
                 transaction.stage(successor.session_id.filename, updated)
 
+    # Everything from here down changes durable plan state, so the publication
+    # opens its rollback image first. Between this line and the close below the
+    # plan is mid-publication: a crash leaves the image on disk and the next
+    # locked caller restores it, so no run can ever select a child whose
+    # loop-ready state was never established.
+    window = _open_publication_window(
+        canonical_dir,
+        review_id=review_id,
+        child_filenames=[child.session_id.filename for child in children],
+        restore_paths=[
+            *transaction.staged_paths,
+            # readiness metadata lives in the manifest, and the post-authoring
+            # refresh rewrites it whether or not the manifest was staged.
+            canonical_dir / "manifest.md",
+            # the executability gate runs the children's targeted baselines,
+            # which persist their outcomes here.
+            canonical_dir / baseline.BASELINE_RESULTS_FILENAME,
+        ],
+        now=now,
+    )
+
     try:
         transaction.commit()
     except PlanError as error:
+        _rollback_publication_window(window)
         return _malformed(review_id, f"atomic plan write failed: {error}")
 
-    # Authoring succeeded — refresh readiness to draft (children not yet
-    # executable). Mirrors the prepare-pipeline post-authoring contract.
-    authoring.refresh_readiness_metadata(canonical_dir, state="draft", now=now)
+    try:
+        # Authoring succeeded — refresh readiness to draft (children not yet
+        # executable). Mirrors the prepare-pipeline post-authoring contract.
+        authoring.refresh_readiness_metadata(canonical_dir, state="draft", now=now)
 
-    loop_ready = False
-    blockers: tuple[str, ...] = ()
-    non_bypassable_blockers: tuple[str, ...] = ()
-    baseline_summary: dict[str, Any] | None = None
-    reason = REVIEW_REPAIR_REASON_OK
-    if cwd is not None:
-        gate = _make_children_executable(
-            canonical_dir, cwd, children, state_dir, lock_info
-        )
-        loop_ready = gate["loop_ready"]
-        blockers = tuple(gate["blockers"])
-        non_bypassable_blockers = tuple(gate["non_bypassable_blockers"])
-        baseline_summary = gate["baseline_summary"]
-        if not loop_ready:
-            reason = REVIEW_REPAIR_REASON_NOT_LOOP_READY
+        loop_ready = False
+        blockers: tuple[str, ...] = ()
+        non_bypassable_blockers: tuple[str, ...] = ()
+        baseline_summary: dict[str, Any] | None = None
+        reason = REVIEW_REPAIR_REASON_OK
+        if cwd is not None:
+            _advance_publication_phase(window, PUBLICATION_PHASE_VALIDATING)
+            gate = _make_children_executable(
+                canonical_dir, cwd, children, state_dir, lock_info
+            )
+            loop_ready = gate["loop_ready"]
+            blockers = tuple(gate["blockers"])
+            non_bypassable_blockers = tuple(gate["non_bypassable_blockers"])
+            baseline_summary = gate["baseline_summary"]
+            retained = allow_not_loop_ready and not non_bypassable_blockers
+            if not loop_ready:
+                reason = REVIEW_REPAIR_REASON_NOT_LOOP_READY
+            if not loop_ready and not retained:
+                # ASI-136: children that reached disk but cannot be executed
+                # used to stay there, leaving a pending non-loop-ready repair
+                # child no run could clear. Withdraw them instead: the blockers
+                # still describe exactly what was refused, and the plan is the
+                # valid one the publication started from.
+                rollback = _rollback_publication_window(window)
+                return ReviewRepairResult(
+                    ok=True,
+                    reason=REVIEW_REPAIR_REASON_NOT_LOOP_READY,
+                    review_session_id=review_id,
+                    children=(),
+                    loop_ready=False,
+                    error=(
+                        "review repair children were withdrawn after "
+                        "authoring: the plan could not be marked loop-ready "
+                        "with them in it"
+                    ),
+                    blockers=blockers,
+                    baseline_summary=baseline_summary,
+                    non_bypassable_blockers=non_bypassable_blockers,
+                    rolled_back=not rollback["errors"],
+                    rollback=rollback,
+                )
+    except BaseException:
+        # Includes KeyboardInterrupt and SystemExit: an interrupted publication
+        # is exactly the case the rollback image exists for.
+        _rollback_publication_window(window)
+        raise
 
+    _advance_publication_phase(window, PUBLICATION_PHASE_PUBLISHING)
+    _close_publication_window(window)
     return ReviewRepairResult(
         ok=True,
         reason=reason,

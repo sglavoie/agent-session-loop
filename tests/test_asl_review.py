@@ -2548,7 +2548,12 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         )
         self.assertEqual((), result.children)
         self.assertFalse(result.loop_ready)
-        self.assertEqual(("repository-footprint",), result.non_bypassable_blockers)
+        # Both pre-write rules refuse this child: its target escapes the bound
+        # root and its check cannot resolve there either.
+        self.assertEqual(
+            ("repository-footprint", "repository-contract"),
+            result.non_bypassable_blockers,
+        )
         self.assertTrue(
             any("escapes the bound root" in blocker for blocker in result.blockers),
             msg=str(result.blockers),
@@ -3230,6 +3235,632 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
                 self.assertEqual(materializations + 1, terminal.minimum_required_cap)
                 self.assertIsNone(terminal.current_review_output_sha256)
                 self.assertIsNone(terminal.current_review_artifact_sha256)
+
+
+class _SimulatedCrash(BaseException):
+    """Stands in for a process death: nothing in-process gets to clean up."""
+
+
+def _committed_repo(path: Path) -> Path:
+    """Initialize a Git repository holding one committed file."""
+    init_git_repo(path)
+    (path / "README.md").write_text("readme\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.email=a@b.c",
+            "-c",
+            "user.name=x",
+            "commit",
+            "-q",
+            "-m",
+            "readme",
+        ],
+        check=True,
+    )
+    return path
+
+
+def _write_repair_ready_plan(
+    plan_dir: Path,
+    repo: Path,
+    *,
+    findings: list[dict[str, Any]] | None = None,
+    specs: tuple[tuple[str, str, str], ...] | None = None,
+) -> None:
+    """Write a completed two-session plan whose review carries repair findings.
+
+    The plan is loop-ready material: session 1 is complete with a contract that
+    passes against ``repo``, and session 2 is a completed generated review whose
+    artifact holds ``findings``. Passing ``specs`` registers those repositories,
+    which is what makes the plan take the workspace-resolved verification path.
+    """
+    registered = specs is not None
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    (plan_dir / "context.md").write_text("# Context\n", encoding="utf-8")
+
+    manifest = authoring.render_manifest(
+        authoring.ManifestSpec(
+            plan_title="Test Plan",
+            source_path="/src/plan.md",
+            output_dir=str(plan_dir),
+            plan_id="pid",
+            source_fingerprint="fp",
+            content_sha256="csha",
+            sessions=(
+                authoring.ManifestSession(
+                    plans.parse_session_id("1"), "One", "complete"
+                ),
+                authoring.ManifestSession(
+                    plans.parse_session_id("2"), "Review", "complete"
+                ),
+            ),
+            split_date="2026-01-01",
+            readiness=plans.ReadinessMetadata("draft", "sha", "2026-01-01T00:00:00Z"),
+        )
+    )
+    if registered:
+        rows = "\n".join(
+            f"| {alias} | {path} | {origin} |" for alias, path, origin in specs
+        )
+        manifest += (
+            "\n## Repositories\n\n"
+            "| Alias | Path | Origin |\n"
+            "| --- | --- | --- |\n"
+            f"{rows}\n"
+        )
+    (plan_dir / "manifest.md").write_text(manifest, encoding="utf-8")
+
+    aliases = (
+        ", ".join(alias for alias, _path, _origin in specs) if registered else None
+    )
+    check_payload = (
+        '{"type": "file_exists", "path": "README.md", "name": "readme-1"'
+        + (f', "repo": "{specs[0][0]}"' if registered else "")
+        + "}"
+    )
+    session_one = ["# Session 1: One", ""]
+    if registered:
+        session_one.extend(
+            [
+                f"**Reads repositories**: {aliases}",
+                f"**Writes repositories**: {aliases}",
+                "",
+            ]
+        )
+    session_one.extend(
+        [
+            "## Instructions",
+            "",
+            "Do the first thing.",
+            "",
+            _contract_block(check_payload, session="1"),
+            "",
+            "## Handoff",
+            "",
+            "- **Status**: complete",
+            "- **Files modified**: (none)",
+            "- **Key decisions**: (none)",
+            "- **Blockers for next session**: (none)",
+            "- **Notes**:",
+            "",
+        ]
+    )
+    (plan_dir / "session-1.md").write_text("\n".join(session_one), encoding="utf-8")
+
+    review_body = runner.build_generated_review_session_body(
+        plans.parse_session_id("2"),
+        review_harness="codex",
+        plan_dir=plan_dir,
+    ).replace("- **Status**: pending", "- **Status**: complete")
+    if registered:
+        heading, remainder = review_body.split("\n", 1)
+        review_body = (
+            f"{heading}\n\n**Reads repositories**: {aliases}\n"
+            f"**Writes repositories**: (none)\n{remainder}"
+        ).replace("- **Files modified**: (none yet)", "- **Files modified**: (none)")
+    (plan_dir / "session-2.md").write_text(review_body, encoding="utf-8")
+
+    if findings is None:
+        findings = [
+            _structured_review_finding(
+                finding_id="F1",
+                repair_group="docs",
+                evidence=[{"path": "README.md"}],
+                done_criteria=["README stays present."],
+                verification_checks=[
+                    {
+                        "type": "file_exists",
+                        "name": "readme-present",
+                        "path": str(repo / "README.md"),
+                    }
+                ],
+            )
+        ]
+    (plan_dir / "final-review.md").write_text(
+        "# Review\n\n## Findings\n\nSee README.md.\n\n"
+        f"Status: {len(findings)} Findings ({len(findings)} high, 0 med, 0 low)\n",
+        encoding="utf-8",
+    )
+    (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": (
+                    review.REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION if registered else 2
+                ),
+                "outcome": "findings",
+                "findings": findings,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class ReviewRepairPublicationWindowTests(unittest.TestCase):
+    """ASI-136: a selected repair child is always loop-ready.
+
+    Materialization writes children, refreshes readiness, and only then runs the
+    baseline + preflight gate that makes them executable. Every one of those
+    boundaries is a place a refusal or a crash can strand a pending child no run
+    can select and no run can clear, so each is exercised here: the outcome is
+    always the plan the publication started from, or a loop-ready plan with the
+    children in it.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        self.repo = _committed_repo(self.tmp_path / "repo")
+        _write_repair_ready_plan(self.plan_dir, self.repo)
+        progress_repair.repair_progress_journal(self.plan_dir)
+
+    def _materialize(self, **kwargs: Any) -> review_repair.ReviewRepairResult:
+        return review_repair.materialize_review_repair_sessions(
+            self.plan_dir, state_dir=self.state_dir, cwd=self.repo, **kwargs
+        )
+
+    def _plan_bytes(self) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(self.plan_dir)): path.read_bytes()
+            for path in self.plan_dir.rglob("*")
+            if path.is_file()
+        }
+
+    def _window_dir(self) -> Path:
+        return self.plan_dir / review_repair.REPAIR_PUBLICATION_DIR_NAME
+
+    def _blocked_gate(self, *, non_bypassable: list[str]) -> dict[str, Any]:
+        return {
+            "loop_ready": False,
+            "blockers": ["repository-footprint: injected refusal"],
+            "non_bypassable_blockers": non_bypassable,
+            "baseline_summary": {"ok": False},
+        }
+
+    def test_the_happy_path_publishes_children_and_retires_the_window(self) -> None:
+        result = self._materialize()
+
+        self.assertTrue(result.loop_ready, msg=str(result.blockers))
+        self.assertEqual(("2.1",), tuple(c.session_id.value for c in result.children))
+        self.assertFalse(result.rolled_back)
+        self.assertIsNone(result.rollback)
+        self.assertTrue((self.plan_dir / "session-2.1.md").exists())
+        self.assertFalse(self._window_dir().exists())
+        self.assertIn(
+            "**Readiness**: loop-ready",
+            (self.plan_dir / "manifest.md").read_text(encoding="utf-8"),
+        )
+
+    def test_a_blocked_loop_ready_gate_withdraws_the_children_it_authored(
+        self,
+    ) -> None:
+        before = self._plan_bytes()
+
+        with mock.patch.object(
+            review_repair,
+            "_make_children_executable",
+            return_value=self._blocked_gate(non_bypassable=[]),
+        ):
+            result = self._materialize()
+
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY, result.reason
+        )
+        self.assertEqual((), result.children)
+        self.assertTrue(result.rolled_back)
+        assert result.rollback is not None
+        self.assertEqual([], result.rollback["errors"])
+        self.assertIn("session-2.1.md", result.rollback["removed"])
+        self.assertIn("withdrawn after authoring", result.error or "")
+        self.assertEqual(before, self._plan_bytes())
+        self.assertFalse((self.plan_dir / "session-2.1.md").exists())
+        self.assertFalse(self._window_dir().exists())
+
+    def test_allow_not_loop_ready_still_retains_bypassable_children(self) -> None:
+        with mock.patch.object(
+            review_repair,
+            "_make_children_executable",
+            return_value=self._blocked_gate(non_bypassable=[]),
+        ):
+            result = self._materialize(allow_not_loop_ready=True)
+
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY, result.reason
+        )
+        self.assertEqual(("2.1",), tuple(c.session_id.value for c in result.children))
+        self.assertFalse(result.loop_ready)
+        self.assertFalse(result.rolled_back)
+        self.assertTrue((self.plan_dir / "session-2.1.md").exists())
+        self.assertFalse(self._window_dir().exists())
+
+    def test_a_non_bypassable_blocker_withdraws_children_even_when_allowed(
+        self,
+    ) -> None:
+        before = self._plan_bytes()
+
+        with mock.patch.object(
+            review_repair,
+            "_make_children_executable",
+            return_value=self._blocked_gate(non_bypassable=["repository-footprint"]),
+        ):
+            result = self._materialize(allow_not_loop_ready=True)
+
+        self.assertEqual((), result.children)
+        self.assertTrue(result.rolled_back)
+        self.assertEqual(before, self._plan_bytes())
+
+    def test_a_failed_commit_leaves_the_plan_and_retires_the_window(self) -> None:
+        before = self._plan_bytes()
+
+        with mock.patch.object(
+            review_repair.PlanTransaction,
+            "commit",
+            side_effect=plans.PlanError("injected commit failure"),
+        ):
+            result = self._materialize()
+
+        self.assertEqual(review_repair.REVIEW_REPAIR_REASON_MALFORMED, result.reason)
+        self.assertFalse(result.ok)
+        self.assertEqual(before, self._plan_bytes())
+        self.assertFalse(self._window_dir().exists())
+
+    def test_an_interrupt_between_authoring_and_the_gate_rolls_back(self) -> None:
+        before = self._plan_bytes()
+
+        with (
+            mock.patch.object(
+                review_repair.authoring,
+                "refresh_readiness_metadata",
+                side_effect=KeyboardInterrupt(),
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self._materialize()
+
+        self.assertEqual(before, self._plan_bytes())
+        self.assertFalse((self.plan_dir / "session-2.1.md").exists())
+        self.assertFalse(self._window_dir().exists())
+
+    def test_an_interrupt_inside_the_gate_rolls_back(self) -> None:
+        before = self._plan_bytes()
+
+        with (
+            mock.patch.object(
+                review_repair,
+                "_make_children_executable",
+                side_effect=KeyboardInterrupt(),
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self._materialize()
+
+        self.assertEqual(before, self._plan_bytes())
+        self.assertFalse(self._window_dir().exists())
+
+    def _crash_mid_publication(self, phase: str) -> dict[str, bytes]:
+        """Die mid-publication: no in-process rollback, window left on disk."""
+        before = self._plan_bytes()
+        target = {
+            "authoring": (review_repair.authoring, "refresh_readiness_metadata"),
+            "validating": (review_repair, "_make_children_executable"),
+        }[phase]
+        with (
+            mock.patch.object(
+                review_repair, "_rollback_publication_window", return_value={}
+            ),
+            mock.patch.object(*target, side_effect=_SimulatedCrash()),
+            self.assertRaises(_SimulatedCrash),
+        ):
+            self._materialize()
+        self.assertTrue(self._window_dir().is_dir())
+        return before
+
+    def test_a_crash_after_authoring_is_rolled_back_by_the_next_locked_caller(
+        self,
+    ) -> None:
+        before = self._crash_mid_publication("authoring")
+        self.assertTrue((self.plan_dir / "session-2.1.md").exists())
+
+        record = review_repair.recover_review_repair_publication(self.plan_dir)
+
+        assert record is not None
+        self.assertTrue(record["recovered"])
+        self.assertEqual("rolled-back", record["reason"])
+        self.assertEqual([], record["errors"])
+        self.assertEqual(before, self._plan_bytes())
+        self.assertFalse(self._window_dir().exists())
+
+    def test_a_crash_inside_the_gate_is_rolled_back_by_the_next_locked_caller(
+        self,
+    ) -> None:
+        before = self._crash_mid_publication("validating")
+
+        record = review_repair.recover_review_repair_publication(self.plan_dir)
+
+        assert record is not None
+        self.assertTrue(record["recovered"])
+        self.assertEqual("validating", record["phase"])
+        self.assertEqual(before, self._plan_bytes())
+
+    def test_a_crashed_publication_is_recovered_by_the_next_materialization(
+        self,
+    ) -> None:
+        before = self._crash_mid_publication("validating")
+
+        result = self._materialize()
+
+        self.assertTrue(result.loop_ready, msg=str(result.blockers))
+        self.assertEqual(("2.1",), tuple(c.session_id.value for c in result.children))
+        self.assertNotEqual(before, self._plan_bytes())
+        self.assertFalse(self._window_dir().exists())
+
+    def test_recovery_is_idempotent(self) -> None:
+        before = self._crash_mid_publication("validating")
+
+        first = review_repair.recover_review_repair_publication(self.plan_dir)
+        second = review_repair.recover_review_repair_publication(self.plan_dir)
+
+        assert first is not None
+        self.assertTrue(first["recovered"])
+        self.assertIsNone(second)
+        self.assertEqual(before, self._plan_bytes())
+
+    def test_nothing_to_recover_reports_nothing(self) -> None:
+        self.assertIsNone(
+            review_repair.recover_review_repair_publication(self.plan_dir)
+        )
+
+    def test_a_window_without_a_journal_never_opened_and_is_discarded(self) -> None:
+        before = self._plan_bytes()
+        self._window_dir().mkdir(parents=True)
+
+        record = review_repair.recover_review_repair_publication(self.plan_dir)
+
+        assert record is not None
+        self.assertTrue(record["recovered"])
+        self.assertEqual("unopened-publication-window", record["reason"])
+        self.assertEqual(before, self._plan_bytes())
+        self.assertFalse(self._window_dir().exists())
+
+    def test_an_unsupported_publication_schema_fails_closed(self) -> None:
+        window = self._window_dir()
+        window.mkdir(parents=True)
+        (window / review_repair.REPAIR_PUBLICATION_JOURNAL_NAME).write_text(
+            json.dumps({"version": 999, "entries": []}), encoding="utf-8"
+        )
+
+        record = review_repair.recover_review_repair_publication(self.plan_dir)
+
+        assert record is not None
+        self.assertFalse(record["recovered"])
+        self.assertEqual("unsupported-publication-schema", record["reason"])
+        self.assertTrue(window.is_dir())
+
+        result = self._materialize()
+
+        self.assertFalse(result.ok)
+        self.assertIn("could not be rolled back", result.error or "")
+        self.assertFalse((self.plan_dir / "session-2.1.md").exists())
+        self.assertTrue(window.is_dir())
+
+
+class ReviewRepairContractGateTests(unittest.TestCase):
+    """ASI-136: a check the contract cannot resolve is refused before authoring.
+
+    The reported shape is a repair check whose working directory is invalid
+    under the plan's repository contract. Preflight rejects it with a red
+    ``repository-contract`` finding — but that ran only after the child was on
+    disk, so the plan kept a pending repair child no run could select and no
+    run could clear. The same resolution now runs before anything is written.
+
+    A registered plan is already covered upstream: the review-artifact grammar
+    validates every check against the registry, so an unresolvable ``repo``,
+    ``cwd``, or ``path`` is refused as a malformed verdict. The gap is the
+    legacy (unregistered) plan, whose artifact grammar has no registry to
+    check against and whose footprint gate judges targets rather than checks.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.repo = _committed_repo(self.tmp_path / "repo")
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+
+    def _write_plan_with_check(self, check: dict[str, Any]) -> None:
+        finding = _structured_review_finding(
+            finding_id="F1",
+            repair_group="docs",
+            evidence=[{"path": "README.md"}],
+            done_criteria=["README stays present."],
+            verification_checks=[check],
+        )
+        _write_repair_ready_plan(self.plan_dir, self.repo, findings=[finding])
+        progress_repair.repair_progress_journal(self.plan_dir)
+
+    def _plan_bytes(self) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(self.plan_dir)): path.read_bytes()
+            for path in self.plan_dir.rglob("*")
+            if path.is_file()
+        }
+
+    def _materialize(self) -> review_repair.ReviewRepairResult:
+        return review_repair.materialize_review_repair_sessions(
+            self.plan_dir, state_dir=self.state_dir, cwd=self.repo
+        )
+
+    def test_an_unresolvable_check_cwd_is_refused_before_authoring(self) -> None:
+        self._write_plan_with_check(
+            {
+                "type": "command",
+                "name": "escaping",
+                "cwd": "..",
+                "argv": ["python3", "-c", "pass"],
+            }
+        )
+        before = self._plan_bytes()
+
+        result = self._materialize()
+
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY, result.reason
+        )
+        self.assertEqual((), result.children)
+        self.assertEqual(("repository-contract",), result.non_bypassable_blockers)
+        self.assertTrue(
+            any(
+                "verification check 'escaping' that cannot resolve" in blocker
+                for blocker in result.blockers
+            ),
+            msg=str(result.blockers),
+        )
+        self.assertFalse(result.rolled_back)
+        self.assertFalse((self.plan_dir / "session-2.1.md").exists())
+        self.assertEqual(before, self._plan_bytes())
+        self.assertFalse(
+            (self.plan_dir / review_repair.REPAIR_PUBLICATION_DIR_NAME).exists()
+        )
+
+    def test_the_refusal_is_non_bypassable(self) -> None:
+        self._write_plan_with_check(
+            {
+                "type": "command",
+                "name": "escaping",
+                "cwd": "nested/../../elsewhere",
+                "argv": ["python3", "-c", "pass"],
+            }
+        )
+
+        result = review_repair.materialize_review_repair_sessions(
+            self.plan_dir,
+            state_dir=self.state_dir,
+            cwd=self.repo,
+            allow_not_loop_ready=True,
+        )
+
+        self.assertEqual((), result.children)
+        self.assertEqual(("repository-contract",), result.non_bypassable_blockers)
+        self.assertFalse((self.plan_dir / "session-2.1.md").exists())
+
+    def test_without_the_gate_the_same_plan_strands_a_pending_child(self) -> None:
+        """The pre-fix path, pinned so the regression cannot come back quietly."""
+        self._write_plan_with_check(
+            {
+                "type": "command",
+                "name": "escaping",
+                "cwd": "..",
+                "argv": ["python3", "-c", "pass"],
+            }
+        )
+
+        with (
+            mock.patch.object(
+                review_repair, "_validate_children_contract", return_value=[]
+            ),
+            mock.patch.object(
+                review_repair,
+                "_rollback_publication_window",
+                return_value={"errors": []},
+            ),
+        ):
+            result = self._materialize()
+
+        # Preflight is the one that catches it, and only after the write.
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY, result.reason
+        )
+        self.assertTrue(
+            any("repository-contract" in blocker for blocker in result.blockers),
+            msg=str(result.blockers),
+        )
+        self.assertTrue((self.plan_dir / "session-2.1.md").exists())
+        self.assertIn(
+            "**Readiness**: draft",
+            (self.plan_dir / "manifest.md").read_text(encoding="utf-8"),
+        )
+
+    def test_a_resolvable_check_is_authored(self) -> None:
+        self._write_plan_with_check(
+            {
+                "type": "command",
+                "name": "resolvable",
+                "argv": ["python3", "-c", "pass"],
+            }
+        )
+
+        result = self._materialize()
+
+        self.assertEqual((), result.non_bypassable_blockers)
+        self.assertEqual(("2.1",), tuple(c.session_id.value for c in result.children))
+        self.assertTrue(result.loop_ready, msg=str(result.blockers))
+
+    def test_a_registered_plan_rejects_the_same_shape_as_a_malformed_verdict(
+        self,
+    ) -> None:
+        workspace = self.tmp_path / "workspace"
+        repositories = init_multi_repo_workspace(
+            workspace, DEFAULT_MULTI_REPO_SPECS[:2]
+        )
+        finding = _structured_review_finding(
+            finding_id="F1",
+            repair_group="svc",
+            repo="SVC",
+            evidence=[{"path": "SVC:README.md", "symbol": "target"}],
+            done_criteria=["SVC is fixed."],
+            verification_checks=[
+                {
+                    "type": "command",
+                    "name": "escaping",
+                    "repo": "SVC",
+                    "cwd": "../tundra_OAK",
+                    "argv": ["python3", "-c", "pass"],
+                }
+            ],
+        )
+        _write_repair_ready_plan(
+            self.plan_dir,
+            repositories["SVC"],
+            findings=[finding],
+            specs=DEFAULT_MULTI_REPO_SPECS[:2],
+        )
+        progress_repair.repair_progress_journal(self.plan_dir)
+
+        result = review_repair.materialize_review_repair_sessions(
+            self.plan_dir, state_dir=self.state_dir, cwd=workspace
+        )
+
+        self.assertEqual(review_repair.REVIEW_REPAIR_REASON_MALFORMED, result.reason)
+        self.assertIn("must stay beneath the selected repository", result.error or "")
+        self.assertFalse((self.plan_dir / "session-2.1.md").exists())
 
 
 class ReviewRepairCycleTests(unittest.TestCase):
@@ -4029,9 +4660,10 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertIn(events.REVIEW_CYCLE_EVENT, event_names)
         self.assertIn(events.RUN_PAUSED_EVENT, event_names)
 
-    def test_not_loop_ready_pause_projects_the_materialized_repair_sessions(
-        self,
-    ) -> None:
+    def _advance_blocked_review_cycle(
+        self, *, allow_not_loop_ready: bool
+    ) -> tuple[str, Any, dict[str, Any], Path]:
+        """Run one review cycle whose loop-ready gate refuses the children."""
         finding = _structured_review_finding()
         write_plan_with_ids(self.plan_dir, (("1", "complete"),))
         review_body = runner.build_generated_review_session_body(
@@ -4076,7 +4708,8 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 payload=payload,
                 persistence=runner._RunPersistence(),
                 args=argparse.Namespace(
-                    state_dir=str(self.state_dir), allow_not_loop_ready=False
+                    state_dir=str(self.state_dir),
+                    allow_not_loop_ready=allow_not_loop_ready,
                 ),
                 cwd=self.repo_root,
                 session_id="2",
@@ -4094,14 +4727,51 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 max_review_fix_cycles=2,
                 plan_cache=plans.PlanSnapshotCache(),
             )
+        return action, after, payload, event_path
+
+    def test_a_blocked_gate_withdraws_the_children_and_projects_the_old_plan(
+        self,
+    ) -> None:
+        """ASI-136: the pause must not leave a repair child no run can select."""
+        action, after, payload, event_path = self._advance_blocked_review_cycle(
+            allow_not_loop_ready=False
+        )
 
         self.assertEqual("paused", action)
         self.assertEqual("not-loop-ready", payload["pause_reason"])
-        self.assertTrue((self.plan_dir / "session-2.1.md").exists())
+        self.assertFalse((self.plan_dir / "session-2.1.md").exists())
 
-        # The children are on disk, so the returned snapshot, the persisted
-        # projection and the pause event all have to name them.
-        self.assertIsNot(snapshot, after)
+        # The children were withdrawn, so every projection has to name the plan
+        # that is actually on disk: the one the cycle started from.
+        self.assertEqual(
+            plans.inspect_plan(self.plan_dir).fingerprint, after.fingerprint
+        )
+        self.assertNotIn("2.1", [item.id for item in after.sessions])
+        projected = payload["final_snapshot"]
+        self.assertEqual(
+            [item.id for item in after.sessions],
+            [item["id"] for item in projected["sessions"]],
+        )
+        self.assertNotEqual("2.1", projected["next_pending_id"])
+        paused = [
+            record["payload"]
+            for record in read_jsonl(event_path)
+            if record["name"] == events.RUN_PAUSED_EVENT
+        ][0]
+        self.assertEqual([], paused["details"]["repair_session_ids"])
+        self.assertTrue(paused["details"]["repair_children_rolled_back"])
+        self.assertIn("session-2.1.md", paused["details"]["repair_rollback"]["removed"])
+        self.assertIn("withdrawn after authoring", paused["message"])
+
+    def test_allow_not_loop_ready_keeps_projecting_the_materialized_children(
+        self,
+    ) -> None:
+        action, after, payload, _event_path = self._advance_blocked_review_cycle(
+            allow_not_loop_ready=True
+        )
+
+        self.assertEqual("continue", action)
+        self.assertTrue((self.plan_dir / "session-2.1.md").exists())
         self.assertEqual(
             plans.inspect_plan(self.plan_dir).fingerprint, after.fingerprint
         )
@@ -4112,12 +4782,6 @@ class ReviewRepairCycleTests(unittest.TestCase):
             [item["id"] for item in projected["sessions"]],
         )
         self.assertEqual("2.1", projected["next_pending_id"])
-        paused_events = [
-            record["payload"]
-            for record in read_jsonl(event_path)
-            if record["name"] == events.RUN_PAUSED_EVENT
-        ]
-        self.assertEqual(["2.1"], paused_events[0]["details"]["repair_session_ids"])
 
     # ------------------------------------------------------------------
     # End-to-end cycles through the fake harness

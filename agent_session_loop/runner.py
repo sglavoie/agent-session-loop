@@ -21,8 +21,10 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -12815,6 +12817,7 @@ def _advance_review_cycle(
         cwd=cwd,
         state_dir=args.state_dir,
         hold_lock=False,
+        allow_not_loop_ready=_allow_not_loop_ready(args),
     )
     cycle_record["repair_session_ids"] = [
         child.session_id.value for child in repair_result.children
@@ -12898,7 +12901,7 @@ def _advance_review_cycle(
                 )
                 if cycle_record["repair_session_ids"]
                 else (
-                    "review repair children were refused before authoring "
+                    "no review repair children survived materialization "
                     f"after {session_label}: {repair_result.error}"
                 )
             ),
@@ -12908,6 +12911,14 @@ def _advance_review_cycle(
                 "blocker": list(repair_result.non_bypassable_blockers),
                 "repair_session_ids": cycle_record["repair_session_ids"],
                 "cycle": cycle_record["cycle"],
+                # ASI-136: children that failed the gate are withdrawn, so the
+                # pause has to say which plan an operator is looking at.
+                "repair_children_rolled_back": repair_result.rolled_back,
+                **(
+                    {"repair_rollback": repair_result.rollback}
+                    if repair_result.rollback is not None
+                    else {}
+                ),
             },
             persistence=persistence,
         )
@@ -13600,6 +13611,414 @@ def _legacy_unobserved_repositories(
     return payload
 
 
+#: A file larger than this is digested by size and mtime rather than by
+#: content. The cap keeps the guard's cost bounded on a turn that names a
+#: build artifact or a transcript; the classification, not the digest, is what
+#: fails the guard closed.
+EXTERNAL_WRITE_DIGEST_MAX_BYTES = 8 * 1024 * 1024
+
+#: How many direct entries a directory digest covers, and how many rows any
+#: one classification bucket reports before it is truncated to a count.
+EXTERNAL_WRITE_MANIFEST_MAX_ENTRIES = 512
+
+#: The classification a path receives when it fits none of the known buckets.
+#: Routed into the guard's existing ``unavailable`` lane rather than into
+#: ``violations``: an unclassified write is one the guard could not judge, not
+#: one it judged and rejected.
+EXTERNAL_WRITE_UNCLASSIFIED = "unclassified"
+
+#: Reported as the ``unavailable`` reason for each unclassified mutation.
+EXTERNAL_WRITE_UNCLASSIFIED_REASON = "external-write-unclassified"
+
+#: Every bucket :func:`_classify_external_path` can return. Ordered from the
+#: most specific authority to the least so the enumeration reads as the
+#: precedence the classifier applies.
+EXTERNAL_WRITE_CLASSES: tuple[str, ...] = (
+    "control-plane",
+    "workspace-repository",
+    "workspace-unregistered-path",
+    "unregistered-repository",
+    "plan-provenance",
+    "system-path",
+    "ephemeral-path",
+    "unresolved",
+    EXTERNAL_WRITE_UNCLASSIFIED,
+)
+
+
+def _ephemeral_roots() -> tuple[Path, ...]:
+    """Canonical temporary directories, which are not workspace writes.
+
+    A turn that names a scratch file has not mutated anything durable, and the
+    platform temporary directory is where the plan directory itself lives under
+    test. Resolving through symlinks matters on macOS, where ``/tmp`` and the
+    per-user ``TMPDIR`` both live under ``/private``.
+    """
+    roots: dict[Path, None] = {}
+    for value in (tempfile.gettempdir(), os.environ.get("TMPDIR")):
+        if not value:
+            continue
+        roots[workspaces.canonicalize_filesystem_path(value)] = None
+    return tuple(roots)
+
+
+def _external_path_digest(path: Path) -> dict[str, Any]:
+    """Digest one external path cheaply enough to run on every turn.
+
+    A control-plane root is a directory ASL appends to constantly and may hold
+    gigabytes of run transcripts, so a recursive content hash is not on the
+    table -- the live state root measures in gigabytes. A directory is
+    therefore digested by its *shape*: the bounded, sorted listing of its
+    direct entries with each entry's size and mtime, which is exactly what
+    moves when the runner appends a record to a store inside it. A file is
+    digested by content up to :data:`EXTERNAL_WRITE_DIGEST_MAX_BYTES`, and by
+    size and mtime beyond it.
+
+    The directory form is deliberately shallow. It is evidence that a control
+    plane root was or was not disturbed, not a commitment about every byte
+    beneath it; a mutation nested deeper is caught by digesting the individual
+    path the turn named, which is what the post-turn pass adds.
+    """
+    try:
+        stat_result = path.lstat()
+    except FileNotFoundError:
+        return {"present": False}
+    except OSError as error:
+        return {"present": True, "unavailable": str(error)}
+    record: dict[str, Any] = {
+        "present": True,
+        "mtime_ns": stat_result.st_mtime_ns,
+        "size": stat_result.st_size,
+    }
+    if stat.S_ISDIR(stat_result.st_mode):
+        record["kind"] = "directory"
+        digest = hashlib.sha256()
+        count = 0
+        try:
+            with os.scandir(path) as entries:
+                rows = sorted(
+                    (entry.name, entry)
+                    for entry in entries  # noqa: C414
+                )
+            for name, entry in rows:
+                count += 1
+                if count > EXTERNAL_WRITE_MANIFEST_MAX_ENTRIES:
+                    continue
+                child = entry.stat(follow_symlinks=False)
+                digest.update(
+                    f"{name}\0{stat.S_ISDIR(child.st_mode)}\0"
+                    f"{child.st_size}\0{child.st_mtime_ns}\0".encode()
+                )
+        except OSError as error:
+            record["unavailable"] = str(error)
+            return record
+        record["entry_count"] = count
+        record["truncated"] = count > EXTERNAL_WRITE_MANIFEST_MAX_ENTRIES
+        record["sha256"] = digest.hexdigest()
+        return record
+    if not stat.S_ISREG(stat_result.st_mode):
+        record["kind"] = "other"
+        return record
+    record["kind"] = "file"
+    if stat_result.st_size > EXTERNAL_WRITE_DIGEST_MAX_BYTES:
+        record["truncated"] = True
+        return record
+    try:
+        record["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        record["unavailable"] = str(error)
+    return record
+
+
+def _external_control_plane_paths(roots: Sequence[Path]) -> tuple[Path, ...]:
+    """The bounded path set a pre-turn control-plane digest covers.
+
+    Each root plus its direct entries: the roots catch a store appearing or
+    disappearing, and the direct entries catch an append to a store the runner
+    keeps at the top level, which a directory digest of the root alone would
+    miss because appending to a file moves neither the parent's mtime nor its
+    entry names.
+    """
+    paths: dict[Path, None] = {}
+    for root in roots:
+        canonical = workspaces.canonicalize_filesystem_path(root)
+        paths[canonical] = None
+        try:
+            with os.scandir(canonical) as entries:
+                names = sorted(entry.name for entry in entries)
+        except OSError:
+            # An absent or unreadable root is still digested as a root; the
+            # digest itself records why it could not be read.
+            continue
+        for name in names[:EXTERNAL_WRITE_MANIFEST_MAX_ENTRIES]:
+            paths[canonical / name] = None
+    return tuple(paths)
+
+
+def _capture_external_write_digests(roots: Sequence[Path]) -> dict[str, dict[str, Any]]:
+    """Digest the control-plane path set, keyed by canonical path."""
+    return {
+        repository_intent.redact_credentials(str(path)): _external_path_digest(path)
+        for path in _external_control_plane_paths(roots)
+    }
+
+
+def _classify_external_path(
+    resolved: repository_intent.ResolvedCandidate,
+    *,
+    control_plane_roots: Sequence[Path],
+    repository_roots: Sequence[Path],
+    workspace_root: Path,
+    ephemeral_roots: Sequence[Path],
+) -> str:
+    """Name the authority a path answers to, or report it unclassified.
+
+    Precedence runs from the most specific authority outward. The control
+    plane wins over everything because a plan directory or state root may
+    legitimately sit inside a checkout, and the runner's own bookkeeping is
+    never the work under judgement. A repository comes next, then the guarded
+    workspace tree, then the exemptions the pre-turn intent gate already
+    honors. Whatever survives all of that answers to nothing this run can
+    name, which is what :data:`EXTERNAL_WRITE_UNCLASSIFIED` means.
+
+    Ephemeral paths are matched late, not early: a temporary directory is only
+    a temporary directory when nothing more specific claims the path. Under
+    test the plan directory, the workspace, and every repository live inside
+    ``TMPDIR``, and an early match would collapse the whole taxonomy into one
+    bucket -- which is also true of an operator who keeps a checkout there.
+    """
+    path = resolved.resolved
+    if path is None or resolved.exemption == "unresolved":
+        return "unresolved"
+    if any(
+        workspaces.is_descendant(path, root, allow_equal=True)
+        for root in control_plane_roots
+    ):
+        return "control-plane"
+    if resolved.exemption == "system-path":
+        return "system-path"
+    if resolved.git_root is not None:
+        if any(
+            workspaces.is_descendant(resolved.git_root, root, allow_equal=True)
+            for root in repository_roots
+        ):
+            return "workspace-repository"
+        return "unregistered-repository"
+    if resolved.exemption == "plan-provenance":
+        return "plan-provenance"
+    if workspaces.is_descendant(path, workspace_root, allow_equal=True):
+        # Inside the guarded tree but in no repository: a scratch file beside
+        # the checkouts. Recorded rather than fatal -- the registry decides
+        # what may be written, and no registered repository was touched.
+        return "workspace-unregistered-path"
+    if any(
+        workspaces.is_descendant(root, path, allow_equal=True)
+        for root in (workspace_root, *repository_roots)
+    ):
+        # An ancestor of the workspace: `$HOME` itself when a repository is
+        # registered beneath it. Naming a container is not writing into it.
+        return "workspace-unregistered-path"
+    if any(
+        workspaces.is_descendant(path, root, allow_equal=True)
+        for root in ephemeral_roots
+    ):
+        return "ephemeral-path"
+    return EXTERNAL_WRITE_UNCLASSIFIED
+
+
+def _external_write_evidence(
+    *,
+    artifact_paths: Sequence[Path],
+    root: Path,
+    workspace_root: Path,
+    repository_roots: Sequence[Path],
+    control_plane_roots: Sequence[Path],
+    provenance_roots: Sequence[Path],
+    digests_before: Mapping[str, Mapping[str, Any]],
+    turn_started_ns: int | None,
+    ephemeral_roots: Sequence[Path] | None = None,
+    limit: int = EXTERNAL_WRITE_MANIFEST_MAX_ENTRIES,
+) -> dict[str, Any]:
+    """Classify and digest every external path this turn named.
+
+    The repository snapshot answers one question -- did a registered checkout
+    change -- and reports silence about everywhere else as cleanliness. That
+    silence is what let audit-store writes count as workspace-clean evidence:
+    the state root is exempted from repository intent as a plan artifact, so it
+    produced no ``changed`` entry, no topology row, and nothing ``unavailable``.
+
+    This pass judges paths rather than repositories. Every location the turn's
+    own artifacts and sign-off message name is classified, control-plane paths
+    are recorded with before and after digests so a permitted mutation is
+    evidenced rather than assumed, and anything that fits no bucket becomes an
+    ``unclassified`` row. ``turn_started_ns`` bounds that last lane to writes
+    that actually landed during the turn: a path merely mentioned, or one last
+    written before the turn began, is classified but not charged to it.
+    """
+    candidates: list[repository_intent.IntentCandidate] = []
+    for path in artifact_paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            # Unreadable artifacts name nothing. The turn is still judged on
+            # every artifact that can be read.
+            continue
+        candidates.extend(repository_intent.candidates_from_plan_document(text))
+    intent = repository_intent.resolve_intent(
+        candidates,
+        root=root,
+        exempt_roots=control_plane_roots,
+        provenance_roots=provenance_roots,
+    )
+    if ephemeral_roots is None:
+        ephemeral_roots = _ephemeral_roots()
+    # A legacy run is bound to the repository containing its execution root,
+    # which the caller cannot name because the root may sit below it.
+    known_repositories = tuple(repository_roots) + (
+        (intent.bound_git_root,) if intent.bound_git_root is not None else ()
+    )
+
+    counts = dict.fromkeys(EXTERNAL_WRITE_CLASSES, 0)
+    control_plane: dict[str, dict[str, Any]] = {}
+    unclassified: dict[str, dict[str, Any]] = {}
+    mentioned: dict[str, str] = {}
+    seen: set[str] = set()
+    for resolved in intent.candidates:
+        classification = _classify_external_path(
+            resolved,
+            control_plane_roots=control_plane_roots,
+            repository_roots=known_repositories,
+            workspace_root=workspace_root,
+            ephemeral_roots=ephemeral_roots,
+        )
+        assert resolved.resolved is not None or classification == "unresolved"
+        key = repository_intent.redact_credentials(
+            str(resolved.resolved)
+            if resolved.resolved is not None
+            else resolved.candidate.value
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        counts[classification] += 1
+        mentioned[key] = classification
+        if classification == "control-plane":
+            control_plane[key] = {
+                "before": dict(digests_before.get(key, {"observed": False})),
+                "after": _external_path_digest(Path(str(resolved.resolved))),
+                "surface": resolved.candidate.surface,
+            }
+            continue
+        if classification != EXTERNAL_WRITE_UNCLASSIFIED:
+            continue
+        after = _external_path_digest(Path(str(resolved.resolved)))
+        mutated = bool(after.get("present")) and (
+            turn_started_ns is None
+            or int(after.get("mtime_ns") or 0) >= turn_started_ns
+        )
+        if not mutated:
+            # Named but not written during this turn: classified, recorded in
+            # the counts, and not charged to the turn as a mutation.
+            continue
+        unclassified[key] = {
+            "reason": EXTERNAL_WRITE_UNCLASSIFIED_REASON,
+            "surface": resolved.candidate.surface,
+            "after": after,
+        }
+
+    # Roots the turn never named are still compared, because the whole point is
+    # that a control-plane write leaves no trace in the paths a turn declares.
+    for key, before in digests_before.items():
+        if key in control_plane:
+            continue
+        after = _external_path_digest(Path(key))
+        if after == dict(before):
+            continue
+        control_plane[key] = {
+            "before": dict(before),
+            "after": after,
+            "surface": "control-plane-root",
+        }
+
+    mutated_control_plane = sorted(
+        key
+        for key, record in control_plane.items()
+        if record["before"].get("observed") is not False
+        and record["before"] != record["after"]
+    )
+    reported, omitted = (
+        sorted(control_plane)[:limit],
+        max(0, len(control_plane) - limit),
+    )
+    evidence: dict[str, Any] = {
+        "classified": {name: counts[name] for name in EXTERNAL_WRITE_CLASSES},
+        "control_plane": {key: control_plane[key] for key in reported},
+        "control_plane_mutated": mutated_control_plane[:limit],
+        "unclassified": unclassified,
+        "paths": {key: mentioned[key] for key in sorted(mentioned)[:limit]},
+    }
+    if omitted:
+        evidence["control_plane_omitted"] = omitted
+    return evidence
+
+
+def _external_write_unavailable(
+    evidence: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Project unclassified external mutations into the fail-closed lane."""
+    unclassified = evidence.get("unclassified")
+    if not isinstance(unclassified, Mapping):
+        return {}
+    return {str(key): dict(value) for key, value in unclassified.items()}
+
+
+def _control_plane_digest_roots(
+    plan_dir: Path,
+    state_dir_arg: str | None,
+    *,
+    run_dir: Path | None = None,
+) -> tuple[Path, ...]:
+    """The control-plane trees worth digesting before and after every turn.
+
+    Narrower than :func:`_runner_owned_roots`, which also names the whole state
+    root. The state root holds every plan's store and digesting its children
+    would scan unrelated plans on every turn; this run's own plan directory,
+    plan state directory, and run directory are where a permitted control-plane
+    mutation actually lands.
+    """
+    roots = [plan_dir, state.plan_state_dir(plan_dir, state_dir_arg)]
+    if run_dir is not None:
+        roots.append(run_dir)
+    return tuple(roots)
+
+
+def _turn_external_write_evidence(
+    *,
+    plan_dir: Path,
+    artifact_paths: Sequence[Path],
+    root: Path,
+    workspace_root: Path,
+    repository_roots: Sequence[Path],
+    state_dir_arg: str | None,
+    run_dir: Path | None,
+    digests_before: Mapping[str, Mapping[str, Any]] | None,
+    turn_started_ns: int | None,
+) -> dict[str, Any]:
+    """Build one turn's external-write verdict for either guard mode."""
+    return _external_write_evidence(
+        artifact_paths=artifact_paths,
+        root=root,
+        workspace_root=workspace_root,
+        repository_roots=repository_roots,
+        control_plane_roots=_runner_owned_roots(
+            plan_dir, state_dir_arg, run_dir=run_dir
+        ),
+        provenance_roots=preflight.plan_provenance_exempt_roots(plan_dir),
+        digests_before=digests_before if digests_before is not None else {},
+        turn_started_ns=turn_started_ns,
+    )
+
+
 def _annotate_history_transitions(
     comparison: dict[str, Any],
     *,
@@ -13737,8 +14156,15 @@ def _workspace_write_guard_evidence(
     comparison: Mapping[str, Any],
     exclude: tuple[str, ...],
     include_ignored: bool,
+    external_writes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Classify workspace-vector changes against one session's write scope."""
+    """Classify workspace-vector changes against one session's write scope.
+
+    ``external_writes`` carries the per-path verdict from
+    :func:`_external_write_evidence`. Its unclassified rows join
+    ``unavailable`` rather than ``violations`` for the same reason an
+    unobserved repository does: the guard has no observation to classify.
+    """
     registered = {
         repository.repository.path: repository.alias
         for repository in workspace.repositories
@@ -13810,14 +14236,21 @@ def _workspace_write_guard_evidence(
             )
 
     unavailable = comparison.get("unavailable")
-    unavailable_payload = (
-        {str(key): value for key, value in unavailable.items()}
-        if isinstance(unavailable, Mapping)
+    unavailable_payload: dict[str, Any] = (
+        _external_write_unavailable(external_writes)
+        if external_writes is not None
         else {}
     )
+    if isinstance(unavailable, Mapping):
+        # A repository the comparison itself could not read has the more
+        # specific reason, so it wins a key collision with a path verdict.
+        unavailable_payload.update(
+            {str(key): value for key, value in unavailable.items()}
+        )
     authorized_set = set(authorized)
     return {
         "passed": not violations and not unavailable_payload,
+        "external_writes": dict(external_writes) if external_writes is not None else {},
         "read_aliases": list(scope.reads),
         "write_aliases": list(scope.writes),
         "registered_repositories": [
@@ -13849,6 +14282,7 @@ def _legacy_implementation_write_guard_evidence(
     exclude: tuple[str, ...],
     include_ignored: bool,
     unobserved: Mapping[str, Mapping[str, Any]] = MappingProxyType({}),
+    external_writes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project a legacy single-repository comparison into the guard schema.
 
@@ -13859,6 +14293,10 @@ def _legacy_implementation_write_guard_evidence(
     lane's exact meaning. The comparison's own entries win a key collision --
     a repository that failed to fingerprint has a more specific reason than
     one that was never fingerprinted.
+
+    ``external_writes`` carries the same judgement one level down, over paths
+    rather than repositories, and contributes its unclassified rows to the same
+    lane.
     """
     raw_changed = comparison.get("changed")
     changed = (
@@ -13870,6 +14308,8 @@ def _legacy_implementation_write_guard_evidence(
     unavailable_payload: dict[str, Any] = {
         str(key): dict(value) for key, value in unobserved.items()
     }
+    if external_writes is not None:
+        unavailable_payload.update(_external_write_unavailable(external_writes))
     if isinstance(unavailable, Mapping):
         unavailable_payload.update(
             {str(key): value for key, value in unavailable.items()}
@@ -13889,6 +14329,7 @@ def _legacy_implementation_write_guard_evidence(
     return {
         "passed": not unavailable_payload and not violations,
         "scope_mode": "legacy-single-repository",
+        "external_writes": dict(external_writes) if external_writes is not None else {},
         "repository_root": str(cwd),
         "read_aliases": ["legacy"],
         "write_aliases": ["legacy"],
@@ -14249,6 +14690,10 @@ def _enforce_workspace_write_guard(
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
     plan_cache: plans.PlanSnapshotCache,
+    state_dir_arg: str | None = None,
+    run_dir: Path | None = None,
+    external_digests_before: Mapping[str, Mapping[str, Any]] | None = None,
+    turn_started_ns: int | None = None,
 ) -> bool:
     """Fail closed when a registered implementation turn exceeds its writes."""
     snapshot_after: repository_evidence.WorkspaceSnapshot | None = None
@@ -14291,6 +14736,20 @@ def _enforce_workspace_write_guard(
         comparison=comparison,
         exclude=exclude,
         include_ignored=include_ignored,
+        external_writes=_turn_external_write_evidence(
+            plan_dir=before.plan_dir,
+            artifact_paths=(
+                *_task_packet_artifact_paths(before.plan_dir, session_id, None),
+                paths["last_message"],
+            ),
+            root=workspace.root,
+            workspace_root=workspace.root,
+            repository_roots=[repository.root for repository in workspace.repositories],
+            state_dir_arg=state_dir_arg,
+            run_dir=run_dir,
+            digests_before=external_digests_before,
+            turn_started_ns=turn_started_ns,
+        ),
     )
     if evidence["passed"]:
         with persistence.lock:
@@ -14405,6 +14864,8 @@ def _enforce_legacy_implementation_write_guard(
     plan_cache: plans.PlanSnapshotCache,
     state_dir_arg: str | None,
     run_dir: Path | None = None,
+    external_digests_before: Mapping[str, Mapping[str, Any]] | None = None,
+    turn_started_ns: int | None = None,
 ) -> bool:
     """Fail closed around every legacy implementation turn, in every mode."""
     snapshot_after = _capture_legacy_implementation_snapshot(
@@ -14420,6 +14881,10 @@ def _enforce_legacy_implementation_write_guard(
         comparison,
         repository_roots={".": cwd},
     )
+    artifact_paths = (
+        *_task_packet_artifact_paths(before.plan_dir, session_id, None),
+        paths["last_message"],
+    )
     evidence = _legacy_implementation_write_guard_evidence(
         cwd=cwd,
         comparison=comparison,
@@ -14427,14 +14892,22 @@ def _enforce_legacy_implementation_write_guard(
         include_ignored=include_ignored,
         unobserved=_legacy_unobserved_repositories(
             cwd=cwd,
-            artifact_paths=(
-                *_task_packet_artifact_paths(before.plan_dir, session_id, None),
-                paths["last_message"],
-            ),
+            artifact_paths=artifact_paths,
             exempt_roots=_runner_owned_roots(
                 before.plan_dir, state_dir_arg, run_dir=run_dir
             ),
             provenance_roots=preflight.plan_provenance_exempt_roots(before.plan_dir),
+        ),
+        external_writes=_turn_external_write_evidence(
+            plan_dir=before.plan_dir,
+            artifact_paths=artifact_paths,
+            root=cwd,
+            workspace_root=cwd,
+            repository_roots=[cwd],
+            state_dir_arg=state_dir_arg,
+            run_dir=run_dir,
+            digests_before=external_digests_before,
+            turn_started_ns=turn_started_ns,
         ),
     )
     if evidence["passed"]:
@@ -15867,7 +16340,45 @@ def _run_locked(
         plans.normalize_generated_review_handoff_artifacts(args.plan_dir)
     )
     executed_review_requires_artifact = False
+    # ASI-136: a repair publication that died mid-flight owns this plan's files
+    # until it is rolled back, and its children are pending but not loop-ready.
+    # Recover under this run's lock, before the first snapshot, so selection
+    # never sees a child whose loop-ready state was never established.
+    repair_publication_recovery: dict[str, Any] | None = None
+    if not args.dry_run:
+        try:
+            repair_publication_recovery = (
+                review_repair.recover_review_repair_publication(args.plan_dir)
+            )
+        except plans.PlanError as error:
+            repair_publication_recovery = {
+                "recovered": False,
+                "reason": "recovery-failed",
+                "error": str(error),
+            }
     snapshot = plan_cache.get(args.plan_dir)
+    if repair_publication_recovery is not None and not (
+        repair_publication_recovery.get("recovered")
+    ):
+        # The image could not be put back, so the plan on disk is neither the
+        # state the publication started from nor a published one. Refuse to run
+        # rather than select out of a half-published generation.
+        payload = _error_payload(
+            args,
+            reason="malformed-plan",
+            message=(
+                "an interrupted review repair publication could not be rolled "
+                f"back: {repair_publication_recovery.get('reason')}"
+            ),
+            paused=True,
+            cwd=cwd,
+            snapshot=snapshot,
+        )
+        payload["details"] = {
+            "review_repair_publication_recovery": repair_publication_recovery
+        }
+        payload["pause_details"] = dict(payload["details"])
+        return 1, payload
     if not args.dry_run:
         _ensure_legacy_run_metadata(snapshot.plan_dir, verification_context)
     state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
@@ -16890,6 +17401,7 @@ def _run_locked(
                                 cwd=cwd,
                                 state_dir=args.state_dir,
                                 hold_lock=False,
+                                allow_not_loop_ready=allow_not_loop_ready,
                             )
                         )
                         repair_session_ids = tuple(
@@ -16918,9 +17430,11 @@ def _run_locked(
                             and repair_result.reason
                             == review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY
                         ):
-                            # The pre-authoring footprint gate refused: nothing
-                            # was written, so there is no reopened plan to
-                            # proceed into even with --allow-not-loop-ready.
+                            # No child survived materialization: the pre-authoring
+                            # gate refused them, or the loop-ready gate withdrew
+                            # them (ASI-136). Either way the plan is the one this
+                            # cycle started from, so there is nothing to proceed
+                            # into even with --allow-not-loop-ready.
                             with persistence.lock:
                                 payload["final_snapshot"] = _snapshot_payload(snapshot)
                             _pause_run(
@@ -16928,8 +17442,8 @@ def _run_locked(
                                 payload,
                                 reason="not-loop-ready",
                                 message=(
-                                    "review repair children were refused before "
-                                    "authoring for session "
+                                    "no review repair children survived "
+                                    "materialization for session "
                                     f"{repair_result.review_session_id}: "
                                     f"{repair_result.error}"
                                 ),
@@ -16938,6 +17452,14 @@ def _run_locked(
                                     "blockers": list(repair_result.blockers),
                                     "blocker": list(
                                         repair_result.non_bypassable_blockers
+                                    ),
+                                    "repair_children_rolled_back": (
+                                        repair_result.rolled_back
+                                    ),
+                                    **(
+                                        {"repair_rollback": repair_result.rollback}
+                                        if repair_result.rollback is not None
+                                        else {}
                                     ),
                                 },
                                 persistence=persistence,
@@ -17922,6 +18444,15 @@ def _run_locked(
                 None
             )
             legacy_snapshot_before: repository_evidence.WorkspaceSnapshot | None = None
+            # The control plane is digested for both modes and unconditionally:
+            # the repository snapshot is silent about it by construction, so a
+            # permitted mutation there has no other evidence.
+            turn_started_ns = time.time_ns()
+            external_digests_before = _capture_external_write_digests(
+                _control_plane_digest_roots(
+                    before.plan_dir, args.state_dir, run_dir=run_dir
+                )
+            )
             if workspace is not None:
                 assert session_scope is not None
                 if is_review_session and prepared_review_workspace_snapshot is not None:
@@ -18148,6 +18679,8 @@ def _run_locked(
                     "active_turn": active_turn,
                     "live_turn": live_turn,
                     "paths": paths,
+                    "external_digests_before": external_digests_before,
+                    "turn_started_ns": turn_started_ns,
                 }
             elif legacy_snapshot_before is not None:
                 pending_exception_guard = {
@@ -18163,6 +18696,8 @@ def _run_locked(
                     "active_turn": active_turn,
                     "live_turn": live_turn,
                     "paths": paths,
+                    "external_digests_before": external_digests_before,
+                    "turn_started_ns": turn_started_ns,
                 }
             review_fingerprint_before: dict[str, Any] | None = (
                 _capture_review_repo_fingerprint(
@@ -18432,6 +18967,10 @@ def _run_locked(
                     turn_payload=turn_payload,
                     paths=paths,
                     plan_cache=plan_cache,
+                    state_dir_arg=args.state_dir,
+                    run_dir=run_dir,
+                    external_digests_before=external_digests_before,
+                    turn_started_ns=turn_started_ns,
                 ):
                     break
                 if is_review_session:
@@ -18478,6 +19017,8 @@ def _run_locked(
                     plan_cache=plan_cache,
                     state_dir_arg=args.state_dir,
                     run_dir=run_dir,
+                    external_digests_before=external_digests_before,
+                    turn_started_ns=turn_started_ns,
                 ):
                     break
             if (
@@ -19619,6 +20160,10 @@ def _run_locked(
                         plan_cache=plan_cache,
                         state_dir_arg=args.state_dir,
                         run_dir=run_dir,
+                        external_digests_before=guard_context.get(
+                            "external_digests_before"
+                        ),
+                        turn_started_ns=guard_context.get("turn_started_ns"),
                     )
                 else:
                     _enforce_workspace_write_guard(
@@ -19638,6 +20183,12 @@ def _run_locked(
                         turn_payload=turn_payload,
                         paths=guard_context["paths"],
                         plan_cache=plan_cache,
+                        state_dir_arg=args.state_dir,
+                        run_dir=run_dir,
+                        external_digests_before=guard_context.get(
+                            "external_digests_before"
+                        ),
+                        turn_started_ns=guard_context.get("turn_started_ns"),
                     )
             except Exception as guard_error:
                 error.add_note(
