@@ -3267,7 +3267,8 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         )
 
     def test_state_schema_docs_match_authoritative_versions(self) -> None:
-        self.assertEqual(2, runner.STATE_SCHEMA_VERSION)
+        self.assertEqual(3, runner.STATE_SCHEMA_VERSION)
+        self.assertEqual(2, runner.COMPACT_STATE_SCHEMA_VERSION)
         self.assertEqual(2, runner.RESULT_SCHEMA_VERSION)
         self.assertEqual(2, events.EVENT_SCHEMA_VERSION)
         state_files = self.docs.split("## State Files", 1)[1].split("\n## ", 1)[0]

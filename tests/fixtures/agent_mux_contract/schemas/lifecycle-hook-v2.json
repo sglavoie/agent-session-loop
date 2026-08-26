@@ -4,10 +4,52 @@
   "body_bearing_pointers": [],
   "component": "lifecycle_hook",
   "definitions": {
+    "Acceptance": {
+      "additionalProperties": false,
+      "description": "Why a failing verification was nevertheless accepted. Carried as bounded counts and names: the findings themselves stay in the turn artifact.",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "deferred_failure_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "deferred_failure_names": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "reason": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "review_outcome": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted",
+        "deferred_failure_count",
+        "deferred_failure_names",
+        "reason",
+        "review_outcome"
+      ],
+      "type": "object"
+    },
     "DeliveryState": {
-      "description": "Whether a wait ended on a closure the loop consumed.",
+      "description": "How far the message this event announces has travelled. `consumed` and `unconsumed` say whether a wait ended on a closure the loop took up. `open` and `accepted` are the mailbox spellings: a question nothing has answered yet, and a reply or resolution the mailbox has durably accepted but the waiting loop has not read.",
       "enum": [
+        "accepted",
         "consumed",
+        "open",
         "unconsumed"
       ]
     },
@@ -35,8 +77,30 @@
     "HookPayload": {
       "additionalProperties": false,
       "properties": {
+        "acceptance": {
+          "$ref": "#/definitions/Acceptance"
+        },
         "artifact_dir": {
           "format": "canonical-path",
+          "type": "string"
+        },
+        "check_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "check_index": {
+          "description": "Zero-based position of the check a verification heartbeat is reporting on. A heartbeat that lands between checks reports 0, the same as the first check; `check_name` is what distinguishes them.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "check_kind": {
+          "description": "Kind of the check a verification heartbeat is reporting on. Empty when the heartbeat landed between checks.",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "check_name": {
+          "description": "Name of the check a verification heartbeat is reporting on. Empty when the heartbeat landed between checks.",
+          "maxLength": 128,
           "type": "string"
         },
         "closure_consumed": {
@@ -46,6 +110,10 @@
           "maxLength": 128,
           "minLength": 1,
           "type": "string"
+        },
+        "consumed": {
+          "description": "Whether the waiting loop has already taken up the mailbox message this event announces. It is false on the mailbox boundaries, which are emitted by the CLI that wrote the message, not by the loop that will read it.",
+          "type": "boolean"
         },
         "contract_set_id": {
           "format": "contract-set-id",
@@ -58,12 +126,26 @@
         "delivery_state": {
           "$ref": "#/definitions/DeliveryState"
         },
+        "diagnostic_count": {
+          "description": "Checks that failed without gating the verification.",
+          "minimum": 0,
+          "type": "integer"
+        },
         "emitted_time": {
           "format": "epoch-seconds",
           "type": "string"
         },
         "event": {
           "$ref": "#/definitions/EventName"
+        },
+        "executed_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gate_count": {
+          "description": "Checks whose failure would fail the verification.",
+          "minimum": 0,
+          "type": "integer"
         },
         "hang_idle_seconds": {
           "minimum": 0,
@@ -100,6 +182,10 @@
           "minimum": 1,
           "type": "integer"
         },
+        "last_heartbeat_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
         "last_message_path": {
           "format": "canonical-path",
           "type": "string"
@@ -107,6 +193,18 @@
         "last_output_at": {
           "format": "timestamp",
           "type": "string"
+        },
+        "mailbox_projection_sequence": {
+          "description": "Generation of the mailbox projection this event was read from. It counts in the mailbox file, not in `source_sequence`'s run-scoped stream, so the two are never comparable.",
+          "format": "sequence",
+          "type": "string"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "passed_count": {
+          "minimum": 0,
+          "type": "integer"
         },
         "pause_message": {
           "description": "ASL's own operator-facing pause sentence. It is ASL-authored rather than model-authored, so it is permitted, but it carries a ceiling like every other free-text field in this contract.",
@@ -125,6 +223,10 @@
           "format": "canonical-path",
           "type": "string"
         },
+        "question_created_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
         "question_id": {
           "maxLength": 128,
           "minLength": 1,
@@ -137,6 +239,11 @@
         },
         "reason": {
           "$ref": "#/definitions/Reason"
+        },
+        "resolution_action": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
         },
         "result_path": {
           "format": "canonical-path",
@@ -172,6 +279,10 @@
           "minimum": 1,
           "type": "integer"
         },
+        "skipped_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "source": {
           "const": "agent_session_loop"
         },
@@ -205,6 +316,10 @@
           "type": "integer"
         },
         "turn_index": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unanswered_questions": {
           "minimum": 0,
           "type": "integer"
         },
@@ -265,7 +380,7 @@
       ]
     }
   },
-  "description": "The JSON ASL pipes to `amx hook-indicator` on stdin at every lifecycle boundary. Schema 2 adds the contract-set ID, the explicit event name, and a declared schema version to the schema-1 payload; everything else is the shape ASL already emits. Only the identity fields are required: the rest are event-scoped and appear when the boundary carries them. Sequence and emission time are strings, because a numeric spelling that loses precision in a consumer is worse than a string both ends compare verbatim.",
+  "description": "The JSON ASL pipes to `amx hook-indicator` on stdin at every lifecycle boundary. Schema 2 adds the contract-set ID, the explicit event name, and a declared schema version to the schema-1 payload; everything else is the shape ASL already emits, including the verification counters, the turn identity, and the mailbox fields the CLI-emitted boundaries carry. Only the identity fields are required: the rest are event-scoped and appear when the boundary carries them. Sequence and emission time are strings, because a numeric spelling that loses precision in a consumer is worse than a string both ends compare verbatim.",
   "forbidden_property_names": [
     "answer",
     "body",

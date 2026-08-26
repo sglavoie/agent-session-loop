@@ -39,6 +39,7 @@ from typing import Any, TextIO
 
 from . import (
     agent_mux_delivery,
+    agent_mux_projection,
     assurance_report,
     commit_groups,
     commit_message,
@@ -253,11 +254,19 @@ INLINE_TAIL_INITIAL_LOG_LINES = 40
 
 # Schema version stamped on persisted ``state.json`` and per-turn
 # ``result.json`` records. Absence of a ``version`` key means v1; readers must
-# accept both. ``state.json`` (a v2 state record) stores only compact turn
-# summaries and never embeds raw verification output — the full per-turn detail,
-# including verification stdout/stderr previews, lives in ``result.json`` (a v2
-# result record, which may carry detailed output) referenced by ``result_path``.
-STATE_SCHEMA_VERSION = 2
+# accept all three. A v2 state record stores only compact turn summaries and
+# never embeds raw verification output — the full per-turn detail, including
+# verification stdout/stderr previews, lives in ``result.json`` (a v2 result
+# record, which may carry detailed output) referenced by ``result_path``. A v3
+# state record keeps every v2 guarantee and adds the nested body-free
+# ``agent_mux`` projection, written inside the same atomic replacement so a
+# reader never sees a state and a projection from different transitions.
+# ``asl migrate-state`` upgrades an absent-version, v1, or v2 record in place.
+STATE_SCHEMA_VERSION = agent_mux_projection.STATE_SCHEMA_VERSION
+# The version a record that has only been output-bounded may claim. Compaction
+# reaches this and no further; only a state transition or an explicit
+# ``asl migrate-state`` upgrade attaches the projection v3 promises.
+COMPACT_STATE_SCHEMA_VERSION = 2
 RESULT_SCHEMA_VERSION = 2
 # Keys carrying raw command output on a verification check payload. These are
 # stripped from every v2 state and event record; the accompanying
@@ -5617,14 +5626,26 @@ def _compact_turn_summary(turn: Any) -> Any:
 
 
 def _compact_state_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Build the v2 ``state.json`` projection persisted to disk.
+    """Build the compact ``state.json`` record persisted to disk.
 
     Returns a fresh dict so no mutable detailed turn dictionary stays aliased
     inside the persisted state payload. Detailed per-turn data (full snapshots
     and verification output) is dropped here and kept in ``result.json``.
+
+    The stamped version describes what the record actually contains rather than
+    what this build can produce. Compaction performs the v2 bounding itself, so
+    it always claims at least v2; it claims v3 only when an ``agent_mux``
+    projection is already attached, because attaching one is a state
+    transition's job and ``asl compact``/``asl migrate-state`` are not that.
+    Stamping v3 on a projection-free record would tell a consumer to expect a
+    block that is not there.
     """
     compact = dict(payload)
-    compact["version"] = STATE_SCHEMA_VERSION
+    compact["version"] = (
+        STATE_SCHEMA_VERSION
+        if isinstance(payload.get(agent_mux_projection.PROJECTION_KEY), dict)
+        else COMPACT_STATE_SCHEMA_VERSION
+    )
     turns = payload.get("turns")
     if isinstance(turns, list):
         compact["turns"] = [_compact_turn_summary(turn) for turn in turns]
@@ -5698,9 +5719,20 @@ def _run_finished_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_state_payload(payload: dict[str, Any]) -> None:
+    """Persist one state transition and the projection that describes it.
+
+    The projection is attached to the live payload immediately before the
+    compaction that produces the bytes on disk, so the ``agent_mux`` block a
+    reader finds was built from exactly the state it is nested in. Callers
+    reach this through :meth:`_RunPersistence.write_state`, which holds the
+    run's lock across both the generation allocation and the atomic replace;
+    that is what keeps generations monotonic when a heartbeat thread and the
+    main loop both write.
+    """
     state_path = payload.get("state_path")
     if not isinstance(state_path, str) or not state_path:
         return
+    agent_mux_projection.attach_projection(payload, updated_at=_isoformat(_utc_now()))
     _write_json_file(
         Path(state_path),
         _compact_state_payload(payload),
@@ -16114,6 +16146,10 @@ def _initial_payload(
         run_started_at=_isoformat(_utc_now()),
         run_finished_at=None,
         agent_mux_sequence=0,
+        # The lifecycle sequence counts notifications; the projection
+        # generation counts durable transitions. Seeded separately and side by
+        # side so neither is ever read as a stand-in for the other.
+        **{agent_mux_projection.GENERATION_KEY: 0},
         duration_seconds=None,
         active_turn=None,
         active_verification=None,

@@ -24,6 +24,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    agent_mux_projection,
     artifacts,
     authoring,
     contracts,
@@ -5575,6 +5576,7 @@ class ParserAndStateTests(unittest.TestCase):
         return {
             "version_absent_is_v1": True,
             "state_path": str(state_path),
+            "plan_dir": str(state_path.parent),
             "run_id": "run-1",
             "harness": "codex",
             "ok": True,
@@ -5592,7 +5594,7 @@ class ParserAndStateTests(unittest.TestCase):
             "turns": [self._detailed_turn()],
         }
 
-    def test_write_state_payload_compacts_turns_and_stamps_v2(self) -> None:
+    def test_write_state_payload_compacts_turns_and_stamps_the_version(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "state.json"
             payload = self._base_state_payload(state_path)
@@ -5601,6 +5603,11 @@ class ParserAndStateTests(unittest.TestCase):
             persisted = json.loads(state_path.read_text(encoding="utf-8"))
 
         self.assertEqual(runner.STATE_SCHEMA_VERSION, persisted["version"])
+        # The projection rides in the same write the version names.
+        self.assertEqual(
+            "turn",
+            persisted[agent_mux_projection.PROJECTION_KEY]["phase"],
+        )
         turn = persisted["turns"][0]
         # Scalar/path fields readers depend on are preserved.
         self.assertEqual("/artifacts/stdout.log", turn["stdout_path"])

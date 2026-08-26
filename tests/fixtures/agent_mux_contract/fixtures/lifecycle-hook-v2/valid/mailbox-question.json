@@ -1,0 +1,26 @@
+{
+  "case": "mailbox-question",
+  "description": "A mailbox boundary, emitted by the CLI that wrote the question rather than by the loop that will read it. It announces `waiting` because nothing here observes the run resuming, and it carries the mailbox file's own generation, which is not comparable with `source_sequence`.",
+  "document": {
+    "contract_set_id": "asl-amx-1.0000000000000000",
+    "cwd": "/fixtures/workspaces/alpha",
+    "delivery_state": "open",
+    "emitted_time": "1782234700",
+    "event": "AgentSessionLoopMailboxQuestion",
+    "harness": "claude",
+    "mailbox_projection_sequence": "31",
+    "phase": "waiting",
+    "plan_dir": "/fixtures/plans/plan-alpha",
+    "question_created_at": "2026-06-19T15:11:40+00:00",
+    "question_id": "q-7",
+    "reason": "mailbox_question_surfaced",
+    "run_id": "20260619T140000Z-1",
+    "schema_version": 2,
+    "source": "agent_session_loop",
+    "source_event_id": "20260619T140000Z-1:mailbox-question:31",
+    "source_sequence": "31",
+    "state_path": "/fixtures/state/8f14e45fceea167a/state.json",
+    "unanswered_questions": 1
+  },
+  "root": "hook_payload"
+}

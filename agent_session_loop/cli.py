@@ -1064,8 +1064,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     migrate_state_parser = subparsers.add_parser(
         "migrate-state",
         help=(
-            "Relocate an orphaned state directory after a plan directory move "
-            "(default: dry-run)."
+            "Relocate an orphaned state directory after a plan directory move, "
+            "or upgrade a plan's state schema in place (default: dry-run)."
         ),
     )
     migrate_state_parser.add_argument(
@@ -1074,8 +1074,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     migrate_state_parser.add_argument(
         "--from",
         dest="from_plan_dir",
-        required=True,
-        help="Old plan directory path the state was keyed under",
+        help=(
+            "Old plan directory path the state was keyed under; omit to upgrade "
+            "this plan's own state to the current schema version instead"
+        ),
     )
     migrate_state_parser.add_argument(
         "--state-dir",

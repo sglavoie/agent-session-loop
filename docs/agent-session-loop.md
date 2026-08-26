@@ -552,7 +552,7 @@ asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
-asl migrate-state PLAN_DIR --from OLD_PLAN_PATH [--state-dir DIR] [--apply] [--json]
+asl migrate-state PLAN_DIR [--from OLD_PLAN_PATH] [--state-dir DIR] [--apply] [--json]
 asl metrics [--since-days N] [--state-dir DIR] [--json]
 asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guidance TEXT] [--from-id SHA] [--pathspec PATH ...] [--expect-snapshot TOKEN] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--prepare-only] [--message-file PATH] [--json]
 asl bridge serve [--stdio] [--protocol VERSION] [--state-dir DIR] [--plan-root DIR]
@@ -2668,7 +2668,26 @@ state directories untouched) when the source plan directory still exists on disk
 (`source-plan-exists` — its state is not orphaned, so migrating would steal a
 live plan's state), the source holds an active lock, or the destination state
 directory already exists. The default is a dry-run; pass `--apply` to perform the
-rename and rewrite, and `--json` for the machine payload.
+rename and rewrite, and `--json` for the machine payload. A relocation also
+brings the record it is already rewriting forward to the current state schema
+version in the same write; a record that cannot carry a projection, or one whose
+`version` this build does not recognize, still relocates and reports the
+shortfall rather than blocking the repair the operator asked for.
+
+Omitting `--from` selects the other mode: upgrade *this* plan's own
+`state.json` in place, from an absent `version` (v1) or from v2, to the current
+schema version, adding the `agent_mux` projection. Nothing else in the record
+changes — paused state, terminal state, turns, and artifact references are
+preserved — and the upgrade appends a `state_migrated` event naming the versions
+it moved between and the projection generation it allocated. It is idempotent:
+a record already at the current version is a reported no-op, not a rewrite.
+It refuses (`incompatible-active-run`) when a live lock is held over a record
+this build would have to upgrade, because that process holds the payload in
+memory and would overwrite the upgrade on its next transition; a live run
+already at the current version is a benign no-op instead. It also refuses an
+unrecognized `version` (`unknown-schema-version`) and a record with no run
+identity to project (`unprojectable-state`), leaving the file untouched in both
+cases.
 
 `baseline` executes every contract check that declares a `baseline_expectation`
 of `pass` or `fail` (checks with the default `skip` carry no baseline
@@ -3833,16 +3852,38 @@ from the immutable artifact tree, so the same plan's repeated runs are visible
 rather than collapsed by whichever `state.json` was overwritten last; running
 rows come from the live lock plus the latest `state.json` `active_turn`.
 
-State, event, and result records carry schema version 2: `state.json` and each
-turn `result.json` have a top-level `version: 2`, and every `events.jsonl`
-record carries `version: 2` on its envelope. Readers treat a missing `version`
-key as v1 and keep accepting those records. The persisted v2 `state.json` is a
-compact projection — per-turn `before`/`after` session lists and raw
-verification check stdout/stderr are dropped (bounded previews, byte counts,
-sha256 digests, and gzip artifact paths remain) — while each turn's
-`result.json` keeps full per-turn detail. No v2 state or event record embeds
-raw verification output; full failed-check output lives in the referenced
-`verification/*.gz` artifacts.
+`state.json` carries schema version 3: a top-level `version: 3` plus a nested
+`agent_mux` projection. Turn `result.json` files and `events.jsonl` envelopes
+stay at `version: 2`, and readers treat a missing `version` key as v1 and keep
+accepting those records. The persisted `state.json` is a compact projection —
+per-turn `before`/`after` session lists and raw verification check
+stdout/stderr are dropped (bounded previews, byte counts, sha256 digests, and
+gzip artifact paths remain) — while each turn's `result.json` keeps full
+per-turn detail. No state or event record embeds raw verification output; full
+failed-check output lives in the referenced `verification/*.gz` artifacts. A
+record that carries no projection is stamped `version: 2` rather than 3, which
+is what `asl compact` writes when it rewrites a legacy file: the version names
+what the record actually contains.
+
+The `agent_mux` block is the durable half of the AgentMux integration — the
+same canonical projection the lifecycle hook sends, written into the one atomic
+`state.json` replacement that every ASL state transition already performs, so a
+reader that has the state file has the projection at that exact transition. It
+carries its own `schema_version`, the run and plan identity, the derived phase
+(`starting`, `turn`, `verification`, `between`, `waiting`, `paused`, or
+`finished`), turn index, session ID, harness, the awaited question's *ID*, and a
+`process` birth identity (`pid` plus the kernel's start token, which survives
+pid reuse) that is present for live phases and `null` for `paused` and
+`finished`. It carries no question body, no prompt, no verification output, and
+no raw bridge diagnostics: the projection says where a run is, and the artifacts
+it names say what happened.
+
+Two counters advance independently and neither is derived from the other.
+`agent_mux_projection_generation` counts durable state transitions and is
+allocated inside the same lock that serializes the payload mutation and the
+write, so concurrent writers produce a gap-free monotonic sequence.
+`agent_mux_sequence` is the lifecycle *notification* source sequence and
+advances per hook emission, which is a different event than a state write.
 
 `cli-invocations-YYYY-MM-DD.jsonl` sits at the state root itself, beside the
 per-plan-hash directories, because a CLI invocation is not scoped to a plan. It

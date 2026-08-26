@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from . import agent_mux_projection
+
 START_EVENT = "AgentSessionLoopStarted"
 TURN_START_EVENT = "AgentSessionLoopTurnStarted"
 TURN_HEARTBEAT_EVENT = "AgentSessionLoopTurnHeartbeat"
@@ -57,20 +59,32 @@ MAILBOX_RESOLUTION_REASON = "mailbox_resolution_appended"
 PAUSE_REASON = "run_paused"
 FINISH_REASON = "run_finished"
 
+# Phase vocabulary is owned by ``agent_mux_projection`` so the durable
+# projection and this notification stream cannot disagree about what a phase
+# name means. The mapping below says which phase each boundary *announces*;
+# the projection derives the same vocabulary from persisted run state instead.
 PHASE_BY_EVENT: dict[str, str] = {
-    START_EVENT: "between",
-    TURN_START_EVENT: "turn",
-    TURN_HEARTBEAT_EVENT: "turn",
-    TURN_FINISH_EVENT: "between",
-    TURN_HANG_SUSPECTED_EVENT: "turn",
-    TURN_HANG_CLEARED_EVENT: "turn",
-    VERIFICATION_START_EVENT: "verification",
-    VERIFICATION_HEARTBEAT_EVENT: "verification",
-    VERIFICATION_FINISH_EVENT: "between",
-    WAIT_START_EVENT: "waiting",
-    WAIT_END_EVENT: "between",
-    PAUSE_EVENT: "paused",
-    FINISH_EVENT: "finished",
+    START_EVENT: agent_mux_projection.PHASE_BETWEEN,
+    TURN_START_EVENT: agent_mux_projection.PHASE_TURN,
+    TURN_HEARTBEAT_EVENT: agent_mux_projection.PHASE_TURN,
+    TURN_FINISH_EVENT: agent_mux_projection.PHASE_BETWEEN,
+    TURN_HANG_SUSPECTED_EVENT: agent_mux_projection.PHASE_TURN,
+    TURN_HANG_CLEARED_EVENT: agent_mux_projection.PHASE_TURN,
+    VERIFICATION_START_EVENT: agent_mux_projection.PHASE_VERIFICATION,
+    VERIFICATION_HEARTBEAT_EVENT: agent_mux_projection.PHASE_VERIFICATION,
+    VERIFICATION_FINISH_EVENT: agent_mux_projection.PHASE_BETWEEN,
+    WAIT_START_EVENT: agent_mux_projection.PHASE_WAITING,
+    WAIT_END_EVENT: agent_mux_projection.PHASE_BETWEEN,
+    # The three mailbox boundaries are emitted by the CLI rather than by the
+    # loop, and every one of them concerns a run that is blocked on an answer:
+    # the question that blocks it, the reply that will clear it, and the
+    # resolution that ends the wait. None of them observes the run resuming, so
+    # none may announce a phase that claims it has.
+    MAILBOX_QUESTION_EVENT: agent_mux_projection.PHASE_WAITING,
+    MAILBOX_REPLY_EVENT: agent_mux_projection.PHASE_WAITING,
+    MAILBOX_RESOLUTION_EVENT: agent_mux_projection.PHASE_WAITING,
+    PAUSE_EVENT: agent_mux_projection.PHASE_PAUSED,
+    FINISH_EVENT: agent_mux_projection.PHASE_FINISHED,
 }
 
 NOTIFY_TIMEOUT_SECONDS = 1.0
@@ -168,7 +182,13 @@ def build_loop_payload(
     emitted_at: datetime | None = None,
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the bounded lifecycle payload consumed by ``hook-indicator``."""
+    """Build the bounded lifecycle payload consumed by ``hook-indicator``.
+
+    ``event_name`` is what makes the result a schema-2 payload: it supplies the
+    declared event, the phase that boundary announces, and — with the version
+    and contract-set identity beside it — the block that lets a consumer decide
+    whether it understands the message before it reads the rest.
+    """
     hook_payload: dict[str, Any] = {
         "source": SOURCE,
         "reason": reason,
@@ -179,6 +199,7 @@ def build_loop_payload(
         "harness": loop_harness(payload, active_turn),
     }
     if event_name is not None:
+        hook_payload.update(agent_mux_projection.hook_identity(event_name))
         phase = PHASE_BY_EVENT.get(event_name)
         if phase is not None:
             hook_payload["phase"] = phase

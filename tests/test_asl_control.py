@@ -32,6 +32,7 @@ from unittest import mock
 
 from agent_session_loop import (
     agent_mux_delivery,
+    agent_mux_projection,
     cli,
     config,
     control_cli,
@@ -12017,6 +12018,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     "run_finished_at": "2026-06-11T12:00:03Z",
                     "source_sequence": "1",
                     "source_event_id": "run-123:1",
+                    "schema_version": agent_mux_projection.HOOK_SCHEMA_VERSION,
+                    "contract_set_id": agent_mux_projection.CONTRACT_SET_ID,
+                    "event": "AgentSessionLoopFinished",
                 },
                 hook_payload,
             )

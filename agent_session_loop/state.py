@@ -17,7 +17,7 @@ import shlex
 import socket
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    agent_mux_projection,
     artifacts,
     config,
     events,
@@ -2375,18 +2376,30 @@ class MigrationError(StateError):
         self.details = details or {}
 
 
+#: ``migrate-state`` relocates an orphaned state directory to the current
+#: plan's path hash, upgrades a state record to the current schema, or both.
+MIGRATION_MODE_RELOCATE = "relocate"
+MIGRATION_MODE_UPGRADE = "upgrade"
+
+
 @dataclass(frozen=True)
 class MigrationReport:
     """Outcome of migrating one plan's operational state directory."""
 
     plan_dir: str
-    from_plan_dir: str
+    from_plan_dir: str | None
     state_dir: str
     from_state_dir: str
     applied: bool
     rewritten_fields: tuple[str, ...]
     result_artifacts: int
     unmigrated_artifacts_note: str | None
+    mode: str = MIGRATION_MODE_RELOCATE
+    schema_version_before: int | None = None
+    schema_version_after: int | None = None
+    schema_upgraded: bool = False
+    projection_written: bool = False
+    schema_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2400,6 +2413,12 @@ class MigrationReport:
             "rewritten_fields": list(self.rewritten_fields),
             "result_artifacts": self.result_artifacts,
             "unmigrated_artifacts_note": self.unmigrated_artifacts_note,
+            "mode": self.mode,
+            "schema_version_before": self.schema_version_before,
+            "schema_version_after": self.schema_version_after,
+            "schema_upgraded": self.schema_upgraded,
+            "projection_written": self.projection_written,
+            "schema_note": self.schema_note,
         }
 
 
@@ -2408,10 +2427,220 @@ def _dump_state_bytes(payload: dict[str, Any]) -> bytes:
     return (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 
+def state_schema_version(state_obj: Mapping[str, Any]) -> int | None:
+    """Return the declared state schema version.
+
+    ``None`` means the record declares nothing, which the format has always
+    read as v1, and ``-1`` stands for a ``version`` key this build cannot
+    interpret at all — a future version, or a non-integer. The two are kept
+    apart because the first is a record this build knows how to upgrade and the
+    second is one it must refuse to touch.
+    """
+    if "version" not in state_obj:
+        return None
+    raw = state_obj["version"]
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return -1
+    return raw
+
+
+def _upgrade_state_object(
+    state_obj: dict[str, Any],
+    *,
+    now: datetime,
+) -> tuple[dict[str, Any], bool]:
+    """Return ``(upgraded object, projection written)`` for one state record.
+
+    The projection is built from the persisted state alone and never names a
+    process: whatever ran this record's loop is not this migrator, and a
+    ``(pid, start token)`` pair it cannot observe is not one it may assert. A
+    paused or terminal record would clear the process anyway; a record that
+    still reads as live gets a null process, which says "no live owner is
+    claimed here" rather than making one up.
+    """
+    upgraded = dict(state_obj)
+    upgraded.pop(agent_mux_projection.PROJECTION_KEY, None)
+    projection = agent_mux_projection.attach_projection(
+        upgraded,
+        updated_at=now.isoformat(),
+        detect_process=False,
+    )
+    if projection is None:
+        return upgraded, False
+    upgraded["version"] = agent_mux_projection.STATE_SCHEMA_VERSION
+    return upgraded, True
+
+
+def upgrade_plan_state_schema(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+    apply: bool = False,
+) -> MigrationReport:
+    """Upgrade one plan's ``state.json`` to the current schema, in place.
+
+    Reads an absent-version, v1, or v2 record and rewrites it as v3: the same
+    evidence, plus the nested body-free ``agent_mux`` projection built from it.
+    Nothing else in the record is touched — no turn, no snapshot, no pause
+    evidence, no path — so a paused run stays paused with its pause details
+    intact and a terminal run keeps the ending it recorded.
+
+    Idempotent by construction: a record already at v3 is reported and left
+    alone, so re-running is a no-op rather than a second generation bump.
+
+    Refuses a record whose ``version`` this build cannot interpret, a record
+    with too little identity to project, and — the case that matters most — a
+    run whose lock is still live. An old process holds its state payload in
+    memory and rewrites the whole file on its next transition, so upgrading
+    underneath it would be silently reverted; worse, that process emits schema-1
+    lifecycle hooks a v3 consumer will not recognise. Such a run is reported as
+    incompatible and left for its operator to stop.
+    """
+    canonical_plan_dir = plans.canonicalize_path(plan_dir)
+    plan_state = plan_state_dir(canonical_plan_dir, state_dir)
+    state_path = plan_state / events.STATE_FILE_NAME
+    if not plan_state.is_dir() or not state_path.is_file():
+        raise MigrationError(
+            "no-source-state",
+            f"no state to upgrade at {plan_state}",
+            {"state_dir": str(plan_state), "state_path": str(state_path)},
+        )
+
+    state_obj = _read_json_object_safe(state_path)
+    if state_obj is None:
+        raise MigrationError(
+            "malformed-source-state",
+            f"state file is not a JSON object: {state_path}",
+            {"state_path": str(state_path)},
+        )
+
+    version = state_schema_version(state_obj)
+    current = agent_mux_projection.STATE_SCHEMA_VERSION
+    upgradable = version in agent_mux_projection.UPGRADABLE_STATE_SCHEMA_VERSIONS
+    if version is not None and version != current and not upgradable:
+        known = ", ".join(
+            str(each) for each in agent_mux_projection.UPGRADABLE_STATE_SCHEMA_VERSIONS
+        )
+        raise MigrationError(
+            "unknown-schema-version",
+            f"state records schema version {state_obj['version']!r}, which this "
+            f"build cannot upgrade; it understands absent, {known} and {current}",
+            {"state_path": str(state_path), "schema_version": state_obj["version"]},
+        )
+
+    lock = _read_lock_path(plan_state / LOCK_FILE_NAME, canonical_plan_dir)
+    live = lock is not None and lock.active
+
+    def _report(
+        *,
+        applied: bool,
+        version_after: int | None,
+        upgraded: bool,
+        projection_written: bool,
+        note: str | None,
+    ) -> MigrationReport:
+        return MigrationReport(
+            plan_dir=str(canonical_plan_dir),
+            from_plan_dir=None,
+            state_dir=str(plan_state),
+            from_state_dir=str(plan_state),
+            applied=applied,
+            rewritten_fields=(),
+            result_artifacts=0,
+            unmigrated_artifacts_note=None,
+            mode=MIGRATION_MODE_UPGRADE,
+            schema_version_before=version,
+            schema_version_after=version_after,
+            schema_upgraded=upgraded,
+            projection_written=projection_written,
+            schema_note=note,
+        )
+
+    if version == current:
+        # Already current. Reported rather than refused, and reported the same
+        # way whether or not a run holds the lock: nothing here would change.
+        return _report(
+            applied=False,
+            version_after=current,
+            upgraded=False,
+            projection_written=isinstance(
+                state_obj.get(agent_mux_projection.PROJECTION_KEY), dict
+            ),
+            note=f"state is already at schema version {current}; nothing to upgrade",
+        )
+
+    if live:
+        raise MigrationError(
+            "incompatible-active-run",
+            f"plan is locked by pid {lock.pid} and its state is at schema "
+            f"version {'absent' if version is None else version}, not {current}; "
+            "that run predates this build's projection and cannot be upgraded "
+            "underneath itself — stop it, then re-run this command",
+            {
+                "lock_path": str(lock.path),
+                "pid": lock.pid,
+                "schema_version": version,
+                "expected_schema_version": current,
+                "incompatible_active_run": True,
+            },
+        )
+
+    upgraded_obj, projection_written = _upgrade_state_object(
+        state_obj, now=datetime.now(UTC)
+    )
+    if not projection_written:
+        raise MigrationError(
+            "unprojectable-state",
+            f"state at {state_path} records no run identity (run_id, plan_dir "
+            "and run_started_at are all required), so no projection can be "
+            f"built for it; it stays at schema version "
+            f"{'absent' if version is None else version}",
+            {"state_path": str(state_path), "schema_version": version},
+        )
+
+    if not apply:
+        return _report(
+            applied=False,
+            version_after=current,
+            upgraded=True,
+            projection_written=True,
+            note=(
+                f"schema version {'absent' if version is None else version} → "
+                f"{current}; re-run with --apply to write it"
+            ),
+        )
+
+    artifacts.atomic_write_bytes(
+        state_path, _dump_state_bytes(upgraded_obj), durable=True
+    )
+    events.append_event(
+        plan_state / events.EVENTS_FILE_NAME,
+        events.Event(
+            STATE_MIGRATED_EVENT,
+            {
+                "plan_dir": str(canonical_plan_dir),
+                "state_dir": str(plan_state),
+                "from_schema_version": version,
+                "to_schema_version": current,
+                "projection_generation": upgraded_obj[
+                    agent_mux_projection.PROJECTION_KEY
+                ]["projection_generation"],
+            },
+        ),
+    )
+    return _report(
+        applied=True,
+        version_after=current,
+        upgraded=True,
+        projection_written=True,
+        note=(f"schema version {'absent' if version is None else version} → {current}"),
+    )
+
+
 def migrate_plan_state(
     plan_dir: str | Path,
     *,
-    from_plan_dir: str | Path,
+    from_plan_dir: str | Path | None = None,
     state_dir: str | Path | None = None,
     apply: bool = False,
 ) -> MigrationReport:
@@ -2425,6 +2654,15 @@ def migrate_plan_state(
     ``unmigrated_artifacts_note``. The default is a dry-run; ``apply`` performs
     the rename, rewrite, and ``state_migrated`` event append.
 
+    ``from_plan_dir=None`` selects the schema upgrade instead: see
+    :func:`upgrade_plan_state_schema`. With a source plan named, the relocated
+    record is opportunistically upgraded in the same rewrite — it is being
+    written anyway, and leaving it a version behind would only require a second
+    command. That upgrade is best-effort here: a legacy record too thin to
+    project keeps its old version and is reported, because a stranded state
+    directory's paths are worth restoring whether or not it can carry a
+    projection.
+
     Refuses (in both dry-run and apply, before touching either directory) on a
     source plan directory that still exists on disk (its state is not orphaned),
     an active source lock, an already-occupied destination, a target that is not
@@ -2433,6 +2671,8 @@ def migrate_plan_state(
     content check prefers ``final_snapshot.content_sha256`` and falls back to
     ``initial_snapshot.content_sha256`` only for legacy state.
     """
+    if from_plan_dir is None:
+        return upgrade_plan_state_schema(plan_dir, state_dir=state_dir, apply=apply)
     # Inspecting the target validates it is a real plan (raising PlanError,
     # surfaced as ``malformed-plan``) and yields the content hash the source
     # state must be compatible with.
@@ -2554,7 +2794,48 @@ def migrate_plan_state(
         field for field in _MIGRATION_PATH_FIELDS if field in state_obj
     )
 
+    # The relocated record is rewritten anyway, so bring its schema forward in
+    # the same write rather than leaving a second command to run. Best-effort:
+    # an unrecognised version or a record too thin to project keeps its version
+    # and is reported, because restoring a stranded state directory's paths is
+    # worth doing either way.
+    version_before = state_schema_version(state_obj)
+    current_version = agent_mux_projection.STATE_SCHEMA_VERSION
+    upgradable = (
+        version_before is None
+        or version_before in agent_mux_projection.UPGRADABLE_STATE_SCHEMA_VERSIONS
+    )
+
     if not apply:
+        note: str | None = None
+        upgraded_preview = False
+        projection_preview = False
+        if version_before == current_version:
+            note = f"state is already at schema version {current_version}"
+            projection_preview = isinstance(
+                state_obj.get(agent_mux_projection.PROJECTION_KEY), dict
+            )
+        elif not upgradable:
+            note = (
+                f"state records schema version {state_obj.get('version')!r}, which "
+                "this build cannot upgrade; relocation leaves it unchanged"
+            )
+        else:
+            # Discarding the upgraded object: the dry-run only needs to know
+            # whether the record carries enough identity to be projected.
+            projection_preview = _upgrade_state_object(
+                state_obj, now=datetime.now(UTC)
+            )[1]
+            upgraded_preview = projection_preview
+            shown = "absent" if version_before is None else version_before
+            note = (
+                f"schema version {shown} → {current_version}"
+                if projection_preview
+                else (
+                    f"state records no run identity, so no projection can be built; "
+                    f"it stays at schema version {shown}"
+                )
+            )
         return MigrationReport(
             plan_dir=str(new_plan_dir),
             from_plan_dir=str(old_plan_dir),
@@ -2564,6 +2845,13 @@ def migrate_plan_state(
             rewritten_fields=rewritten_fields,
             result_artifacts=result_artifacts,
             unmigrated_artifacts_note=unmigrated_note,
+            schema_version_before=version_before,
+            schema_version_after=(
+                current_version if upgraded_preview else version_before
+            ),
+            schema_upgraded=upgraded_preview,
+            projection_written=projection_preview,
+            schema_note=note,
         )
 
     new_state_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -2585,21 +2873,56 @@ def migrate_plan_state(
     for field, value in field_targets.items():
         if field in migrated:
             migrated[field] = value
+
+    # Project after the path rewrite so the projection names where the state
+    # now lives, not where it was stranded.
+    schema_note: str | None = None
+    projection_written = isinstance(
+        migrated.get(agent_mux_projection.PROJECTION_KEY), dict
+    )
+    schema_upgraded = False
+    version_after = version_before
+    if version_before == current_version:
+        schema_note = f"state was already at schema version {current_version}"
+    elif not upgradable:
+        schema_note = (
+            f"state records schema version {migrated.get('version')!r}, which this "
+            "build cannot upgrade; it was relocated unchanged"
+        )
+    else:
+        migrated, projection_written = _upgrade_state_object(
+            migrated, now=datetime.now(UTC)
+        )
+        shown = "absent" if version_before is None else version_before
+        if projection_written:
+            schema_upgraded = True
+            version_after = current_version
+            schema_note = f"schema version {shown} → {current_version}"
+        else:
+            schema_note = (
+                "state records no run identity, so no projection could be built; "
+                f"it stays at schema version {shown}"
+            )
+
     artifacts.atomic_write_bytes(
         new_state_path, _dump_state_bytes(migrated), durable=True
     )
 
+    migrated_details: dict[str, Any] = {
+        "from_plan_dir": str(old_plan_dir),
+        "to_plan_dir": str(new_plan_dir),
+        "from_state_dir": str(old_state_dir),
+        "to_state_dir": str(new_state_dir),
+    }
+    if schema_upgraded:
+        migrated_details["from_schema_version"] = version_before
+        migrated_details["to_schema_version"] = current_version
+        migrated_details["projection_generation"] = migrated[
+            agent_mux_projection.PROJECTION_KEY
+        ]["projection_generation"]
     events.append_event(
         new_events_path,
-        events.Event(
-            STATE_MIGRATED_EVENT,
-            {
-                "from_plan_dir": str(old_plan_dir),
-                "to_plan_dir": str(new_plan_dir),
-                "from_state_dir": str(old_state_dir),
-                "to_state_dir": str(new_state_dir),
-            },
-        ),
+        events.Event(STATE_MIGRATED_EVENT, migrated_details),
     )
 
     return MigrationReport(
@@ -2611,22 +2934,38 @@ def migrate_plan_state(
         rewritten_fields=rewritten_fields,
         result_artifacts=result_artifacts,
         unmigrated_artifacts_note=unmigrated_note,
+        schema_version_before=version_before,
+        schema_version_after=version_after,
+        schema_upgraded=schema_upgraded,
+        projection_written=projection_written,
+        schema_note=schema_note,
     )
 
 
 def _print_migration_report(report: MigrationReport) -> None:
-    mode = "applied" if report.applied else "dry-run"
-    print(f"Migrate state ({mode})")
-    print(f"From plan: {report.from_plan_dir}")
-    print(f"To plan:   {report.plan_dir}")
-    print(f"From state dir: {report.from_state_dir}")
-    print(f"To state dir:   {report.state_dir}")
+    outcome = "applied" if report.applied else "dry-run"
+    upgrade_only = report.mode == MIGRATION_MODE_UPGRADE
+    print(f"{'Upgrade' if upgrade_only else 'Migrate'} state ({outcome})")
+    if upgrade_only:
+        print(f"Plan:      {report.plan_dir}")
+        print(f"State dir: {report.state_dir}")
+    else:
+        print(f"From plan: {report.from_plan_dir}")
+        print(f"To plan:   {report.plan_dir}")
+        print(f"From state dir: {report.from_state_dir}")
+        print(f"To state dir:   {report.state_dir}")
     if report.rewritten_fields:
         print(f"Rewritten fields: {', '.join(report.rewritten_fields)}")
+    if report.schema_note:
+        print(f"Schema: {report.schema_note}")
     if report.unmigrated_artifacts_note:
         print(report.unmigrated_artifacts_note)
     if not report.applied:
-        print("Re-run with --apply to migrate the state directory.")
+        if upgrade_only:
+            if report.schema_upgraded:
+                print("Re-run with --apply to write the upgraded state file.")
+        else:
+            print("Re-run with --apply to migrate the state directory.")
 
 
 def _migrate_state_error_reason(error: Exception) -> str:
@@ -2641,10 +2980,11 @@ def _migrate_state_error_reason(error: Exception) -> str:
 
 def migrate_state_from_args(args: argparse.Namespace) -> int:
     """CLI handler for ``asl migrate-state``."""
+    from_plan_dir = getattr(args, "from_plan_dir", None)
     try:
         report = migrate_plan_state(
             args.plan_dir,
-            from_plan_dir=args.from_plan_dir,
+            from_plan_dir=from_plan_dir,
             state_dir=getattr(args, "state_dir", None),
             apply=args.apply,
         )
@@ -2658,7 +2998,9 @@ def migrate_state_from_args(args: argparse.Namespace) -> int:
                     paused=False,
                     details=getattr(error, "details", {}),
                     plan_dir=str(args.plan_dir),
-                    from_plan_dir=str(args.from_plan_dir),
+                    from_plan_dir=(
+                        None if from_plan_dir is None else str(from_plan_dir)
+                    ),
                 )
             )
         else:

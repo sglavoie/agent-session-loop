@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from agent_session_loop import (
+    agent_mux_projection,
     artifacts,
     compact_state,
     events,
@@ -121,13 +122,40 @@ class StateCompactionTests(unittest.TestCase):
         )
 
         payload = json.loads(state_path.read_text(encoding="utf-8"))
-        self.assertEqual(runner.STATE_SCHEMA_VERSION, payload["version"])
+        # Compaction performs the v2 output bounding and nothing more. It does
+        # not attach an AgentMux projection, so it must not claim the v3 that
+        # promises one; ``asl migrate-state`` is what upgrades this record.
+        self.assertEqual(runner.COMPACT_STATE_SCHEMA_VERSION, payload["version"])
+        self.assertNotIn(agent_mux_projection.PROJECTION_KEY, payload)
         turn = payload["turns"][0]
         self.assertNotIn("sessions", turn["before"])
         self.assertNotIn("sessions", turn["after"])
         check = turn["verification"]["checks"][0]
         self.assertNotIn("stdout", check)
         self.assertNotIn("stderr", check)
+
+    def test_apply_keeps_schema_v3_when_a_projection_is_present(self) -> None:
+        # A record a state transition already projected keeps its version and
+        # its projection: compaction bounds output, it does not demote schemas.
+        projection = {
+            "schema_version": agent_mux_projection.PROJECTION_SCHEMA_VERSION,
+            "run_id": "r",
+        }
+        state_path = self._write_state(
+            {
+                "run_id": "r",
+                "turns": [self._v1_turn()],
+                agent_mux_projection.PROJECTION_KEY: projection,
+            }
+        )
+
+        compact_state.compact_plan_state(
+            self.plan_dir, state_dir=self.state_dir, apply=True
+        )
+
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(runner.STATE_SCHEMA_VERSION, payload["version"])
+        self.assertEqual(projection, payload[agent_mux_projection.PROJECTION_KEY])
 
     def test_compaction_preserves_unknown_top_level_run_config(self) -> None:
         # ``run_config`` is an additive top-level key the runner persists for

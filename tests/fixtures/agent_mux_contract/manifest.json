@@ -104,8 +104,8 @@
           "schema_version": 2
         },
         "lifecycle_hook": {
-          "digest": "dafca9e877da05da4e4a7803318c818522e665851ae749970d7285b4bd12747d",
-          "fixture_count": 11,
+          "digest": "aff23bf930342036358bf7022bbddd0842ade1d9257e6275ed552d812e4f70b7",
+          "fixture_count": 13,
           "max_document_bytes": 8192,
           "roots": [
             "hook_payload"
@@ -115,7 +115,7 @@
         },
         "projection": {
           "digest": "37db4d9877d522de5e868118b5bbcc00c9d943e48cb70a3b99c79a01a6d4e79d",
-          "fixture_count": 11,
+          "fixture_count": 12,
           "max_document_bytes": 4096,
           "roots": [
             "projection"
@@ -124,12 +124,12 @@
           "schema_version": 1
         }
       },
-      "contract_set_id": "asl-amx-1.a36b4fe66ddedcac",
-      "corpus_digest": "a36b4fe66ddedcac8de11fcfd6d4737ea60a52da9b22b69a9d67e7f3485583f1",
+      "contract_set_id": "asl-amx-1.09f9ea5c5ceaa6cd",
+      "corpus_digest": "09f9ea5c5ceaa6cdf68b84b231ac0f2f59b2ddb0e6f67e2861a497b320be5ed8",
       "status": "current"
     }
   ],
-  "current_contract_set_id": "asl-amx-1.a36b4fe66ddedcac",
+  "current_contract_set_id": "asl-amx-1.09f9ea5c5ceaa6cd",
   "files": {
     "fixtures/bridge-protocol-v2/invalid/error-unknown-code.json": "d7137e07022b3ad8c5d67e421088de01dc6bb0c33137130f68b06bcbadc81459",
     "fixtures/bridge-protocol-v2/invalid/hello-protocol-1.json": "9f89f9d6919a5f5eaab4f47b501925cadcaf4c6442822d3fd1291feabc4766e7",
@@ -158,8 +158,10 @@
     "fixtures/lifecycle-hook-v2/invalid/reply-text-leak.json": "f1c2af0a8bdaaee35eded7ff63db525fe0f3c629025eb519a150ffda61df622b",
     "fixtures/lifecycle-hook-v2/invalid/unknown-field.json": "3d212ffe9bc6c3745a4963c72684b807c7a689340914332e050fb909402b8a57",
     "fixtures/lifecycle-hook-v2/invalid/zulu-timestamp.json": "0305baba8e081bdcc5eb3a3868d45797428c90abd425894110a1ffc6b5089af9",
+    "fixtures/lifecycle-hook-v2/valid/mailbox-question.json": "e7eb8c1d72de41829c60e4ac1e93989cd7dc4f48c9542b1539571877ec7eb71e",
     "fixtures/lifecycle-hook-v2/valid/run-finished.json": "ed399cbc3c2a3b45cc89805e2ac7b3a306716263bbb696479fb3f91b3c1909cb",
     "fixtures/lifecycle-hook-v2/valid/turn-started.json": "9773dbe86b92641422a46ddf8d409ed71f2ade13a9c7a20fdd2d2c09e4e4f231",
+    "fixtures/lifecycle-hook-v2/valid/verification-finished.json": "9d99d5e9f20f30ebbb72b3b86eed7fec4df8a3942bb4dc19021d499c1b540951",
     "fixtures/lifecycle-hook-v2/valid/wait-started.json": "3042c58ee2ef3407279626e3157d0396a35631fbc5aafaca829e571b16156f2a",
     "fixtures/projection-v1/invalid/invalid-phase.json": "049627efbb58819aa00f1b17b2ff678d7900a39957877f22bbc1a326c45bc42b",
     "fixtures/projection-v1/invalid/missing-updated-at.json": "3131c14853ceacbbf0388896d85e97433178dacd2cd9054d7f46b5b710ae2e9e",
@@ -172,8 +174,9 @@
     "fixtures/projection-v1/valid/awaiting-reply.json": "448dbd3d40783e62e81661db3ad41185b88110f71bea9df9573ac9d1cbc3e988",
     "fixtures/projection-v1/valid/finished-unregistered.json": "cd313643872b3c20987d995d3bedcf46230e4c566d4460510917c68ef7cadc39",
     "fixtures/projection-v1/valid/live-turn.json": "b6a92136d9784a5f3e7b460a594771b1b334e2cc5867dbc4c6556deaced211b1",
+    "fixtures/projection-v1/valid/paused-after-finish.json": "b939f07b7e91511850c0427d7af579e0a139cf79a6780c12929185af589691cc",
     "schemas/bridge-protocol-v2.json": "e3b52edc334475d6de249231560898b7a2d6dd7ff4970dd1d67f7037c696e38a",
-    "schemas/lifecycle-hook-v2.json": "dafca9e877da05da4e4a7803318c818522e665851ae749970d7285b4bd12747d",
+    "schemas/lifecycle-hook-v2.json": "aff23bf930342036358bf7022bbddd0842ade1d9257e6275ed552d812e4f70b7",
     "schemas/projection-v1.json": "37db4d9877d522de5e868118b5bbcc00c9d943e48cb70a3b99c79a01a6d4e79d"
   },
   "generated_by": "python3 -m agent_session_loop.agent_mux_contract --write",
