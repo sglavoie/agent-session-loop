@@ -1913,6 +1913,25 @@ and is never discharged. Both reasons classify as `inspect` rather than `reply`,
 since no mailbox answer makes a failing gate pass, and both carry a preflight
 repair hint in `action_required.remediation` naming the pause details to read.
 
+That policy and the lanes feeding it are declared rather than coded as
+branches. `agent_session_loop/verification_transitions.py` holds the
+per-session verification machine (`scheduled` into `contract-ready`,
+`running`, and the settled `passed`, `deferred`, `failed`, `unenforced`, and
+`refused`) together with the single terminal adjudicator above, so the
+required-check and final-review clauses live beside the states whose evidence
+they read and no path can grow a second definition of success.
+`agent_session_loop/review_transitions.py` holds the review-verdict machine
+(`submitted`, `retrying`, and the settled `accepted`, `exhausted`, `declined`)
+and the review-cycle machine (`reviewed`, `materializing`, and the settled
+`settled`, `reopened`, `refused`), which makes review exhaustion, deferral,
+repeated findings, the per-group repair cap, and rereview named states rather
+than conditions. Both build on the shared `transitions.py`, whose machines
+validate their own tables and raise `IllegalTransitionError` on any undeclared
+step, so an out-of-order verification or review step fails loudly instead of
+falling through. The modules return frozen decisions only; pausing, reverting,
+and every durable write stay in the runner, and the durable event and result
+schemas are unchanged.
+
 Optional post-run assurance stays advisory and never blocks. A run whose audit
 landed `unavailable` or `partial` keeps the success it earned and carries an
 additive `assurance_degraded` block naming `assurance_state`, `reason`,

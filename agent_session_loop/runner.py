@@ -69,6 +69,7 @@ from . import (
     review,
     review_continuation,
     review_repair,
+    review_transitions,
     run_contention,
     run_control,
     run_flags,
@@ -77,6 +78,7 @@ from . import (
     tail,
     turn_execution,
     verification,
+    verification_transitions,
     workspaces,
 )
 from .formatting import (
@@ -353,28 +355,22 @@ MAILBOX_REPLY_WAIT_POLL_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_POLL_SECONDS"
 MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS"
 _MAILBOX_TOKEN_UNSEEN = object()
 
-# Verification-repair loop control. A verify-failed session is reverted to
-# ``pending`` and paused; the autopilot relaunches it. To stop an identical
-# failure from looping forever, the runner fingerprints each verification
-# failure and marks the repair *exhausted* once the fingerprint repeats a prior
-# failure for the same session, or once the total number of verify-failures for
-# the session exceeds :data:`MAX_VERIFICATION_REPAIR_ATTEMPTS`. A *changed*
-# failure (new fingerprint) is still eligible for another repair attempt within
-# that cap. The autopilot honors the recorded ``verification_repair_exhausted``
-# flag and stops relaunching.
-MAX_VERIFICATION_REPAIR_ATTEMPTS = 2
-VERIFICATION_FINGERPRINT_PREFIX = "verify-failed"
-
-# Review-verdict repair loop control. A review turn whose ``final-review``
-# artifacts fail validation is reverted to ``pending`` and re-run *in the same
-# run*, with the exact validation error fed back through the task packet, so a
-# malformed artifact costs one extra turn instead of a human relaunch. Bounded
-# exactly like the verification-repair loop above: an identical error (repeated
-# fingerprint) or more than :data:`MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS` retries
-# within the current review cycle falls back to the ``verify-failed`` pause and
-# records ``review_verdict_repair_exhausted``.
-MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS = 2
-REVIEW_VERDICT_FINGERPRINT_PREFIX = "review-verdict"
+# Verification-repair and review-verdict-repair loop control. Both budgets and
+# both fingerprint prefixes are declared beside the transitions that spend them
+# — :mod:`agent_session_loop.verification_transitions` and
+# :mod:`agent_session_loop.review_transitions` — and are re-exported here for
+# the runner's own call sites and for the tooling that reads them off this
+# module.
+MAX_VERIFICATION_REPAIR_ATTEMPTS = (
+    verification_transitions.MAX_VERIFICATION_REPAIR_ATTEMPTS
+)
+VERIFICATION_FINGERPRINT_PREFIX = (
+    verification_transitions.VERIFICATION_FINGERPRINT_PREFIX
+)
+MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS = (
+    review_transitions.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS
+)
+REVIEW_VERDICT_FINGERPRINT_PREFIX = review_transitions.REVIEW_VERDICT_FINGERPRINT_PREFIX
 
 # Post-turn handoff correction control. A completed handoff whose ``Files
 # modified`` line is mechanically malformed — missing, still carrying the
@@ -720,14 +716,13 @@ _GENERATED_REVIEW_ARTIFACT_VERIFY_SOURCE = "\n".join(
 
 
 #: Prefix distinguishing a gate replayed from another session's contract from
-#: the review's own artifact validators.
-BROAD_REVIEW_CHECK_PREFIX = "broad"
-
-#: A findings review may truthfully finish with broad gates still failing: the
-#: findings are the repair specification for those failures.  The raw check
-#: result stays failed; this reason records why the review turn itself was
-#: accepted into the repair/rereview cycle.
-REVIEW_BROAD_FAILURES_DEFERRED_REASON = "findings-defer-broad-failures"
+#: the review's own artifact validators, and the reason a findings review's
+#: deferral of those gates records. Both are declared beside the deferral
+#: policy in :mod:`agent_session_loop.verification_transitions`.
+BROAD_REVIEW_CHECK_PREFIX = verification_transitions.BROAD_REVIEW_CHECK_PREFIX
+REVIEW_BROAD_FAILURES_DEFERRED_REASON = (
+    verification_transitions.REVIEW_BROAD_FAILURES_DEFERRED_REASON
+)
 
 
 def _broad_review_verification_checks(plan_dir: Path) -> list[dict[str, Any]]:
@@ -8155,26 +8150,37 @@ def _attach_assurance_report(
 #: so a blocker clears only when the evidence that produced it changes. The
 #: vocabulary itself lives in :mod:`agent_session_loop.events` with every other
 #: pause reason; these are the runner's names for the same two atoms.
-REQUIRED_CHECKS_INCOMPLETE_REASON = events.PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE
-REVIEW_NOT_CLEAR_REASON = events.PAUSE_REASON_REVIEW_NOT_CLEAR
+REQUIRED_CHECKS_INCOMPLETE_REASON = (
+    verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON
+)
+REVIEW_NOT_CLEAR_REASON = verification_transitions.REVIEW_NOT_CLEAR_REASON
 
 #: Terminal reasons that assert the plan's own work is finished. Only these
 #: claim a final review; ``stopped`` and ``max-sessions`` report an early exit
 #: an operator asked for and never pretend the plan was reviewed to the end.
-_PLAN_COMPLETION_REASONS = frozenset({"all-complete"})
+_PLAN_COMPLETION_REASONS = verification_transitions.PLAN_COMPLETION_REASONS
 
 #: Assurance states that leave the optional post-run audit unable to speak.
 #: ``skipped`` is a settled decision not to audit and is not a degradation.
 _DEGRADED_ASSURANCE_STATES = frozenset({"unavailable", "partial"})
 
-
-@dataclass(frozen=True)
-class _TerminalBlocker:
-    """One reason a terminating run may not report the success it reached."""
-
-    reason: str
-    message: str
-    details: dict[str, Any]
+#: Session 2's terminal success policy, now declared beside the verification
+#: states it reads. Bound here because the run's terminal paths and the suite's
+#: patch targets resolve it off the runner.
+_TerminalBlocker = verification_transitions.TerminalBlocker
+_accepted_broad_failure_deferral = (
+    verification_transitions.accepted_broad_failure_deferral
+)
+_recorded_review_cycles = verification_transitions.recorded_review_cycles
+_unresolved_deferred_verifications = (
+    verification_transitions.unresolved_deferred_verifications
+)
+_read_verification_finished_events = (
+    verification_transitions.read_verification_finished_events
+)
+_unpassed_run_verifications = verification_transitions.unpassed_run_verifications
+_final_review_is_clear = verification_transitions.final_review_is_clear
+_terminal_blocker = verification_transitions.terminal_blocker
 
 
 @dataclass(frozen=True)
@@ -8204,232 +8210,6 @@ class _TerminalAdjudication:
             "reason": None if self.blocker is None else self.blocker.reason,
             "details": {} if self.blocker is None else self.blocker.details,
         }
-
-
-def _accepted_broad_failure_deferral(
-    verification_payload: Mapping[str, Any],
-) -> Mapping[str, Any] | None:
-    """Return a structurally valid broad-failure deferral, else ``None``.
-
-    Validated rather than trusted even though this process wrote it: a run
-    resumed over an older event log reads acceptances a previous build
-    produced, and an acceptance whose shape cannot be checked is not evidence
-    that the failures under it were ever owed to a repair loop.
-    """
-    acceptance = verification_payload.get("acceptance")
-    if not isinstance(acceptance, Mapping):
-        return None
-    names = acceptance.get("deferred_failure_names")
-    if not isinstance(names, (list, tuple)) or not names:
-        return None
-    prefix = f"{BROAD_REVIEW_CHECK_PREFIX}:"
-    if any(not isinstance(name, str) or not name.startswith(prefix) for name in names):
-        return None
-    if not (
-        acceptance.get("accepted") is True
-        and acceptance.get("reason") == REVIEW_BROAD_FAILURES_DEFERRED_REASON
-        and acceptance.get("review_outcome") == review.REVIEW_OUTCOME_FINDINGS
-        and acceptance.get("deferred_failure_count") == len(names)
-    ):
-        return None
-    return acceptance
-
-
-def _recorded_review_cycles(
-    payload: Mapping[str, Any], event_path: Path
-) -> list[dict[str, Any]]:
-    """Every review cycle this plan has recorded, oldest first.
-
-    The append-only event log is authoritative because it spans runs: a
-    deferral opened by one run is discharged by the all-clear a *later* run
-    records, and reading only this run's projection would call that deferral
-    unearned forever. The live projection is the fallback for a run whose
-    events are not being persisted (a dry run, a reply-only invocation).
-    """
-    try:
-        cycles = review_continuation.read_prior_review_cycles(event_path)
-    except OSError:
-        cycles = []
-    if cycles:
-        return cycles
-    projected = payload.get("review_cycles")
-    if not isinstance(projected, list):
-        return []
-    return [dict(item) for item in projected if isinstance(item, Mapping)]
-
-
-def _unresolved_deferred_verifications(
-    payload: Mapping[str, Any], event_path: Path
-) -> list[dict[str, Any]]:
-    """Broad-check failures a review deferred and no later review closed.
-
-    A findings review is allowed to finish with the plan's own gates still
-    failing: those failures *are* the repair specification the findings
-    describe. What the deferral buys is a delay, redeemed only by a later
-    all-clear review of the repaired tree. This finds the deferrals that were
-    never redeemed, which is the one way a run can reach a terminal ending with
-    a recorded required-check failure and no pause naming it.
-
-    Deferrals are read from the event log rather than from this run's turns, so
-    a run resumed after the deferral was opened re-evaluates the same blocker
-    instead of forgetting it.
-    """
-    cycles = _recorded_review_cycles(payload, event_path)
-    unresolved: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for record in _read_verification_finished_events(event_path):
-        acceptance = _accepted_broad_failure_deferral(record)
-        if acceptance is None or record.get("passed") is not False:
-            continue
-        session_id = str(record.get("session_id") or record.get("session") or "")
-        run_id = str(record.get("run_id") or "")
-        if (run_id, session_id) in seen:
-            continue
-        seen.add((run_id, session_id))
-        if review_continuation.deferred_review_is_cleared(
-            cycles, review_session_id=session_id
-        ):
-            continue
-        unresolved.append(
-            {
-                "run_id": run_id or None,
-                "session_id": session_id or None,
-                "turn_index": record.get("turn_index"),
-                "checks": list(acceptance.get("deferred_failure_names") or ()),
-                "review_outcome": acceptance.get("review_outcome"),
-            }
-        )
-    return unresolved
-
-
-def _read_verification_finished_events(event_path: str | Path) -> list[dict[str, Any]]:
-    """Return every ``verification_finished`` payload this plan recorded.
-
-    Reads the append-only ``events.jsonl`` log, which spans ``asl run``
-    invocations, oldest first. Malformed lines are skipped the way every other
-    reader of this log skips them.
-    """
-    try:
-        text = Path(event_path).read_text(encoding="utf-8")
-    except OSError:
-        return []
-    finished: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        if record.get("name") != events.VERIFICATION_FINISHED_EVENT:
-            continue
-        payload = record.get("payload")
-        if isinstance(payload, dict):
-            finished.append(payload)
-    return finished
-
-
-def _unpassed_run_verifications(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """This run's turn verifications that neither passed nor were deferred.
-
-    Every such failure already pauses the run where it happens, so this is the
-    backstop rather than the detector: it exists so that a future path which
-    forgets to pause still cannot exit reporting success.
-    """
-    turns = payload.get("turns")
-    if not isinstance(turns, list):
-        return []
-    unpassed: list[dict[str, Any]] = []
-    for turn in turns:
-        if not isinstance(turn, Mapping):
-            continue
-        verification_payload = turn.get("verification")
-        if not isinstance(verification_payload, Mapping):
-            continue
-        if verification_payload.get("passed") is not False:
-            continue
-        if _accepted_broad_failure_deferral(verification_payload) is not None:
-            continue
-        unpassed.append(
-            {
-                "session_id": verification_payload.get("session")
-                or turn.get("session_id"),
-                "turn_index": turn.get("turn_index"),
-                "reason": verification_payload.get("reason"),
-            }
-        )
-    return unpassed
-
-
-def _final_review_is_clear(payload: Mapping[str, Any]) -> bool:
-    """Whether the run holds a review verdict that closed every finding."""
-    verdict = payload.get("review_verdict")
-    verdict = verdict if isinstance(verdict, Mapping) else {}
-    return (
-        payload.get("review_fix_disposition")
-        == review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
-        and verdict.get("outcome") == review.REVIEW_OUTCOME_ALL_CLEAR
-        and verdict.get("total_findings") == 0
-    )
-
-
-def _terminal_blocker(
-    payload: Mapping[str, Any], event_path: Path
-) -> _TerminalBlocker | None:
-    """The first thing a terminating run cannot show it earned.
-
-    Required checks are asked about first because they are the broader claim:
-    a run whose gates never passed is not made honest by a clear review. Only
-    that first clause can fire on a run that is already failing — the review
-    clause is scoped to the endings that assert the plan is finished, and a run
-    reporting unresolved findings asserts the opposite.
-    """
-    unresolved = _unresolved_deferred_verifications(payload, event_path)
-    unpassed = _unpassed_run_verifications(payload)
-    if unresolved or unpassed:
-        deferred_checks = sorted(
-            {check for entry in unresolved for check in entry["checks"]}
-        )
-        summary = ", ".join(deferred_checks) or ", ".join(
-            str(entry["session_id"]) for entry in unpassed
-        )
-        return _TerminalBlocker(
-            reason=REQUIRED_CHECKS_INCOMPLETE_REASON,
-            message=(
-                "the run cannot report success: required verification did not "
-                f"reach passed for every session ({summary})"
-            ),
-            details={
-                "deferred_unresolved": unresolved,
-                "unpassed_verifications": unpassed,
-            },
-        )
-    if (
-        payload.get("review_requested")
-        and str(payload.get("reason") or "") in _PLAN_COMPLETION_REASONS
-        and not _final_review_is_clear(payload)
-    ):
-        verdict = payload.get("review_verdict")
-        verdict = verdict if isinstance(verdict, Mapping) else {}
-        return _TerminalBlocker(
-            reason=REVIEW_NOT_CLEAR_REASON,
-            message=(
-                "the run cannot report the plan complete: its final review is "
-                "missing or did not come back all-clear"
-            ),
-            details={
-                "review_completed": payload.get("review_completed"),
-                "review_fix_disposition": payload.get("review_fix_disposition"),
-                "review_outcome": verdict.get("outcome"),
-                "unresolved_findings": verdict.get("total_findings"),
-                "findings_by_severity": verdict.get("findings_by_severity"),
-                "review_skipped_reason": payload.get("review_skipped_reason"),
-            },
-        )
-    return None
 
 
 def _adjudicate_terminal_run(
@@ -9870,39 +9650,30 @@ def _repair_readiness_gate(
     return report, repair_payload
 
 
-def _verification_failure_summary(
-    result: verification.VerificationResult,
-) -> str:
-    failures = result.failures
-    total = result.gate_count
-    parts = [f"{check.name} ({check.failure_reason or 'failed'})" for check in failures]
-    rendered = "; ".join(parts) if parts else "no checks reported"
-    return f"{len(failures)} of {total} verification check(s) failed: {rendered}"
-
-
-def _verification_failure_details(
-    result: verification.VerificationResult,
-    contract: contracts.CompletionContract,
-) -> dict[str, Any]:
-    diagnostic_count = sum(
-        bool(check.on_failure_of) for check in contract.verify.checks
-    )
-    return {
-        "session": result.session_id.value,
-        "recipe": {
-            "check_count": len(contract.verify.checks),
-            "gate_count": len(contract.verify.checks) - diagnostic_count,
-            "diagnostic_count": diagnostic_count,
-            "kinds": [check.kind for check in contract.verify.checks],
-            "names": [check.name for check in contract.verify.checks],
-            "repos": [check.repo for check in contract.verify.checks],
-        },
-        "passed": result.passed,
-        "checks": [asdict(check) for check in result.checks],
-        "skipped_checks": [asdict(check) for check in result.skipped_checks],
-        "failures": [asdict(check) for check in result.failures],
-        "diagnostic_failures": [asdict(check) for check in result.diagnostic_failures],
-    }
+# Verification and review-verdict adjudication now lives in the two transition
+# modules. The names below stay bound here because in-tree callers and the
+# suite's patch targets resolve them off the runner; each is the extracted
+# implementation, not a second one.
+_verification_failure_summary = verification_transitions.verification_failure_summary
+_verification_failure_details = verification_transitions.verification_failure_details
+_verification_fingerprint = verification_transitions.verification_fingerprint
+_read_prior_verification_failures = (
+    verification_transitions.read_prior_verification_failures
+)
+_verification_repair_references = (
+    verification_transitions.verification_repair_references
+)
+_is_verification_repair_exhausted = (
+    verification_transitions.is_verification_repair_exhausted
+)
+_review_verdict_fingerprint = review_transitions.review_verdict_fingerprint
+_read_prior_review_verdict_retries = (
+    review_transitions.read_prior_review_verdict_retries
+)
+_is_review_verdict_repair_exhausted = (
+    review_transitions.is_review_verdict_repair_exhausted
+)
+_review_verdict_repair_references = review_transitions.review_verdict_repair_references
 
 
 def _review_broad_failure_acceptance(
@@ -9910,311 +9681,28 @@ def _review_broad_failure_acceptance(
     *,
     plan_dir: Path,
     require_artifact: bool,
-) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
-    """Accept only findings-backed failures from replayed plan gates.
+) -> verification_transitions.BroadFailureDeferral | None:
+    """Read the verdict a deferral needs, but only when one could apply.
 
-    The two returned projections deliberately differ in size.  The event
-    projection carries bounded identity and rationale; the turn projection
-    additionally retains each raw failure beside the ordinary ``checks`` list.
-    A malformed verdict, an all-clear verdict, an artifact-validator failure,
-    or any non-broad failure is ineligible and follows the normal fail-closed
-    verification path.
+    The eligibility test is pure and lives with the deferral policy; this
+    supplies the one thing it cannot compute, the review verdict on disk, and
+    reads it only once the failures are known to be deferrable at all.
     """
-    failures = tuple(result.failures)
-    prefix = f"{BROAD_REVIEW_CHECK_PREFIX}:"
-    if not failures or any(not check.name.startswith(prefix) for check in failures):
+    failures = verification_transitions.broad_failures_only(result)
+    if failures is None:
         return None
-    verdict = _read_review_verdict(plan_dir, require_artifact=require_artifact)
-    if not (
-        verdict.get("ok") is True
-        and verdict.get("outcome") == review.REVIEW_OUTCOME_FINDINGS
-    ):
-        return None
-    raw_failures = [asdict(check) for check in failures]
-    acceptance = {
-        "accepted": True,
-        "reason": REVIEW_BROAD_FAILURES_DEFERRED_REASON,
-        "review_outcome": review.REVIEW_OUTCOME_FINDINGS,
-        "deferred_failure_count": len(raw_failures),
-        "deferred_failure_names": [check.name for check in failures],
-    }
-    return acceptance, raw_failures
-
-
-def _verification_fingerprint(details: dict[str, Any] | None) -> str | None:
-    """Normalize a verification failure into a stable repeat-detection slug.
-
-    The fingerprint folds each failed check's name, kind, failure reason,
-    return code, and the full-stream stdout/stderr digests (bounded evidence
-    identity, preserved by :func:`_strip_check_output`) into one sorted digest.
-    Two byte-for-byte identical failures share a fingerprint; a failure whose
-    output changed after a repair attempt yields a different one, so a changed
-    failure can retry while an identical failure is caught as a repeat.
-    Returns ``None`` when no failing check evidence is present.
-    """
-    if not isinstance(details, dict):
-        return None
-    failures = details.get("failures")
-    if not isinstance(failures, list):
-        return None
-    parts: list[str] = []
-    for check in failures:
-        if not isinstance(check, dict):
-            continue
-        returncode = check.get("returncode")
-        parts.append(
-            "|".join(
-                (
-                    str(check.get("name", "")),
-                    str(check.get("kind", "")),
-                    str(check.get("failure_reason") or ""),
-                    "" if returncode is None else str(returncode),
-                    str(check.get("stdout_sha256") or ""),
-                    str(check.get("stderr_sha256") or ""),
-                )
-            )
-        )
-    if not parts:
-        return None
-    normalized = "\n".join(sorted(parts))
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
-    return f"{VERIFICATION_FINGERPRINT_PREFIX}:{digest}"
-
-
-def _read_prior_verification_failures(
-    event_path: str | Path, session_id: str
-) -> list[dict[str, Any]]:
-    """Return prior verify-failed pause detail dicts for ``session_id``.
-
-    Reads the persistent ``events.jsonl`` log (append-only across ``asl run``
-    invocations) and returns the ``details`` payload of every ``run_paused``
-    event whose reason is ``verify-failed`` and whose session matches, in
-    chronological (oldest-first) order. Malformed or unrelated lines are
-    skipped. Used to reconstruct repair context and prior fingerprints when a
-    paused run is relaunched, without re-running the failed session.
-    """
-    try:
-        text = Path(event_path).read_text(encoding="utf-8")
-    except OSError:
-        return []
-    priors: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        if record.get("name") != events.RUN_PAUSED_EVENT:
-            continue
-        payload = record.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        if payload.get("reason") != verification.VERIFY_EXIT_REASON_FAILED:
-            continue
-        details = payload.get("details")
-        if not isinstance(details, dict):
-            continue
-        if str(details.get("session")) != str(session_id):
-            continue
-        priors.append(details)
-    return priors
-
-
-def _verification_repair_references(
-    priors: Sequence[dict[str, Any]],
-) -> tuple[str, ...]:
-    """Render packet repair references from the most recent prior failure.
-
-    Summarizes the last verify-failed attempt for a session as flat, bounded
-    strings — the fingerprint, each failed check's name/kind/reason, and any
-    retained full-output artifact paths — so the task packet can hand the
-    worker concrete prior-failure context instead of re-deriving it.
-    """
-    if not priors:
-        return ()
-    latest = priors[-1]
-    fingerprint = _verification_fingerprint(latest)
-    references: list[str] = []
-    attempt = len(priors)
-    references.append(
-        f"Prior verification attempt {attempt} failed"
-        + (f" (fingerprint {fingerprint})." if fingerprint else ".")
+    return verification_transitions.broad_failure_acceptance(
+        failures, _read_review_verdict(plan_dir, require_artifact=require_artifact)
     )
-    failures = latest.get("failures")
-    if isinstance(failures, list):
-        for check in failures:
-            if not isinstance(check, dict):
-                continue
-            name = str(check.get("name", "?"))
-            kind = str(check.get("kind", "?"))
-            reason = str(check.get("failure_reason") or "failed")
-            references.append(f"Failed check `{name}` ({kind}): {reason}.")
-            for stream in ("stdout", "stderr"):
-                artifact = check.get(f"{stream}_artifact_path")
-                if artifact:
-                    references.append(
-                        f"Full {stream} for `{name}` retained at {artifact}."
-                    )
-    references.append(
-        "Diagnose and fix the root cause; do not re-submit the same failing "
-        "result unchanged."
-    )
-    return tuple(references)
 
 
 def _verification_repair_state(
     event_path: str | Path, session_id: str
 ) -> dict[str, Any]:
-    """Compute repair context for the session's *next* verification attempt.
-
-    Returns a dict with the packet ``references`` derived from the latest prior
-    failure, the ``attempt`` number that the next verification failure would be
-    (``len(priors) + 1``), and the set of prior ``fingerprints`` seen so far.
-    """
-    priors = _read_prior_verification_failures(event_path, session_id)
-    fingerprints = tuple(
-        fp
-        for fp in (_verification_fingerprint(details) for details in priors)
-        if fp is not None
-    )
-    return {
-        "references": _verification_repair_references(priors),
-        "attempt": len(priors) + 1,
-        "prior_fingerprints": fingerprints,
-    }
-
-
-def _is_verification_repair_exhausted(
-    fingerprint: str | None,
-    prior_fingerprints: Sequence[str],
-    attempt: int,
-) -> bool:
-    """Decide whether a verification repair loop must stop.
-
-    Exhausted when the current failure fingerprint repeats a prior failure for
-    the same session (an identical failure cannot loop), or when ``attempt``
-    (the 1-indexed count of verify-failures for the session) exceeds
-    :data:`MAX_VERIFICATION_REPAIR_ATTEMPTS`. A new fingerprint under the cap is
-    not exhausted, so a *changed* verification failure stays eligible to retry.
-    """
-    if fingerprint is not None and fingerprint in prior_fingerprints:
-        return True
-    return attempt > MAX_VERIFICATION_REPAIR_ATTEMPTS
-
-
-def _review_verdict_fingerprint(verdict: Mapping[str, Any]) -> str | None:
-    """Normalize a rejected review verdict into a repeat-detection slug.
-
-    Folds the classification ``reason`` and the exact validation ``error`` into
-    one digest, so a re-run that reproduces the same malformed artifact is
-    caught as a repeat while a *different* validation error stays eligible for
-    another bounded retry. Returns ``None`` when the verdict carries neither.
-    """
-    if not isinstance(verdict, Mapping):
-        return None
-    reason = verdict.get("reason")
-    error = verdict.get("error")
-    if not reason and not error:
-        return None
-    normalized = f"{reason or ''}|{error or ''}"
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
-    return f"{REVIEW_VERDICT_FINGERPRINT_PREFIX}:{digest}"
-
-
-def _read_prior_review_verdict_retries(
-    event_path: str | Path, session_id: str
-) -> list[dict[str, Any]]:
-    """Return this cycle's prior ``review_verdict_retry`` payloads for a session.
-
-    Reads the persistent ``events.jsonl`` log in chronological order and keeps
-    only the records appended after the most recent ``review_cycle`` event: a
-    reopened cycle re-reviews a repaired tree and must get a fresh retry budget
-    rather than inheriting the previous cycle's exhaustion.
-    """
-    try:
-        text = Path(event_path).read_text(encoding="utf-8")
-    except OSError:
-        return []
-    priors: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        name = record.get("name")
-        if name == events.REVIEW_CYCLE_EVENT:
-            priors.clear()
-            continue
-        if name != events.REVIEW_VERDICT_RETRY_EVENT:
-            continue
-        payload = record.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        if str(payload.get("session")) != str(session_id):
-            continue
-        priors.append(payload)
-    return priors
-
-
-def _is_review_verdict_repair_exhausted(
-    fingerprint: str | None,
-    prior_fingerprints: Sequence[str],
-    attempt: int,
-) -> bool:
-    """Decide whether a review-verdict repair loop must stop.
-
-    Exhausted when the current validation-failure fingerprint repeats a prior
-    failure for the same session in this cycle (an identical failure cannot
-    loop), or when ``attempt`` (the 1-indexed count of rejected verdicts for
-    the session) exceeds :data:`MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS`. A new
-    fingerprint under the cap is not exhausted, so a *changed* validation
-    failure stays eligible to retry.
-    """
-    if fingerprint is not None and fingerprint in prior_fingerprints:
-        return True
-    return attempt > MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS
-
-
-def _review_verdict_repair_references(
-    event_path: str | Path, session_id: str
-) -> tuple[str, ...]:
-    """Render packet repair references from the latest rejected verdict.
-
-    Hands the retrying review turn the exact validation error that rejected its
-    previous artifacts, so the harness repairs the named defect instead of
-    re-deriving it from the Handoff note alone. Empty when the session has no
-    rejected verdict in the current review cycle.
-    """
-    priors = _read_prior_review_verdict_retries(event_path, session_id)
-    if not priors:
-        return ()
-    latest = priors[-1]
-    fingerprint = latest.get("fingerprint")
-    references = [
-        f"Prior review verdict attempt {len(priors)} was rejected"
-        + (f" (fingerprint {fingerprint})." if fingerprint else ".")
-    ]
-    failure_reason = latest.get("failure_reason")
-    if failure_reason:
-        references.append(f"Rejection reason: {failure_reason}.")
-    error = latest.get("error")
-    if error:
-        references.append(f"Validation error: {error}")
-    references.append(
-        f"Rewrite {review.FINAL_REVIEW_FILENAME} and "
-        f"{review.FINAL_REVIEW_ARTIFACT_FILENAME} so they are valid and "
-        "mutually consistent; do not re-submit the same artifacts unchanged."
-    )
-    return tuple(references)
+    """Compute repair context for the session's *next* verification attempt."""
+    return verification_transitions.verification_repair_budget(
+        event_path, session_id
+    ).to_payload()
 
 
 def _read_prior_review_cycles(event_path: str | Path) -> list[dict[str, Any]]:
@@ -10768,36 +10256,21 @@ def _set_review_resume(
     return resume
 
 
-REVIEW_FINDINGS_UNRESOLVED_REASON = "review-findings-unresolved"
+REVIEW_FINDINGS_UNRESOLVED_REASON = review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON
 
 
 def _terminal_review_reason(payload: dict[str, Any]) -> str:
-    """Resolve the terminal reason for a run whose review cycle ended.
+    """Apply the review lane's terminal verdict to this run's payload.
 
-    ``all-complete`` is only honest when the review actually cleared. A run
-    whose cycle terminated on an exhausted repair budget still carries the
-    findings that budget failed to close, so it reports them and stops
-    claiming success.
+    The decision is the extracted adjudicator's, which asks the same
+    cleared-review predicate the terminal blocker asks; all that happens here is
+    recording it, so the two cannot disagree about whether a review cleared.
     """
-    verdict = payload.get("review_verdict")
-    verdict = verdict if isinstance(verdict, Mapping) else {}
-    total_findings = verdict.get("total_findings")
-    if (
-        payload.get("review_fix_disposition")
-        == review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
-        and verdict.get("outcome") == review.REVIEW_OUTCOME_ALL_CLEAR
-        and total_findings == 0
-    ):
-        return "all-complete"
-    payload["ok"] = False
-    payload["action_required"] = {
-        "reason": REVIEW_FINDINGS_UNRESOLVED_REASON,
-        "review_fix_disposition": payload.get("review_fix_disposition"),
-        "review_outcome": verdict.get("outcome"),
-        "unresolved_findings": total_findings,
-        "findings_by_severity": verdict.get("findings_by_severity"),
-    }
-    return REVIEW_FINDINGS_UNRESOLVED_REASON
+    outcome = review_transitions.adjudicate_terminal_review(payload)
+    if not outcome.cleared:
+        payload["ok"] = False
+        payload["action_required"] = outcome.action_required
+    return outcome.reason
 
 
 def _set_existing_review_verdict(
@@ -10892,51 +10365,30 @@ def _advance_review_cycle(
     - ``("paused", snapshot)`` — the run was paused (malformed repair output
       or a failed executability gate); ``_pause_run`` has already fired.
     """
+    cursor = review_transitions.REVIEW_CYCLE_MACHINE.start()
     verdict = turn_payload.get("review_verdict")
     verdict = verdict if isinstance(verdict, dict) else {}
     outcome = verdict.get("outcome")
     fingerprints = review.finding_fingerprints(verdict.get("findings"))
-    repeat_keys = review.finding_repeat_keys(verdict.get("findings"))
     cycle_state = _review_cycle_state(event_path, snapshot)
-    previous = cycle_state["previous_fingerprints"]
-    previous_keys = cycle_state["previous_repeat_keys"]
-    current = () if fingerprints is None else fingerprints
-    current_keys = () if repeat_keys is None else repeat_keys
-    repeated_positions = review_continuation.repeated_finding_positions(
-        fingerprints=current,
-        repeat_keys=current_keys,
-        previous_fingerprints=previous,
-        previous_repeat_keys=previous_keys,
+    delta = review_transitions.diff_review_findings(
+        fingerprints=fingerprints,
+        repeat_keys=review.finding_repeat_keys(verdict.get("findings")),
+        previous_fingerprints=cycle_state["previous_fingerprints"],
+        previous_repeat_keys=cycle_state["previous_repeat_keys"],
     )
-    repeated = [current[position] for position in repeated_positions]
     cycle_record: dict[str, Any] = {
         "run_id": payload.get("run_id"),
         "cycle": cycle_state["cycle"],
         "review_session_id": session_id,
         "outcome": outcome,
         "total_findings": verdict.get("total_findings"),
-        "fingerprints": list(current),
-        "repeat_keys": list(current_keys),
-        "introduced_findings": [
-            fingerprint
-            for position, fingerprint in enumerate(current)
-            if position not in set(repeated_positions)
-        ],
-        "closed_findings": [
-            fingerprint
-            for position, fingerprint in enumerate(previous)
-            if fingerprint not in current
-            and not (
-                position < len(previous_keys)
-                and previous_keys[position] in current_keys
-            )
-        ],
-        "repeated_findings": repeated,
-        "repeated_finding_keys": [
-            current_keys[position]
-            for position in repeated_positions
-            if position < len(current_keys)
-        ],
+        "fingerprints": list(delta.current),
+        "repeat_keys": list(delta.current_keys),
+        "introduced_findings": list(delta.introduced),
+        "closed_findings": list(delta.closed),
+        "repeated_findings": list(delta.repeated),
+        "repeated_finding_keys": list(delta.repeated_keys),
         "repair_session_ids": [],
         "max_repair_group_attempts": _max_repair_group_attempts(args),
         "max_review_fix_cycles": max_review_fix_cycles,
@@ -10957,30 +10409,28 @@ def _advance_review_cycle(
         if isinstance(findings, list):
             cycle_record["findings"] = findings
 
-    def record_and_complete(disposition: str) -> tuple[str, plans.PlanSnapshot]:
+    def record_and_complete(
+        transition: review_transitions.ReviewCycleTransition,
+    ) -> tuple[str, plans.PlanSnapshot]:
         _record_review_cycle(
             event_path=event_path,
             payload=payload,
             persistence=persistence,
             cycle_record=cycle_record,
-            disposition=disposition,
+            disposition=str(transition.disposition),
         )
         return "complete", snapshot
 
-    if outcome != review.REVIEW_OUTCOME_FINDINGS:
-        return record_and_complete(REVIEW_CYCLE_DISPOSITION_ALL_CLEAR)
-    if fingerprints is None:
-        # Legacy Markdown-only verdict (no structured findings): repair
-        # materialization is impossible, so surface the findings and stop.
-        return record_and_complete(REVIEW_CYCLE_DISPOSITION_UNSTRUCTURED)
-    if cycle_record["repeated_findings"]:
-        # A finding survived its own targeted repair; another identical
-        # cycle cannot converge, so stop without creating one.
-        return record_and_complete(REVIEW_CYCLE_DISPOSITION_REPEATED)
-    if max_review_fix_cycles == 0:
-        return record_and_complete(REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED)
-    if cycle_state["repairs_materialized"] >= max_review_fix_cycles:
-        return record_and_complete(REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED)
+    classified = review_transitions.classify_review_cycle(
+        outcome=outcome,
+        structured=fingerprints is not None,
+        delta=delta,
+        max_review_fix_cycles=max_review_fix_cycles,
+        repairs_materialized=cycle_state["repairs_materialized"],
+    )
+    cursor.advance(str(classified.event))
+    if classified.settles:
+        return record_and_complete(classified)
 
     planning = review_repair.plan_review_repair_sessions(
         snapshot.plan_dir,
@@ -11009,21 +10459,19 @@ def _advance_review_cycle(
             }
             for group in planning.repair_groups
         ]
-        exhausted_group = next(
-            (
-                group
-                for group in planning.repair_groups
-                if historical_attempts.get(group.repair_group, 0)
-                >= cycle_record["max_repair_group_attempts"]
-            ),
-            None,
+        exhausted_group = review_transitions.first_exhausted_repair_group(
+            repair_groups=planning.repair_groups,
+            historical_attempts=historical_attempts,
+            max_repair_group_attempts=cycle_record["max_repair_group_attempts"],
         )
         if exhausted_group is not None:
             cycle_record["exhausted_repair_group"] = exhausted_group.repair_group
             cycle_record["exhausted_repair_group_attempts"] = historical_attempts[
                 exhausted_group.repair_group
             ]
-            return record_and_complete(REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED)
+            settled = review_transitions.settle_group_exhausted()
+            cursor.advance(str(settled.event))
+            return record_and_complete(settled)
 
     repair_result = review_repair.materialize_review_repair_sessions(
         snapshot.plan_dir,
@@ -11058,7 +10506,15 @@ def _advance_review_cycle(
     # before the runner mutated the plan.
     materialized = _reinspect_after_plan_mutation(plan_cache, snapshot)
 
-    if not repair_result.ok:
+    settlement = review_transitions.classify_materialization(
+        ok=repair_result.ok,
+        reason=repair_result.reason,
+        non_bypassable_blockers=repair_result.non_bypassable_blockers,
+        allow_not_loop_ready=_allow_not_loop_ready(args),
+    )
+    cursor.advance(str(settlement.event))
+
+    if settlement.disposition == REVIEW_CYCLE_DISPOSITION_MALFORMED:
         _record_review_cycle(
             event_path=event_path,
             payload=payload,
@@ -11071,7 +10527,7 @@ def _advance_review_cycle(
         _pause_run(
             event_path,
             payload,
-            reason=events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+            reason=str(settlement.pause_reason),
             message=(
                 "review repair materialization failed after "
                 f"{session_label}: {repair_result.error}"
@@ -11086,14 +10542,10 @@ def _advance_review_cycle(
         )
         return "paused", materialized
 
-    if repair_result.reason == review_repair.REVIEW_REPAIR_REASON_NO_FINDINGS:
-        # The verdict said findings but the artifact re-read reported none;
-        # nothing to repair, treat as clean.
-        return record_and_complete(REVIEW_CYCLE_DISPOSITION_ALL_CLEAR)
+    if settlement.settles:
+        return record_and_complete(settlement)
 
-    if repair_result.reason == review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY and (
-        repair_result.non_bypassable_blockers or not _allow_not_loop_ready(args)
-    ):
+    if settlement.disposition == REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY:
         _record_review_cycle(
             event_path=event_path,
             payload=payload,
@@ -11106,7 +10558,7 @@ def _advance_review_cycle(
         _pause_run(
             event_path,
             payload,
-            reason="not-loop-ready",
+            reason=str(settlement.pause_reason),
             message=(
                 (
                     "repair sessions were materialized after "
@@ -11143,7 +10595,7 @@ def _advance_review_cycle(
         payload=payload,
         persistence=persistence,
         cycle_record=cycle_record,
-        disposition=REVIEW_CYCLE_DISPOSITION_REPAIRS,
+        disposition=str(settlement.disposition),
     )
     try:
         refreshed = plan_cache.get_fresh(snapshot.plan_dir)
@@ -13244,7 +12696,19 @@ def _enforce_review_verdict(
     """
     review_path = final_review_output_path(before.plan_dir)
     verdict = _read_review_verdict(before.plan_dir, require_artifact=require_artifact)
-    if verdict.get("ok"):
+    cursor = review_transitions.REVIEW_VERDICT_MACHINE.start()
+    # Fingerprint this rejection and compare against the retries already
+    # recorded for this session in the current review cycle (read before the
+    # new retry event is appended). An identical rejection cannot loop, and the
+    # attempt cap bounds a reviewer that keeps producing *different* malformed
+    # artifacts.
+    graded = review_transitions.adjudicate_review_verdict(
+        verdict=verdict,
+        priors=_read_prior_review_verdict_retries(event_path, session_id),
+        stop_after_current_pending=stop_after_current_pending,
+    )
+    cursor.advance(graded.event)
+    if graded.accepted:
         with persistence.lock:
             turn_payload["review_verdict"] = {
                 "passed": True,
@@ -13262,28 +12726,7 @@ def _enforce_review_verdict(
         before.plan_dir, after, reverted, plan_cache
     )
 
-    # Fingerprint this rejection and compare against the retries already
-    # recorded for this session in the current review cycle (read before the
-    # new retry event is appended). An identical rejection cannot loop, and the
-    # attempt cap bounds a reviewer that keeps producing *different* malformed
-    # artifacts.
-    fingerprint = _review_verdict_fingerprint(verdict)
-    priors = _read_prior_review_verdict_retries(event_path, session_id)
-    prior_fingerprints = tuple(
-        str(prior["fingerprint"]) for prior in priors if prior.get("fingerprint")
-    )
-    attempt = len(priors) + 1
-    exhausted = _is_review_verdict_repair_exhausted(
-        fingerprint, prior_fingerprints, attempt
-    )
-    repair_payload: dict[str, Any] = {
-        "review_verdict_fingerprint": fingerprint,
-        "review_verdict_repair_attempt": attempt,
-        "review_verdict_repair_exhausted": exhausted,
-        "review_verdict_repair_max_attempts": (MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS),
-    }
-    if not exhausted and stop_after_current_pending:
-        repair_payload["review_verdict_repair_declined"] = "stop-after-current"
+    repair_payload = graded.to_payload()
     with persistence.lock:
         payload["final_snapshot"] = _snapshot_payload(snapshot_after)
         payload["review_verdict"] = None
@@ -13308,23 +12751,24 @@ def _enforce_review_verdict(
         guard="review-verdict",
         reason="invalid-review-verdict",
         reopened=reverted is not None,
-        detail={"failure_reason": verdict.get("reason"), "attempt": attempt},
+        detail={"failure_reason": verdict.get("reason"), "attempt": graded.attempt},
     )
 
-    if not exhausted and not stop_after_current_pending:
+    if graded.action == "retry":
         persistence.append_event(
             event_path,
             events.REVIEW_VERDICT_RETRY_EVENT,
             {
                 "run_id": payload.get("run_id"),
                 **_session_identity_payload(session_id),
-                "attempt": attempt,
-                "max_attempts": MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
-                "fingerprint": fingerprint,
+                "attempt": graded.attempt,
+                "max_attempts": graded.max_attempts,
+                "fingerprint": graded.fingerprint,
                 "failure_reason": verdict.get("reason"),
                 "error": str(error),
             },
         )
+        cursor.advance("resubmit")
         return ("retry", snapshot_after)
 
     details = {
@@ -13374,26 +12818,39 @@ def _enforce_session_verification(
 ) -> bool:
     """Run the session's `Verify` recipe and pause on failure or contract problems.
 
+    The lane's states — scheduled, running, and the settled passed / deferred /
+    failed / unenforced / refused — are declared in
+    :data:`verification_transitions.VERIFICATION_MACHINE` and driven here beside
+    the effects each one earns, so an out-of-order step raises rather than
+    writing a durable record describing a lifecycle this session never had.
+
     Returns ``True`` when the run should pause (the caller must ``break``);
     ``False`` when verification passed and the loop should continue.
     """
-    try:
-        contract = contracts.read_completion_contract(before.plan_dir, session_id)
-    except plans.PlanError as error:
-        failure_note = f"verification skipped: malformed completion contract ({error})"
+    cursor = verification_transitions.VERIFICATION_MACHINE.start()
+    live_verification: _LiveVerification | None = None
+
+    def refuse(
+        refusal: verification_transitions.VerificationRefusal,
+    ) -> bool:
+        """Apply a refusal's effects: close the live record, revert, pause."""
+
+        if live_verification is not None and refusal.live_finish_reason is not None:
+            live_verification.finish(
+                passed=False,
+                passed_count=0,
+                reason=refusal.live_finish_reason,
+                error=refusal.error,
+            )
         reverted = _revert_session_status_to_pending(
-            after, session_id, failure_note=failure_note
+            after, session_id, failure_note=refusal.failure_note
         )
         snapshot_after = _reinspect_after_revert(
             before.plan_dir, after, reverted, plan_cache
         )
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot_after)
-            turn_payload["verification"] = {
-                "session": session_id,
-                "reason": "malformed-contract",
-                "error": str(error),
-            }
+            turn_payload["verification"] = refusal.turn_verification(session_id)
             _write_json_file(paths["result"], turn_payload)
         _record_turn_rejected(
             event_path=event_path,
@@ -13402,65 +12859,43 @@ def _enforce_session_verification(
             turn_payload=turn_payload,
             session_id=session_id,
             guard="session-verification",
-            reason="malformed-contract",
+            reason=refusal.reason,
             reopened=reverted is not None,
+            detail=refusal.guard_detail,
         )
         _pause_run(
             event_path,
             payload,
-            reason="malformed-contract",
-            message=(f"completion contract for {session_label} is malformed: {error}"),
-            details={**session_details, "error": str(error)},
+            reason=refusal.reason,
+            message=refusal.message,
+            details=refusal.pause_details(session_details),
             persistence=persistence,
         )
         return True
 
-    if contract is None:
-        if allow_not_loop_ready:
-            with persistence.lock:
-                turn_payload["verification"] = {
-                    "session": session_id,
-                    "reason": "no-contract",
-                    "enforced": False,
-                }
-                _write_json_file(paths["result"], turn_payload)
-            return False
-        failure_note = (
-            "verification skipped: session is missing a Completion Contract section"
-        )
-        reverted = _revert_session_status_to_pending(
-            after, session_id, failure_note=failure_note
-        )
-        snapshot_after = _reinspect_after_revert(
-            before.plan_dir, after, reverted, plan_cache
-        )
+    contract: contracts.CompletionContract | None
+    contract_error: str | None = None
+    try:
+        contract = contracts.read_completion_contract(before.plan_dir, session_id)
+    except plans.PlanError as error:
+        contract, contract_error = None, str(error)
+
+    schedule = verification_transitions.schedule_verification(
+        contract=contract,
+        contract_error=contract_error,
+        allow_not_loop_ready=allow_not_loop_ready,
+        session_label=session_label,
+    )
+    cursor.advance(schedule.event)
+    if not schedule.runs:
+        if schedule.refusal is not None:
+            return refuse(schedule.refusal)
+        # Waived: a loop-ready run accepted a session with no contract, so the
+        # turn records that nothing was enforced and the loop continues.
         with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot_after)
-            turn_payload["verification"] = {
-                "session": session_id,
-                "reason": "no-contract",
-                "enforced": True,
-            }
+            turn_payload["verification"] = schedule.turn_verification(session_id)
             _write_json_file(paths["result"], turn_payload)
-        _record_turn_rejected(
-            event_path=event_path,
-            payload=payload,
-            persistence=persistence,
-            turn_payload=turn_payload,
-            session_id=session_id,
-            guard="session-verification",
-            reason="no-contract",
-            reopened=reverted is not None,
-        )
-        _pause_run(
-            event_path,
-            payload,
-            reason="no-contract",
-            message=(f"{session_label} has no Completion Contract section to verify"),
-            details={**session_details},
-            persistence=persistence,
-        )
-        return True
+        return False
 
     # Persist `final_snapshot` to the post-turn inspected snapshot before
     # verification starts. Completion bookkeeping (progress.md append and
@@ -13547,6 +12982,7 @@ def _enforce_session_verification(
     # only bounded previews.
     verification_artifact_dir = paths["artifact_dir"] / "verification"
 
+    cursor.advance("start")
     live_verification.start()
     try:
         verification_kwargs: dict[str, Any] = {
@@ -13559,138 +12995,48 @@ def _enforce_session_verification(
             verification_kwargs["context"] = verification_context
         result = verification.run_verification(contract, **verification_kwargs)
     except KeyboardInterrupt:
-        live_verification.finish(
-            passed=False,
-            passed_count=0,
-            reason="interrupted",
+        cursor.advance("run-refused")
+        return refuse(
+            verification_transitions.refuse_interrupted_verification(
+                session_label=session_label
+            )
         )
-        failure_note = "verification interrupted by user"
-        reverted = _revert_session_status_to_pending(
-            after, session_id, failure_note=failure_note
-        )
-        snapshot_after = _reinspect_after_revert(
-            before.plan_dir, after, reverted, plan_cache
-        )
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot_after)
-            turn_payload["verification"] = {
-                "session": session_id,
-                "reason": "interrupted",
-            }
-            _write_json_file(paths["result"], turn_payload)
-        _record_turn_rejected(
-            event_path=event_path,
-            payload=payload,
-            persistence=persistence,
-            turn_payload=turn_payload,
-            session_id=session_id,
-            guard="session-verification",
-            reason="interrupted",
-            reopened=reverted is not None,
-        )
-        _pause_run(
-            event_path,
-            payload,
-            reason="interrupted",
-            message=(f"verification for {session_label} interrupted by user"),
-            details={**session_details},
-            persistence=persistence,
-        )
-        return True
     except OSError as error:
-        live_verification.finish(
-            passed=False,
-            passed_count=0,
-            reason="verify-failed",
-            error=str(error),
+        cursor.advance("run-refused")
+        return refuse(
+            verification_transitions.refuse_unavailable_verification(
+                session_label=session_label, error=str(error)
+            )
         )
-        failure_note = f"verification failed to execute: {error}"
-        reverted = _revert_session_status_to_pending(
-            after, session_id, failure_note=failure_note
-        )
-        snapshot_after = _reinspect_after_revert(
-            before.plan_dir, after, reverted, plan_cache
-        )
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot_after)
-            turn_payload["verification"] = {
-                "session": session_id,
-                "reason": "verify-failed",
-                "error": str(error),
-            }
-            _write_json_file(paths["result"], turn_payload)
-        _record_turn_rejected(
-            event_path=event_path,
-            payload=payload,
-            persistence=persistence,
-            turn_payload=turn_payload,
-            session_id=session_id,
-            guard="session-verification",
-            reason="verify-failed",
-            reopened=reverted is not None,
-            detail={"error": str(error)},
-        )
-        _pause_run(
-            event_path,
-            payload,
-            reason="verify-failed",
-            message=f"verification for {session_label} could not run: {error}",
-            details={**session_details, "error": str(error)},
-            persistence=persistence,
-        )
-        return True
 
-    acceptance_projections = (
-        _review_broad_failure_acceptance(
-            result,
-            plan_dir=before.plan_dir,
-            require_artifact=require_review_artifact,
-        )
-        if review_broad_failure_deferral and not result.passed
-        else None
-    )
-    event_acceptance = (
-        acceptance_projections[0] if acceptance_projections is not None else None
-    )
-    deferred_failures = (
-        acceptance_projections[1] if acceptance_projections is not None else None
-    )
-    passed_count = sum(1 for check in result.checks if check.status == "pass")
-    diagnostic_count = len(result.diagnostic_names)
-    live_verification.finish(
-        passed=result.passed,
-        passed_count=passed_count,
-        skipped_count=len(result.skipped_checks),
-        executed_count=len(result.checks),
-        gate_count=result.gate_count,
-        diagnostic_count=diagnostic_count,
-        reason=(
-            verification.VERIFY_EXIT_REASON_OK
-            if result.passed
-            else verification.VERIFY_EXIT_REASON_FAILED
+    graded = verification_transitions.adjudicate_verification(
+        result=result,
+        contract=contract,
+        deferral=(
+            _review_broad_failure_acceptance(
+                result,
+                plan_dir=before.plan_dir,
+                require_artifact=require_review_artifact,
+            )
+            if review_broad_failure_deferral and not result.passed
+            else None
         ),
-        acceptance=event_acceptance,
+    )
+    cursor.advance(graded.event)
+    details = graded.details
+    live_verification.finish(
+        passed=graded.passed,
+        passed_count=graded.passed_count,
+        skipped_count=graded.skipped_count,
+        executed_count=graded.executed_count,
+        gate_count=graded.gate_count,
+        diagnostic_count=graded.diagnostic_count,
+        reason=graded.reason,
+        acceptance=graded.acceptance,
     )
 
-    details = _verification_failure_details(result, contract)
     with persistence.lock:
-        verification_payload = {
-            "session": session_id,
-            "reason": (
-                verification.VERIFY_EXIT_REASON_OK
-                if result.passed
-                else verification.VERIFY_EXIT_REASON_FAILED
-            ),
-            "passed": result.passed,
-            "recipe": details["recipe"],
-            "checks": details["checks"],
-            "skipped_checks": details["skipped_checks"],
-            "diagnostic_failures": details["diagnostic_failures"],
-        }
-        if event_acceptance is not None:
-            verification_payload["acceptance"] = event_acceptance
-            verification_payload["deferred_failures"] = deferred_failures
-        turn_payload["verification"] = verification_payload
+        turn_payload["verification"] = graded.turn_verification(session_id)
         _write_json_file(paths["result"], turn_payload)
         for check in result.checks:
             _append_process_sweep_event(
@@ -13706,10 +13052,10 @@ def _enforce_session_verification(
                 },
             )
 
-    if result.passed or event_acceptance is not None:
+    if graded.continues:
         return False
 
-    summary = _verification_failure_summary(result)
+    summary = str(graded.summary)
     reverted = _revert_session_status_to_pending(
         after,
         session_id,
@@ -13725,18 +13071,13 @@ def _enforce_session_verification(
     # failure cannot loop) or when the total number of verify-failures exceeds
     # the attempt cap. The autopilot honors ``verification_repair_exhausted``
     # and stops relaunching; a changed fingerprint under the cap stays eligible.
-    fingerprint = _verification_fingerprint(details)
-    prior_state = _verification_repair_state(event_path, session_id)
-    attempt = prior_state["attempt"]
-    exhausted = _is_verification_repair_exhausted(
-        fingerprint, prior_state["prior_fingerprints"], attempt
+    repair = verification_transitions.adjudicate_verification_repair(
+        details=details,
+        budget=verification_transitions.verification_repair_budget(
+            event_path, session_id
+        ),
     )
-    repair_payload = {
-        "verification_fingerprint": fingerprint,
-        "verification_repair_attempt": attempt,
-        "verification_repair_exhausted": exhausted,
-        "verification_repair_max_attempts": MAX_VERIFICATION_REPAIR_ATTEMPTS,
-    }
+    repair_payload = repair.to_payload()
     with persistence.lock:
         payload["final_snapshot"] = _snapshot_payload(snapshot_after)
         turn_payload["verification"].update(repair_payload)
@@ -13750,7 +13091,7 @@ def _enforce_session_verification(
         guard="session-verification",
         reason="verify-failed",
         reopened=reverted is not None,
-        detail={"summary": summary, "fingerprint": fingerprint},
+        detail={"summary": summary, "fingerprint": repair.fingerprint},
     )
     _pause_run(
         event_path,

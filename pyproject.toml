@@ -60,6 +60,9 @@ disable_error_code = [
 module = [
     "agent_session_loop.clock",
     "agent_session_loop.turn_execution",
+    "agent_session_loop.transitions",
+    "agent_session_loop.verification_transitions",
+    "agent_session_loop.review_transitions",
 ]
 enable_error_code = [
     "arg-type",
