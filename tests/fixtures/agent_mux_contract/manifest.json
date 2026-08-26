@@ -1,0 +1,181 @@
+{
+  "contract_sets": [
+    {
+      "capabilities": {
+        "bridge_error_codes": [
+          "malformed-json",
+          "invalid-request",
+          "unsupported-protocol",
+          "unknown-method",
+          "frame-too-large",
+          "internal-error",
+          "mutation-failed",
+          "workbench-unavailable",
+          "invalid-plan",
+          "no-active-run",
+          "run-mismatch",
+          "not-paused",
+          "no-open-question",
+          "question-mismatch",
+          "stale-action-token",
+          "action-not-permitted",
+          "invalid-action",
+          "empty-text",
+          "question-body-too-large",
+          "missing-question-body",
+          "contract-set-mismatch",
+          "stale-snapshot"
+        ],
+        "bridge_events": [
+          "runs.changed",
+          "operation.updated"
+        ],
+        "bridge_methods": [
+          "session.handshake",
+          "runs.snapshot",
+          "question.get",
+          "question.reply",
+          "question.resolve",
+          "run.resume",
+          "run.stop_after_current",
+          "run.abort",
+          "workbench.ensure"
+        ],
+        "bridge_mutation_methods": [
+          "question.reply",
+          "question.resolve",
+          "run.resume",
+          "run.stop_after_current",
+          "run.abort"
+        ],
+        "lifecycle_events": [
+          "AgentSessionLoopStarted",
+          "AgentSessionLoopTurnStarted",
+          "AgentSessionLoopTurnHeartbeat",
+          "AgentSessionLoopTurnFinished",
+          "AgentSessionLoopTurnHangSuspected",
+          "AgentSessionLoopTurnHangCleared",
+          "AgentSessionLoopVerificationStarted",
+          "AgentSessionLoopVerificationHeartbeat",
+          "AgentSessionLoopVerificationFinished",
+          "AgentSessionLoopWaitStarted",
+          "AgentSessionLoopWaitEnded",
+          "AgentSessionLoopMailboxQuestion",
+          "AgentSessionLoopMailboxReply",
+          "AgentSessionLoopMailboxResolution",
+          "AgentSessionLoopPaused",
+          "AgentSessionLoopFinished"
+        ],
+        "lifecycle_phases": [
+          "between",
+          "turn",
+          "verification",
+          "waiting",
+          "paused",
+          "finished"
+        ],
+        "projection_phases": [
+          "starting",
+          "turn",
+          "verification",
+          "between",
+          "waiting",
+          "paused",
+          "finished"
+        ]
+      },
+      "components": {
+        "bridge_protocol": {
+          "digest": "e3b52edc334475d6de249231560898b7a2d6dd7ff4970dd1d67f7037c696e38a",
+          "fixture_count": 19,
+          "max_document_bytes": 1048576,
+          "roots": [
+            "error_response",
+            "handshake_response",
+            "hello",
+            "operation_receipt_response",
+            "operation_updated_event",
+            "question_body_response",
+            "runs_changed_event",
+            "runs_snapshot_response",
+            "workbench_link_response"
+          ],
+          "schema_path": "schemas/bridge-protocol-v2.json",
+          "schema_version": 2
+        },
+        "lifecycle_hook": {
+          "digest": "dafca9e877da05da4e4a7803318c818522e665851ae749970d7285b4bd12747d",
+          "fixture_count": 11,
+          "max_document_bytes": 8192,
+          "roots": [
+            "hook_payload"
+          ],
+          "schema_path": "schemas/lifecycle-hook-v2.json",
+          "schema_version": 2
+        },
+        "projection": {
+          "digest": "37db4d9877d522de5e868118b5bbcc00c9d943e48cb70a3b99c79a01a6d4e79d",
+          "fixture_count": 11,
+          "max_document_bytes": 4096,
+          "roots": [
+            "projection"
+          ],
+          "schema_path": "schemas/projection-v1.json",
+          "schema_version": 1
+        }
+      },
+      "contract_set_id": "asl-amx-1.a36b4fe66ddedcac",
+      "corpus_digest": "a36b4fe66ddedcac8de11fcfd6d4737ea60a52da9b22b69a9d67e7f3485583f1",
+      "status": "current"
+    }
+  ],
+  "current_contract_set_id": "asl-amx-1.a36b4fe66ddedcac",
+  "files": {
+    "fixtures/bridge-protocol-v2/invalid/error-unknown-code.json": "d7137e07022b3ad8c5d67e421088de01dc6bb0c33137130f68b06bcbadc81459",
+    "fixtures/bridge-protocol-v2/invalid/hello-protocol-1.json": "9f89f9d6919a5f5eaab4f47b501925cadcaf4c6442822d3fd1291feabc4766e7",
+    "fixtures/bridge-protocol-v2/invalid/hello-unknown-capability.json": "4338661beae50733fb89ab9dfaddb678b02ea0df7f5ca171e14338de8184de74",
+    "fixtures/bridge-protocol-v2/invalid/operation-invalid-status.json": "b356f81926cf27ad2c1b43fd335e92bcadee9dccce848129bde5b8d772822a91",
+    "fixtures/bridge-protocol-v2/invalid/operation-oversized-detail.json": "7bf8b1b0c0676473b5b13bdf858ee76a226aa46694bb31b66466e4a2127571b2",
+    "fixtures/bridge-protocol-v2/invalid/snapshot-question-body-leak.json": "5c6924c4ce94216089f4b0a2eff74b851cd100567e4322502f87776bd47edfef",
+    "fixtures/bridge-protocol-v2/invalid/snapshot-too-many-warnings.json": "fa4216fa1a7827fa2068f286288e11c50f0ea60aa13fd4a1f9fbe24b560c6942",
+    "fixtures/bridge-protocol-v2/invalid/snapshot-unknown-row-field.json": "cc6fe3791e36a43745f9605ade741e582426d975f6fe594ec350bee2cb1f673b",
+    "fixtures/bridge-protocol-v2/invalid/workbench-nonloopback-url.json": "2e657d18b51967067733ccf48cd3896a567b64763be6cf250e1a735382a45ea6",
+    "fixtures/bridge-protocol-v2/valid/handshake-accepted.json": "e98ac138d2c1d0516fdee3e4920eb0cc19fa39ce2b61fc9328912a49f05c878b",
+    "fixtures/bridge-protocol-v2/valid/handshake-read-only.json": "66e74a819f3c03cc4adc576a7e401f15e50334786e0573c3f8c89ad2f210d491",
+    "fixtures/bridge-protocol-v2/valid/hello.json": "da5c6502fed332cd180510e4a0ba50910e8125df1939009b4cd47c894b28ca1a",
+    "fixtures/bridge-protocol-v2/valid/operation-receipt.json": "4d9a3af4b5f0ecd92ec918c1ee1defd4f1a927dce211e95e7f307a27e0ff62dc",
+    "fixtures/bridge-protocol-v2/valid/operation-updated-event.json": "415a10050d569e8cceef612fecd46e0b8f0e1ceb519c0dd73284fb3c6ea58534",
+    "fixtures/bridge-protocol-v2/valid/question-body.json": "073685bdef05470e3f8b0de6a4c22a7c4bd88927b2ce438d649d07062e297621",
+    "fixtures/bridge-protocol-v2/valid/runs-changed-event.json": "bdcced2c7ba33f6a120045ff2ee4a6f98e9e5451291337795c1da657ffa543ef",
+    "fixtures/bridge-protocol-v2/valid/runs-snapshot.json": "cd855d8502bb90efaeddda07ebd203a7de938bddf0ba88ad4c1962708fc9767b",
+    "fixtures/bridge-protocol-v2/valid/stale-action-token-error.json": "2ed80ce258dd0fb2990302c6160bf3ed57b86f83b3260f6ed723b922161465ad",
+    "fixtures/bridge-protocol-v2/valid/workbench-link.json": "6448f0208014b19b79d1e05bb744f7abdd60adecb29f32f407463b0fc8219b63",
+    "fixtures/lifecycle-hook-v2/invalid/invalid-event.json": "2f64390842f2dc1533c1e4afd7ac645d58eed30ff3845a51118bc43e763d5fda",
+    "fixtures/lifecycle-hook-v2/invalid/missing-contract-set-id.json": "0a76636b0eae464658baadc9aa45688d87a6f14c420475398372ba4dd8afbff4",
+    "fixtures/lifecycle-hook-v2/invalid/numeric-source-sequence.json": "4bcc3545ea2f380164f9f1171e284e70f3b1cc0f405deef2315d811afac92f83",
+    "fixtures/lifecycle-hook-v2/invalid/oversized-question-preview.json": "4cb2b7b6eca7c81a62337f312b71108f0d781882d164e53abec2ff7580ae947f",
+    "fixtures/lifecycle-hook-v2/invalid/relative-plan-dir.json": "4c8a45068d4e33b37906f0cfbd1cef4b9eef56b70c12af62ae6c9c6779374016",
+    "fixtures/lifecycle-hook-v2/invalid/reply-text-leak.json": "f1c2af0a8bdaaee35eded7ff63db525fe0f3c629025eb519a150ffda61df622b",
+    "fixtures/lifecycle-hook-v2/invalid/unknown-field.json": "3d212ffe9bc6c3745a4963c72684b807c7a689340914332e050fb909402b8a57",
+    "fixtures/lifecycle-hook-v2/invalid/zulu-timestamp.json": "0305baba8e081bdcc5eb3a3868d45797428c90abd425894110a1ffc6b5089af9",
+    "fixtures/lifecycle-hook-v2/valid/run-finished.json": "ed399cbc3c2a3b45cc89805e2ac7b3a306716263bbb696479fb3f91b3c1909cb",
+    "fixtures/lifecycle-hook-v2/valid/turn-started.json": "9773dbe86b92641422a46ddf8d409ed71f2ade13a9c7a20fdd2d2c09e4e4f231",
+    "fixtures/lifecycle-hook-v2/valid/wait-started.json": "3042c58ee2ef3407279626e3157d0396a35631fbc5aafaca829e571b16156f2a",
+    "fixtures/projection-v1/invalid/invalid-phase.json": "049627efbb58819aa00f1b17b2ff678d7900a39957877f22bbc1a326c45bc42b",
+    "fixtures/projection-v1/invalid/missing-updated-at.json": "3131c14853ceacbbf0388896d85e97433178dacd2cd9054d7f46b5b710ae2e9e",
+    "fixtures/projection-v1/invalid/naive-timestamp.json": "492f9c9f42da08b1a7d98dc954e8865f3ac05f0335f8dc9bb66992c3fee99fff",
+    "fixtures/projection-v1/invalid/null-run-id.json": "85fd0e71911102822c5fb343e1a26415a0ed18baf429b6ea35d18f026a51ad46",
+    "fixtures/projection-v1/invalid/oversized-question-id.json": "4763e34840a3c470002c838b1cb7c4952159784ee0c8e51bb9a8ef483e271f7a",
+    "fixtures/projection-v1/invalid/question-body-leak.json": "215d797b6c97bf058ddabef5737533d113d55883175544b3fe4fac364f90e185",
+    "fixtures/projection-v1/invalid/schema-version-drift.json": "4535cab870b5f57d90664cf46614e438e3108adbb19d65c0a968da224fcb2c6b",
+    "fixtures/projection-v1/invalid/unknown-field.json": "44367f46941f63daf51252a494ee1c4892040a5ff50f3454d7b9b2ef6c213c47",
+    "fixtures/projection-v1/valid/awaiting-reply.json": "448dbd3d40783e62e81661db3ad41185b88110f71bea9df9573ac9d1cbc3e988",
+    "fixtures/projection-v1/valid/finished-unregistered.json": "cd313643872b3c20987d995d3bedcf46230e4c566d4460510917c68ef7cadc39",
+    "fixtures/projection-v1/valid/live-turn.json": "b6a92136d9784a5f3e7b460a594771b1b334e2cc5867dbc4c6556deaced211b1",
+    "schemas/bridge-protocol-v2.json": "e3b52edc334475d6de249231560898b7a2d6dd7ff4970dd1d67f7037c696e38a",
+    "schemas/lifecycle-hook-v2.json": "dafca9e877da05da4e4a7803318c818522e665851ae749970d7285b4bd12747d",
+    "schemas/projection-v1.json": "37db4d9877d522de5e868118b5bbcc00c9d943e48cb70a3b99c79a01a6d4e79d"
+  },
+  "generated_by": "python3 -m agent_session_loop.agent_mux_contract --write",
+  "manifest_version": 1
+}

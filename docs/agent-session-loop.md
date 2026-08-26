@@ -386,6 +386,58 @@ observer start, finish, and skip events carry the same alias. This schema
 is also used by repository-aware execution: ASL resolves the alias through the
 validated workspace registry before diagnosing or running the check.
 
+### The AgentMux Compatibility Contract
+
+`asl contract-check PLAN_DIR --agent-mux [--state-dir DIR] [--json]` adds a
+second, plan-independent block reporting the compatibility contract ASL owns for
+the AgentMux integration: per-component schema version and digest, the
+contract-set ID, the corpus and state roots, the supported protocol
+capabilities, and the fixture verdict. Exit stays 0 only when the contract set
+is consistent as well as every contract row; an inconsistent corpus with clean
+rows exits 1 with `reason: contract-set-issues`, and a corpus that cannot be
+read at all exits 1 with `reason: contract-set-error`.
+
+ASL is the sole run authority, so ASL — not AgentMux — owns the schemas the two
+components exchange. `tests/fixtures/agent_mux_contract/` holds canonical
+schemas for **projection v1** (the `agent_mux` block in `state.json`),
+**lifecycle hook v2** (the payload piped to `amx hook-indicator`), and **bridge
+protocol v2** (the NDJSON frames `asl bridge serve` writes), each beside
+positive fixtures the schema must accept and negative fixtures it must reject
+for a named reason at a named JSON pointer. Publishing the contract is not
+adopting it: nothing in this corpus activates v2 behavior, and the bridge still
+serves protocol 1.
+
+Four properties are structural rather than conventional. Every object declares
+`additionalProperties: false`, every string carries an enum, const, format, or
+`maxLength`, and every array a `maxItems`, so a producer cannot widen the wire
+without being noticed. Absence is spelled `null` rather than omission, so a
+consumer never distinguishes "missing" from "not applicable". Timestamps have
+one UTC spelling — RFC 3339 with an explicit `+00:00`, rejecting `Z`, naive
+values, and other offsets — so the same instant compares byte for byte across
+all three components, and paths are absolute, traversal-free POSIX. Question and
+reply prose is refused by name at every depth before any schema-guided walk
+runs, so a leak is diagnosed as `body-not-allowed` where it actually is rather
+than as an unknown field; the one body-bearing frame declares its exemption as
+the JSON pointer `/result/body`, and the linter reconciles declarations against
+exemptions in both directions, so a stale exemption is as much a schema defect
+as an undeclared one. Bounded ASL-authored diagnostics — the 160-character
+`question_preview` AgentMux already renders, `pause_message`, and the bridge
+`message` and `detail` — remain permitted: the rule is not "no text" but "no
+undeclared text, and every declared text field carries a ceiling".
+
+Identity is derived, never declared. The contract-set ID is a SHA-256 over the
+canonical bytes of every corpus `.json` file in sorted path order, truncated to
+64 bits and prefixed `asl-amx-1.`; editing any schema or fixture byte moves it
+and nothing else can. `manifest.json` maps that ID to component versions,
+digests, roots, document ceilings, fixture counts, and the capability lists a
+consumer feature-detects against, and is excluded from the digest it carries.
+Every file is stored in one canonical rendering — sorted keys, two-space indent,
+no ASCII escaping, trailing newline — so `python3 -m
+agent_session_loop.agent_mux_contract --write` is a no-op or a diff, never a
+whitespace churn. Fixture documents carry the placeholder
+`asl-amx-1.0000000000000000`, because a fixture cannot carry an ID computed from
+its own bytes; the authoritative value lives in the manifest.
+
 ## Migration From Older Split Plans
 
 Older split plans that pre-date this lifecycle lack the three `**Readiness**`
@@ -460,7 +512,7 @@ before any `--review-harness` work.
 asl run PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--review-harness codex|claude|copilot] [--review-harness-model MODEL] [--effort EFFORT] [--timeout SEC] [--audit-harness codex|claude|copilot] [--audit-harness-model MODEL] [--audit-effort EFFORT] [--audit-timeout SEC] [--supervisor-audit|--no-supervisor-audit] [--max-sessions N] [--max-pending-sessions N] [--max-review-fix-cycles N] [--max-repair-group-attempts N] [--max-review-fix-cycles-ceiling N] [--review-guard-exclude PATH] [--review-guard-include-ignored] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--no-mailbox] [--allow-not-loop-ready] [--reply TEXT|--reply-stdin] [--json] [--dry-run]
 asl preflight PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd ROOT] [--artifact-dir DIR] [--json]
-asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--json]
+asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--agent-mux] [--state-dir DIR] [--json]
 asl baseline PLAN_DIR [--cwd ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
 asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--cwd ROOT] [--base-dir DIR] [--force-new] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
 asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--force-new] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]

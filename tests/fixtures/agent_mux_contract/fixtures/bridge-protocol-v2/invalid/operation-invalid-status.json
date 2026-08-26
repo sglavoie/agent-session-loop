@@ -1,0 +1,25 @@
+{
+  "case": "operation-invalid-status",
+  "description": "The operation status vocabulary is closed.",
+  "document": {
+    "id": "req-3",
+    "ok": true,
+    "protocol": 2,
+    "result": {
+      "closure_id": null,
+      "command_id": null,
+      "detail": null,
+      "method": "question.reply",
+      "operation_id": "amx-op-7f2c1d",
+      "plan_dir": "/fixtures/plans/plan-alpha",
+      "question_id": "q-1",
+      "row_id": "80505101697f6cce",
+      "run_id": "20260619T140000Z-1",
+      "status": "queued"
+    },
+    "type": "response"
+  },
+  "pointer": "/result/status",
+  "reason": "invalid-enum",
+  "root": "operation_receipt_response"
+}

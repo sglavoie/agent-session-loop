@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 
-from . import plans, responses, workspaces
+from . import agent_mux_contract, plans, responses, state, workspaces
 from .artifacts import ArtifactError, StreamCapture
 from .contracts import (
     CommandCheck,
@@ -2028,6 +2028,10 @@ CONTRACT_CHECK_EXIT_REASON_ISSUES = "contract-issues"
 CONTRACT_CHECK_EXIT_REASON_INVALID_SESSION = "invalid-session"
 CONTRACT_CHECK_EXIT_REASON_CWD_ERROR = "cwd-error"
 CONTRACT_CHECK_EXIT_REASON_PLAN_ERROR = "plan-error"
+#: ``--agent-mux`` found the corpus itself inconsistent.
+CONTRACT_CHECK_EXIT_REASON_CONTRACT_SET_ISSUES = "contract-set-issues"
+#: ``--agent-mux`` could not read the corpus at all.
+CONTRACT_CHECK_EXIT_REASON_CONTRACT_SET_ERROR = "contract-set-error"
 
 #: Per-check row statuses.
 CONTRACT_CHECK_ROW_OK = "ok"
@@ -2303,7 +2307,21 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
         "issue_count": len(issues),
     }
 
-    if not issues:
+    agent_mux_ok = True
+    if bool(getattr(args, "agent_mux", False)):
+        try:
+            corpus = agent_mux_contract.check_corpus()
+            state_root = str(state.state_root(getattr(args, "state_dir", None)))
+        except (agent_mux_contract.ContractError, OSError) as error:
+            return _emit_error(
+                CONTRACT_CHECK_EXIT_REASON_CONTRACT_SET_ERROR, str(error)
+            )
+        result_fields["agent_mux"] = agent_mux_contract.report_payload(
+            corpus, state_root=state_root
+        )
+        agent_mux_ok = corpus.ok
+
+    if not issues and agent_mux_ok:
         if want_json:
             responses.print_json(
                 responses.success_payload(
@@ -2321,14 +2339,21 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
             )
             print(f"{root_label}: {verification_context.root}")
             print(f"Checks: {len(rows)} (all ok)")
+            _print_agent_mux_block(result_fields.get("agent_mux"))
         return 0
 
+    if issues:
+        reason = CONTRACT_CHECK_EXIT_REASON_ISSUES
+        error = f"{len(issues)} of {len(rows)} contract check(s) have issues"
+    else:
+        reason = CONTRACT_CHECK_EXIT_REASON_CONTRACT_SET_ISSUES
+        error = "the AgentMux compatibility contract set is inconsistent"
     if want_json:
         responses.print_json(
             responses.error_payload(
                 "contract-check",
-                reason=CONTRACT_CHECK_EXIT_REASON_ISSUES,
-                error=f"{len(issues)} of {len(rows)} contract check(s) have issues",
+                reason=reason,
+                error=error,
                 paused=False,
                 **{**common_fields, **result_fields},
             )
@@ -2344,15 +2369,38 @@ def contract_check_from_args(args: argparse.Namespace) -> int:
         for row in rows:
             marker = "OK" if row["status"] == CONTRACT_CHECK_ROW_OK else "ISSUE"
             label = row["name"] or row["status"]
-            reason = f" ({row['reason']})" if row["reason"] else ""
+            row_reason = f" ({row['reason']})" if row["reason"] else ""
             repository = f" {row.get('repo')}:" if row.get("repo") else ""
             print(
                 f"  [{marker}]{repository} session {row['session']} "
-                f"{label}{reason}: "
+                f"{label}{row_reason}: "
                 f"{row['detail']}"
             )
-        print(
-            f"contract-check: {len(issues)} of {len(rows)} check(s) have issues",
-            file=sys.stderr,
-        )
+        _print_agent_mux_block(result_fields.get("agent_mux"))
+        print(f"contract-check: {error}", file=sys.stderr)
     return 1
+
+
+def _print_agent_mux_block(payload: Mapping[str, Any] | None) -> None:
+    """Print the ``--agent-mux`` compatibility report in human-readable form."""
+    if payload is None:
+        return
+    print(f"Contract set: {payload['contract_set_id']}")
+    print(f"Corpus digest: {payload['corpus_digest']}")
+    print(f"Corpus root: {payload['corpus_root']}")
+    print(f"State root: {payload['state_root']}")
+    for component in payload["components"]:
+        print(
+            f"  [{component['schema_status']}] {component['component']} "
+            f"v{component.get('schema_version')} {component.get('digest')}"
+        )
+    fixtures = payload["fixtures"]
+    print(
+        f"  fixtures: {fixtures['total']} "
+        f"({fixtures['accepted']} accepted, {fixtures['rejected']} rejected)"
+    )
+    for issue in payload["issues"]:
+        print(
+            f"  [ISSUE] {issue['reason']} at {issue['pointer'] or '/'}: "
+            f"{issue['detail']}"
+        )

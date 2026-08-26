@@ -1,0 +1,22 @@
+{
+  "case": "missing-contract-set-id",
+  "description": "Schema 2 exists to carry compatibility identity; a payload without it is not schema 2.",
+  "document": {
+    "cwd": "/fixtures/workspaces/alpha",
+    "emitted_time": "1782230462",
+    "event": "AgentSessionLoopTurnStarted",
+    "harness": "claude",
+    "phase": "turn",
+    "plan_dir": "/fixtures/plans/plan-alpha",
+    "reason": "turn_started",
+    "run_id": "20260619T140000Z-1",
+    "schema_version": 2,
+    "source": "agent_session_loop",
+    "source_event_id": "20260619T140000Z-1:41",
+    "source_sequence": "41",
+    "state_path": "/fixtures/state/8f14e45fceea167a/state.json"
+  },
+  "pointer": "/contract_set_id",
+  "reason": "missing-field",
+  "root": "hook_payload"
+}

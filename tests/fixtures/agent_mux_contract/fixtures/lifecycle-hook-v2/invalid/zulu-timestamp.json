@@ -1,0 +1,24 @@
+{
+  "case": "zulu-timestamp",
+  "description": "One UTC spelling, so a timestamp compares byte for byte across components.",
+  "document": {
+    "contract_set_id": "asl-amx-1.0000000000000000",
+    "cwd": "/fixtures/workspaces/alpha",
+    "emitted_time": "1782230462",
+    "event": "AgentSessionLoopTurnStarted",
+    "harness": "claude",
+    "phase": "turn",
+    "plan_dir": "/fixtures/plans/plan-alpha",
+    "reason": "turn_started",
+    "run_id": "20260619T140000Z-1",
+    "run_started_at": "2026-06-19T14:00:00Z",
+    "schema_version": 2,
+    "source": "agent_session_loop",
+    "source_event_id": "20260619T140000Z-1:41",
+    "source_sequence": "41",
+    "state_path": "/fixtures/state/8f14e45fceea167a/state.json"
+  },
+  "pointer": "/run_started_at",
+  "reason": "invalid-format",
+  "root": "hook_payload"
+}

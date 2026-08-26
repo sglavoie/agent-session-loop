@@ -516,6 +516,19 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         ),
     )
     contract_check_parser.add_argument(
+        "--agent-mux",
+        action="store_true",
+        help=(
+            "Also report the ASL-owned AgentMux compatibility contract: "
+            "component schema versions, digests, contract-set id, state root, "
+            "and fixture validation"
+        ),
+    )
+    contract_check_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory (reported by --agent-mux)",
+    )
+    contract_check_parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable JSON output",

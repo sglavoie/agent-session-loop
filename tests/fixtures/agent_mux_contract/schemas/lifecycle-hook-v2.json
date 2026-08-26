@@ -1,0 +1,286 @@
+{
+  "$id": "asl-amx/lifecycle-hook-v2",
+  "$schema": "https://agent-session-loop.invalid/schemas/asl-amx-contract-1",
+  "body_bearing_pointers": [],
+  "component": "lifecycle_hook",
+  "definitions": {
+    "DeliveryState": {
+      "description": "Whether a wait ended on a closure the loop consumed.",
+      "enum": [
+        "consumed",
+        "unconsumed"
+      ]
+    },
+    "EventName": {
+      "description": "Closed lifecycle event vocabulary.",
+      "enum": [
+        "AgentSessionLoopStarted",
+        "AgentSessionLoopTurnStarted",
+        "AgentSessionLoopTurnHeartbeat",
+        "AgentSessionLoopTurnFinished",
+        "AgentSessionLoopTurnHangSuspected",
+        "AgentSessionLoopTurnHangCleared",
+        "AgentSessionLoopVerificationStarted",
+        "AgentSessionLoopVerificationHeartbeat",
+        "AgentSessionLoopVerificationFinished",
+        "AgentSessionLoopWaitStarted",
+        "AgentSessionLoopWaitEnded",
+        "AgentSessionLoopMailboxQuestion",
+        "AgentSessionLoopMailboxReply",
+        "AgentSessionLoopMailboxResolution",
+        "AgentSessionLoopPaused",
+        "AgentSessionLoopFinished"
+      ]
+    },
+    "HookPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_dir": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "closure_consumed": {
+          "type": "boolean"
+        },
+        "closure_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "contract_set_id": {
+          "format": "contract-set-id",
+          "type": "string"
+        },
+        "cwd": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "delivery_state": {
+          "$ref": "#/definitions/DeliveryState"
+        },
+        "emitted_time": {
+          "format": "epoch-seconds",
+          "type": "string"
+        },
+        "event": {
+          "$ref": "#/definitions/EventName"
+        },
+        "hang_idle_seconds": {
+          "minimum": 0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "hang_reason": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "harness": {
+          "maxLength": 64,
+          "pattern": "[a-z][a-z0-9_-]{0,63}",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "harness_pid": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "heartbeat_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kitty_window_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "last_message_path": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "last_output_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
+        "pause_message": {
+          "description": "ASL's own operator-facing pause sentence. It is ASL-authored rather than model-authored, so it is permitted, but it carries a ceiling like every other free-text field in this contract.",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "pause_reason": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/definitions/Phase"
+        },
+        "plan_dir": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "question_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "question_preview": {
+          "description": "The one bounded excerpt this contract permits, and the reason the forbidden-name rule is by name rather than by shape: AgentMux renders it in the dashboard today. It is whitespace-collapsed and capped at 160 characters by the producer, and re-bounded here so a replayed or hand-written payload cannot widen it.",
+          "maxLength": 160,
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/definitions/Reason"
+        },
+        "result_path": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "run_finished_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
+        "run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "run_started_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "session": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_number": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "source": {
+          "const": "agent_session_loop"
+        },
+        "source_event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_sequence": {
+          "format": "sequence",
+          "type": "string"
+        },
+        "started_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
+        "state_path": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "stderr_path": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "stdout_path": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "total_sessions": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "turn_index": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wait_reason": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract_set_id",
+        "cwd",
+        "emitted_time",
+        "event",
+        "harness",
+        "phase",
+        "plan_dir",
+        "reason",
+        "run_id",
+        "schema_version",
+        "source",
+        "source_event_id",
+        "source_sequence",
+        "state_path"
+      ],
+      "type": "object"
+    },
+    "Phase": {
+      "description": "The phase this event puts the run in. It is the same vocabulary the projection uses minus `starting`, which no hook announces.",
+      "enum": [
+        "between",
+        "turn",
+        "verification",
+        "waiting",
+        "paused",
+        "finished"
+      ]
+    },
+    "Reason": {
+      "description": "The snake_case reason paired with the event. It is carried separately because schema-1 consumers key on it.",
+      "enum": [
+        "run_started",
+        "turn_started",
+        "turn_heartbeat",
+        "turn_finished",
+        "turn_hang_suspected",
+        "turn_hang_cleared",
+        "verification_started",
+        "verification_heartbeat",
+        "verification_finished",
+        "wait_started",
+        "wait_ended",
+        "mailbox_question_surfaced",
+        "mailbox_reply_appended",
+        "mailbox_resolution_appended",
+        "run_paused",
+        "run_finished"
+      ]
+    }
+  },
+  "description": "The JSON ASL pipes to `amx hook-indicator` on stdin at every lifecycle boundary. Schema 2 adds the contract-set ID, the explicit event name, and a declared schema version to the schema-1 payload; everything else is the shape ASL already emits. Only the identity fields are required: the rest are event-scoped and appear when the boundary carries them. Sequence and emission time are strings, because a numeric spelling that loses precision in a consumer is worse than a string both ends compare verbatim.",
+  "forbidden_property_names": [
+    "answer",
+    "body",
+    "initial_prompt",
+    "prompt",
+    "question_body",
+    "question_text",
+    "reply",
+    "reply_text",
+    "text"
+  ],
+  "max_document_bytes": 8192,
+  "roots": {
+    "hook_payload": "HookPayload"
+  },
+  "title": "ASL lifecycle hook payload, schema 2",
+  "version": 2
+}

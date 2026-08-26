@@ -1,0 +1,1063 @@
+{
+  "$id": "asl-amx/bridge-protocol-v2",
+  "$schema": "https://agent-session-loop.invalid/schemas/asl-amx-contract-1",
+  "body_bearing_pointers": [
+    "/result/body"
+  ],
+  "component": "bridge_protocol",
+  "definitions": {
+    "Cadence": {
+      "additionalProperties": false,
+      "description": "How stale the data on the wire can already be. Attached when a snapshot is served rather than when it is built, so it is excluded from the snapshot digest and never moves runs.changed.",
+      "properties": {
+        "age_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "build_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "failed_projections": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "interval_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "observed_interval_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "staleness_bound_seconds": {
+          "minimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "age_seconds",
+        "build_seconds",
+        "failed_projections",
+        "interval_seconds",
+        "observed_interval_seconds",
+        "staleness_bound_seconds"
+      ],
+      "type": "object"
+    },
+    "ContextKind": {
+      "description": "Why the run is waiting on this question.",
+      "enum": [
+        "pause",
+        "waiting"
+      ]
+    },
+    "ErrorBody": {
+      "additionalProperties": false,
+      "description": "A refusal. `message` is bridge-authored and bounded; it is never operator or model prose, which is why it survives the forbidden-name rule.",
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "details": {
+          "additionalProperties": {
+            "maxLength": 400,
+            "type": "string"
+          },
+          "propertyNames": {
+            "maxLength": 64,
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "message": {
+          "maxLength": 400,
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "details",
+        "message",
+        "retryable"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "description": "One error space for protocol failures and service-layer refusals. Protocol 2 appends `contract-set-mismatch` and `stale-snapshot`; it removes nothing.",
+      "enum": [
+        "malformed-json",
+        "invalid-request",
+        "unsupported-protocol",
+        "unknown-method",
+        "frame-too-large",
+        "internal-error",
+        "mutation-failed",
+        "workbench-unavailable",
+        "invalid-plan",
+        "no-active-run",
+        "run-mismatch",
+        "not-paused",
+        "no-open-question",
+        "question-mismatch",
+        "stale-action-token",
+        "action-not-permitted",
+        "invalid-action",
+        "empty-text",
+        "question-body-too-large",
+        "missing-question-body",
+        "contract-set-mismatch",
+        "stale-snapshot"
+      ]
+    },
+    "ErrorResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "$ref": "#/definitions/ErrorBody"
+        },
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "ok": {
+          "const": false
+        },
+        "protocol": {
+          "const": 2
+        },
+        "type": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "error",
+        "id",
+        "ok",
+        "protocol",
+        "type"
+      ],
+      "type": "object"
+    },
+    "EventName": {
+      "description": "Closed unsolicited-event vocabulary.",
+      "enum": [
+        "runs.changed",
+        "operation.updated"
+      ]
+    },
+    "Focus": {
+      "description": "Workbench deep-link panels.",
+      "enum": [
+        "reply",
+        "verification",
+        "active",
+        "events"
+      ]
+    },
+    "Handshake": {
+      "additionalProperties": false,
+      "description": "The result of `session.handshake`. Mutations are enabled only when the client's contract-set ID matches and the snapshot digest it names is the one the bridge currently holds.",
+      "properties": {
+        "contract_set_id": {
+          "format": "contract-set-id",
+          "type": "string"
+        },
+        "handshake_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "mutations_enabled": {
+          "type": "boolean"
+        },
+        "snapshot_digest": {
+          "format": "sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract_set_id",
+        "handshake_id",
+        "mutations_enabled",
+        "snapshot_digest"
+      ],
+      "type": "object"
+    },
+    "HandshakeResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "ok": {
+          "const": true
+        },
+        "protocol": {
+          "const": 2
+        },
+        "result": {
+          "$ref": "#/definitions/Handshake"
+        },
+        "type": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "protocol",
+        "result",
+        "type"
+      ],
+      "type": "object"
+    },
+    "HelloFrame": {
+      "additionalProperties": false,
+      "description": "The server-first frame every session begins with. Protocol 2 adds the contract-set ID, the split of methods into readable and mutating, the event list, and the explicit handshake requirement.",
+      "properties": {
+        "asl_version": {
+          "maxLength": 32,
+          "type": "string"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/definitions/Method"
+          },
+          "maxItems": 32,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "contract_set_id": {
+          "format": "contract-set-id",
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/definitions/EventName"
+          },
+          "maxItems": 16,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "handshake_required": {
+          "const": true
+        },
+        "max_frame_bytes": {
+          "const": 1048576
+        },
+        "mutation_methods": {
+          "items": {
+            "$ref": "#/definitions/MutationMethod"
+          },
+          "maxItems": 16,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "poll_interval_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "protocol": {
+          "const": 2
+        },
+        "type": {
+          "const": "hello"
+        }
+      },
+      "required": [
+        "asl_version",
+        "capabilities",
+        "contract_set_id",
+        "events",
+        "handshake_required",
+        "max_frame_bytes",
+        "mutation_methods",
+        "poll_interval_seconds",
+        "protocol",
+        "type"
+      ],
+      "type": "object"
+    },
+    "Method": {
+      "description": "Closed request vocabulary.",
+      "enum": [
+        "session.handshake",
+        "runs.snapshot",
+        "question.get",
+        "question.reply",
+        "question.resolve",
+        "run.resume",
+        "run.stop_after_current",
+        "run.abort",
+        "workbench.ensure"
+      ]
+    },
+    "MutationMethod": {
+      "description": "The subset that changes ASL state. Each requires a completed handshake and a snapshot digest still current when it arrives.",
+      "enum": [
+        "question.reply",
+        "question.resolve",
+        "run.resume",
+        "run.stop_after_current",
+        "run.abort"
+      ]
+    },
+    "Operation": {
+      "additionalProperties": false,
+      "description": "A body-free receipt for one accepted mutation.",
+      "properties": {
+        "closure_id": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command_id": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "maxLength": 400,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method": {
+          "$ref": "#/definitions/MutationMethod"
+        },
+        "operation_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "plan_dir": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "question_id": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "row_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/OperationStatus"
+        }
+      },
+      "required": [
+        "closure_id",
+        "command_id",
+        "detail",
+        "method",
+        "operation_id",
+        "plan_dir",
+        "question_id",
+        "row_id",
+        "run_id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "OperationReceiptResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "ok": {
+          "const": true
+        },
+        "protocol": {
+          "const": 2
+        },
+        "result": {
+          "$ref": "#/definitions/Operation"
+        },
+        "type": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "protocol",
+        "result",
+        "type"
+      ],
+      "type": "object"
+    },
+    "OperationStatus": {
+      "description": "`accepted` means durable in ASL's own records; every other value is ASL settling the operation by observing its own corpus.",
+      "enum": [
+        "accepted",
+        "consumed",
+        "rejected",
+        "expired",
+        "superseded"
+      ]
+    },
+    "OperationUpdatedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/Operation"
+        },
+        "event": {
+          "const": "operation.updated"
+        },
+        "protocol": {
+          "const": 2
+        },
+        "seq": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "event"
+        }
+      },
+      "required": [
+        "data",
+        "event",
+        "protocol",
+        "seq",
+        "type"
+      ],
+      "type": "object"
+    },
+    "Question": {
+      "additionalProperties": false,
+      "description": "Body-free question metadata. Identity, counts, and timing only.",
+      "properties": {
+        "asked_at": {
+          "format": "timestamp",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "context_kind": {
+          "$ref": "#/definitions/ContextKind"
+        },
+        "hard_deadline": {
+          "format": "timestamp",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_lease_activity_at": {
+          "format": "timestamp",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "question_id": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "question_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 16,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "session_id": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn_index": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unanswered_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unsupervised_ceiling_seconds": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "waiting_status": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "asked_at",
+        "context_kind",
+        "hard_deadline",
+        "last_lease_activity_at",
+        "question_id",
+        "question_ids",
+        "session_id",
+        "turn_index",
+        "unanswered_count",
+        "unsupervised_ceiling_seconds",
+        "waiting_status"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "QuestionBodyResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "ok": {
+          "const": true
+        },
+        "protocol": {
+          "const": 2
+        },
+        "result": {
+          "$ref": "#/definitions/QuestionBodyResult"
+        },
+        "type": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "protocol",
+        "result",
+        "type"
+      ],
+      "type": "object"
+    },
+    "QuestionBodyResult": {
+      "additionalProperties": false,
+      "description": "The one body-bearing result in this contract. It is fetched deliberately, never rides along with a projection, and its exemption from the forbidden-name rule is declared as the pointer `/result/body` rather than inferred.",
+      "properties": {
+        "action_token": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "body": {
+          "maxLength": 262144,
+          "type": "string"
+        },
+        "body_bytes": {
+          "maximum": 262144,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "context_kind": {
+          "$ref": "#/definitions/ContextKind"
+        },
+        "plan_dir": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "question_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "row_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_token",
+        "body",
+        "body_bytes",
+        "context_kind",
+        "plan_dir",
+        "question_id",
+        "row_id",
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "RequestId": {
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string"
+    },
+    "Row": {
+      "additionalProperties": false,
+      "description": "One projected active or actionable run.",
+      "properties": {
+        "action_token": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "actions": {
+          "items": {
+            "$ref": "#/definitions/MutationMethod"
+          },
+          "maxItems": 8,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "activity_label": {
+          "maxLength": 400,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "disabled_reasons": {
+          "additionalProperties": {
+            "maxLength": 400,
+            "type": "string"
+          },
+          "description": "Why each unavailable action is unavailable. A map node: the key space is the closed method vocabulary and the value is bounded, so an operator-authored string cannot become a key.",
+          "propertyNames": {
+            "$ref": "#/definitions/Method"
+          },
+          "type": "object"
+        },
+        "harness": {
+          "maxLength": 64,
+          "pattern": "[a-z][a-z0-9_-]{0,63}",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "maxLength": 400,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_activity_at": {
+          "format": "timestamp",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_activity_source": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pause_reason": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "enum": [
+            "awaiting-reply",
+            "failed",
+            "stale",
+            "invalid",
+            "verifying",
+            "running"
+          ]
+        },
+        "plan_dir": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "primary_state": {
+          "enum": [
+            "paused-for-reply",
+            "failed",
+            "stale",
+            "invalid",
+            "verifying",
+            "running"
+          ]
+        },
+        "question": {
+          "$ref": "#/definitions/Question"
+        },
+        "recommended_action": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registry_digest": {
+          "maxLength": 64,
+          "pattern": "[0-9a-f]{1,64}",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "run_finished_at": {
+          "format": "timestamp",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "run_started_at": {
+          "format": "timestamp",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "urgency_group": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "urgency_rank": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warnings": {
+          "items": {
+            "maxLength": 400,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "window": {
+          "$ref": "#/definitions/Window"
+        },
+        "workspace_root": {
+          "format": "canonical-path",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action_token",
+        "actions",
+        "activity_label",
+        "disabled_reasons",
+        "harness",
+        "label",
+        "last_activity_at",
+        "last_activity_source",
+        "pause_reason",
+        "phase",
+        "plan_dir",
+        "primary_state",
+        "question",
+        "recommended_action",
+        "registry_digest",
+        "repository_count",
+        "row_id",
+        "run_finished_at",
+        "run_id",
+        "run_started_at",
+        "session_id",
+        "urgency_group",
+        "urgency_rank",
+        "warnings",
+        "window",
+        "workspace_root"
+      ],
+      "type": "object"
+    },
+    "RunsChangedEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "digest": {
+              "format": "sha256",
+              "type": "string"
+            },
+            "row_count": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "digest",
+            "row_count"
+          ],
+          "type": "object"
+        },
+        "event": {
+          "const": "runs.changed"
+        },
+        "protocol": {
+          "const": 2
+        },
+        "seq": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "event"
+        }
+      },
+      "required": [
+        "data",
+        "event",
+        "protocol",
+        "seq",
+        "type"
+      ],
+      "type": "object"
+    },
+    "RunsSnapshotResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "ok": {
+          "const": true
+        },
+        "protocol": {
+          "const": 2
+        },
+        "result": {
+          "$ref": "#/definitions/Snapshot"
+        },
+        "type": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "protocol",
+        "result",
+        "type"
+      ],
+      "type": "object"
+    },
+    "Snapshot": {
+      "additionalProperties": false,
+      "description": "The deterministic projection of every active run.",
+      "properties": {
+        "contract_set_id": {
+          "format": "contract-set-id",
+          "type": "string"
+        },
+        "digest": {
+          "format": "sha256",
+          "type": "string"
+        },
+        "projection": {
+          "$ref": "#/definitions/Cadence"
+        },
+        "protocol": {
+          "const": 2
+        },
+        "row_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/definitions/Row"
+          },
+          "maxItems": 200,
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "warnings": {
+          "items": {
+            "maxLength": 400,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "type": "array"
+        }
+      },
+      "required": [
+        "contract_set_id",
+        "digest",
+        "projection",
+        "protocol",
+        "row_count",
+        "rows",
+        "truncated",
+        "warnings"
+      ],
+      "type": "object"
+    },
+    "Window": {
+      "additionalProperties": false,
+      "description": "The projected Kitty binding of one run.",
+      "properties": {
+        "kitty_window_id": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kitty_window_id"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "WorkbenchLink": {
+      "additionalProperties": false,
+      "description": "A tokenized loopback deep link into one plan's detail view.",
+      "properties": {
+        "focus": {
+          "$ref": "#/definitions/Focus"
+        },
+        "plan_dir": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "row_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "url": {
+          "description": "Loopback only. A link that leaves the machine is not a deep link into a local Workbench.",
+          "maxLength": 2048,
+          "pattern": "http://127\\.0\\.0\\.1:[0-9]{1,5}/.*",
+          "type": "string"
+        }
+      },
+      "required": [
+        "focus",
+        "plan_dir",
+        "row_id",
+        "url"
+      ],
+      "type": "object"
+    },
+    "WorkbenchLinkResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "ok": {
+          "const": true
+        },
+        "protocol": {
+          "const": 2
+        },
+        "result": {
+          "$ref": "#/definitions/WorkbenchLink"
+        },
+        "type": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "protocol",
+        "result",
+        "type"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "UTF-8 NDJSON frames on stdio. Protocol 2 keeps every schema-1 shape and adds compatibility identity plus a mutation gate: the hello carries the contract-set ID and declares that mutations require a handshake, and `session.handshake` enables them only against a matching contract set and a snapshot digest the client has actually seen. Snapshots and events are body-free; `question.get` is the one deliberate exception and declares its exemption by pointer below.",
+  "forbidden_property_names": [
+    "answer",
+    "body",
+    "initial_prompt",
+    "prompt",
+    "question_body",
+    "question_text",
+    "reply",
+    "reply_text",
+    "text"
+  ],
+  "max_document_bytes": 1048576,
+  "roots": {
+    "error_response": "ErrorResponse",
+    "handshake_response": "HandshakeResponse",
+    "hello": "HelloFrame",
+    "operation_receipt_response": "OperationReceiptResponse",
+    "operation_updated_event": "OperationUpdatedEvent",
+    "question_body_response": "QuestionBodyResponse",
+    "runs_changed_event": "RunsChangedEvent",
+    "runs_snapshot_response": "RunsSnapshotResponse",
+    "workbench_link_response": "WorkbenchLinkResponse"
+  },
+  "title": "ASL bridge protocol 2 frames",
+  "version": 2
+}

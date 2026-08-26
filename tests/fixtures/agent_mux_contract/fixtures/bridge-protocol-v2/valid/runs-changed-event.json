@@ -1,0 +1,15 @@
+{
+  "case": "runs-changed-event",
+  "description": "The unsolicited event that tells a client its snapshot moved.",
+  "document": {
+    "data": {
+      "digest": "75f1a65cc47cce84ea965af6fb0584ef28094836e33824c305d26953bb4e0ad7",
+      "row_count": 2
+    },
+    "event": "runs.changed",
+    "protocol": 2,
+    "seq": 12,
+    "type": "event"
+  },
+  "root": "runs_changed_event"
+}

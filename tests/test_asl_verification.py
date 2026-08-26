@@ -24,6 +24,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    agent_mux_contract,
     artifacts,
     cli,
     contracts,
@@ -3582,6 +3583,75 @@ class ContractCheckCliTests(unittest.TestCase):
         self.assertEqual("2", args.session)
         self.assertEqual(".", args.cwd)
         self.assertFalse(args.json)
+        self.assertFalse(args.agent_mux)
+        self.assertIsNone(args.state_dir)
+
+    def _ok_plan(self, tmp_dir: Path) -> tuple[Path, Path]:
+        plan_dir = tmp_dir / "plan"
+        repo_root = tmp_dir / "repo"
+        repo_root.mkdir()
+        contract = _contract_block('{"type": "command", "name": "c", "argv": ["true"]}')
+        write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+        return plan_dir, repo_root
+
+    def test_agent_mux_block_is_absent_unless_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, repo_root = self._ok_plan(Path(tmp))
+
+            code, payload = self._run(plan_dir, repo_root)
+
+            self.assertEqual(0, code)
+            self.assertNotIn("agent_mux", payload)
+
+    def test_agent_mux_block_reports_the_contract_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            plan_dir, repo_root = self._ok_plan(tmp_dir)
+            state_dir = tmp_dir / "state"
+
+            code, payload = self._run(
+                plan_dir,
+                repo_root,
+                "--agent-mux",
+                "--state-dir",
+                str(state_dir),
+            )
+
+            self.assertEqual(0, code)
+            self.assertEqual("ok", payload["reason"])
+            block = payload["agent_mux"]
+            self.assertEqual(
+                agent_mux_contract.contract_set_id(), block["contract_set_id"]
+            )
+            self.assertEqual(agent_mux_contract.corpus_digest(), block["corpus_digest"])
+            # The state root is reported canonicalized, the same way every
+            # other ASL surface resolves `--state-dir`.
+            self.assertEqual(
+                str(plans.canonicalize_path(state_dir)), block["state_root"]
+            )
+            self.assertEqual(
+                list(agent_mux_contract.COMPONENTS),
+                [component["component"] for component in block["components"]],
+            )
+            self.assertEqual([], block["issues"])
+            self.assertEqual([], block["fixtures"]["failures"])
+
+    def test_an_unreadable_corpus_is_a_structured_error(self) -> None:
+        # The corpus is checked-in data, so a missing one is an environment
+        # failure with its own reason rather than a traceback or a silent pass.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, repo_root = self._ok_plan(Path(tmp))
+            with mock.patch.object(
+                agent_mux_contract,
+                "check_corpus",
+                side_effect=agent_mux_contract.ContractError("corpus is missing"),
+            ):
+                code, payload = self._run(plan_dir, repo_root, "--agent-mux")
+
+            self.assertEqual(1, code)
+            self.assertFalse(payload["ok"])
+            self.assertEqual("contract-set-error", payload["reason"])
+            self.assertIn("corpus is missing", payload["error"])
 
     def test_registered_checks_resolve_static_paths_by_alias(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

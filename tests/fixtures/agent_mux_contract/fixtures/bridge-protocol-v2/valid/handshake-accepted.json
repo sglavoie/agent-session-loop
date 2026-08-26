@@ -1,0 +1,17 @@
+{
+  "case": "handshake-accepted",
+  "description": "A handshake that matched the contract set and a current snapshot digest.",
+  "document": {
+    "id": "req-1",
+    "ok": true,
+    "protocol": 2,
+    "result": {
+      "contract_set_id": "asl-amx-1.0000000000000000",
+      "handshake_id": "hs-4c1f0b9a",
+      "mutations_enabled": true,
+      "snapshot_digest": "75f1a65cc47cce84ea965af6fb0584ef28094836e33824c305d26953bb4e0ad7"
+    },
+    "type": "response"
+  },
+  "root": "handshake_response"
+}

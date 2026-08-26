@@ -1,0 +1,38 @@
+{
+  "case": "hello-protocol-1",
+  "description": "Protocol 2 is not a negotiation: a hello announcing anything else is a failure.",
+  "document": {
+    "asl_version": "0.1.0",
+    "capabilities": [
+      "session.handshake",
+      "runs.snapshot",
+      "question.get",
+      "question.reply",
+      "question.resolve",
+      "run.resume",
+      "run.stop_after_current",
+      "run.abort",
+      "workbench.ensure"
+    ],
+    "contract_set_id": "asl-amx-1.0000000000000000",
+    "events": [
+      "runs.changed",
+      "operation.updated"
+    ],
+    "handshake_required": true,
+    "max_frame_bytes": 1048576,
+    "mutation_methods": [
+      "question.reply",
+      "question.resolve",
+      "run.resume",
+      "run.stop_after_current",
+      "run.abort"
+    ],
+    "poll_interval_seconds": 1.0,
+    "protocol": 1,
+    "type": "hello"
+  },
+  "pointer": "/protocol",
+  "reason": "const-mismatch",
+  "root": "hello"
+}

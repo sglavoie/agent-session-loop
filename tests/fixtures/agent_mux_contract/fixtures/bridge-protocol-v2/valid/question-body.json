@@ -1,0 +1,21 @@
+{
+  "case": "question-body",
+  "description": "The one body-bearing frame. It is reachable only by asking for it, and its exemption is the declared pointer `/result/body`.",
+  "document": {
+    "id": "req-5",
+    "ok": true,
+    "protocol": 2,
+    "result": {
+      "action_token": "37db468d7f42a93b7e29a1f71551663e",
+      "body": "Should we drop the v1 column before the backfill lands?",
+      "body_bytes": 54,
+      "context_kind": "pause",
+      "plan_dir": "/fixtures/plans/plan-alpha",
+      "question_id": "q-1",
+      "row_id": "80505101697f6cce",
+      "run_id": "20260619T140000Z-1"
+    },
+    "type": "response"
+  },
+  "root": "question_body_response"
+}

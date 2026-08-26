@@ -1,0 +1,36 @@
+{
+  "case": "hello",
+  "description": "The server-first frame. It advertises the contract set a client must echo before any mutation is accepted.",
+  "document": {
+    "asl_version": "0.1.0",
+    "capabilities": [
+      "session.handshake",
+      "runs.snapshot",
+      "question.get",
+      "question.reply",
+      "question.resolve",
+      "run.resume",
+      "run.stop_after_current",
+      "run.abort",
+      "workbench.ensure"
+    ],
+    "contract_set_id": "asl-amx-1.0000000000000000",
+    "events": [
+      "runs.changed",
+      "operation.updated"
+    ],
+    "handshake_required": true,
+    "max_frame_bytes": 1048576,
+    "mutation_methods": [
+      "question.reply",
+      "question.resolve",
+      "run.resume",
+      "run.stop_after_current",
+      "run.abort"
+    ],
+    "poll_interval_seconds": 1.0,
+    "protocol": 2,
+    "type": "hello"
+  },
+  "root": "hello"
+}

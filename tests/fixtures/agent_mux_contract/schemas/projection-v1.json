@@ -1,0 +1,184 @@
+{
+  "$id": "asl-amx/projection-v1",
+  "$schema": "https://agent-session-loop.invalid/schemas/asl-amx-contract-1",
+  "body_bearing_pointers": [],
+  "component": "projection",
+  "definitions": {
+    "Phase": {
+      "description": "Where the run is right now. `starting` covers the window before the first turn; `between` is the loop's own bookkeeping between a turn and whatever follows it.",
+      "enum": [
+        "starting",
+        "turn",
+        "verification",
+        "between",
+        "waiting",
+        "paused",
+        "finished"
+      ]
+    },
+    "Process": {
+      "additionalProperties": false,
+      "description": "The live loop process. Present only while the run holds one; a PID without the start token it was observed with cannot be distinguished from a recycled PID.",
+      "properties": {
+        "pid": {
+          "maximum": 4194304,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "start_token": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "pid",
+        "start_token"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "Projection": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_set_id": {
+          "format": "contract-set-id",
+          "type": "string"
+        },
+        "finished_at": {
+          "format": "timestamp",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "harness": {
+          "maxLength": 64,
+          "pattern": "[a-z][a-z0-9_-]{0,63}",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kitty_window_id": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lifecycle_source_sequence": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "phase": {
+          "$ref": "#/definitions/Phase"
+        },
+        "plan_dir": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "process": {
+          "$ref": "#/definitions/Process"
+        },
+        "projection_generation": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "question_id": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registry_digest": {
+          "maxLength": 64,
+          "pattern": "[0-9a-f]{1,64}",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "session_id": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
+        "turn_index": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
+        "workspace_root": {
+          "format": "canonical-path",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "contract_set_id",
+        "finished_at",
+        "harness",
+        "kitty_window_id",
+        "lifecycle_source_sequence",
+        "phase",
+        "plan_dir",
+        "process",
+        "projection_generation",
+        "question_id",
+        "registry_digest",
+        "run_id",
+        "schema_version",
+        "session_id",
+        "started_at",
+        "turn_index",
+        "updated_at",
+        "workspace_root"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "The atomic block ASL writes into state.json for AgentMux to observe. It is a complete description of one run's supervision-relevant position: every field is always present, and absence is spelled null rather than omission, so a consumer never has to distinguish 'missing' from 'not applicable'. Question identity appears; question prose never does.",
+  "forbidden_property_names": [
+    "answer",
+    "body",
+    "initial_prompt",
+    "prompt",
+    "question_body",
+    "question_text",
+    "reply",
+    "reply_text",
+    "text"
+  ],
+  "max_document_bytes": 4096,
+  "roots": {
+    "projection": "Projection"
+  },
+  "title": "ASL agent_mux projection, schema 1",
+  "version": 1
+}

@@ -1,0 +1,17 @@
+{
+  "case": "handshake-read-only",
+  "description": "A handshake against a snapshot the bridge no longer holds: reads continue, mutations do not.",
+  "document": {
+    "id": "req-1",
+    "ok": true,
+    "protocol": 2,
+    "result": {
+      "contract_set_id": "asl-amx-1.0000000000000000",
+      "handshake_id": "hs-91ab0421",
+      "mutations_enabled": false,
+      "snapshot_digest": "cb9dcf6bc1d83a8f6cf76ded1bf9c2280b0a5cf5b6e0a5a7c1d5f2e3a4b5c6d7"
+    },
+    "type": "response"
+  },
+  "root": "handshake_response"
+}

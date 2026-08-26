@@ -1,0 +1,19 @@
+{
+  "case": "error-unknown-code",
+  "description": "One closed error space, so a client maps a refusal by code rather than by prose.",
+  "document": {
+    "error": {
+      "code": "rate-limited",
+      "details": {},
+      "message": "slow down",
+      "retryable": true
+    },
+    "id": "req-6",
+    "ok": false,
+    "protocol": 2,
+    "type": "response"
+  },
+  "pointer": "/error/code",
+  "reason": "invalid-enum",
+  "root": "error_response"
+}

@@ -1,0 +1,17 @@
+{
+  "case": "workbench-link",
+  "description": "A tokenized loopback deep link.",
+  "document": {
+    "id": "req-4",
+    "ok": true,
+    "protocol": 2,
+    "result": {
+      "focus": "reply",
+      "plan_dir": "/fixtures/plans/plan-alpha",
+      "row_id": "80505101697f6cce",
+      "url": "http://127.0.0.1:52341/?token=fixture-token#plan?dir=%2Ffixtures%2Fplans%2Fplan-alpha&focus=reply"
+    },
+    "type": "response"
+  },
+  "root": "workbench_link_response"
+}

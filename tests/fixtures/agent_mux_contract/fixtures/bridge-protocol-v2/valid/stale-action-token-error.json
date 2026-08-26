@@ -1,0 +1,19 @@
+{
+  "case": "stale-action-token-error",
+  "description": "A refusal a client maps by code. Retryable means refresh the snapshot and reissue, not resubmit the same token.",
+  "document": {
+    "error": {
+      "code": "stale-action-token",
+      "details": {
+        "expected_fingerprint": "cb9dcf6bc1d83a8f6cf76ded1bf9c228"
+      },
+      "message": "action token does not match current plan state; refresh the snapshot",
+      "retryable": true
+    },
+    "id": "req-6",
+    "ok": false,
+    "protocol": 2,
+    "type": "response"
+  },
+  "root": "error_response"
+}

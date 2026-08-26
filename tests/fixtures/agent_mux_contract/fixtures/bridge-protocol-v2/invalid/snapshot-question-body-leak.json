@@ -1,0 +1,83 @@
+{
+  "case": "snapshot-question-body-leak",
+  "description": "Question prose never rides along with a projection.",
+  "document": {
+    "id": "req-2",
+    "ok": true,
+    "protocol": 2,
+    "result": {
+      "contract_set_id": "asl-amx-1.0000000000000000",
+      "digest": "75f1a65cc47cce84ea965af6fb0584ef28094836e33824c305d26953bb4e0ad7",
+      "projection": {
+        "age_seconds": 0.4,
+        "build_seconds": 9.8,
+        "failed_projections": 0,
+        "interval_seconds": 1.0,
+        "observed_interval_seconds": 9.8,
+        "staleness_bound_seconds": 20.0
+      },
+      "protocol": 2,
+      "row_count": 1,
+      "rows": [
+        {
+          "action_token": "37db468d7f42a93b7e29a1f71551663e",
+          "actions": [
+            "run.resume"
+          ],
+          "activity_label": "Reply needed",
+          "disabled_reasons": {
+            "question.reply": "run is paused and holds no live turn",
+            "question.resolve": "run is paused and holds no live turn",
+            "run.abort": "run is paused and holds no live turn",
+            "run.stop_after_current": "run is paused and holds no live turn"
+          },
+          "harness": "claude",
+          "label": null,
+          "last_activity_at": "2026-06-19T14:00:00+00:00",
+          "last_activity_source": "run-started",
+          "pause_reason": "agent-question",
+          "phase": "awaiting-reply",
+          "plan_dir": "/fixtures/plans/plan-alpha",
+          "primary_state": "paused-for-reply",
+          "question": {
+            "asked_at": "2026-06-19T14:01:00+00:00",
+            "body": "Should we drop the v1 column?",
+            "context_kind": "pause",
+            "hard_deadline": null,
+            "last_lease_activity_at": null,
+            "question_id": "q-1",
+            "question_ids": [
+              "q-1"
+            ],
+            "session_id": "1",
+            "turn_index": 1,
+            "unanswered_count": 1,
+            "unsupervised_ceiling_seconds": null,
+            "waiting_status": null
+          },
+          "recommended_action": "reply",
+          "registry_digest": null,
+          "repository_count": 0,
+          "row_id": "80505101697f6cce",
+          "run_finished_at": null,
+          "run_id": "20260619T140000Z-1",
+          "run_started_at": "2026-06-19T14:00:00+00:00",
+          "session_id": "1",
+          "urgency_group": "needs-action",
+          "urgency_rank": 10,
+          "warnings": [],
+          "window": {
+            "kitty_window_id": 17
+          },
+          "workspace_root": null
+        }
+      ],
+      "truncated": false,
+      "warnings": []
+    },
+    "type": "response"
+  },
+  "pointer": "/result/rows/0/question/body",
+  "reason": "body-not-allowed",
+  "root": "runs_snapshot_response"
+}

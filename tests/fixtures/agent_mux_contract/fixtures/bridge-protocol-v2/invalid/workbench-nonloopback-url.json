@@ -1,0 +1,19 @@
+{
+  "case": "workbench-nonloopback-url",
+  "description": "A Workbench link that leaves the machine is not a Workbench link.",
+  "document": {
+    "id": "req-4",
+    "ok": true,
+    "protocol": 2,
+    "result": {
+      "focus": "reply",
+      "plan_dir": "/fixtures/plans/plan-alpha",
+      "row_id": "80505101697f6cce",
+      "url": "http://cockpit.example.com/?token=fixture-token"
+    },
+    "type": "response"
+  },
+  "pointer": "/result/url",
+  "reason": "pattern-mismatch",
+  "root": "workbench_link_response"
+}
