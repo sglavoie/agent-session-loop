@@ -2504,6 +2504,12 @@ GENERIC_RECOVERY_PAUSE_REASONS: tuple[str, ...] = (
     # The turn rewrote another session's instructions. The plan needs inspecting
     # and the tampered artifact restoring before a relaunch; no reply undoes it.
     "plan-artifact-tampered",
+    # The terminal adjudicator refused an unearned success. Relaunching re-derives
+    # the same blocker from the same evidence, so the workbench offers the generic
+    # inspect-then-relaunch guidance: the operator has to make the checks pass or
+    # the review come back all-clear first, and no reply substitutes for either.
+    "required-checks-incomplete",
+    "review-not-clear",
 )
 
 

@@ -291,6 +291,47 @@ def read_prior_review_cycles(event_path: str | Path) -> list[dict[str, Any]]:
     ]
 
 
+def cycle_is_all_clear(cycle: Mapping[str, Any]) -> bool:
+    """Whether one recorded review cycle closed the loop with nothing left."""
+    return (
+        cycle.get("outcome") == review.REVIEW_OUTCOME_ALL_CLEAR
+        and cycle.get("disposition") == REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
+    )
+
+
+def deferred_review_is_cleared(
+    cycles: Sequence[Mapping[str, Any]], *, review_session_id: Any
+) -> bool:
+    """Whether a review session's deferred broad failures were later closed.
+
+    A findings review that materialized repairs buys its broad gates a delay,
+    not a pass: the promise is that a *later* review of the repaired tree comes
+    back all-clear. Only such a later cycle discharges it. A deferral whose own
+    cycle never materialized repairs — one the cap disabled, exhausted, or left
+    malformed — never bought the delay in the first place and can never be
+    cleared here.
+
+    ``cycles`` must be ordered oldest first. The runner reads them from its live
+    projection or the append-only event log (so a resumed run sees the cycles a
+    previous run recorded); the terminal audit reads the same records out of its
+    audit input. Both ask this one question so a run and its auditor can never
+    disagree about whether a deferral was earned.
+    """
+    source_index = next(
+        (
+            index
+            for index, cycle in enumerate(cycles)
+            if str(cycle.get("review_session_id")) == str(review_session_id)
+            and cycle.get("outcome") == review.REVIEW_OUTCOME_FINDINGS
+            and cycle.get("disposition") == REVIEW_CYCLE_DISPOSITION_REPAIRS
+        ),
+        None,
+    )
+    if source_index is None:
+        return False
+    return any(cycle_is_all_clear(cycle) for cycle in cycles[source_index + 1 :])
+
+
 def _nonempty_str(value: Any) -> str | None:
     if isinstance(value, str):
         text = value.strip()

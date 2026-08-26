@@ -67,12 +67,19 @@ USER_REQUIRED_HARNESS_FAILURE_REASONS: tuple[str, ...] = (
 #   repository; one of the two processes has to stop.
 # - ``not-loop-ready``: preflight has to reach ``loop-ready``, which means
 #   repairing the plan or the environment its findings name.
+# - ``required-checks-incomplete`` / ``review-not-clear``: the terminal
+#   adjudicator refused a success the run had not earned. Relaunching with the
+#   same arguments re-derives the same blocker from the same append-only
+#   evidence, so these are never machine-retryable; the gates have to pass or
+#   the review has to come back all-clear first.
 ENVIRONMENT_BLOCKED_PAUSE_REASONS: tuple[str, ...] = (
     "commit-preflight",
     "commit-failed",
     events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
     events.PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION,
     "not-loop-ready",
+    events.PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE,
+    events.PAUSE_REASON_REVIEW_NOT_CLEAR,
 )
 
 # Every pause an operator must inspect rather than answer, from either source:

@@ -1743,6 +1743,142 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual([], payload["commits"])
         self.assertFalse(commit_log.exists())
 
+    def test_a_stopped_run_cannot_leave_a_deferred_broad_failure_green(self) -> None:
+        # ASI-133 reproducer. The review defers its failing broad gate against
+        # a repair loop, and the stop is exactly what keeps that loop from ever
+        # running. The ending is legitimate; the success is not. Before terminal
+        # adjudication this exited 0 reporting ``stopped`` with the plan's own
+        # required gate still failing and nothing naming it.
+        self._setup_review_with_broad_gate_waiting_for_repair()
+        self._queue_stop_after_current()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "findings"},
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, payload["pause_reason"]
+        )
+        adjudication = payload["terminal_adjudication"]
+        self.assertTrue(adjudication["claimed_ok"])
+        self.assertEqual("stopped", adjudication["claimed_reason"])
+        unresolved = payload["pause_details"]["deferred_unresolved"]
+        self.assertEqual(
+            ["broad:1:repair-child-exists"],
+            sorted(check for entry in unresolved for check in entry["checks"]),
+        )
+        self.assertEqual(["2"], [entry["session_id"] for entry in unresolved])
+        self.assertEqual(
+            pause_policy.USER_ACTION_INSPECT,
+            payload["action_required"]["user_action"],
+        )
+
+    def test_a_resumed_run_that_redeems_nothing_keeps_the_same_blocker(self) -> None:
+        # The blocker lives in the append-only event log, so a resumed run
+        # re-derives it instead of inheriting a forgotten one — and stopping
+        # again redeems nothing, so the same deferral blocks the same way.
+        self._setup_review_with_broad_gate_waiting_for_repair()
+        self._queue_stop_after_current()
+        first_completed, first = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "findings"},
+        )
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+
+        self._queue_stop_after_current()
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "findings"},
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual(
+            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, payload["pause_reason"]
+        )
+        self.assertEqual(
+            first["pause_details"]["deferred_unresolved"][0]["checks"],
+            payload["pause_details"]["deferred_unresolved"][0]["checks"],
+        )
+
+    def test_a_resumed_run_clears_the_blocker_once_a_review_comes_back_clear(
+        self,
+    ) -> None:
+        # The redeeming half: the resumed run executes the repair the deferral
+        # was promised against, the next review cycle comes back all-clear, and
+        # only then may the plan report itself complete.
+        self._setup_review_with_broad_gate_waiting_for_repair()
+        self._queue_stop_after_current()
+        blocked_completed, blocked = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "findings"},
+        )
+        self.assertEqual(1, blocked_completed.returncode, blocked_completed.stderr)
+        self.assertEqual(
+            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, blocked["pause_reason"]
+        )
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "all-clear"},
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertFalse(payload["terminal_adjudication"]["blocked"])
+        self.assertEqual("all-clear", payload["review_cycles"][-1]["disposition"])
+
+    def test_an_exhausted_repair_budget_cannot_strand_the_deferral_either(
+        self,
+    ) -> None:
+        # ASI-133's second shape, observed on 20260825T152058432989Z-6755: the
+        # run refuses success on its own (``review-findings-unresolved``), so
+        # nothing here is dishonest — but the deferral it opened is still owed
+        # and a plain failure leaves nobody to redeem it. Adjudicating the
+        # failure path turns that into a blocker a resume re-evaluates.
+        self._setup_review_with_broad_gate_waiting_for_repair()
+
+        completed, payload = self._run(
+            mode="success-with-review",
+            review_harness="claude",
+            max_review_fix_cycles=1,
+            extra_env={"FAKE_CODEX_REVIEW_OUTCOMES": "findings,findings"},
+        )
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, payload["pause_reason"]
+        )
+        adjudication = payload["terminal_adjudication"]
+        self.assertFalse(adjudication["claimed_ok"])
+        self.assertEqual(
+            runner.REVIEW_FINDINGS_UNRESOLVED_REASON, adjudication["claimed_reason"]
+        )
+        # The narrower reason the review path recorded survives the pause.
+        self.assertEqual(
+            runner.REVIEW_FINDINGS_UNRESOLVED_REASON,
+            payload["action_required"]["reason"],
+        )
+        self.assertEqual(
+            ["broad:1:repair-child-exists"],
+            sorted(
+                check
+                for entry in payload["pause_details"]["deferred_unresolved"]
+                for check in entry["checks"]
+            ),
+        )
+
     def test_generated_repair_commits_under_null_ordinary_mode(self) -> None:
         self._setup_review_with_broad_gate_waiting_for_repair()
         commit_log, commit_env = self._commit_log_env()

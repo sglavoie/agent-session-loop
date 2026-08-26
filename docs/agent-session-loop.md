@@ -1795,13 +1795,68 @@ terminalization still completes, and the run keeps the exit code it had already
 earned.
 
 Ordering inside one run is fixed. Every ending reaches the terminalization
-coordinator exactly once, the audit runs there first, and its artifacts and
-ledger records are on disk before `run_finished` is appended — so the terminal
-event and the state projection carry the same verdict rather than two. The
-outcome and the exit code are decided before a run reaches the coordinator and
-auditing changes neither: a finding, a failed audit, or a failed publication
-never turns a successful run into a failed one, never rewrites a pause reason,
-and never touches the artifacts the run recorded.
+coordinator exactly once, the terminal adjudicator runs there first, the audit
+second, and the audit's artifacts and ledger records are on disk
+before `run_finished` is appended — so the terminal event and the state
+projection carry the same verdict rather than two. The outcome and the exit
+code a caller carries into the coordinator are a proposal that only the
+adjudicator may overturn; auditing changes neither: a finding, a failed audit,
+or a failed publication never turns a successful run into a failed one, never
+rewrites a pause reason, and never touches the artifacts the run recorded.
+
+### Terminal success semantics
+
+Success has one definition, applied by one adjudicator to every terminal path —
+normal completion, review exhaustion, a resumed run, an operator's
+stop-after-current, the failure paths, and the refusals raised above the loop.
+A run may report
+`ok: true` only when every required verification reached `passed`, and a plan
+may call itself finished only when a final review came back all-clear. Anything
+else becomes a pause with a stable reason:
+
+- `required-checks-incomplete` — a required verification never reached
+  `passed`. That covers an unpassed turn verification and, more often, a broad
+  plan gate that a findings review deferred under
+  `findings-defer-broad-failures` and that no later all-clear review cycle ever
+  redeemed. `pause_details` carries `deferred_unresolved` (the deferring run ID,
+  review session, turn index, and outstanding check names) and
+  `unpassed_verifications`.
+- `review-not-clear` — a run reporting `all-complete` whose final review is
+  missing or did not come back all-clear. `pause_details` carries
+  `review_completed`, `review_fix_disposition`, `review_outcome`,
+  `unresolved_findings`, `findings_by_severity`, and `review_skipped_reason`.
+
+Only `all-complete` is asked for a review: `stopped` and `max-sessions` report
+the early exit an operator asked for and never claim the plan was reviewed to
+the end. A dry run and a run already paused keep the verdict they arrived with,
+because the specific pause is the evidence an operator needs. A run that is
+failing but not paused is still adjudicated, and only the required-checks clause
+can fire on it: ASL's one such ending is `review-findings-unresolved`, whose
+repair loop by definition never converged, so an unredeemed deferral it still
+owes becomes a `required-checks-incomplete` pause a resume re-evaluates rather
+than a stranded failure. The narrower reason survives on
+`terminal_adjudication.claimed_ok`/`claimed_reason` and on the `action_required`
+record the review path already wrote. Every ending records the claim it was
+tested against under
+`terminal_adjudication` (`claimed_ok`, `claimed_reason`, `blocked`, `reason`,
+`details`), in `state.json`, the `run_finished` event, and `asl run --json`.
+
+Deferrals are read from the plan's append-only `events.jsonl` rather than from
+one run's turns, so a resumed run re-derives the same blocker instead of
+forgetting it, and the blocker clears only when the evidence clears — a later
+all-clear review cycle over the repaired tree. A deferral whose own cycle
+materialized no repairs (the cap disabled or exhausted it) never bought a delay
+and is never discharged. Both reasons classify as `inspect` rather than `reply`,
+since no mailbox answer makes a failing gate pass, and both carry a preflight
+repair hint in `action_required.remediation` naming the pause details to read.
+
+Optional post-run assurance stays advisory and never blocks. A run whose audit
+landed `unavailable` or `partial` keeps the success it earned and carries an
+additive `assurance_degraded` block naming `assurance_state`, `reason`,
+`blocking: false`, `run_ok`, the audit's `issue_ids`, and the `evidence`
+locators it did leave behind, so a reader can tell a run that was graded clean
+from one that was never graded. A settled `skipped` audit is a decision not to
+grade rather than a failure to, and records no degradation.
 
 A terminated run also carries an additive `assurance_report` block beside its
 `assurance` object, in `state.json`, in the `run_finished` event, in
@@ -4757,7 +4812,8 @@ failures that carry no question context (`quota-exhausted`, `auth-failed`,
 `invalid-model`), and the pauses blocked on a workspace or environment
 precondition (`commit-preflight`, `commit-failed`,
 `repository-registry-required`, `workspace-repository-contention`,
-`not-loop-ready`). The dividing principle is whether a mailbox answer can make
+`not-loop-ready`, `required-checks-incomplete`, `review-not-clear`). The
+dividing principle is whether a mailbox answer can make
 the run proceed: a dirty worktree stays dirty however the operator answers, so
 waiting for a reply would only burn the mailbox lease before escalating anyway.
 A reason joins the set on its own clearing path, never on symmetry with a

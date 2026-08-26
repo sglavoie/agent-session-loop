@@ -9933,9 +9933,376 @@ def _attach_assurance_report(
         payload["assurance_report"] = report
 
 
+#: Stable terminal pause reasons the adjudicator imposes on a run that reached
+#: an ending it could not justify. Both are durable and re-evaluated: the next
+#: run over the same plan re-derives them from the same append-only evidence,
+#: so a blocker clears only when the evidence that produced it changes. The
+#: vocabulary itself lives in :mod:`agent_session_loop.events` with every other
+#: pause reason; these are the runner's names for the same two atoms.
+REQUIRED_CHECKS_INCOMPLETE_REASON = events.PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE
+REVIEW_NOT_CLEAR_REASON = events.PAUSE_REASON_REVIEW_NOT_CLEAR
+
+#: Terminal reasons that assert the plan's own work is finished. Only these
+#: claim a final review; ``stopped`` and ``max-sessions`` report an early exit
+#: an operator asked for and never pretend the plan was reviewed to the end.
+_PLAN_COMPLETION_REASONS = frozenset({"all-complete"})
+
+#: Assurance states that leave the optional post-run audit unable to speak.
+#: ``skipped`` is a settled decision not to audit and is not a degradation.
+_DEGRADED_ASSURANCE_STATES = frozenset({"unavailable", "partial"})
+
+
+@dataclass(frozen=True)
+class _TerminalBlocker:
+    """One reason a terminating run may not report the success it reached."""
+
+    reason: str
+    message: str
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _TerminalAdjudication:
+    """The typed verdict every terminal path is closed through.
+
+    ``blocker`` is ``None`` when the run kept the outcome it arrived with —
+    including every run that was already paused, whose existing blocker is
+    preserved rather than restated.
+    """
+
+    #: What the run said about itself before adjudication, so an operator can
+    #: see that a success claim was tested rather than assumed.
+    claimed_ok: bool
+    claimed_reason: str
+    blocker: _TerminalBlocker | None = None
+
+    @property
+    def blocked(self) -> bool:
+        return self.blocker is not None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "claimed_ok": self.claimed_ok,
+            "claimed_reason": self.claimed_reason,
+            "blocked": self.blocked,
+            "reason": None if self.blocker is None else self.blocker.reason,
+            "details": {} if self.blocker is None else self.blocker.details,
+        }
+
+
+def _accepted_broad_failure_deferral(
+    verification_payload: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Return a structurally valid broad-failure deferral, else ``None``.
+
+    Validated rather than trusted even though this process wrote it: a run
+    resumed over an older event log reads acceptances a previous build
+    produced, and an acceptance whose shape cannot be checked is not evidence
+    that the failures under it were ever owed to a repair loop.
+    """
+    acceptance = verification_payload.get("acceptance")
+    if not isinstance(acceptance, Mapping):
+        return None
+    names = acceptance.get("deferred_failure_names")
+    if not isinstance(names, (list, tuple)) or not names:
+        return None
+    prefix = f"{BROAD_REVIEW_CHECK_PREFIX}:"
+    if any(not isinstance(name, str) or not name.startswith(prefix) for name in names):
+        return None
+    if not (
+        acceptance.get("accepted") is True
+        and acceptance.get("reason") == REVIEW_BROAD_FAILURES_DEFERRED_REASON
+        and acceptance.get("review_outcome") == review.REVIEW_OUTCOME_FINDINGS
+        and acceptance.get("deferred_failure_count") == len(names)
+    ):
+        return None
+    return acceptance
+
+
+def _recorded_review_cycles(
+    payload: Mapping[str, Any], event_path: Path
+) -> list[dict[str, Any]]:
+    """Every review cycle this plan has recorded, oldest first.
+
+    The append-only event log is authoritative because it spans runs: a
+    deferral opened by one run is discharged by the all-clear a *later* run
+    records, and reading only this run's projection would call that deferral
+    unearned forever. The live projection is the fallback for a run whose
+    events are not being persisted (a dry run, a reply-only invocation).
+    """
+    try:
+        cycles = review_continuation.read_prior_review_cycles(event_path)
+    except OSError:
+        cycles = []
+    if cycles:
+        return cycles
+    projected = payload.get("review_cycles")
+    if not isinstance(projected, list):
+        return []
+    return [dict(item) for item in projected if isinstance(item, Mapping)]
+
+
+def _unresolved_deferred_verifications(
+    payload: Mapping[str, Any], event_path: Path
+) -> list[dict[str, Any]]:
+    """Broad-check failures a review deferred and no later review closed.
+
+    A findings review is allowed to finish with the plan's own gates still
+    failing: those failures *are* the repair specification the findings
+    describe. What the deferral buys is a delay, redeemed only by a later
+    all-clear review of the repaired tree. This finds the deferrals that were
+    never redeemed, which is the one way a run can reach a terminal ending with
+    a recorded required-check failure and no pause naming it.
+
+    Deferrals are read from the event log rather than from this run's turns, so
+    a run resumed after the deferral was opened re-evaluates the same blocker
+    instead of forgetting it.
+    """
+    cycles = _recorded_review_cycles(payload, event_path)
+    unresolved: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for record in _read_verification_finished_events(event_path):
+        acceptance = _accepted_broad_failure_deferral(record)
+        if acceptance is None or record.get("passed") is not False:
+            continue
+        session_id = str(record.get("session_id") or record.get("session") or "")
+        run_id = str(record.get("run_id") or "")
+        if (run_id, session_id) in seen:
+            continue
+        seen.add((run_id, session_id))
+        if review_continuation.deferred_review_is_cleared(
+            cycles, review_session_id=session_id
+        ):
+            continue
+        unresolved.append(
+            {
+                "run_id": run_id or None,
+                "session_id": session_id or None,
+                "turn_index": record.get("turn_index"),
+                "checks": list(acceptance.get("deferred_failure_names") or ()),
+                "review_outcome": acceptance.get("review_outcome"),
+            }
+        )
+    return unresolved
+
+
+def _read_verification_finished_events(event_path: str | Path) -> list[dict[str, Any]]:
+    """Return every ``verification_finished`` payload this plan recorded.
+
+    Reads the append-only ``events.jsonl`` log, which spans ``asl run``
+    invocations, oldest first. Malformed lines are skipped the way every other
+    reader of this log skips them.
+    """
+    try:
+        text = Path(event_path).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    finished: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("name") != events.VERIFICATION_FINISHED_EVENT:
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            finished.append(payload)
+    return finished
+
+
+def _unpassed_run_verifications(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """This run's turn verifications that neither passed nor were deferred.
+
+    Every such failure already pauses the run where it happens, so this is the
+    backstop rather than the detector: it exists so that a future path which
+    forgets to pause still cannot exit reporting success.
+    """
+    turns = payload.get("turns")
+    if not isinstance(turns, list):
+        return []
+    unpassed: list[dict[str, Any]] = []
+    for turn in turns:
+        if not isinstance(turn, Mapping):
+            continue
+        verification_payload = turn.get("verification")
+        if not isinstance(verification_payload, Mapping):
+            continue
+        if verification_payload.get("passed") is not False:
+            continue
+        if _accepted_broad_failure_deferral(verification_payload) is not None:
+            continue
+        unpassed.append(
+            {
+                "session_id": verification_payload.get("session")
+                or turn.get("session_id"),
+                "turn_index": turn.get("turn_index"),
+                "reason": verification_payload.get("reason"),
+            }
+        )
+    return unpassed
+
+
+def _final_review_is_clear(payload: Mapping[str, Any]) -> bool:
+    """Whether the run holds a review verdict that closed every finding."""
+    verdict = payload.get("review_verdict")
+    verdict = verdict if isinstance(verdict, Mapping) else {}
+    return (
+        payload.get("review_fix_disposition")
+        == review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
+        and verdict.get("outcome") == review.REVIEW_OUTCOME_ALL_CLEAR
+        and verdict.get("total_findings") == 0
+    )
+
+
+def _terminal_blocker(
+    payload: Mapping[str, Any], event_path: Path
+) -> _TerminalBlocker | None:
+    """The first thing a terminating run cannot show it earned.
+
+    Required checks are asked about first because they are the broader claim:
+    a run whose gates never passed is not made honest by a clear review. Only
+    that first clause can fire on a run that is already failing — the review
+    clause is scoped to the endings that assert the plan is finished, and a run
+    reporting unresolved findings asserts the opposite.
+    """
+    unresolved = _unresolved_deferred_verifications(payload, event_path)
+    unpassed = _unpassed_run_verifications(payload)
+    if unresolved or unpassed:
+        deferred_checks = sorted(
+            {check for entry in unresolved for check in entry["checks"]}
+        )
+        summary = ", ".join(deferred_checks) or ", ".join(
+            str(entry["session_id"]) for entry in unpassed
+        )
+        return _TerminalBlocker(
+            reason=REQUIRED_CHECKS_INCOMPLETE_REASON,
+            message=(
+                "the run cannot report success: required verification did not "
+                f"reach passed for every session ({summary})"
+            ),
+            details={
+                "deferred_unresolved": unresolved,
+                "unpassed_verifications": unpassed,
+            },
+        )
+    if (
+        payload.get("review_requested")
+        and str(payload.get("reason") or "") in _PLAN_COMPLETION_REASONS
+        and not _final_review_is_clear(payload)
+    ):
+        verdict = payload.get("review_verdict")
+        verdict = verdict if isinstance(verdict, Mapping) else {}
+        return _TerminalBlocker(
+            reason=REVIEW_NOT_CLEAR_REASON,
+            message=(
+                "the run cannot report the plan complete: its final review is "
+                "missing or did not come back all-clear"
+            ),
+            details={
+                "review_completed": payload.get("review_completed"),
+                "review_fix_disposition": payload.get("review_fix_disposition"),
+                "review_outcome": verdict.get("outcome"),
+                "unresolved_findings": verdict.get("total_findings"),
+                "findings_by_severity": verdict.get("findings_by_severity"),
+                "review_skipped_reason": payload.get("review_skipped_reason"),
+            },
+        )
+    return None
+
+
+def _adjudicate_terminal_run(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+) -> _TerminalAdjudication:
+    """Decide whether this ending may report the success it arrived with.
+
+    One adjudicator for every terminal path — normal completion, review
+    exhaustion, a resumed run, stop-after-current, and the failure paths — so
+    success has a single definition instead of one per exit. A run that already
+    paused is left exactly as it is: its blocker is the specific one an operator
+    needs, and restating it as a generic adjudication verdict would lose that. A
+    dry run rehearsed a loop and claimed nothing, so it is not adjudicated
+    either.
+
+    A run that is failing but *not* paused is still adjudicated, because the two
+    endings are not the same claim. The only such ending ASL has is
+    ``review-findings-unresolved``, and a run that reaches it while still owing
+    an unredeemed broad-check deferral has a repair loop that never converged —
+    which a resume can converge. Naming that as a pause makes the blocker
+    durable and re-evaluated instead of leaving the deferral stranded behind a
+    plain failure; the specific reason survives on ``claimed_reason`` and on the
+    ``action_required`` record the review path already wrote.
+    """
+    with persistence.lock:
+        claimed_ok = bool(payload.get("ok"))
+        claimed_reason = str(payload.get("reason") or "")
+        already_settled = bool(payload.get("paused")) or claimed_reason == "dry-run"
+        blocker = None if already_settled else _terminal_blocker(payload, event_path)
+        adjudication = _TerminalAdjudication(
+            claimed_ok=claimed_ok,
+            claimed_reason=claimed_reason,
+            blocker=blocker,
+        )
+        payload["terminal_adjudication"] = adjudication.to_payload()
+        persistence.write_state(payload)
+    if blocker is not None:
+        _pause_run(
+            event_path,
+            payload,
+            reason=blocker.reason,
+            message=blocker.message,
+            details=blocker.details,
+            persistence=persistence,
+        )
+    return adjudication
+
+
+def _record_degraded_assurance(
+    payload: dict[str, Any], *, persistence: _RunPersistence
+) -> None:
+    """Record that optional assurance could not speak, without blocking on it.
+
+    Post-run assurance is advisory by design, so its unavailability may not
+    turn a run that earned its success into a failure. What it may not do is
+    disappear: a run whose audit never rendered a verdict is a *degraded*
+    success, and this states that explicitly beside the evidence the audit did
+    leave behind, so an operator reading a green run can tell the difference
+    between "graded clean" and "not graded".
+    """
+    with persistence.lock:
+        assurance = payload.get("assurance")
+        assurance = assurance if isinstance(assurance, Mapping) else {}
+        state = assurance.get("state")
+        if state not in _DEGRADED_ASSURANCE_STATES:
+            payload.pop("assurance_degraded", None)
+            return
+        artifacts = assurance.get("artifacts")
+        evidence = [
+            item.get("locator")
+            for item in (artifacts if isinstance(artifacts, list) else [])
+            if isinstance(item, Mapping) and item.get("locator")
+        ]
+        payload["assurance_degraded"] = {
+            "assurance_state": state,
+            "reason": assurance.get("reason"),
+            "blocking": False,
+            "run_ok": bool(payload.get("ok")),
+            "evidence": evidence,
+            "issue_ids": list(assurance.get("issue_ids") or ()),
+        }
+        persistence.write_state(payload)
+
+
 def _terminalize_run(
     *,
-    outcome: str,
     exit_code: int,
     event_path: Path,
     payload: dict[str, Any],
@@ -9945,14 +10312,18 @@ def _terminalize_run(
     cancel: harnesses.AbortSignal | None = None,
     poll: Callable[[], None] | None = None,
 ) -> int:
-    """Close one run: audit it, then finalize it. Returns ``exit_code`` as given.
+    """Close one run: adjudicate it, audit it, then finalize it.
 
-    The outcome and the exit code are decided before a run gets here, and this
-    coordinator changes neither — auditing is advisory, so an audit that fails
-    or finds something still leaves the run's own verdict alone. The audit runs
-    first so its artifacts and ledger records exist before ``run_finished``
-    carries the summary that names them; readiness, the terminal event, the
-    state projection, AgentMux, and the final output all follow unchanged.
+    Adjudication runs first and is the only thing here that can change the
+    run's verdict: a run may not claim success it did not earn, so
+    :func:`_adjudicate_terminal_run` re-derives success from the durable
+    evidence and pauses the run when the evidence is missing. Auditing stays
+    advisory and downstream of it — an audit that fails or finds something
+    still leaves the adjudicated verdict alone, and it now grades the same
+    verdict an operator reads. The audit runs before finalization so its
+    artifacts and ledger records exist before ``run_finished`` carries the
+    summary that names them; readiness, the terminal event, the state
+    projection, AgentMux, and the final output all follow unchanged.
 
     ``cancel`` and ``poll`` come from the run loop's exit, the one path that
     still has a live control queue to drain: together they make the audit
@@ -9960,8 +10331,17 @@ def _terminalize_run(
     terminalize before the loop starts pass neither, so their finalization is
     visible but not cancellable.
     """
+    resolved_persistence = _run_persistence(persistence)
+    adjudication = _adjudicate_terminal_run(
+        event_path=event_path,
+        payload=payload,
+        persistence=resolved_persistence,
+    )
+    if adjudication.blocked:
+        exit_code = 1
+    with resolved_persistence.lock:
+        outcome = _terminal_outcome(payload)
     if audit_context is not None and outcome not in _UNAUDITED_TERMINAL_OUTCOMES:
-        resolved_persistence = _run_persistence(persistence)
         finalization = _LiveFinalization(
             event_path=event_path,
             payload=payload,
@@ -9983,6 +10363,7 @@ def _terminalize_run(
             _attach_assurance_report(payload, audit_context, resolved_persistence)
         finally:
             finalization.finish(cancelled=cancelled)
+    _record_degraded_assurance(payload, persistence=resolved_persistence)
     _finish_run(event_path, payload, progress, persistence=persistence)
     return exit_code
 
@@ -15637,15 +16018,18 @@ def _run_locked(
         A commit failure no longer stops the run, so the last thing decided
         before the audit runs is whether any group is still owed. The answer is
         written into the payload here, ahead of ``_terminalize_run``, because
-        both readers that must not miss it — the assurance audit and the final
-        summary — are downstream of this point.
+        every reader that must not miss it — terminal adjudication, the
+        assurance audit, and the final summary — is downstream of this point.
+
+        The exit code each caller passes is a proposal, not a verdict: the
+        adjudicator inside ``_terminalize_run`` may refuse a success and return
+        a failing code instead, which is why the returned value is used rather
+        than the one passed in.
         """
         with persistence.lock:
             payload[UNRESOLVED_COMMIT_GROUPS_KEY] = _unresolved_commit_groups(payload)
-            outcome = _terminal_outcome(payload)
         return finish_run_locked(
             _terminalize_run(
-                outcome=outcome,
                 exit_code=exit_code,
                 event_path=event_path,
                 payload=payload,

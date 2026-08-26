@@ -3873,11 +3873,7 @@ def _recorded_review_cycles(context: _CheckContext) -> tuple[Mapping[str, Any], 
 
 def _cycle_is_all_clear(cycle: Mapping[str, Any]) -> bool:
     """Whether one recorded review cycle closed the loop with nothing left."""
-    return (
-        cycle.get("outcome") == review.REVIEW_OUTCOME_ALL_CLEAR
-        and cycle.get("disposition")
-        == review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
-    )
+    return review_continuation.cycle_is_all_clear(cycle)
 
 
 def _run_is_in_flight(context: _CheckContext) -> bool:
@@ -3903,19 +3899,8 @@ def _deferred_review_resolution(
     yet rather than evidence that contradicts the run.
     """
     cycles = _recorded_review_cycles(context)
-    source_index = next(
-        (
-            index
-            for index, cycle in enumerate(cycles)
-            if str(cycle.get("review_session_id")) == str(session_id)
-            and cycle.get("outcome") == review.REVIEW_OUTCOME_FINDINGS
-            and cycle.get("disposition")
-            == review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS
-        ),
-        None,
-    )
-    if source_index is not None and any(
-        _cycle_is_all_clear(cycle) for cycle in cycles[source_index + 1 :]
+    if review_continuation.deferred_review_is_cleared(
+        cycles, review_session_id=session_id
     ):
         return "resolved"
     # Deliberately not gated on a repairs-materialized source: a run can pause

@@ -951,6 +951,25 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             ledger_state_dir=state_path.parent.parent / "ledger",
         )
 
+    def _stage_outcome(self, payload: dict[str, object], outcome: str) -> None:
+        """Leave ``payload`` in the state the named ending would leave it in.
+
+        The coordinator derives the ending from the run's own payload rather
+        than taking it as an argument, so a fixture that wants a given ending
+        has to say it the way a real run does.
+        """
+        if outcome == "paused":
+            payload.update({"ok": False, "paused": True, "reason": "verify-failed"})
+            return
+        payload.update({"ok": True, "paused": False})
+        if outcome == "dry-run":
+            payload["reason"] = "dry-run"
+        elif outcome in ("complete", "no-work"):
+            payload["reason"] = "all-complete"
+            payload["turns"] = [{"session_id": "1"}] if outcome == "complete" else []
+        else:
+            payload["reason"] = outcome
+
     def _terminalize(
         self,
         payload: dict[str, object],
@@ -965,9 +984,9 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             calls.append(dict(kwargs))
             return _summary() if summary is None else summary
 
+        self._stage_outcome(payload, outcome)
         with mock.patch.object(runner.supervisor_audit, "audit_terminal_run", record):
             code = runner._terminalize_run(
-                outcome=outcome,
                 exit_code=exit_code,
                 event_path=Path(str(payload["events_path"])),
                 payload=payload,
@@ -996,6 +1015,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
         self.assertEqual({"_terminalize_run"}, callers)
 
     def test_the_exit_code_survives_the_coordinator_unchanged(self) -> None:
+        """For an ending the run earned, which is the only kind here.
+
+        The terminal adjudicator is the sole exception, and it is exercised by
+        ``test_an_unearned_success_is_refused_before_the_audit_runs``.
+        """
         for exit_code in (0, 1, runner.INTERRUPTED_EXIT):
             with (
                 self.subTest(exit_code=exit_code),
@@ -1009,6 +1033,28 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
 
                 self.assertEqual(exit_code, code)
                 self.assertEqual(1, len(calls))
+
+    def test_an_unearned_success_is_refused_before_the_audit_runs(self) -> None:
+        """Adjudication is the one thing in the coordinator that may overrule.
+
+        It also runs first, so the audit reads the verdict the run actually
+        ended on rather than the success it walked in claiming.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self._payload(
+                Path(tmp), ["--audit-harness", "claude", "--review-harness", "claude"]
+            )
+
+            code, calls = self._terminalize(payload, outcome="complete", exit_code=0)
+
+            self.assertEqual(1, code)
+            self.assertFalse(payload["ok"])
+            self.assertTrue(payload["paused"])
+            self.assertEqual(runner.REVIEW_NOT_CLEAR_REASON, payload["pause_reason"])
+            self.assertEqual(1, len(calls))
+            audited = calls[0]["state_payload"]
+            self.assertTrue(audited["paused"])
+            self.assertEqual(runner.REVIEW_NOT_CLEAR_REASON, audited["pause_reason"])
 
     def test_the_terminal_event_carries_the_bounded_assurance_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1105,11 +1151,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                 )
                 return _summary()
 
+            self._stage_outcome(payload, "complete")
             with mock.patch.object(
                 runner.supervisor_audit, "audit_terminal_run", record
             ):
                 runner._terminalize_run(
-                    outcome="complete",
                     exit_code=0,
                     event_path=event_path,
                     payload=payload,
@@ -1181,11 +1227,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             def interrupt(plan: object, **kwargs: object):
                 raise KeyboardInterrupt
 
+            self._stage_outcome(payload, "paused")
             with mock.patch.object(
                 runner.supervisor_audit, "audit_terminal_run", interrupt
             ):
                 code = runner._terminalize_run(
-                    outcome="paused",
                     exit_code=runner.INTERRUPTED_EXIT,
                     event_path=Path(str(payload["events_path"])),
                     payload=payload,
@@ -1207,9 +1253,9 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             payload = self._payload(Path(tmp), ["--audit-harness", "claude"])
             auditor = _ScriptedAuditor("", interrupted=True)
 
+            self._stage_outcome(payload, "complete")
             with mock.patch.object(harnesses, "run_harness", auditor):
                 code = runner._terminalize_run(
-                    outcome="complete",
                     exit_code=1,
                     event_path=Path(str(payload["events_path"])),
                     payload=payload,
@@ -1246,11 +1292,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                 )
                 return _summary()
 
+            self._stage_outcome(payload, "stopped")
             with mock.patch.object(
                 runner.supervisor_audit, "audit_terminal_run", record
             ):
                 runner._terminalize_run(
-                    outcome="stopped",
                     exit_code=0,
                     event_path=event_path,
                     payload=payload,
@@ -1315,12 +1361,12 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                 )
 
             auditor = _AuditorAbortedMidTurn(enqueue_abort, "never read")
+            self._stage_outcome(payload, "stopped")
             with (
                 mock.patch.object(harnesses, "run_harness", auditor),
                 mock.patch.object(runner, "_LiveFinalization", _fast_finalization()),
             ):
                 code = runner._terminalize_run(
-                    outcome="stopped",
                     exit_code=0,
                     event_path=event_path,
                     payload=payload,

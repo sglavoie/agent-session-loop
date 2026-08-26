@@ -1158,6 +1158,45 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
         ),
         fix_category="manifest-update",
     ),
+    "required-checks-incomplete": RepairHint(
+        category="required-checks-incomplete",
+        check_id="runtime.required-checks-incomplete",
+        severity_hint="red",
+        message=(
+            "The run reached the end with required verification still short of "
+            "passed, so it was refused the success it would otherwise have "
+            "reported. The pause payload names each one under "
+            "`details.deferred_unresolved` (broad gates a findings review "
+            "deferred and no later all-clear review closed) and "
+            "`details.unpassed_verifications`. Make those gates pass — usually "
+            "by letting the review repair loop finish, raising "
+            "`--max-review-fix-cycles`, or fixing the code the gate reports on "
+            "— then re-run. No reply clears this: the checks have to pass."
+        ),
+        question_template=(
+            "Runner paused: required checks never reached passed ({message}). "
+            "Should I walk through the outstanding gates?"
+        ),
+        fix_category="env-state",
+    ),
+    "review-not-clear": RepairHint(
+        category="review-not-clear",
+        check_id="runtime.review-not-clear",
+        severity_hint="red",
+        message=(
+            "The run finished the plan's sessions but holds no all-clear "
+            "review, so it may not report the plan complete. Re-run with "
+            "`--review-harness` so the generated review session executes; if a "
+            "review did run and returned findings, let its repair cycles "
+            "converge (raise `--max-review-fix-cycles` when the cap was the "
+            "limit) until a later review comes back all-clear."
+        ),
+        question_template=(
+            "Runner paused: the final review is missing or not all-clear "
+            "({message}). Should I drive the review to completion?"
+        ),
+        fix_category="env-state",
+    ),
 }
 
 

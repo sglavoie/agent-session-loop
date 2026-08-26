@@ -194,6 +194,12 @@ PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION = "workspace-repository-contention"
 # its task packet selected. The packet fixes exactly one writable session file,
 # so any other session's instructions changing under it is tampering.
 PAUSE_REASON_PLAN_ARTIFACT_TAMPERED = "plan-artifact-tampered"
+# The terminal adjudicator refused a success the run could not show it earned:
+# a required verification never reached passed, or a plan calling itself
+# finished held no clear final review. Both are re-derived from the plan's
+# append-only history, so a resumed run reaches the same verdict.
+PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE = "required-checks-incomplete"
+PAUSE_REASON_REVIEW_NOT_CLEAR = "review-not-clear"
 
 # The subset of harness-failure categories that a supervisor may safely retry
 # by relaunching the same session. Quota, authentication, invalid-model, and
@@ -231,6 +237,8 @@ PAUSE_REASONS: tuple[str, ...] = (
     PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
     PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION,
     PAUSE_REASON_PLAN_ARTIFACT_TAMPERED,
+    PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE,
+    PAUSE_REASON_REVIEW_NOT_CLEAR,
     PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     PAUSE_REASON_QUOTA_EXHAUSTED,
     PAUSE_REASON_AUTH_FAILED,
