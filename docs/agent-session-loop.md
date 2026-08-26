@@ -1162,7 +1162,13 @@ into a commit loop; whatever is still owed when the run ends is reported in
 `commit_failures`, `unresolved_commit_groups`, the final summary, and the
 supervisor audit's `commit-group-resolution` check. Legacy single-repository
 commits use the same coordinator, which also makes a failed per-session commit
-retryable on resume.
+retryable on resume, and their single target is filtered for a dirty worktree
+exactly as registered targets are: `asl commit` exits non-zero when nothing is
+staged, so a session that changed nothing inside the bound repository must not
+be handed to a commit at all. A group built over a clean target recorded that
+refusal as the repository's failure with empty `staging_paths` and
+`qualified_paths`, and the resumed group then read the still-clean tree at the
+unchanged HEAD as `skipped-clean` and finalized as complete (ASI-19).
 
 The runner is the last authority on which repositories a run may reach, and it
 enforces that independently of preflight. A plan whose `**Readiness**` is
@@ -1915,6 +1921,41 @@ A source review counts once when it produced repair children, including legacy
 and reopen evidence never double-count it. The minimum cap needed for another
 materialization is therefore `historical_materializations + 1`, not the prior
 run's cap plus one.
+
+Materialization is all-or-nothing across the whole publication, not only across
+the plan transaction. Two gates run before any file is written, both
+non-bypassable: the repository-footprint gate described above, and a contract
+gate that resolves every proposed check against the same
+`VerificationContext` preflight builds. A repair check naming a `repo`/`cwd`
+the plan's registry cannot resolve is refused there, with the plan untouched,
+rather than authored and then rejected by preflight — which is what used to
+strand a pending child no run could select or clear. Everything past that point
+runs inside a rollback window: `<plan>/.asl-review-repair-publication/` holds
+the fsynced pre-publication image of every path the publication may change (the
+staged files, `manifest.md`, and `baseline-results.json`) plus a
+`journal.json` naming the review session, the child filenames, the phase, and
+the publishing pid. The image is durable before the first destination byte
+moves. If the post-authoring executability gate blocks, the children are
+withdrawn: the window is restored, `ReviewRepairResult.children` is empty,
+`rolled_back` is true, and `rollback` carries the restored and removed paths.
+The `not-loop-ready` pause reports both as `repair_children_rolled_back` and
+`repair_rollback` in `pause_details`. `--allow-not-loop-ready` retains children
+blocked only by bypassable findings; non-bypassable blockers withdraw them
+regardless. A publication interrupted by a crash, a signal, or a failed atomic
+write leaves the window behind, and recovery is always a rollback rather than a
+roll-forward, because nothing on disk proves an interrupted publication would
+have reached loop-ready; the review findings are unchanged, so the next cycle
+re-plans. `review_repair.recover_review_repair_publication(plan_dir)` performs
+it under the caller's plan lock, running
+`plans.recover_pending_plan_transaction` first so a half-installed generation
+is settled before the image is restored. `asl run` calls it before its first
+plan snapshot, so selection never sees a non-loop-ready generated child, and
+`materialize_review_repair_sessions` calls it before planning. A window whose
+journal is missing never opened and is discarded; a window whose
+`version` is not `REPAIR_PUBLICATION_SCHEMA_VERSION` is left in place and both
+callers fail closed on it; a restore that errors makes `asl run` pause with
+`reason: malformed-plan` carrying
+`pause_details.review_repair_publication_recovery`.
 
 Rereviews are delta-scoped when the runner can prove a narrower scope is safe.
 Each review turn records the reviewed tree on its `review_cycle` record
@@ -4199,12 +4240,14 @@ reason (`commit-preflight`, `commit-failed`, `repository-registry-required`, or
 `workspace-repository-contention`), a terminal disposition (`all-clear`,
 `repair-group-exhausted`, `findings-repeated`, or `unstructured-findings`), or
 a non-disposition terminal blocker (`repair-sessions-missing`,
-`repair-sessions-not-runnable`, or `unknown-disposition`). Repair children are
-written to disk before the executability gate judges them, so a materialization
-the gate refused leaves pending sessions that look runnable. A `run-repairs`
-continuation for such a plan reports `eligible: false` with blocker
-`not-loop-ready` until the plan is marked loop-ready again, rather than
-claiming the refused children are ready to run. A `run-repairs` continuation
+`repair-sessions-not-runnable`, or `unknown-disposition`). Repair children the
+executability gate refuses are withdrawn by the publication rollback described
+above, so an ordinary refusal now leaves no pending sessions at all. Children
+retained under `--allow-not-loop-ready`, and children authored by an older ASL
+that stranded them, still look runnable while the plan is not loop-ready: a
+`run-repairs` continuation for such a plan reports `eligible: false` with
+blocker `not-loop-ready` until the plan is marked loop-ready again, rather than
+claiming those children are ready to run. A `run-repairs` continuation
 also reports `eligible: false` with blocker `repair-scope-stale` when a pending
 repair child's persisted **Writes repositories** is narrower than the scope its
 own findings require, which would hand that child a work list naming files it
@@ -4574,7 +4617,20 @@ Common pause reasons:
   after-turn failure retains content, returns the handoff to pending, and
   outranks every harness-result branch because the runner cannot prove scope.
   Every such failure names the unavailable repository evidence and stays
-  fail-closed; repair that evidence rather than excluding anything.
+  fail-closed; repair that evidence rather than excluding anything. The same
+  reason covers an external write the guard could not classify: every path a
+  turn's task packet, session file, and last message name is classified into
+  one of `control-plane`, `workspace-repository`,
+  `workspace-unregistered-path`, `unregistered-repository`,
+  `plan-provenance`, `system-path`, `ephemeral-path`, `unresolved`, or
+  `unclassified`, and an `unclassified` path whose mtime shows it was written
+  during the turn enters the `unavailable` lane under
+  `external-write-unclassified`. The verdict rides on the guard evidence as
+  `external_writes`, carrying the per-class counts, the classification of each
+  named path, and before/after digests for every control-plane location plus
+  the `control_plane_mutated` list — so a permitted control-plane mutation is
+  evidenced rather than assumed, and an audit-store write can no longer pass as
+  workspace-clean silence.
 - `review-mutated-worktree`: the review harness changed repo content outside
   the plan directory. The pre/post fingerprint covers the working tree's
   `HEAD`, tracked diff, the separate `--cached` (index) diff — so staging a

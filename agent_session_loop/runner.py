@@ -9518,6 +9518,29 @@ def _commit_targets(
     ]
 
 
+def _dirty_commit_targets(
+    verification_context: verification.VerificationContext,
+) -> list[dict[str, Any]]:
+    """Commit targets that actually have something to commit.
+
+    An unregistered workspace resolves to exactly one target, and until this
+    filter existed nothing asked whether that target was dirty before the
+    commit was launched. `asl commit` refuses a commit with nothing staged and
+    exits nonzero, so a session that wrote nothing into the bound repository
+    recorded a failed commit attempt with empty staging and qualified paths --
+    and the next run read the same still-clean tree back as `skipped-clean`
+    and finalized the failed group as complete (ASI-19). Not launching a
+    commit there is what keeps the group's record honest, and it is the rule
+    `_registered_session_commit_targets` has always applied to a registered
+    workspace.
+    """
+    return [
+        target
+        for target in _commit_targets(verification_context)
+        if not _commit_target_is_clean(target)
+    ]
+
+
 def _registered_session_commit_targets(
     verification_context: verification.VerificationContext,
     guard: Mapping[str, Any],
@@ -9593,7 +9616,7 @@ def _registered_end_commit_targets(
 ) -> list[dict[str, Any]]:
     workspace = verification_context.workspace
     if workspace is None:
-        return _commit_targets(verification_context)
+        return _dirty_commit_targets(verification_context)
     aliases = [
         repository.alias
         for repository in workspace.repositories
@@ -13730,7 +13753,11 @@ def _external_path_digest(path: Path) -> dict[str, Any]:
     return record
 
 
-def _external_control_plane_paths(roots: Sequence[Path]) -> tuple[Path, ...]:
+def _external_control_plane_paths(
+    roots: Sequence[Path],
+    *,
+    shallow_roots: Sequence[Path] = (),
+) -> tuple[Path, ...]:
     """The bounded path set a pre-turn control-plane digest covers.
 
     Each root plus its direct entries: the roots catch a store appearing or
@@ -13738,8 +13765,16 @@ def _external_control_plane_paths(roots: Sequence[Path]) -> tuple[Path, ...]:
     keeps at the top level, which a directory digest of the root alone would
     miss because appending to a file moves neither the parent's mtime nor its
     entry names.
+
+    A ``shallow_root`` contributes only itself. That is the shape a root whose
+    direct entries are other plans' state directories needs: its own directory
+    digest already carries every child's name, size, and mtime -- enough to see
+    a top-level store appended to or a sibling plan appearing -- while
+    expanding it would digest every unrelated plan's directory on every turn.
     """
     paths: dict[Path, None] = {}
+    for root in shallow_roots:
+        paths[workspaces.canonicalize_filesystem_path(root)] = None
     for root in roots:
         canonical = workspaces.canonicalize_filesystem_path(root)
         paths[canonical] = None
@@ -13755,11 +13790,15 @@ def _external_control_plane_paths(roots: Sequence[Path]) -> tuple[Path, ...]:
     return tuple(paths)
 
 
-def _capture_external_write_digests(roots: Sequence[Path]) -> dict[str, dict[str, Any]]:
+def _capture_external_write_digests(
+    roots: Sequence[Path],
+    *,
+    shallow_roots: Sequence[Path] = (),
+) -> dict[str, dict[str, Any]]:
     """Digest the control-plane path set, keyed by canonical path."""
     return {
         repository_intent.redact_credentials(str(path)): _external_path_digest(path)
-        for path in _external_control_plane_paths(roots)
+        for path in _external_control_plane_paths(roots, shallow_roots=shallow_roots)
     }
 
 
@@ -13978,18 +14017,33 @@ def _control_plane_digest_roots(
     *,
     run_dir: Path | None = None,
 ) -> tuple[Path, ...]:
-    """The control-plane trees worth digesting before and after every turn.
+    """The control-plane trees digested entry by entry before and after a turn.
 
     Narrower than :func:`_runner_owned_roots`, which also names the whole state
-    root. The state root holds every plan's store and digesting its children
-    would scan unrelated plans on every turn; this run's own plan directory,
-    plan state directory, and run directory are where a permitted control-plane
-    mutation actually lands.
+    root: this run's own plan directory, plan state directory, and run
+    directory are where a permitted control-plane mutation usually lands, and
+    each is small enough to expand. The state root itself is digested too, but
+    shallowly -- see :func:`_control_plane_shallow_digest_roots`.
     """
     roots = [plan_dir, state.plan_state_dir(plan_dir, state_dir_arg)]
     if run_dir is not None:
         roots.append(run_dir)
     return tuple(roots)
+
+
+def _control_plane_shallow_digest_roots(state_dir_arg: str | None) -> tuple[Path, ...]:
+    """Control-plane roots digested by shape alone, never entry by entry.
+
+    The state root is where ASL keeps the stores that belong to no single plan
+    -- the assurance inbox above all, which is the *external audit store* a
+    session was observed editing while its bound workspace stayed clean
+    (ASI-19). Its own directory digest carries every direct child's name, size,
+    and mtime, so an append to a top-level store or a new plan directory is
+    visible without expanding it; expanding it would digest every unrelated
+    plan's state directory on every turn, which is the cost that kept it out of
+    :func:`_control_plane_digest_roots`.
+    """
+    return (state.state_root(state_dir_arg),)
 
 
 def _turn_external_write_evidence(
@@ -18451,7 +18505,8 @@ def _run_locked(
             external_digests_before = _capture_external_write_digests(
                 _control_plane_digest_roots(
                     before.plan_dir, args.state_dir, run_dir=run_dir
-                )
+                ),
+                shallow_roots=_control_plane_shallow_digest_roots(args.state_dir),
             )
             if workspace is not None:
                 assert session_scope is not None
@@ -19903,7 +19958,7 @@ def _run_locked(
                             turn_payload.get("workspace_write_guard", {}),
                         )
                         if verification_context.workspace is not None
-                        else _commit_targets(verification_context)
+                        else _dirty_commit_targets(verification_context)
                     )
                     if repair_owned_commit:
                         session_targets = [
