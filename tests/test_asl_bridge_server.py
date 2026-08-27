@@ -16,6 +16,7 @@ import os
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -230,6 +231,68 @@ def _request(request_id: str, method: str, **params: Any) -> bytes:
     return json.dumps(payload).encode("utf-8")
 
 
+def _handshake_request(digest: str, request_id: str = "hs-1") -> bytes:
+    """The frame a protocol-2 client must send before any mutation is accepted."""
+    return _request(
+        request_id,
+        bridge.METHOD_HANDSHAKE,
+        contract_set_id=bridge.CONTRACT_SET_ID,
+        snapshot_digest=digest,
+    )
+
+
+class _LineWriter:
+    """A protocol sink a scripted client can wait on one response at a time.
+
+    ``serve_stdio`` blocks its caller, so a client that must react to what the
+    server said — as a protocol-2 client must, because the handshake names a
+    digest — needs the frames as they land rather than after the loop returns.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._arrived = threading.Condition(self._lock)
+        self.lines: list[str] = []
+        self._partial = ""
+
+    def write(self, text: str) -> int:
+        with self._arrived:
+            self._partial += text
+            while "\n" in self._partial:
+                line, self._partial = self._partial.split("\n", 1)
+                self.lines.append(line)
+            self._arrived.notify_all()
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+    def getvalue(self) -> str:
+        with self._lock:
+            return "".join(f"{line}\n" for line in self.lines) + self._partial
+
+    def wait_for(self, needle: str, timeout: float) -> str:
+        deadline = time.monotonic() + timeout
+        with self._arrived:
+            while True:
+                for line in self.lines:
+                    if needle in line:
+                        return line
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(f"no frame matched {needle!r}: {self.lines}")
+                self._arrived.wait(remaining)
+
+
+def _handshake(session: bridge.BridgeSession) -> dict[str, Any]:
+    """Open the mutation gate on a session under test, and prove it opened."""
+    digest = session.runs_snapshot()["digest"]
+    response = session.handle_frame(_handshake_request(digest))
+    assert response is not None and response["ok"], response
+    assert response["result"]["mutations_enabled"], response
+    return response["result"]
+
+
 class _RecordingServer:
     """A stand-in for the Workbench HTTP server that never binds a socket."""
 
@@ -275,15 +338,22 @@ class BridgeCapabilityTests(unittest.TestCase):
             intervention.ACTION_ABORT,
             intervention.ACTION_WORKBENCH,
             "question.get",
-            bridge.EVENT_OPERATION_UPDATED,
+            bridge.METHOD_HANDSHAKE,
         ):
             with self.subTest(capability=name):
                 self.assertIn(name, bridge.CAPABILITIES)
 
+    def test_events_are_advertised_separately_from_methods(self) -> None:
+        """Protocol 1 published one list, so "callable" and "delivered" looked alike."""
+        for name in (bridge.EVENT_RUNS_CHANGED, bridge.EVENT_OPERATION_UPDATED):
+            with self.subTest(event=name):
+                self.assertIn(name, bridge.EVENT_NAMES)
+                self.assertNotIn(name, bridge.CAPABILITIES)
+
     def test_capability_order_is_the_candidate_order(self) -> None:
         # Derivation must filter, never reorder: a client compares the list.
         candidates = [
-            name for name in bridge._CAPABILITY_ORDER if name in bridge.CAPABILITIES
+            name for name in bridge._METHOD_ORDER if name in bridge.CAPABILITIES
         ]
         self.assertEqual(candidates, list(bridge.CAPABILITIES))
 
@@ -1813,6 +1883,7 @@ class BridgeDispatchTests(unittest.TestCase):
             plan_dir, _ = corpus.waiting_plan()
             row = corpus.row_for(plan_dir)
             session = corpus.session()
+            _handshake(session)
 
             response = session.handle_frame(
                 _request(
@@ -1836,6 +1907,22 @@ class BridgeDispatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))
             plan_dir, _ = corpus.waiting_plan()
+            session = corpus.session()
+            _handshake(session)
+
+            response = session.handle_frame(
+                _request("r1", intervention.ACTION_REPLY, plan_dir=str(plan_dir))
+            )
+
+            assert response is not None
+            self.assertFalse(response["ok"])
+            self.assertEqual(bridge.ERROR_INVALID_REQUEST, response["error"]["code"])
+
+    def test_the_mutation_gate_runs_before_the_request_is_parsed(self) -> None:
+        """An unauthorized client is refused, not told how to fix its params."""
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir, _ = corpus.waiting_plan()
 
             response = corpus.session().handle_frame(
                 _request("r1", intervention.ACTION_REPLY, plan_dir=str(plan_dir))
@@ -1843,7 +1930,10 @@ class BridgeDispatchTests(unittest.TestCase):
 
             assert response is not None
             self.assertFalse(response["ok"])
-            self.assertEqual(bridge.ERROR_INVALID_REQUEST, response["error"]["code"])
+            self.assertEqual(
+                bridge.ERROR_CONTRACT_SET_MISMATCH, response["error"]["code"]
+            )
+            self.assertFalse(response["error"]["retryable"])
 
     def test_unknown_method_still_reports_unknown_method(self) -> None:
         session = bridge.BridgeSession(
@@ -1862,31 +1952,63 @@ class BridgeDiagnosticsTests(unittest.TestCase):
             corpus = _Corpus(Path(tmp))
             plan_dir, _ = corpus.waiting_plan()
             row = corpus.row_for(plan_dir)
-            frames = _request(
-                "r1",
-                intervention.ACTION_REPLY,
-                plan_dir=str(plan_dir),
-                operation_id="op-1",
-                action_token=row["action_token"],
-                text=REPLY_TEXT,
-            )
             read_fd, write_fd = os.pipe()
-            os.write(write_fd, frames + b"\n")
-            os.close(write_fd)
-            writer = io.StringIO()
+            writer = _LineWriter()
             diagnostics = io.StringIO()
 
-            with os.fdopen(read_fd, "rb") as reader:
-                bridge.serve_stdio(
-                    reader=reader,
-                    writer=writer,
-                    diagnostics=diagnostics,
-                    state_dir=corpus.state_root,
-                    plan_roots=(corpus.plans_root,),
-                    include_default_dirs=False,
-                    poll_interval=3600.0,
-                )
+            def serve() -> None:
+                with os.fdopen(read_fd, "rb") as reader:
+                    bridge.serve_stdio(
+                        reader=reader,
+                        writer=writer,
+                        diagnostics=diagnostics,
+                        state_dir=corpus.state_root,
+                        plan_roots=(corpus.plans_root,),
+                        include_default_dirs=False,
+                        poll_interval=3600.0,
+                    )
 
+            server = threading.Thread(target=serve, name="serve-stdio", daemon=True)
+            server.start()
+            try:
+                writer.wait_for('"type":"hello"', WAIT)
+                # The first projection is built off the protocol loop, so a
+                # handshake can legitimately arrive before there is a digest to
+                # name. That refusal is retryable, and retrying is what a real
+                # client does: the digest is a function of the corpus alone, so
+                # every attempt names the snapshot it is about to be served.
+                for attempt in range(200):
+                    request_id = f"hs-{attempt}"
+                    os.write(
+                        write_fd,
+                        _handshake_request(corpus.snapshot()["digest"], request_id)
+                        + b"\n",
+                    )
+                    settled = writer.wait_for(f'"id":"{request_id}"', WAIT)
+                    if '"ok":true' in settled:
+                        break
+                    time.sleep(0.05)
+                else:  # pragma: no cover - the worker never published
+                    self.fail("the bridge never produced a first projection")
+
+                os.write(
+                    write_fd,
+                    _request(
+                        "r1",
+                        intervention.ACTION_REPLY,
+                        plan_dir=str(plan_dir),
+                        operation_id="op-1",
+                        action_token=row["action_token"],
+                        text=REPLY_TEXT,
+                    )
+                    + b"\n",
+                )
+                writer.wait_for('"id":"r1"', WAIT)
+            finally:
+                os.close(write_fd)
+                server.join(timeout=WAIT)
+
+            self.assertFalse(server.is_alive())
             self.assertNotIn(REPLY_TEXT, diagnostics.getvalue())
             self.assertNotIn(REPLY_TEXT, writer.getvalue())
             self.assertIn('"ok":true', writer.getvalue())

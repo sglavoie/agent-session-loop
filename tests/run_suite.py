@@ -5,8 +5,12 @@ every test module plus the standalone helper-script suites, one isolated
 subprocess per shard. Shards are ordered longest-first so the slowest module
 starts immediately and bounds wall-clock time.
 
+``just test-portable`` runs the subset that needs nothing but the Python
+interpreter, which is what a non-macOS CI lane can honestly gate on.
+
 Usage:
     python3 -m tests.run_suite --fast
+    python3 -m tests.run_suite --portable
     python3 -m tests.run_suite --all [--jobs N]
 """
 
@@ -87,9 +91,48 @@ FAST_MODULES = (
     "tests.test_asl_supervision_liveness",
     "tests.test_asl_retention",
     "tests.test_asl_maintenance",
+    "tests.test_asl_harness_compatibility",
     "tests.test_asl_startup_context",
     "tests.test_asl_commit_message",
     "tests.test_skill_sync",
+)
+
+# Modules that need nothing outside the Python interpreter: no `git`, no shell
+# script, no launchd domain, no harness executable, no Kitty. This is what the
+# Linux CI lane gates on, and the membership rule is mechanical rather than a
+# judgement call -- a module belongs here when it spawns no external process at
+# all. Everything else is left to the macOS lane, which has the real tools the
+# product is developed and released against, so the portable lane never reports
+# a pass it did not earn on a machine that has none of them.
+#
+# This is a strict subset of FAST_MODULES; `tests/test_asl_docs.py` enforces
+# that, so a module deleted or renamed cannot survive here as a silent skip.
+PORTABLE_MODULES = (
+    "tests.test_asl_cli_trace",
+    "tests.test_asl_tail",
+    "tests.test_asl_assurance_baseline",
+    "tests.test_asl_assurance_reconcile",
+    "tests.test_asl_assurance_metrics",
+    "tests.test_asl_turn_execution",
+    "tests.test_asl_verification_transitions",
+    "tests.test_asl_review_transitions",
+    "tests.test_asl_transitions",
+    "tests.test_asl_typing_ratchet",
+    "tests.test_asl_commit_groups",
+    "tests.test_asl_bridge_projection",
+    "tests.test_asl_bridge_fixtures",
+    "tests.test_asl_agent_mux_contract",
+    "tests.test_asl_agent_mux_projection",
+    "tests.test_asl_agent_mux_pairing",
+    "tests.test_asl_workbench_archive",
+    "tests.test_asl_workbench_summary",
+    "tests.test_asl_workbench_recovery",
+    "tests.test_asl_progress",
+    "tests.test_asl_metrics",
+    "tests.test_asl_state_migration",
+    "tests.test_asl_retention",
+    "tests.test_asl_harness_compatibility",
+    "tests.test_asl_startup_context",
 )
 
 # Integration modules: fake-harness end-to-end runs, workbench HTTP servers,
@@ -118,8 +161,17 @@ SCRIPT_SUITES = (
 _RAN_PATTERN = re.compile(r"^Ran (\d+) tests?", re.MULTILINE)
 
 
-def _shard_commands(fast_only: bool) -> list[tuple[str, list[str]]]:
-    modules = FAST_MODULES if fast_only else FAST_MODULES + INTEGRATION_MODULES
+def _modules_for(mode: str) -> tuple[str, ...]:
+    if mode == "portable":
+        return PORTABLE_MODULES
+    if mode == "fast":
+        return FAST_MODULES
+    return FAST_MODULES + INTEGRATION_MODULES
+
+
+def _shard_commands(mode: str) -> list[tuple[str, list[str]]]:
+    fast_only = mode != "all"
+    modules = _modules_for(mode)
     shards = [
         (module, [sys.executable, "-m", "unittest", module]) for module in modules
     ]
@@ -178,6 +230,11 @@ def main(argv: list[str] | None = None) -> int:
         help="run only the unit/schema/parser modules",
     )
     group.add_argument(
+        "--portable",
+        action="store_true",
+        help="run only the modules that need no external process",
+    )
+    group.add_argument(
         "--all",
         action="store_true",
         help="run every test module plus helper-script suites (default)",
@@ -189,9 +246,10 @@ def main(argv: list[str] | None = None) -> int:
         help="maximum parallel shard processes (default: CPU count)",
     )
     args = parser.parse_args(argv)
-    fast_only = args.fast
+    mode = "portable" if args.portable else "fast" if args.fast else "all"
+    fast_only = mode != "all"
 
-    shards = _shard_commands(fast_only)
+    shards = _shard_commands(mode)
     started = time.monotonic()
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
@@ -228,7 +286,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-    label = "fast suite" if fast_only else "complete suite"
+    label = {"portable": "portable suite", "fast": "fast suite"}.get(
+        mode, "complete suite"
+    )
     verdict = "FAILED" if failures else "passed"
     print(
         f"\n{label} {verdict}: {total_tests} tests across {len(shards)} shards "

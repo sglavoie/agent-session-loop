@@ -161,16 +161,24 @@ class BridgeHelloTests(unittest.TestCase):
         payload = bridge.hello_payload()
 
         self.assertEqual("hello", payload["type"])
-        self.assertEqual(1, payload["protocol"])
+        self.assertEqual(2, payload["protocol"])
         self.assertEqual(list(bridge.CAPABILITIES), payload["capabilities"])
-        # Capabilities are append-only, so the original protocol 1 pair must
-        # stay the prefix no matter how much later work adds behind it.
+        # The handshake leads because nothing else a client wants to do is
+        # available until it has completed one.
         self.assertEqual(
-            ["runs.snapshot", "runs.changed"],
+            [bridge.METHOD_HANDSHAKE, "runs.snapshot"],
             payload["capabilities"][:2],
         )
+        self.assertEqual(list(bridge.EVENT_NAMES), payload["events"])
+        self.assertEqual(list(bridge.MUTATION_METHODS), payload["mutation_methods"])
         self.assertEqual(1024 * 1024, payload["max_frame_bytes"])
         self.assertIsInstance(payload["asl_version"], str)
+
+    def test_hello_names_the_contract_set_the_bridge_implements(self) -> None:
+        payload = bridge.hello_payload()
+
+        self.assertEqual(bridge.CONTRACT_SET_ID, payload["contract_set_id"])
+        self.assertIs(True, payload["handshake_required"])
 
     def test_hello_frame_is_one_newline_terminated_utf8_line(self) -> None:
         frame = bridge.encode_frame(bridge.hello_payload())
@@ -440,7 +448,7 @@ class BridgeSessionTests(unittest.TestCase):
 
         self.assertFalse(response["ok"])
         self.assertEqual("unsupported-protocol", response["error"]["code"])
-        self.assertEqual([1], response["error"]["details"]["supported"])
+        self.assertEqual("2", response["error"]["details"]["supported"])
 
     def test_malformed_json_is_answered_without_a_correlation_id(self) -> None:
         response = self._session().handle_frame(b"{not json")
@@ -452,15 +460,15 @@ class BridgeSessionTests(unittest.TestCase):
     def test_missing_request_id_and_method_are_invalid_requests(self) -> None:
         session = self._session()
         no_id = json.dumps(
-            {"type": "request", "protocol": 1, "method": "runs.snapshot"}
+            {"type": "request", "protocol": 2, "method": "runs.snapshot"}
         ).encode("utf-8")
         no_method = json.dumps(
-            {"type": "request", "protocol": 1, "id": "req-1"}
+            {"type": "request", "protocol": 2, "id": "req-1"}
         ).encode("utf-8")
         bad_params = json.dumps(
             {
                 "type": "request",
-                "protocol": 1,
+                "protocol": 2,
                 "id": "req-1",
                 "method": "runs.snapshot",
                 "params": [],
@@ -737,9 +745,10 @@ class BridgeCliTests(unittest.TestCase):
         self.assertEqual("/tmp/state", args.state_dir)
         self.assertEqual(["/tmp/a", "/tmp/b"], args.plan_root)
 
-    def test_unsupported_protocol_request_refuses_to_serve(self) -> None:
+    def test_the_retired_protocol_cannot_be_selected(self) -> None:
+        """Protocol 1 fails before a byte of protocol is written."""
         args = cli.build_parser().parse_args(
-            ["bridge", "serve", "--stdio", "--protocol", "2"]
+            ["bridge", "serve", "--stdio", "--protocol", "1"]
         )
 
         self.assertEqual(2, bridge.bridge_serve_from_args(args))

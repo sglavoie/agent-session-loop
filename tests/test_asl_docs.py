@@ -49,6 +49,7 @@ from agent_session_loop import (
     verification,
     workbench,
 )
+from tests import run_suite
 from tests.support import (
     REPO_ROOT,
 )
@@ -3359,11 +3360,29 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
 
     def test_test_recipes_exist_and_are_documented(self) -> None:
         self.assertIn("\ntest-fast:", self.justfile)
+        self.assertIn("\ntest-portable:", self.justfile)
         self.assertIn("\ntest-all:", self.justfile)
         for text in (self.docs, self.readme):
             self.assertIn("just test-fast", text)
+            self.assertIn("just test-portable", text)
             self.assertIn("just test-all", text)
         self.assertIn("tests/run_suite.py", self.docs)
+
+    def test_the_portable_lane_is_a_subset_of_the_fast_lane(self) -> None:
+        """A renamed or deleted module cannot survive as a silent skip.
+
+        The portable list is hand-curated -- membership is "spawns no external
+        process" -- so nothing recomputes it. Without this, a module dropped
+        from ``FAST_MODULES`` would keep the Linux lane green by running a
+        stale name that ``unittest`` would refuse to import.
+        """
+        stray = set(run_suite.PORTABLE_MODULES) - set(run_suite.FAST_MODULES)
+
+        self.assertEqual(stray, set())
+        self.assertEqual(
+            len(set(run_suite.PORTABLE_MODULES)),
+            len(run_suite.PORTABLE_MODULES),
+        )
 
     def sweep_section(self) -> str:
         return self.docs.split("### Process sweep", 1)[1].split("\n## ", 1)[0]

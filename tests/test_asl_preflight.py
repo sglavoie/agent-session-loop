@@ -22,6 +22,7 @@ from agent_session_loop import (
     baseline,
     baseline_cache,
     contracts,
+    harness_compatibility,
     plans,
     preflight,
     repository_registration,
@@ -2694,12 +2695,49 @@ class PreflightEnvironmentTests(unittest.TestCase):
         self.assertEqual("red", harness_findings[0].severity)
         self.assertIn("not found on PATH", harness_findings[0].message)
 
-    def test_env_harness_present_executable_is_silent(self) -> None:
+    def _drop_versioned_harness(self, directory: Path, name: str, output: str) -> Path:
+        target = directory / name
+        target.write_text(f"#!/bin/sh\nprintf '%s\\n' {output!r}\n", encoding="utf-8")
+        target.chmod(0o755)
+        return target
+
+    def test_env_harness_supported_version_is_silent(self) -> None:
+        harness_compatibility.clear_probe_cache()
+        self.addCleanup(harness_compatibility.clear_probe_cache)
+        latest = harness_compatibility.POLICY["codex"].latest
+        self._drop_versioned_harness(self.path_dir, "codex", f"codex-cli {latest}")
+        with patched_env(PATH=str(self.path_dir)):
+            report = preflight.run_environment_preflight(self.plan_dir, harness="codex")
+        harness_findings = [f for f in report.findings if f.category == "env-harness"]
+        self.assertEqual([], harness_findings)
+
+    def test_env_harness_unverified_version_warns_without_blocking(self) -> None:
+        # An executable that reports nothing parseable is `unknown`. Preflight
+        # must say so and still let the run start: yellow is a blocker here, so
+        # the warning lane is green with the word "warning" in its message.
+        harness_compatibility.clear_probe_cache()
+        self.addCleanup(harness_compatibility.clear_probe_cache)
         path_str = self._path_with("codex")
         with patched_env(PATH=path_str):
             report = preflight.run_environment_preflight(self.plan_dir, harness="codex")
         harness_findings = [f for f in report.findings if f.category == "env-harness"]
-        self.assertEqual([], harness_findings)
+        self.assertEqual(1, len(harness_findings))
+        self.assertEqual("green", harness_findings[0].severity)
+        self.assertIn("unverified codex version", harness_findings[0].message)
+        self.assertEqual((), report.red_findings)
+        self.assertEqual((), report.yellow_findings)
+
+    def test_env_harness_known_incompatible_version_emits_red(self) -> None:
+        harness_compatibility.clear_probe_cache()
+        self.addCleanup(harness_compatibility.clear_probe_cache)
+        self._drop_versioned_harness(self.path_dir, "codex", "codex-cli 0.1.0")
+        with patched_env(PATH=str(self.path_dir)):
+            report = preflight.run_environment_preflight(self.plan_dir, harness="codex")
+        harness_findings = [f for f in report.findings if f.category == "env-harness"]
+        self.assertEqual(1, len(harness_findings))
+        self.assertEqual("red", harness_findings[0].severity)
+        self.assertIn("known-incompatible", harness_findings[0].message)
+        self.assertFalse(report.ok)
 
     def test_commit_mode_needs_no_external_commit_executable(self) -> None:
         # Auto-commit re-enters this checkout as `asl commit`, so an empty

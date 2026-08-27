@@ -8,7 +8,7 @@
     "result": {
       "action_token": "37db468d7f42a93b7e29a1f71551663e",
       "body": "Should we drop the v1 column before the backfill lands?",
-      "body_bytes": 54,
+      "body_bytes": 55,
       "context_kind": "pause",
       "plan_dir": "/fixtures/plans/plan-alpha",
       "question_id": "q-1",

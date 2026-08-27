@@ -1,0 +1,113 @@
+name: Harness compatibility
+
+# Scheduled compatibility smoke for the three harness CLIs ASL launches.
+#
+# No model is used and no provider is contacted. The only subprocess the
+# compatibility module ever builds is `<executable> --version`, and
+# `tests/test_asl_harness_compatibility.py` pins the recorded argv to exactly
+# `["--version"]`, so this workflow can install and exercise six third-party CLI
+# releases without spending a token or needing a single provider credential.
+#
+# Two questions are asked, and they are deliberately gated differently:
+#
+#   `pinned` is the gate. Every version named by
+#   `agent_session_loop.harness_compatibility.POLICY` -- the latest and the
+#   previous supported line of each harness -- must still install and must still
+#   classify as `supported`. A pinned release that vanished from the registry,
+#   changed its `--version` sentence, or slipped outside the window is a real
+#   compatibility regression and fails the run.
+#
+#   `drift` is advisory. It installs whatever each harness currently ships as
+#   `latest` and reports the classification without failing the workflow. A new
+#   upstream release lands here as `unknown` -- a warning to triage by moving the
+#   pin and recording fresh smoke evidence -- rather than as a red build, which
+#   is the whole reason `unknown` warns instead of blocking.
+on:
+  schedule:
+    # Weekly, Mondays at 06:17 UTC. Off the hour so it does not queue behind
+    # every other cron on the runner fleet.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  pinned:
+    name: ${{ matrix.harness }} ${{ matrix.line }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One harness release per job, and a failure in one must not hide the
+      # verdict for the other five.
+      fail-fast: false
+      matrix:
+        harness: [codex, claude, copilot]
+        line: [latest, previous]
+        include:
+          - harness: codex
+            package: "@openai/codex"
+          - harness: claude
+            package: "@anthropic-ai/claude-code"
+          - harness: copilot
+            package: "@github/copilot"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      # The version is read out of POLICY rather than repeated here. The
+      # workflow knows how to install a harness; only the module knows which
+      # release ASL claims to support, and duplicating that in YAML is how the
+      # two silently disagree.
+      - name: Resolve pinned version
+        id: pin
+        run: |
+          version=$(python3 -c 'import sys; from agent_session_loop.harness_compatibility import POLICY; print(getattr(POLICY[sys.argv[1]], sys.argv[2]))' "${{ matrix.harness }}" "${{ matrix.line }}")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "${{ matrix.harness }} ${{ matrix.line }} is $version"
+
+      - name: Install ${{ matrix.package }}@${{ steps.pin.outputs.version }}
+        run: npm install -g "${{ matrix.package }}@${{ steps.pin.outputs.version }}"
+
+      # `--strict` exits 3 on anything that is not `supported`, and exactly one
+      # harness is named, so this asserts the pinned release against its own
+      # policy row and says nothing about the two that are not installed.
+      - name: Compatibility smoke (no model use)
+        run: |
+          python3 -m agent_session_loop harness-compat \
+            --harness "${{ matrix.harness }}" --strict --json
+
+  drift:
+    name: upstream drift (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install current releases
+        run: |
+          npm install -g \
+            "@openai/codex@latest" \
+            "@anthropic-ai/claude-code@latest" \
+            "@github/copilot@latest"
+
+      # Advisory by construction: `continue-on-error` turns the strict exit 3
+      # into a visible annotation rather than a failed workflow. A harness that
+      # has moved past the pinned window is news, not a broken build.
+      - name: Report drift against the pinned window
+        continue-on-error: true
+        run: python3 -m agent_session_loop harness-compat --strict --json

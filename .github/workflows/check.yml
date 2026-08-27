@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Two lanes with different authority. The Linux lane is cheap, fast, and
+# deliberately partial: it gates on the checks that hold on any machine with a
+# Python interpreter. The macOS lane is the one that speaks for a release --
+# it runs the complete suite on the platform the ASL/AgentMux pair is developed,
+# installed, and released against. Nothing the Linux lane skips is left
+# unchecked; it is checked on macOS instead.
+jobs:
+  linux-portable:
+    name: Linux (portable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Install Python tooling
+        run: python3 -m pip install --upgrade "ruff==0.16.0" "mypy==2.3.0"
+
+      # `just lint` is deliberately not used here. Its `lint-shell` half runs
+      # `./lint.sh`, whose executable-file sweep uses BSD `find -perm +111`,
+      # which GNU find rejects outright. Shell linting is therefore a macOS-lane
+      # check; the Python static gate is portable and runs on both.
+      - name: Lint and type-check
+        run: just lint-py
+
+      - name: Portable test suite
+        run: just test-portable
+
+      - name: Startup context is not stale
+        run: just check-startup-context
+
+      # No model is used and no provider is contacted: the only subprocess this
+      # builds is `<harness> --version`. On a runner with no harness installed
+      # every harness resolves to `unknown`, which is a warning rather than a
+      # failure, so the default (non-strict) mode is what belongs in a
+      # per-commit gate. The strict form is scheduled separately in
+      # harness-compatibility.yml.
+      - name: Harness compatibility policy
+        run: python3 -m agent_session_loop harness-compat --json
+
+  macos-full:
+    name: macOS (full)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Install Python tooling
+        run: python3 -m pip install --upgrade "ruff==0.16.0" "mypy==2.3.0"
+
+      - name: Install shellcheck
+        run: brew install shellcheck
+
+      - name: Lint
+        run: env ASL_CLI_TRACE=0 just lint
+
+      - name: Complete test suite
+        run: env ASL_CLI_TRACE=0 just test-all

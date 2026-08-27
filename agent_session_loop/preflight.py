@@ -55,6 +55,7 @@ from typing import Any, Literal
 
 from . import (
     baseline,
+    harness_compatibility,
     harnesses,
     progress_repair,
     repository_evidence,
@@ -2811,6 +2812,42 @@ def _check_env_harness(harness: str) -> tuple[PreflightFinding, ...]:
                 "env-harness",
                 f"{harness} executable not found on PATH",
                 detail=f"executable: {adapter.executable}",
+            ),
+        )
+    return _check_env_harness_version(harness, resolved)
+
+
+def _check_env_harness_version(
+    harness: str, executable: str
+) -> tuple[PreflightFinding, ...]:
+    """Classify the resolved harness CLI against the pinned support window.
+
+    The severities are asymmetric on purpose, and the asymmetry is the whole
+    policy. A known-incompatible release is ``red``: it blocks, because a run
+    whose harness is known broken produces evidence nobody can trust. An
+    unrecognised release is ``green``: it is reported on every preflight and in
+    the preflight JSON, but it does not block. ``yellow`` is not available for
+    this - :func:`_blocking_findings` treats yellow as a blocker, so warning in
+    yellow would refuse to run on every harness release that lands after this
+    build, which is the outage the "unknown warns" rule exists to avoid.
+    """
+    compatibility = harness_compatibility.check_executable(harness, executable)
+    if compatibility.status == "incompatible":
+        return (
+            _finding(
+                "red",
+                "env-harness",
+                f"{harness} {compatibility.version} is known-incompatible",
+                detail=compatibility.detail,
+            ),
+        )
+    if compatibility.status == "unknown":
+        return (
+            _finding(
+                "green",
+                "env-harness",
+                f"unverified {harness} version (warning, not a blocker)",
+                detail=compatibility.detail,
             ),
         )
     return ()

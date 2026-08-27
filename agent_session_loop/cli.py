@@ -542,6 +542,39 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="verification:contract_check_from_args"
     )
 
+    harness_compat_parser = subparsers.add_parser(
+        "harness-compat",
+        help=(
+            "Classify the installed Codex, Claude, and Copilot CLIs against "
+            "the pinned support window without using any model."
+        ),
+    )
+    harness_compat_parser.add_argument(
+        "--harness",
+        action="append",
+        choices=list(harnesses.HARNESS_NAMES),
+        help=(
+            "Restrict the check to one harness (repeatable; "
+            "default: every supported harness)"
+        ),
+    )
+    harness_compat_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Exit 3 when any harness is unknown rather than only exiting 1 on "
+            "a known-incompatible version"
+        ),
+    )
+    harness_compat_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    harness_compat_parser.set_defaults(
+        handler_ref="harness_compatibility:harness_compat_from_args"
+    )
+
     baseline_parser = subparsers.add_parser(
         "baseline",
         help=(

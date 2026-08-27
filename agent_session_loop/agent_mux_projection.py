@@ -66,7 +66,7 @@ UPGRADABLE_STATE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
 #: ``tests.test_asl_agent_mux_projection`` asserts this constant still equals
 #: :func:`agent_session_loop.agent_mux_contract.contract_set_id`, so a corpus
 #: edit that moves the identity fails the suite instead of shipping a stale ID.
-CONTRACT_SET_ID = "asl-amx-1.09f9ea5c5ceaa6cd"
+CONTRACT_SET_ID = "asl-amx-1.6f30193cd1744a98"
 
 # --------------------------------------------------------------------------
 # Phase vocabulary

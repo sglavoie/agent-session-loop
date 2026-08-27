@@ -107,6 +107,25 @@ class CorpusIntegrityTests(unittest.TestCase):
         self.assertEqual(entry["corpus_digest"], contract.corpus_digest())
         self.assertEqual(entry["status"], contract.CONTRACT_SET_STATUS_CURRENT)
 
+    def test_the_body_bearing_fixture_states_its_own_size(self) -> None:
+        # ``body_bytes`` is the one field in the corpus whose correct value is a
+        # function of another field, and no schema keyword can say so: JSON
+        # Schema bounds it but cannot tie it to ``body``. The bridge computes it
+        # from the encoded body, so a fixture that disagrees would teach a
+        # consumer a relationship the live wire does not have. Nothing else
+        # catches that, which is why it is asserted here rather than linted.
+        paths = [
+            path
+            for path in contract.fixture_paths(
+                contract.COMPONENT_BRIDGE_PROTOCOL, valid=True
+            )
+            if path.stem == "question-body"
+        ]
+        self.assertEqual(len(paths), 1)
+        fixture = json.loads(paths[0].read_text(encoding="utf-8"))
+        result = fixture["document"]["result"]
+        self.assertEqual(result["body_bytes"], len(result["body"].encode("utf-8")))
+
     def test_manifest_excludes_itself_from_the_digest(self) -> None:
         self.assertNotIn(contract.MANIFEST_FILENAME, contract.corpus_files())
         self.assertNotIn(contract.MANIFEST_FILENAME, contract.file_digests())

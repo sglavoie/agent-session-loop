@@ -1,12 +1,20 @@
 """NDJSON stdio bridge over ASL's active/actionable run projection.
 
 The bridge is the authoritative boundary between ASL and a standalone
-supervision client. Protocol 1 is UTF-8 NDJSON on stdio: the server writes a
+supervision client. Protocol 2 is UTF-8 NDJSON on stdio: the server writes a
 ``hello`` frame before reading anything, every request carries a correlation
 ``id`` answered by exactly one response, and unsolicited events carry a
 monotonic ``seq``. Stdout is protocol-only; diagnostics go to stderr.
 
-Four properties are structural rather than incidental:
+Protocol 2 is not a negotiation. The hello names the contract set both ends
+must already agree on, and a client that does not recognize it has no
+compatible way to continue: there is no protocol-1 parser left to fall back to.
+Reads stay available across a mismatch so a stale cockpit can still explain
+itself, but every mutation is gated behind ``session.handshake``, which accepts
+only an exact contract-set match against a snapshot digest the bridge still
+holds.
+
+Five properties are structural rather than incidental:
 
 - **Observation never writes.** Every state read goes through the explicitly
   non-reclaiming paths (``reclaim=False``), so a snapshot is a function of the
@@ -20,6 +28,10 @@ Four properties are structural rather than incidental:
 - **Reply text never becomes protocol or diagnostic state.** It is passed
   straight to ASL's own durable records and is absent from every response,
   event, operation receipt, and stderr line the bridge can emit.
+- **A mutation is authorized against state the client has actually seen.** The
+  handshake pins a snapshot digest; the action token pins the plan. Both must
+  still hold when the request lands, so an operator can never act on a row that
+  moved between the projection and the click.
 """
 
 from __future__ import annotations
@@ -49,8 +61,9 @@ from . import (
     state,
     workbench,
 )
+from .agent_mux_projection import CONTRACT_SET_ID
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 # A frame ceiling only helps if both ends agree on it before parsing, so it is
 # advertised in the hello and enforced on read and on write.
@@ -80,20 +93,35 @@ WORKER_JOIN_TIMEOUT_SECONDS = 0.1
 # restarts. Later protocol work appends; it never reorders or removes.
 #
 # This is the *candidate* order. The advertised ``CAPABILITIES`` is derived at
-# the bottom of this module by intersecting it with the methods and events that
-# actually got registered, so a name can never reach a hello without a handler
-# behind it.
-_CAPABILITY_ORDER: tuple[str, ...] = (
+# the bottom of this module by intersecting it with the methods that actually
+# got registered, so a name can never reach a hello without a handler behind it.
+#
+# Protocol 2 splits the single protocol-1 capability list into three closed
+# vocabularies. Mixing methods and events in one array made "can I call this?"
+# and "will I be sent this?" indistinguishable to a client, and left the
+# mutation subset — the one that needs a handshake — implicit.
+METHOD_HANDSHAKE = "session.handshake"
+
+_METHOD_ORDER: tuple[str, ...] = (
+    METHOD_HANDSHAKE,
     "runs.snapshot",
-    "runs.changed",
     "question.get",
     "question.reply",
     "question.resolve",
     "run.resume",
     "run.stop_after_current",
     "run.abort",
-    "operation.updated",
     "workbench.ensure",
+)
+
+# The methods that change ASL state. Each one is refused until a handshake has
+# matched the contract set against a snapshot digest the bridge still holds.
+MUTATION_METHODS: tuple[str, ...] = (
+    "question.reply",
+    "question.resolve",
+    "run.resume",
+    "run.stop_after_current",
+    "run.abort",
 )
 
 EVENT_RUNS_CHANGED = "runs.changed"
@@ -142,6 +170,19 @@ ERROR_FRAME_TOO_LARGE = "frame-too-large"
 ERROR_INTERNAL = "internal-error"
 ERROR_MUTATION_FAILED = "mutation-failed"
 ERROR_WORKBENCH_UNAVAILABLE = "workbench-unavailable"
+
+# Protocol 2 appends exactly two codes and removes none, so a client that
+# understands the protocol-1 vocabulary still understands every refusal it
+# shares with protocol 2.
+#
+# The two are deliberately different kinds of failure. A contract-set mismatch
+# is a build-time disagreement: retrying cannot fix it, so it is reported
+# non-retryable and the client is expected to degrade to read-only rather than
+# loop. A stale snapshot is a race the client can and should resolve by
+# refreshing and handshaking again.
+ERROR_CONTRACT_SET_MISMATCH = "contract-set-mismatch"
+ERROR_STALE_SNAPSHOT = "stale-snapshot"
+
 ERROR_CODES: tuple[str, ...] = (
     ERROR_MALFORMED_JSON,
     ERROR_INVALID_REQUEST,
@@ -165,6 +206,8 @@ ERROR_CODES: tuple[str, ...] = (
     intervention.REASON_EMPTY_TEXT,
     intervention.REASON_BODY_TOO_LARGE,
     intervention.REASON_MISSING_QUESTION_BODY,
+    ERROR_CONTRACT_SET_MISMATCH,
+    ERROR_STALE_SNAPSHOT,
 )
 
 OPERATION_ACCEPTED = "accepted"
@@ -530,6 +573,10 @@ def build_runs_snapshot(
 
     snapshot = {
         "protocol": PROTOCOL_VERSION,
+        # Carried on the snapshot as well as the hello so a cached or replayed
+        # projection is self-describing: a client that persists rows can tell
+        # whether they were produced by the contract set it speaks today.
+        "contract_set_id": CONTRACT_SET_ID,
         "rows": rows,
         "row_count": len(rows),
         "warnings": bounded_warnings,
@@ -580,11 +627,24 @@ def encode_frame(payload: Mapping[str, Any]) -> bytes:
 
 
 def hello_payload() -> dict[str, Any]:
+    """The server-first frame, carrying the identity both ends must already share.
+
+    ``contract_set_id`` is the whole compatibility story: it is the digest of
+    the canonical corpus that defines these frames, the lifecycle hook payload,
+    and the projection, so one string pins every component version at once.
+    Listing the component schema versions separately would let the two drift
+    apart, and the frame is closed against unknown properties precisely so that
+    cannot happen.
+    """
     return {
         "type": "hello",
         "protocol": PROTOCOL_VERSION,
         "asl_version": __version__,
+        "contract_set_id": CONTRACT_SET_ID,
         "capabilities": list(CAPABILITIES),
+        "events": list(EVENT_NAMES),
+        "mutation_methods": list(MUTATION_METHODS),
+        "handshake_required": True,
         "max_frame_bytes": MAX_FRAME_BYTES,
         "poll_interval_seconds": POLL_INTERVAL_SECONDS,
     }
@@ -980,6 +1040,13 @@ class BridgeSession:
     projection_cadence: Callable[[], dict[str, Any]] | None = None
     seq: int = 0
     last_digest: str | None = None
+    # The mutation gate. ``handshake_id`` records that a client proved it speaks
+    # this contract set; ``handshake_digest`` records the snapshot that proof
+    # was made against, and is cleared rather than advanced when the corpus
+    # moves, so a handshake authorizes exactly the projection it was shown.
+    handshake_id: str | None = None
+    handshake_digest: str | None = None
+    handshake_count: int = 0
     operations: OrderedDict[str, Operation] = field(
         default_factory=OrderedDict, repr=False
     )
@@ -1027,7 +1094,7 @@ class BridgeSession:
             raise BridgeError(
                 ERROR_UNSUPPORTED_PROTOCOL,
                 f"protocol {protocol!r} is not supported",
-                details={"supported": [PROTOCOL_VERSION]},
+                details={"supported": str(PROTOCOL_VERSION)},
             )
         if request_id is None:
             raise BridgeError(
@@ -1047,8 +1114,12 @@ class BridgeSession:
             raise BridgeError(
                 ERROR_UNKNOWN_METHOD,
                 f"unknown method {method!r}",
-                details={"method": _bounded_text(method)},
+                details={"method": _bounded_text(method) or ""},
             )
+        # Enforced here rather than in each handler so a method added to
+        # MUTATION_METHODS is gated by construction instead of by remembering.
+        if method in MUTATION_METHODS:
+            self._require_mutations_enabled(method)
         return handler(self, params)
 
     def projection_interval(self) -> float:
@@ -1125,11 +1196,15 @@ class BridgeSession:
             failures=0,
         )
 
-    def runs_snapshot(self) -> dict[str, Any]:
+    def _current_snapshot(self) -> dict[str, Any]:
+        """Return the projection this session would serve right now.
+
+        Shared by ``runs.snapshot`` and by the mutation gate so both answer from
+        one definition of "current": a handshake can never be validated against
+        a projection the client was never eligible to be shown.
+        """
         if self._last_snapshot is not None and self.clock() < self.next_projection_at():
-            # Attached per response rather than per walk: the projection is
-            # shared and cached, but how stale it is by now is not.
-            return self._last_snapshot | {"projection": self.cadence()}
+            return self._last_snapshot
         try:
             snapshot = self._project()
         except ProjectionPending as error:
@@ -1147,7 +1222,77 @@ class BridgeSession:
                 retryable=True,
             ) from error
         self.last_digest = snapshot["digest"]
-        return snapshot | {"projection": self.cadence()}
+        return snapshot
+
+    def runs_snapshot(self) -> dict[str, Any]:
+        # The cadence block is attached per response rather than per walk: the
+        # projection is shared and cached, but how stale it is by now is not.
+        return self._current_snapshot() | {"projection": self.cadence()}
+
+    # ----------------------------------------------------------------
+    # Compatibility handshake
+
+    def session_handshake(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """Prove contract-set agreement and pin the snapshot mutations may act on.
+
+        Deliberately not a negotiation. The bridge implements exactly one
+        contract set, so a client naming another is told so once, non-retryably,
+        and keeps its read-only access; there is nothing to fall back to.
+        """
+        offered_contract_set = _require_str(params, "contract_set_id")
+        if offered_contract_set != CONTRACT_SET_ID:
+            # The message is a fixed string rather than an interpolation of the
+            # client's value: the reason a client renders must be stable across
+            # runs, and echoing an unvalidated identifier back into a UI is how
+            # a compatibility notice turns into an injection surface.
+            raise BridgeError(
+                ERROR_CONTRACT_SET_MISMATCH,
+                "client contract set is not the one this bridge implements",
+                retryable=False,
+                details={"contract_set_id": CONTRACT_SET_ID},
+            )
+        offered_digest = _optional_str(params, "snapshot_digest")
+        current = str(self._current_snapshot()["digest"])
+        enabled = offered_digest == current
+        self.handshake_count += 1
+        self.handshake_id = (
+            "hs-"
+            + hashlib.sha256(f"{self.handshake_count}:{current}".encode()).hexdigest()[
+                :8
+            ]
+        )
+        self.handshake_digest = current if enabled else None
+        return {
+            "contract_set_id": CONTRACT_SET_ID,
+            "handshake_id": self.handshake_id,
+            "mutations_enabled": enabled,
+            "snapshot_digest": current,
+        }
+
+    def _require_mutations_enabled(self, method: str) -> None:
+        """Refuse a mutation that no live handshake authorizes.
+
+        Complementary to the action token rather than redundant with it: the
+        token proves the *plan* has not moved since the client read it, and this
+        proves the client read it from a projection produced by the contract set
+        the bridge implements and still holds.
+        """
+        if self.handshake_id is None:
+            raise BridgeError(
+                ERROR_CONTRACT_SET_MISMATCH,
+                "mutations require a completed session.handshake",
+                retryable=False,
+                details={"contract_set_id": CONTRACT_SET_ID, "method": method},
+            )
+        current = str(self._current_snapshot()["digest"])
+        if self.handshake_digest != current:
+            raise BridgeError(
+                ERROR_STALE_SNAPSHOT,
+                "the handshake snapshot is no longer current; "
+                "refresh the snapshot and handshake again",
+                retryable=True,
+                details={"snapshot_digest": current},
+            )
 
     def poll(self) -> dict[str, Any] | None:
         """Return a ``runs.changed`` event, or ``None`` when nothing changed."""
@@ -1604,6 +1749,7 @@ def _optional_str(params: Mapping[str, Any], key: str) -> str | None:
 # Registered last so the derived capability list below can only advertise names
 # that already have a handler behind them.
 METHOD_HANDLERS: dict[str, Callable[[BridgeSession, Mapping[str, Any]], dict]] = {
+    METHOD_HANDSHAKE: BridgeSession.session_handshake,
     "runs.snapshot": lambda session, params: session.runs_snapshot(),
     "question.get": BridgeSession.question_get,
     intervention.ACTION_REPLY: BridgeSession.question_reply,
@@ -1615,7 +1761,7 @@ METHOD_HANDLERS: dict[str, Callable[[BridgeSession, Mapping[str, Any]], dict]] =
 }
 
 CAPABILITIES: tuple[str, ...] = tuple(
-    name for name in _CAPABILITY_ORDER if name in METHOD_HANDLERS or name in EVENT_NAMES
+    name for name in _METHOD_ORDER if name in METHOD_HANDLERS
 )
 
 
@@ -1720,7 +1866,7 @@ def serve_stdio(
                             BridgeError(
                                 ERROR_FRAME_TOO_LARGE,
                                 "request frame exceeded the protocol frame ceiling",
-                                details={"max_frame_bytes": MAX_FRAME_BYTES},
+                                details={"max_frame_bytes": str(MAX_FRAME_BYTES)},
                             ),
                         )
                     ):
@@ -1752,12 +1898,18 @@ def serve_stdio(
 
 
 def bridge_serve_from_args(args: Any) -> int:
-    """Serve protocol 1 on stdio for ``asl bridge serve``."""
+    """Serve protocol 2 on stdio for ``asl bridge serve``.
+
+    There is no protocol-1 path left to select. A client pinned to the retired
+    version fails here, before a byte of protocol is written, rather than
+    discovering the mismatch halfway through a session.
+    """
     requested = getattr(args, "protocol", PROTOCOL_VERSION)
     if requested != PROTOCOL_VERSION:
         print(
             f"agent-session-loop: unsupported bridge protocol {requested}; "
-            f"this build speaks protocol {PROTOCOL_VERSION}",
+            f"this build speaks protocol {PROTOCOL_VERSION} "
+            f"(contract set {CONTRACT_SET_ID})",
             file=sys.stderr,
         )
         return 2

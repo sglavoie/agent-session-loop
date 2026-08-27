@@ -517,6 +517,7 @@ asl run PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model 
 asl preflight PLAN_DIR [--cwd ROOT] [--harness codex|claude|copilot] [--commit-per-session|--commit-at-end] [--state-dir DIR] [--max-pending-sessions N] [--mark-loop-ready] [--json]
 asl verify PLAN_DIR --session ID [--cwd ROOT] [--artifact-dir DIR] [--json]
 asl contract-check PLAN_DIR [--session ID] [--cwd ROOT] [--agent-mux] [--state-dir DIR] [--json]
+asl harness-compat [--harness codex|claude|copilot ...] [--strict] [--json]
 asl baseline PLAN_DIR [--cwd ROOT] [--per-check-timeout SECONDS] [--total-timeout SECONDS] [--json]
 asl split (--plan-file PATH | --inline-stdin) --contracts-file PATH [--cwd ROOT] [--base-dir DIR] [--force-new] [--skill-prefix auto|codex|claude|copilot] [--analysis-file PATH] [--json]
 asl prepare PLAN.md [--cwd ROOT] [--harness codex|claude|copilot] [--harness-model MODEL] [--validator-harness H] [--review-harness H] [--review-harness-model MODEL] [--base-dir DIR] [--force-new] [--state-dir DIR] [--unsafe-bypass|--no-unsafe-bypass] [--json]
@@ -3793,6 +3794,39 @@ from the retained turn list, so trimming old turns cannot erase what the run
 already observed. The supervisor audit reads it in the `state` section beside
 `model` and `observed_model`.
 
+### Harness Version Compatibility
+
+`asl harness-compat [--harness NAME ...] [--strict] [--json]` reports which
+installed harness CLIs fall inside the supported version window. The window is
+pinned per harness in `agent_session_loop/harness_compatibility.py` as a
+`latest`, a `previous`, a `minimum`, and an explicit `blocked` tuple, and a
+resolved executable is classified `supported`, `unknown`, or `incompatible`.
+
+The command never uses a model. The only subprocess it constructs is
+`<executable> --version`, and a test asserts the recorded argv is exactly
+`["--version"]`, so a scheduled compatibility smoke costs nothing but a process
+spawn and cannot consume provider quota. Probes are memoized in process on
+`(path, size, mtime_ns)`, bounded by a 20-second timeout, and disabled entirely
+by `ASL_HARNESS_VERSION_PROBE=0` — in which case every harness degrades to
+`unknown`.
+
+Unknown warns, known-incompatible blocks. Default exit is 0 when nothing is
+`incompatible` and 1 when something is; `--strict` exits 3 when any harness is
+not `supported`, which is the mode the scheduled CI lane runs so that a new
+upstream release surfaces as a warning to be triaged rather than as a red build.
+Every probe failure — an unresolvable executable, a non-zero `--version`, a
+timeout, unparseable output — degrades to `unknown`, never to `incompatible`, so
+"not installed" stays distinguishable from "known broken" in release evidence.
+
+`preflight` applies the same policy to the selected harness with one deliberate
+asymmetry. A known-incompatible release is a `red` finding and blocks the run. An
+unrecognised release is `green`: it is reported on every preflight and in the
+preflight JSON, but it does not block. `yellow` is not available for the warning,
+because `PreflightReport.ok` and `_blocking_findings` both treat yellow as a
+blocker — a yellow warning would refuse every run against any harness release
+newer than the pinned window, which is precisely the case that must stay
+runnable.
+
 ## Safety Modes
 
 By default, `run` and `doctor` use harness-specific bypass modes for every
@@ -7027,6 +7061,7 @@ Run the regression suite and compile check from this repository:
 
 ```bash
 just test-fast
+just test-portable
 just test-all
 just lint
 python3 /Users/dev/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/session-resplit
@@ -7049,6 +7084,19 @@ tests under discovery, so `python3 -m unittest discover -s tests` runs each
 test exactly once. Individual modules still run directly, for example
 `python3 -m unittest tests.test_asl_verification -q`.
 
+`just test-portable` is a third lane cut for CI rather than for a developer. It
+runs `PORTABLE_MODULES`, the subset of `FAST_MODULES` that spawns no external
+process at all — no `git`, no shell script, no launchd domain, no harness
+executable, no Kitty. Membership is that mechanical rule rather than a judgement
+call, and the list is hand-curated, so `tests/test_asl_docs.py` pins it as a
+strict subset of `FAST_MODULES`: a module renamed or dropped from the fast lane
+cannot keep the portable lane green by running a name `unittest` would refuse to
+import. This is the lane the Linux CI job gates on. Everything that needs the
+real tools — the Git-backed repository evidence, the shell helpers, the launchd
+maintenance definitions, the harness adapters — is left to the macOS job, which
+runs `just test-all` on the platform the pair is actually released against, so
+the portable lane never reports a pass it did not earn.
+
 The bridge's cross-language contract is checked from both sides.
 `tests/test_asl_bridge_fixtures.py` runs in `just test-fast` and verifies that
 `tests/fixtures/agent_mux_contract/` still describes what
@@ -7062,6 +7110,29 @@ its mutation gate, snapshot decoding, body-free action and receipt shapes, the
 Workbench URL shape, and a clean exit. That recipe is opt-in there and fails
 rather than skips when ASL is missing or incompatible, so an unrun check is
 never mistaken for a passing one.
+
+Releases of the pair are gated from the client side by
+`just paired-release-gate asl_root=… signing_key=…`, which runs this
+repository's `just test-all`, `just lint`, `just reliability-stress`,
+`just all`, and `just verify-asl-install` alongside Agent Mux's own gates,
+compares `tests/fixtures/agent_mux_contract/` against the vendored copy byte
+for byte, and installs the two halves in the only safe order — ASL first,
+because the client's install restarts the daemon and a daemon restarted against
+a stale ASL says nothing about the pair. The result is a deterministic JSON
+evidence record: both source revisions, a SHA-256 of `bin/.local/bin/agent-session-loop`
+and an ordered digest over `agent_session_loop/`'s sources, the contract-set ID,
+a SHA-256 of `tests/fixtures/agent_mux_contract/manifest.json`, the
+OS/Kitty/harness versions, and every command with its exit code and duration.
+It is signed with `ssh-keygen -Y sign` under the namespace
+`agentmux-asl-release` and both repositories are tagged with the same pair ID.
+
+The manifest hash is recorded explicitly because `manifest.json` is excluded
+from every corpus digest: a manifest that drifted while the schemas held still
+is invisible to every digest check and visible only to the byte comparison and
+to this hash. The tree digest over `agent_session_loop/` exists for the
+symmetric reason — ASL ships as Python, so there is no compiled artifact whose
+hash pins the code that will actually run, and hashing the wrapper alone would
+pin a twenty-line launcher.
 
 Use a synthetic plan directory for manual smoke tests so generated state, locks,
 and logs do not touch an active project plan.
