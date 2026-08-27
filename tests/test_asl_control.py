@@ -712,10 +712,12 @@ class MailboxTests(unittest.TestCase):
         self.assertIsNone(final.active_wait_for(question.id))
         self.assertEqual(1, final.counts.receipts)
 
-    def test_mixed_v1_v2_v3_log_parses_without_rewrite(self) -> None:
+    def test_mixed_v1_v2_v3_v4_log_parses_without_rewrite(self) -> None:
         legacy_guidance_id = self.message_id()
         v2_question_id = self.message_id()
         v2_reply_id = self.message_id()
+        v3_wait_question_id = self.message_id()
+        v3_wait_start_id = self.message_id()
         self.append_raw(
             {
                 "created_at": self.timestamp(),
@@ -744,9 +746,35 @@ class MailboxTests(unittest.TestCase):
                 "version": mailbox.MAILBOX_PREVIOUS_SCHEMA_VERSION,
             }
         )
-        v3_question, v3_wait = mailbox.append_wait_question(
+        # A genuine v3 wait-mode question written before the v4 writer existed.
+        # Wait strictness is a statement about the question's own vintage, so
+        # bumping the write version must not quietly relax it.
+        self.append_raw(
+            {
+                "created_at": self.timestamp(),
+                "delivery_mode": mailbox.DELIVERY_MODE_WAIT,
+                "id": v3_wait_question_id,
+                "kind": mailbox.KIND_QUESTION,
+                "run_id": "run-v3",
+                "session_id": "1",
+                "text": "v3 wait",
+                "turn_index": 1,
+                "version": mailbox.MAILBOX_WAIT_SCHEMA_VERSION,
+                "waiter_origin": mailbox.WAITER_ORIGIN_WORKER,
+            }
+        )
+        self.append_raw(
+            {
+                "created_at": self.timestamp(),
+                "id": v3_wait_start_id,
+                "kind": mailbox.KIND_WAIT_START,
+                "to": v3_wait_question_id,
+                "version": mailbox.MAILBOX_WAIT_SCHEMA_VERSION,
+            }
+        )
+        v4_question, v4_wait = mailbox.append_wait_question(
             self.plan_dir,
-            "v3",
+            "v4",
             state_dir=self.state_dir,
             run_id="run-new",
             session_id="1",
@@ -756,10 +784,323 @@ class MailboxTests(unittest.TestCase):
         view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual((), view.rejected)
         self.assertEqual(
-            [1, 2, 2, 3, 3],
+            [
+                mailbox.MAILBOX_LEGACY_SCHEMA_VERSION,
+                mailbox.MAILBOX_PREVIOUS_SCHEMA_VERSION,
+                mailbox.MAILBOX_PREVIOUS_SCHEMA_VERSION,
+                mailbox.MAILBOX_WAIT_SCHEMA_VERSION,
+                mailbox.MAILBOX_WAIT_SCHEMA_VERSION,
+                mailbox.MAILBOX_SCHEMA_VERSION,
+                mailbox.MAILBOX_SCHEMA_VERSION,
+            ],
             [message.version for message in view.messages],
         )
-        self.assertEqual(v3_wait, view.active_wait_for(v3_question.id))
+        self.assertEqual(v4_wait, view.active_wait_for(v4_question.id))
+        self.assertEqual(
+            v3_wait_start_id,
+            view.active_wait_for(v3_wait_question_id).id,
+        )
+
+        # The v3 question is still strict under the v4 writer: ending its wait
+        # makes a later reply inadmissible.
+        mailbox.finish_wait(
+            self.plan_dir,
+            v3_wait_question_id,
+            v3_wait_start_id,
+            reason=mailbox.WAIT_END_REASON_TIMEOUT,
+            state_dir=self.state_dir,
+        )
+        with self.assertRaises(mailbox.MailboxError) as raised:
+            mailbox.append_reply(
+                self.plan_dir,
+                v3_wait_question_id,
+                "too late",
+                state_dir=self.state_dir,
+            )
+        self.assertEqual(mailbox.REJECT_QUESTION_NOT_WAITING, raised.exception.reason)
+
+    def guidance(self, text: str = "Prefer the existing parser.") -> object:
+        return mailbox.append_guidance(self.plan_dir, text, state_dir=self.state_dir)
+
+    def deliver(self, guidance_id: str, **overrides) -> object:
+        values = {
+            "delivery_state": mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+            "delivery_reason": mailbox.GUIDANCE_REASON_DELIVERED,
+            "channel": mailbox.GUIDANCE_CHANNEL_LIVE,
+        }
+        values.update(overrides)
+        return mailbox.append_guidance_delivery(
+            self.plan_dir,
+            guidance_id,
+            state_dir=self.state_dir,
+            **values,
+        )
+
+    def test_delivery_record_names_guidance_and_never_quotes_it(self) -> None:
+        guidance = self.guidance("Do not repeat me anywhere.")
+        delivery = self.deliver(
+            guidance.id,
+            run_id="run-A",
+            session_id="1",
+            turn_index=2,
+            harness="codex",
+        )
+
+        self.assertEqual(mailbox.KIND_GUIDANCE_DELIVERY, delivery.kind)
+        self.assertEqual(guidance.id, delivery.to)
+        self.assertIsNone(delivery.text)
+        record = delivery.to_record()
+        self.assertNotIn("text", record)
+        self.assertEqual(mailbox.MAILBOX_SCHEMA_VERSION, record["version"])
+        self.assertEqual(
+            {
+                "channel": mailbox.GUIDANCE_CHANNEL_LIVE,
+                "delivery_reason": mailbox.GUIDANCE_REASON_DELIVERED,
+                "delivery_state": mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+                "harness": "codex",
+                "run_id": "run-A",
+                "session_id": "1",
+                "to": guidance.id,
+                "turn_index": 2,
+            },
+            {
+                key: value
+                for key, value in record.items()
+                if key not in {"created_at", "id", "kind", "version"}
+            },
+        )
+
+        payload = mailbox.guidance_delivery_event_payload(delivery)
+        self.assertEqual(guidance.id, payload["guidance_id"])
+        self.assertEqual(mailbox.GUIDANCE_CHANNEL_LIVE, payload["channel"])
+        serialized = json.dumps(payload)
+        self.assertNotIn("Do not repeat me anywhere.", serialized)
+        self.assertEqual(
+            (),
+            tuple(key for key in payload if "text" in key or "digest" in key),
+        )
+        with self.assertRaises(ValueError):
+            mailbox.guidance_delivery_event_payload(guidance)
+
+    def test_delivery_writes_validate_state_reason_channel_and_identity(self) -> None:
+        guidance = self.guidance()
+        cases = (
+            (mailbox.REJECT_GUIDANCE_NOT_FOUND, {"guidance_id": self.message_id()}),
+            (mailbox.REJECT_INVALID_TARGET, {"guidance_id": "not-a-uuid"}),
+            (
+                mailbox.REJECT_INVALID_DELIVERY_STATE,
+                {"delivery_state": mailbox.GUIDANCE_STATE_QUEUED},
+            ),
+            (
+                mailbox.REJECT_INVALID_DELIVERY_REASON,
+                {"delivery_reason": mailbox.GUIDANCE_REASON_STALE_TURN},
+            ),
+            (
+                mailbox.REJECT_INVALID_DELIVERY_CHANNEL,
+                {"channel": mailbox.GUIDANCE_CHANNEL_READ},
+            ),
+            (mailbox.REJECT_INVALID_HARNESS, {"harness": "x" * 65}),
+            (mailbox.REJECT_INCOMPLETE_TURN_IDENTITY, {"run_id": "run-A"}),
+            (
+                mailbox.REJECT_INCOMPLETE_TURN_IDENTITY,
+                {"run_id": "run-A", "session_id": "1"},
+            ),
+        )
+        for reason, overrides in cases:
+            with self.subTest(reason=reason, overrides=overrides):
+                guidance_id = overrides.pop("guidance_id", guidance.id)
+                with self.assertRaises(mailbox.MailboxError) as raised:
+                    self.deliver(guidance_id, **overrides)
+                self.assertEqual(reason, raised.exception.reason)
+
+        self.assertEqual(
+            (),
+            mailbox.guidance_deliveries(
+                self.plan_dir, guidance.id, state_dir=self.state_dir
+            ),
+        )
+
+    def test_only_one_terminal_attempt_per_guidance_and_turn(self) -> None:
+        guidance = self.guidance()
+        turn = {"run_id": "run-A", "session_id": "1", "turn_index": 1}
+        first = self.deliver(
+            guidance.id,
+            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox.GUIDANCE_REASON_NO_ACTIVE_TURN,
+            **turn,
+        )
+        second = self.deliver(
+            guidance.id,
+            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox.GUIDANCE_REASON_TRANSPORT_UNAVAILABLE,
+            **turn,
+        )
+        # Deferred attempts may repeat within a turn: none of them is terminal
+        # for the guidance.
+        self.assertEqual(
+            (first, second),
+            mailbox.read_mailbox(
+                self.plan_dir, state_dir=self.state_dir
+            ).deferred_guidance_deliveries(guidance.id),
+        )
+
+        delivered = self.deliver(guidance.id, **turn)
+        with self.assertRaises(mailbox.MailboxError) as raised:
+            self.deliver(guidance.id, **turn)
+        self.assertEqual(
+            mailbox.REJECT_GUIDANCE_ALREADY_DELIVERED, raised.exception.reason
+        )
+
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(delivered, view.successful_guidance_delivery(guidance.id))
+        self.assertEqual(3, len(view.guidance_deliveries(guidance.id)))
+
+    def test_malformed_delivery_lines_are_rejected_without_rewriting(self) -> None:
+        guidance = self.guidance()
+        good = self.deliver(
+            guidance.id,
+            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox.GUIDANCE_REASON_HARNESS_UNSUPPORTED,
+            run_id="run-A",
+            session_id="1",
+            turn_index=1,
+        )
+        base = {
+            "channel": mailbox.GUIDANCE_CHANNEL_LIVE,
+            "created_at": self.timestamp(),
+            "delivery_reason": mailbox.GUIDANCE_REASON_DELIVERED,
+            "delivery_state": mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+            "kind": mailbox.KIND_GUIDANCE_DELIVERY,
+            "to": guidance.id,
+            "version": mailbox.MAILBOX_SCHEMA_VERSION,
+        }
+        expected = []
+        for reason, overrides in (
+            (mailbox.REJECT_UNEXPECTED_TEXT, {"text": "the guidance body"}),
+            (mailbox.REJECT_INVALID_TARGET, {"to": "not-a-uuid"}),
+            (mailbox.REJECT_GUIDANCE_NOT_FOUND, {"to": self.message_id()}),
+            (mailbox.REJECT_INVALID_DELIVERY_STATE, {"delivery_state": "sent"}),
+            (
+                mailbox.REJECT_INVALID_DELIVERY_CHANNEL,
+                {"channel": mailbox.GUIDANCE_CHANNEL_READ},
+            ),
+            (mailbox.REJECT_INVALID_DELIVERY_REASON, {"delivery_reason": "because"}),
+            (mailbox.REJECT_INCOMPLETE_TURN_IDENTITY, {"session_id": "1"}),
+            (mailbox.REJECT_INVALID_HARNESS, {"harness": "x" * 65}),
+        ):
+            self.append_raw({**base, "id": self.message_id(), **overrides})
+            expected.append(reason)
+        # A second terminal attempt for the same turn identity, appended behind
+        # the writer's back, is still refused at parse time.
+        self.append_raw(
+            {
+                **base,
+                "id": self.message_id(),
+                "run_id": "run-B",
+                "session_id": "2",
+                "turn_index": 1,
+            }
+        )
+        self.append_raw(
+            {
+                **base,
+                "id": self.message_id(),
+                "run_id": "run-B",
+                "session_id": "2",
+                "turn_index": 1,
+            }
+        )
+        expected.append(mailbox.REJECT_GUIDANCE_ALREADY_DELIVERED)
+
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+
+        self.assertEqual(expected, [record.reason for record in view.rejected])
+        self.assertEqual(
+            [guidance.id, good.id],
+            [message.id for message in view.messages[:2]],
+        )
+        self.assertEqual(3, len(view.messages))
+
+    def test_delivery_projections_report_latest_successful_and_deliverable(
+        self,
+    ) -> None:
+        first = self.guidance("first")
+        second = self.guidance("second")
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(
+            (first.id, second.id),
+            tuple(message.id for message in view.deliverable_guidance),
+        )
+        self.assertEqual(
+            mailbox.GUIDANCE_STATE_QUEUED, view.guidance_delivery_state(first.id)
+        )
+        self.assertIsNone(view.latest_guidance_delivery(first.id))
+
+        deferred = self.deliver(
+            first.id,
+            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox.GUIDANCE_REASON_NO_ACTIVE_TURN,
+        )
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        # Deferral is "not yet", never "no".
+        self.assertEqual(deferred, view.latest_guidance_delivery(first.id))
+        self.assertIsNone(view.successful_guidance_delivery(first.id))
+        self.assertEqual(
+            mailbox.GUIDANCE_STATE_DEFERRED, view.guidance_delivery_state(first.id)
+        )
+        self.assertIn(first.id, [m.id for m in view.deliverable_guidance])
+
+        delivered = self.deliver(
+            first.id,
+            delivery_state=mailbox.GUIDANCE_STATE_DELIVERED_NEXT_TURN,
+            channel=mailbox.GUIDANCE_CHANNEL_NEXT_TURN,
+            run_id="run-A",
+            session_id="1",
+            turn_index=2,
+        )
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(delivered, view.latest_guidance_delivery(first.id))
+        self.assertEqual(delivered, view.successful_guidance_delivery(first.id))
+        self.assertEqual(
+            mailbox.GUIDANCE_STATE_DELIVERED_NEXT_TURN,
+            view.guidance_delivery_state(first.id),
+        )
+        self.assertEqual(
+            (second.id,),
+            tuple(message.id for message in view.deliverable_guidance),
+        )
+        self.assertEqual(
+            (second.id,),
+            tuple(
+                message.id
+                for message in mailbox.deliverable_guidance(
+                    self.plan_dir, state_dir=self.state_dir
+                )
+            ),
+        )
+        self.assertEqual(2, view.counts.guidance_deliveries)
+        self.assertEqual(1, view.counts.deliverable_guidance)
+        self.assertEqual(2, view.counts.to_payload()["guidance_deliveries"])
+
+    def test_legacy_acknowledgement_still_counts_as_read_delivery(self) -> None:
+        guidance = self.guidance("read me the old way")
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(
+            mailbox.GUIDANCE_STATE_QUEUED, view.guidance_delivery_state(guidance.id)
+        )
+
+        mailbox.append_acknowledgement(
+            self.plan_dir, guidance.seq, state_dir=self.state_dir
+        )
+
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(
+            mailbox.GUIDANCE_STATE_DELIVERED_BY_READ,
+            view.guidance_delivery_state(guidance.id),
+        )
+        self.assertEqual((), view.deliverable_guidance)
+        # Nothing was rewritten to say so: the ledger stayed empty.
+        self.assertEqual((), view.guidance_deliveries(guidance.id))
 
     def test_timeout_wins_lock_then_late_reply_requires_resumed_wait(self) -> None:
         question, first_wait = mailbox.append_wait_question(
@@ -929,6 +1270,7 @@ class MailboxTests(unittest.TestCase):
             mailbox,
             MAILBOX_MAX_BYTES=4096,
             MAILBOX_CLOSURE_RESERVE_BYTES=1536,
+            MAILBOX_GUIDANCE_DELIVERY_RESERVE_BYTES=768,
             MAILBOX_WAIT_END_RESERVE_BYTES=768,
             MAILBOX_RECEIPT_RESERVE_BYTES=384,
         ):
@@ -941,9 +1283,10 @@ class MailboxTests(unittest.TestCase):
                 turn_index=1,
                 waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
             )
+            last_guidance = None
             while True:
                 try:
-                    mailbox.append_guidance(
+                    last_guidance = mailbox.append_guidance(
                         self.plan_dir,
                         "g" * 80,
                         state_dir=self.state_dir,
@@ -951,6 +1294,18 @@ class MailboxTests(unittest.TestCase):
                 except mailbox.MailboxError as error:
                     self.assertEqual(mailbox.ERROR_MAILBOX_FULL, error.reason)
                     break
+            assert last_guidance is not None
+            # The guidance that saturated the ordinary tier must still be able
+            # to say what became of it.
+            delivery = mailbox.append_guidance_delivery(
+                self.plan_dir,
+                last_guidance.id,
+                delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+                delivery_reason=mailbox.GUIDANCE_REASON_HARNESS_UNSUPPORTED,
+                channel=mailbox.GUIDANCE_CHANNEL_LIVE,
+                state_dir=self.state_dir,
+            )
+            self.assertEqual(last_guidance.id, delivery.to)
             reply = mailbox.append_reply(
                 self.plan_dir,
                 question.id,
@@ -1488,7 +1843,12 @@ class MailboxTests(unittest.TestCase):
 
         self.assertEqual((), view.rejected)
         self.assertEqual(
-            [1, 1, 3, 3],
+            [
+                mailbox.MAILBOX_LEGACY_SCHEMA_VERSION,
+                mailbox.MAILBOX_LEGACY_SCHEMA_VERSION,
+                mailbox.MAILBOX_SCHEMA_VERSION,
+                mailbox.MAILBOX_SCHEMA_VERSION,
+            ],
             [message.version for message in view.messages],
         )
         self.assertEqual(notice, view.messages[2])
@@ -6984,6 +7344,7 @@ class MailboxCliTests(unittest.TestCase):
             "question_id": None,
             "wait": False,
             "wait_consumed": False,
+            "wait_delivered": False,
             "wait_timeout": None,
             "since": 0,
             "timeout": mailbox_cli.DEFAULT_OUTBOX_WAIT_TIMEOUT_SECONDS,
@@ -7134,6 +7495,197 @@ class MailboxCliTests(unittest.TestCase):
             state_dir=self.state_dir,
         )
         self.assertEqual(reply_payload["supervisor_id"], second_lease.supervisor_id)
+
+    def test_guidance_without_wait_stays_byte_identical(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            code = mailbox_cli.inbox_guidance_from_args(
+                self.args(text="Keep going.", json=False)
+            )
+
+        self.assertEqual(0, code)
+        output = stdout.getvalue()
+        self.assertIn("Queued guidance ", output)
+        self.assertNotIn("delivery", output)
+
+        code, payload = self.payload_from(
+            mailbox_cli.inbox_guidance_from_args,
+            self.args(text="Keep going again."),
+        )
+        self.assertEqual(0, code)
+        self.assertTrue(payload["appended"])
+        self.assertFalse(payload["waited"])
+        self.assertFalse(payload["delivered"])
+        self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, payload["delivery_state"])
+        self.assertIsNone(payload["delivery"])
+
+    def _deliver_on_first_poll(self, **overrides):
+        """Append a delivery record the first time the wait polls the mailbox.
+
+        Hooking the change token keeps the test deterministic: the delivery
+        lands before the wait's first read, so no iteration ever sleeps.
+        """
+        real_token = mailbox.mailbox_change_token
+        appended: list[mailbox.MailboxMessage] = []
+
+        def hook(path):
+            if not appended:
+                view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+                guidance = next(
+                    message
+                    for message in reversed(view.messages)
+                    if message.kind == mailbox.KIND_GUIDANCE
+                )
+                values = {
+                    "delivery_state": mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+                    "delivery_reason": mailbox.GUIDANCE_REASON_DELIVERED,
+                    "channel": mailbox.GUIDANCE_CHANNEL_LIVE,
+                }
+                values.update(overrides)
+                appended.append(
+                    mailbox.append_guidance_delivery(
+                        self.plan_dir,
+                        guidance.id,
+                        state_dir=self.state_dir,
+                        **values,
+                    )
+                )
+            return real_token(path)
+
+        return mock.patch.object(mailbox, "mailbox_change_token", side_effect=hook)
+
+    def test_guidance_wait_reports_the_delivery_that_ended_it(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        with self._deliver_on_first_poll(
+            run_id="run-live", session_id="5", turn_index=2, harness="codex"
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_guidance_from_args,
+                self.args(text="Deliver me.", wait_delivered=True, wait_timeout=5.0),
+            )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["appended"])
+        self.assertTrue(payload["waited"])
+        self.assertTrue(payload["delivered"])
+        self.assertEqual(
+            mailbox.GUIDANCE_STATE_DELIVERED_LIVE, payload["delivery_state"]
+        )
+        self.assertEqual(mailbox.GUIDANCE_REASON_DELIVERED, payload["delivery_reason"])
+        self.assertEqual(
+            payload["message"]["id"],
+            payload["delivery"]["to"],
+        )
+
+    def test_guidance_wait_reports_a_deferral_for_the_active_turn(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        with self._deliver_on_first_poll(
+            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox.GUIDANCE_REASON_HARNESS_UNSUPPORTED,
+            run_id="run-live",
+            session_id="5",
+            turn_index=2,
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_guidance_from_args,
+                self.args(text="Maybe later.", wait_delivered=True, wait_timeout=5.0),
+            )
+
+        # A deferral is a real answer for this turn, but it is not a delivery,
+        # and the durable append still succeeded.
+        self.assertEqual(0, code)
+        self.assertTrue(payload["appended"])
+        self.assertFalse(payload["delivered"])
+        self.assertEqual(mailbox.GUIDANCE_STATE_DEFERRED, payload["delivery_state"])
+        self.assertEqual(
+            mailbox.GUIDANCE_REASON_HARNESS_UNSUPPORTED,
+            payload["delivery_reason"],
+        )
+
+    def test_guidance_wait_ignores_a_deferral_from_another_turn(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        with self._deliver_on_first_poll(
+            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox.GUIDANCE_REASON_STALE_TURN,
+            run_id="run-live",
+            session_id="5",
+            turn_index=1,
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_guidance_from_args,
+                self.args(text="Stale news.", wait_delivered=True, wait_timeout=0.0),
+            )
+
+        self.assertEqual(0, code)
+        self.assertFalse(payload["delivered"])
+        self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, payload["delivery_state"])
+        self.assertIsNone(payload["delivery"])
+
+    def test_guidance_wait_timeout_keeps_the_append_successful(self) -> None:
+        code, payload = self.payload_from(
+            mailbox_cli.inbox_guidance_from_args,
+            self.args(text="Nobody home.", wait_delivered=True, wait_timeout=0.0),
+        )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["appended"])
+        self.assertTrue(payload["waited"])
+        self.assertFalse(payload["delivered"])
+        self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, payload["delivery_state"])
+        self.assertIsNone(payload["delivery_reason"])
+        # The guidance is durable regardless of what the wait observed.
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(
+            [payload["message"]["id"]],
+            [message.id for message in view.deliverable_guidance],
+        )
+
+    def test_guidance_wait_timeout_defaults_to_thirty_seconds(self) -> None:
+        observed: dict[str, float] = {}
+
+        def capture(plan_dir, guidance_id, *, state_dir, timeout, active_turn):
+            observed["timeout"] = timeout
+            return None
+
+        with mock.patch.object(
+            mailbox_cli, "_wait_for_guidance_delivery", side_effect=capture
+        ):
+            code, _payload = self.payload_from(
+                mailbox_cli.inbox_guidance_from_args,
+                self.args(text="Default me.", wait_delivered=True),
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            mailbox_cli.DEFAULT_GUIDANCE_DELIVERED_TIMEOUT_SECONDS,
+            observed["timeout"],
+        )
+
+    def test_guidance_timeout_without_wait_is_refused_before_appending(self) -> None:
+        code, payload = self.payload_from(
+            mailbox_cli.inbox_guidance_from_args,
+            self.args(text="Too eager.", wait_timeout=5.0),
+        )
+
+        self.assertEqual(1, code)
+        self.assertEqual("invalid-timeout", payload["reason"])
+        self.assertEqual(
+            (),
+            mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir).messages,
+        )
+
+    def test_guidance_wait_rejects_unbounded_timeouts(self) -> None:
+        for requested in (-1.0, float("inf"), float("nan"), 1801.0):
+            with self.subTest(timeout=requested):
+                code, payload = self.payload_from(
+                    mailbox_cli.inbox_guidance_from_args,
+                    self.args(
+                        text="Forever?", wait_delivered=True, wait_timeout=requested
+                    ),
+                )
+
+                self.assertEqual(1, code)
+                self.assertEqual("invalid-timeout", payload["reason"])
 
     def _write_projected_lease(
         self,

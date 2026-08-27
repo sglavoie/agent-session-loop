@@ -35,10 +35,17 @@ MAILBOX_SUPERVISION_CURSOR_VERSION = 1
 MAILBOX_SUPERVISION_CURSOR_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 MAILBOX_LEGACY_SCHEMA_VERSION = 1
 MAILBOX_PREVIOUS_SCHEMA_VERSION = 2
-MAILBOX_SCHEMA_VERSION = 3
+# The version that introduced the wait/receipt lifecycle. Wait strictness is a
+# statement about a question's own vintage, not about the current write
+# version, so it is pinned here instead of tracking ``MAILBOX_SCHEMA_VERSION``:
+# a v4 writer must keep treating a v3 wait-mode question exactly as v3 did.
+MAILBOX_WAIT_SCHEMA_VERSION = 3
+# The version that introduced ``guidance-delivery`` records.
+MAILBOX_SCHEMA_VERSION = 4
 MAILBOX_SUPPORTED_SCHEMA_VERSIONS = (
     MAILBOX_LEGACY_SCHEMA_VERSION,
     MAILBOX_PREVIOUS_SCHEMA_VERSION,
+    MAILBOX_WAIT_SCHEMA_VERSION,
     MAILBOX_SCHEMA_VERSION,
 )
 MAILBOX_LEASE_VERSION = 2
@@ -66,6 +73,18 @@ MAILBOX_CLOSURE_RESERVE_BYTES = 512 * 1024
 # consume the final receipt reserve.
 MAILBOX_WAIT_END_RESERVE_BYTES = 192 * 1024
 MAILBOX_RECEIPT_RESERVE_BYTES = 96 * 1024
+# Headroom below the non-closure cap that only ``guidance-delivery`` records may
+# consume. Guidance that is already durable must always be able to record what
+# happened to it, so ordinary appends — including further guidance — stop one
+# tier earlier and leave this band for the ledger they create work for.
+MAILBOX_GUIDANCE_DELIVERY_RESERVE_BYTES = 128 * 1024
+# The smallest compact guidance-delivery record produced with normal generated
+# metadata: canonical UUIDs for both its id and its guidance target, a generated
+# UTC timestamp, and the shortest channel/state/reason triple (``live`` /
+# ``deferred`` / ``stale-turn``). A real attempt that also carries a turn
+# identity and a harness name is far larger, which is why the reserve above is
+# sized for many records rather than for one.
+MAILBOX_MIN_GUIDANCE_DELIVERY_BYTES = 253
 # Backward-compatible names for callers that compute the old reply/question
 # reserve. Both aliases intentionally name the shared closure reserve.
 MAILBOX_REPLY_RESERVE_BYTES = MAILBOX_CLOSURE_RESERVE_BYTES
@@ -75,6 +94,10 @@ MAILBOX_QUESTION_RESERVE_BYTES = MAILBOX_CLOSURE_RESERVE_BYTES
 # corrupt value from consuming the mailbox capacity budget.
 MAILBOX_MAX_RUN_ID_CHARS = 128
 MAILBOX_MAX_SESSION_ID_CHARS = 128
+# Harness names are short identifiers chosen by this repository ("claude",
+# "codex", ...). The bound only keeps a hostile or corrupt value from consuming
+# the mailbox capacity budget.
+MAILBOX_MAX_HARNESS_CHARS = 64
 # Mailbox sequence and turn fields are operational counters, not arbitrary
 # precision values. A signed 64-bit ceiling keeps every accepted value safely
 # serializable even when Python's integer-string conversion guard is enabled.
@@ -94,9 +117,25 @@ MessageKind = Literal[
     "wait-end",
     "receipt",
     "supervision-end",
+    "guidance-delivery",
 ]
 ResolutionAction = Literal["continue", "pause"]
 WaiterOrigin = Literal["worker", "runner"]
+GuidanceDeliveryState = Literal[
+    "queued",
+    "delivered-live",
+    "delivered-next-turn",
+    "delivered-by-read",
+    "deferred",
+]
+GuidanceDeliveryChannel = Literal["live", "next-turn", "read"]
+GuidanceDeliveryReason = Literal[
+    "delivered",
+    "harness-unsupported",
+    "no-active-turn",
+    "stale-turn",
+    "transport-unavailable",
+]
 DeliveryMode = Literal["async", "wait"]
 WaitEndReason = Literal["timeout", "closure", "error"]
 SupervisionOutcome = Literal[
@@ -116,7 +155,21 @@ KIND_WAIT_START: MessageKind = "wait-start"
 KIND_WAIT_END: MessageKind = "wait-end"
 KIND_RECEIPT: MessageKind = "receipt"
 KIND_SUPERVISION_END: MessageKind = "supervision-end"
+KIND_GUIDANCE_DELIVERY: MessageKind = "guidance-delivery"
 MESSAGE_KINDS: tuple[MessageKind, ...] = (
+    KIND_GUIDANCE,
+    KIND_QUESTION,
+    KIND_REPLY,
+    KIND_RESOLUTION,
+    KIND_NOTICE,
+    KIND_ACK,
+    KIND_WAIT_START,
+    KIND_WAIT_END,
+    KIND_RECEIPT,
+    KIND_SUPERVISION_END,
+    KIND_GUIDANCE_DELIVERY,
+)
+V3_MESSAGE_KINDS: tuple[MessageKind, ...] = (
     KIND_GUIDANCE,
     KIND_QUESTION,
     KIND_REPLY,
@@ -187,6 +240,71 @@ WAITER_ORIGINS: tuple[WaiterOrigin, ...] = (
     WAITER_ORIGIN_RUNNER,
 )
 
+# ``queued`` is the state of guidance no delivery record speaks about yet, so
+# it is projected rather than recorded: an append that lands with no receipt is
+# already queued, and writing a record to say so would be redundant history.
+GUIDANCE_STATE_QUEUED: GuidanceDeliveryState = "queued"
+GUIDANCE_STATE_DELIVERED_LIVE: GuidanceDeliveryState = "delivered-live"
+GUIDANCE_STATE_DELIVERED_NEXT_TURN: GuidanceDeliveryState = "delivered-next-turn"
+GUIDANCE_STATE_DELIVERED_BY_READ: GuidanceDeliveryState = "delivered-by-read"
+GUIDANCE_STATE_DEFERRED: GuidanceDeliveryState = "deferred"
+# The states a delivery attempt may record. Every one of them is terminal for
+# its own attempt; only the ``delivered-*`` subset is terminal for the guidance.
+GUIDANCE_DELIVERY_STATES: tuple[GuidanceDeliveryState, ...] = (
+    GUIDANCE_STATE_DELIVERED_LIVE,
+    GUIDANCE_STATE_DELIVERED_NEXT_TURN,
+    GUIDANCE_STATE_DELIVERED_BY_READ,
+    GUIDANCE_STATE_DEFERRED,
+)
+GUIDANCE_DELIVERED_STATES: tuple[GuidanceDeliveryState, ...] = (
+    GUIDANCE_STATE_DELIVERED_LIVE,
+    GUIDANCE_STATE_DELIVERED_NEXT_TURN,
+    GUIDANCE_STATE_DELIVERED_BY_READ,
+)
+# The full projected vocabulary, including the state no record carries.
+GUIDANCE_STATES: tuple[GuidanceDeliveryState, ...] = (
+    GUIDANCE_STATE_QUEUED,
+    *GUIDANCE_DELIVERY_STATES,
+)
+
+GUIDANCE_CHANNEL_LIVE: GuidanceDeliveryChannel = "live"
+GUIDANCE_CHANNEL_NEXT_TURN: GuidanceDeliveryChannel = "next-turn"
+GUIDANCE_CHANNEL_READ: GuidanceDeliveryChannel = "read"
+GUIDANCE_DELIVERY_CHANNELS: tuple[GuidanceDeliveryChannel, ...] = (
+    GUIDANCE_CHANNEL_LIVE,
+    GUIDANCE_CHANNEL_NEXT_TURN,
+    GUIDANCE_CHANNEL_READ,
+)
+# Each successful state names the one channel that can produce it, so a record
+# cannot claim a live delivery over the next-turn prompt. A deferred attempt
+# records the channel it tried, and any channel may defer.
+GUIDANCE_DELIVERED_STATE_CHANNEL: dict[
+    GuidanceDeliveryState, GuidanceDeliveryChannel
+] = {
+    GUIDANCE_STATE_DELIVERED_LIVE: GUIDANCE_CHANNEL_LIVE,
+    GUIDANCE_STATE_DELIVERED_NEXT_TURN: GUIDANCE_CHANNEL_NEXT_TURN,
+    GUIDANCE_STATE_DELIVERED_BY_READ: GUIDANCE_CHANNEL_READ,
+}
+
+GUIDANCE_REASON_DELIVERED: GuidanceDeliveryReason = "delivered"
+GUIDANCE_REASON_HARNESS_UNSUPPORTED: GuidanceDeliveryReason = "harness-unsupported"
+GUIDANCE_REASON_NO_ACTIVE_TURN: GuidanceDeliveryReason = "no-active-turn"
+GUIDANCE_REASON_STALE_TURN: GuidanceDeliveryReason = "stale-turn"
+GUIDANCE_REASON_TRANSPORT_UNAVAILABLE: GuidanceDeliveryReason = "transport-unavailable"
+GUIDANCE_DELIVERED_REASONS: tuple[GuidanceDeliveryReason, ...] = (
+    GUIDANCE_REASON_DELIVERED,
+)
+GUIDANCE_DEFERRAL_REASONS: tuple[GuidanceDeliveryReason, ...] = (
+    GUIDANCE_REASON_HARNESS_UNSUPPORTED,
+    GUIDANCE_REASON_NO_ACTIVE_TURN,
+    GUIDANCE_REASON_STALE_TURN,
+    GUIDANCE_REASON_TRANSPORT_UNAVAILABLE,
+)
+GUIDANCE_DELIVERY_REASONS: tuple[GuidanceDeliveryReason, ...] = (
+    *GUIDANCE_DELIVERED_REASONS,
+    *GUIDANCE_DEFERRAL_REASONS,
+)
+
 # Stable record-rejection reasons. These are intentionally data, not prose:
 # later CLI and status surfaces can branch on them without parsing exceptions.
 REJECT_EMPTY_LINE = "empty-line"
@@ -220,6 +338,17 @@ REJECT_INVALID_WAIT_END_REASON = "invalid-wait-end-reason"
 REJECT_INVALID_CLOSURE_ID = "invalid-closure-id"
 REJECT_CLOSURE_NOT_FOUND = "closure-not-found"
 REJECT_CLOSURE_ALREADY_CONSUMED = "closure-already-consumed"
+REJECT_GUIDANCE_NOT_FOUND = "guidance-not-found"
+REJECT_GUIDANCE_ALREADY_DELIVERED = "guidance-already-delivered"
+REJECT_INVALID_DELIVERY_STATE = "invalid-delivery-state"
+REJECT_INVALID_DELIVERY_REASON = "invalid-delivery-reason"
+REJECT_INVALID_DELIVERY_CHANNEL = "invalid-delivery-channel"
+REJECT_INVALID_HARNESS = "invalid-harness"
+REJECT_INCOMPLETE_TURN_IDENTITY = "incomplete-turn-identity"
+# A delivery record must never carry the guidance body it reports on. The
+# rejection is not defensive tidiness: it is the durable enforcement point for
+# "no guidance text outside the guidance record".
+REJECT_UNEXPECTED_TEXT = "unexpected-text"
 
 # Stable operation errors. Validation failures use the corresponding rejection
 # reason where possible so callers receive the same reason for live input and
@@ -288,6 +417,12 @@ class MailboxMessage:
     closure_id: str | None = None
     supervision_outcome: SupervisionOutcome | None = None
     supervision_id: str | None = None
+    # ``guidance-delivery`` fields. ``delivery_reason`` is deliberately not
+    # spelled ``reason``: that on-disk key already belongs to ``wait-end``.
+    delivery_state: GuidanceDeliveryState | None = None
+    delivery_reason: GuidanceDeliveryReason | None = None
+    channel: GuidanceDeliveryChannel | None = None
+    harness: str | None = None
     version: int = MAILBOX_SCHEMA_VERSION
 
     def to_record(self) -> dict[str, Any]:
@@ -324,6 +459,14 @@ class MailboxMessage:
             payload["reason"] = self.wait_end_reason
         if self.closure_id is not None:
             payload["closure_id"] = self.closure_id
+        if self.delivery_state is not None:
+            payload["delivery_state"] = self.delivery_state
+        if self.delivery_reason is not None:
+            payload["delivery_reason"] = self.delivery_reason
+        if self.channel is not None:
+            payload["channel"] = self.channel
+        if self.harness is not None:
+            payload["harness"] = self.harness
         if self.kind == KIND_SUPERVISION_END:
             if self.supervision_outcome is not None:
                 payload["outcome"] = self.supervision_outcome
@@ -374,7 +517,9 @@ class MailboxCounts:
     wait_ends: int
     receipts: int
     supervision_ends: int
+    guidance_deliveries: int
     pending_guidance: int
+    deliverable_guidance: int
     unanswered_questions: int
     rejected: int
 
@@ -399,6 +544,13 @@ class MailboxCounts:
                 wait_ends=self.wait_ends,
                 receipts=self.receipts,
                 supervision_ends=self.supervision_ends,
+            )
+        # The delivery ledger is reported on the same terms: additive, and only
+        # once a mailbox actually carries one.
+        if self.guidance_deliveries:
+            payload.update(
+                guidance_deliveries=self.guidance_deliveries,
+                deliverable_guidance=self.deliverable_guidance,
             )
         return payload
 
@@ -431,6 +583,97 @@ class MailboxView:
             message
             for message in self.messages
             if message.kind == KIND_GUIDANCE and message.seq > acknowledged
+        )
+
+    def guidance_deliveries(self, guidance_id: str) -> tuple[MailboxMessage, ...]:
+        """Return every accepted delivery attempt for one guidance record."""
+        return tuple(
+            message
+            for message in self.messages
+            if message.kind == KIND_GUIDANCE_DELIVERY and message.to == guidance_id
+        )
+
+    def latest_guidance_delivery(self, guidance_id: str) -> MailboxMessage | None:
+        """Return the highest-sequence delivery attempt, successful or not."""
+        for message in reversed(self.messages):
+            if message.kind == KIND_GUIDANCE_DELIVERY and message.to == guidance_id:
+                return message
+        return None
+
+    def successful_guidance_delivery(self, guidance_id: str) -> MailboxMessage | None:
+        """Return the first attempt that actually reached the worker."""
+        for message in self.messages:
+            if (
+                message.kind == KIND_GUIDANCE_DELIVERY
+                and message.to == guidance_id
+                and message.delivery_state in GUIDANCE_DELIVERED_STATES
+            ):
+                return message
+        return None
+
+    def deferred_guidance_deliveries(
+        self,
+        guidance_id: str,
+    ) -> tuple[MailboxMessage, ...]:
+        """Return the attempts that ended without delivering anything.
+
+        A deferred attempt is a durable record of "not yet", never of "no": the
+        guidance it names stays in ``deliverable_guidance``.
+        """
+        return tuple(
+            message
+            for message in self.guidance_deliveries(guidance_id)
+            if message.delivery_state == GUIDANCE_STATE_DEFERRED
+        )
+
+    def guidance_delivery_state(self, guidance_id: str) -> GuidanceDeliveryState:
+        """Return one guidance record's current delivery state.
+
+        Legacy cumulative acknowledgement is honoured as read evidence even
+        though it predates the ledger, so a mailbox whose worker only ever ran
+        ``asl inbox read`` reports ``delivered-by-read`` rather than pretending
+        nothing was ever delivered.
+        """
+        delivered = self.successful_guidance_delivery(guidance_id)
+        if delivered is not None:
+            assert delivered.delivery_state is not None
+            return delivered.delivery_state
+        guidance = next(
+            (
+                message
+                for message in self.messages
+                if message.kind == KIND_GUIDANCE and message.id == guidance_id
+            ),
+            None,
+        )
+        if guidance is not None and guidance.seq <= self.max_acknowledged_seq:
+            return GUIDANCE_STATE_DELIVERED_BY_READ
+        if self.deferred_guidance_deliveries(guidance_id):
+            return GUIDANCE_STATE_DEFERRED
+        return GUIDANCE_STATE_QUEUED
+
+    @property
+    def deliverable_guidance(self) -> tuple[MailboxMessage, ...]:
+        """Return guidance automatic delivery should still try to deliver.
+
+        Successful live, next-turn, or explicit-read delivery suppresses further
+        attempts, and so does the legacy acknowledgement sequence. Everything
+        else — never attempted, or attempted and deferred — remains deliverable.
+        """
+        acknowledged = self.max_acknowledged_seq
+        delivered = {
+            message.to
+            for message in self.messages
+            if message.kind == KIND_GUIDANCE_DELIVERY
+            and message.to is not None
+            and message.delivery_state in GUIDANCE_DELIVERED_STATES
+        }
+        return tuple(
+            message
+            for message in self.messages
+            if message.kind == KIND_GUIDANCE
+            and message.seq > acknowledged
+            and message.id not in delivered
         )
 
     @property
@@ -494,7 +737,7 @@ class MailboxView:
             for message in self.unanswered_questions
             if message.run_id == run_id
             and (
-                message.version < MAILBOX_SCHEMA_VERSION
+                message.version < MAILBOX_WAIT_SCHEMA_VERSION
                 or message.delivery_mode != DELIVERY_MODE_WAIT
                 or self.active_wait_for(message.id) is not None
             )
@@ -519,7 +762,11 @@ class MailboxView:
             supervision_ends=sum(
                 message.kind == KIND_SUPERVISION_END for message in self.messages
             ),
+            guidance_deliveries=sum(
+                message.kind == KIND_GUIDANCE_DELIVERY for message in self.messages
+            ),
             pending_guidance=len(self.pending_guidance),
+            deliverable_guidance=len(self.deliverable_guidance),
             unanswered_questions=len(self.unanswered_questions),
             rejected=len(self.rejected),
         )
@@ -543,6 +790,18 @@ class MailboxView:
         # status key agrees with the append-site refusal boundary.
         return (
             self.size_bytes + MAILBOX_MIN_APPEND_BYTES
+            <= MAILBOX_MAX_BYTES
+            - MAILBOX_CLOSURE_RESERVE_BYTES
+            - MAILBOX_GUIDANCE_DELIVERY_RESERVE_BYTES
+        )
+
+    @property
+    def accepts_guidance_deliveries(self) -> bool:
+        # Delivery records outlive the ordinary tier by exactly the delivery
+        # reserve, so a mailbox saturated by guidance can still say what became
+        # of it.
+        return (
+            self.size_bytes + MAILBOX_MIN_GUIDANCE_DELIVERY_BYTES
             <= MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
         )
 
@@ -596,6 +855,7 @@ class MailboxView:
 
     def to_payload(self) -> dict[str, Any]:
         return {
+            "accepts_guidance_deliveries": self.accepts_guidance_deliveries,
             "accepts_questions": self.accepts_questions,
             "accepts_replies": self.accepts_replies,
             "accepts_resolutions": self.accepts_resolutions,
@@ -947,6 +1207,15 @@ def _valid_session_id(value: object) -> bool:
     )
 
 
+def _valid_harness(value: object) -> bool:
+    """Return whether ``value`` is a bounded, nonblank harness name."""
+    return (
+        isinstance(value, str)
+        and value.strip() != ""
+        and len(value) <= MAILBOX_MAX_HARNESS_CHARS
+    )
+
+
 def _valid_turn_index(value: object) -> bool:
     return (
         not isinstance(value, bool)
@@ -1020,6 +1289,8 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
     wait_starts: dict[str, MailboxMessage] = {}
     active_waits: dict[str, MailboxMessage] = {}
     receipts: dict[str, MailboxMessage] = {}
+    guidance_records: dict[str, MailboxMessage] = {}
+    terminal_deliveries: set[tuple[str, str | None, str | None, int | None]] = set()
     physical_lines = _physical_lines(data)
 
     for seq, raw_bytes in enumerate(physical_lines, start=1):
@@ -1075,6 +1346,8 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             if version == MAILBOX_LEGACY_SCHEMA_VERSION
             else V2_MESSAGE_KINDS
             if version == MAILBOX_PREVIOUS_SCHEMA_VERSION
+            else V3_MESSAGE_KINDS
+            if version == MAILBOX_WAIT_SCHEMA_VERSION
             else MESSAGE_KINDS
         )
         if kind not in allowed_kinds:
@@ -1133,6 +1406,10 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
         closure_id: str | None = None
         supervision_outcome: SupervisionOutcome | None = None
         supervision_id: str | None = None
+        delivery_state: GuidanceDeliveryState | None = None
+        delivery_reason: GuidanceDeliveryReason | None = None
+        channel: GuidanceDeliveryChannel | None = None
+        harness: str | None = None
 
         if kind in (
             KIND_GUIDANCE,
@@ -1201,7 +1478,7 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
                         )
                         continue
                     waiter_origin = waiter_value
-                if version >= MAILBOX_SCHEMA_VERSION:
+                if version >= MAILBOX_WAIT_SCHEMA_VERSION:
                     delivery_value = payload.get("delivery_mode")
                     if delivery_value not in DELIVERY_MODES:
                         _reject(
@@ -1279,6 +1556,141 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
                 supervision_id = payload["supervision_id"]
             supervision_outcome = outcome_value
 
+        if kind == KIND_GUIDANCE_DELIVERY:
+            if "text" in payload:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_UNEXPECTED_TEXT,
+                    raw=raw,
+                )
+                continue
+            target_value = payload.get("to")
+            if not _is_uuid(target_value):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_TARGET,
+                    raw=raw,
+                )
+                continue
+            assert isinstance(target_value, str)
+            target = target_value
+            if target not in guidance_records:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_GUIDANCE_NOT_FOUND,
+                    raw=raw,
+                    detail=target,
+                )
+                continue
+            state_value = payload.get("delivery_state")
+            if state_value not in GUIDANCE_DELIVERY_STATES:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_DELIVERY_STATE,
+                    raw=raw,
+                    detail=str(state_value),
+                )
+                continue
+            channel_value = payload.get("channel")
+            if channel_value not in GUIDANCE_DELIVERY_CHANNELS or (
+                state_value in GUIDANCE_DELIVERED_STATES
+                and channel_value != GUIDANCE_DELIVERED_STATE_CHANNEL[state_value]
+            ):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_DELIVERY_CHANNEL,
+                    raw=raw,
+                    detail=str(channel_value),
+                )
+                continue
+            reason_value = payload.get("delivery_reason")
+            allowed_reasons = (
+                GUIDANCE_DEFERRAL_REASONS
+                if state_value == GUIDANCE_STATE_DEFERRED
+                else GUIDANCE_DELIVERED_REASONS
+            )
+            if reason_value not in allowed_reasons:
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_DELIVERY_REASON,
+                    raw=raw,
+                    detail=str(reason_value),
+                )
+                continue
+            identity_keys = ("run_id", "session_id", "turn_index")
+            present = tuple(key for key in identity_keys if key in payload)
+            if present not in ((), identity_keys):
+                # A partial turn identity cannot key the one-terminal-attempt
+                # rule, so it is refused rather than silently widened to "no
+                # turn" — which would let a second terminal attempt through.
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INCOMPLETE_TURN_IDENTITY,
+                    raw=raw,
+                    detail=",".join(present),
+                )
+                continue
+            if present:
+                if not _valid_run_id(payload.get("run_id")):
+                    _reject(
+                        rejected,
+                        seq=seq,
+                        reason=REJECT_INVALID_RUN_ID,
+                        raw=raw,
+                    )
+                    continue
+                if not _valid_session_id(payload.get("session_id")):
+                    _reject(
+                        rejected,
+                        seq=seq,
+                        reason=REJECT_INVALID_SESSION_ID,
+                        raw=raw,
+                    )
+                    continue
+                if not _valid_turn_index(payload.get("turn_index")):
+                    _reject(
+                        rejected,
+                        seq=seq,
+                        reason=REJECT_INVALID_TURN_INDEX,
+                        raw=raw,
+                    )
+                    continue
+                run_id = payload["run_id"]
+                session_id = payload["session_id"]
+                turn_index = payload["turn_index"]
+            if "harness" in payload and not _valid_harness(payload.get("harness")):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_INVALID_HARNESS,
+                    raw=raw,
+                )
+                continue
+            identity = (target, run_id, session_id, turn_index)
+            if (
+                state_value in GUIDANCE_DELIVERED_STATES
+                and identity in terminal_deliveries
+            ):
+                _reject(
+                    rejected,
+                    seq=seq,
+                    reason=REJECT_GUIDANCE_ALREADY_DELIVERED,
+                    raw=raw,
+                    detail=target,
+                )
+                continue
+            delivery_state = state_value
+            delivery_reason = reason_value
+            channel = channel_value
+            harness = payload.get("harness")
+
         if kind in CLOSURE_KINDS:
             target_value = payload.get("to")
             if not _is_uuid(target_value):
@@ -1316,7 +1728,7 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
                 continue
             question = questions[target]
             if (
-                question.version >= MAILBOX_SCHEMA_VERSION
+                question.version >= MAILBOX_WAIT_SCHEMA_VERSION
                 and question.delivery_mode == DELIVERY_MODE_WAIT
                 and target not in active_waits
             ):
@@ -1457,7 +1869,7 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             active_wait = active_waits.get(target)
             question = questions[target]
             strict = (
-                question.version >= MAILBOX_SCHEMA_VERSION
+                question.version >= MAILBOX_WAIT_SCHEMA_VERSION
                 and question.delivery_mode == DELIVERY_MODE_WAIT
             )
             if wait_value is not None:
@@ -1576,11 +1988,20 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
             closure_id=closure_id,
             supervision_outcome=supervision_outcome,
             supervision_id=supervision_id,
+            delivery_state=delivery_state,
+            delivery_reason=delivery_reason,
+            channel=channel,
+            harness=harness,
             version=version,
         )
         messages.append(message)
         seen_ids.add(message_id)
-        if kind == KIND_QUESTION:
+        if kind == KIND_GUIDANCE:
+            guidance_records[message_id] = message
+        elif kind == KIND_GUIDANCE_DELIVERY and target is not None:
+            if delivery_state in GUIDANCE_DELIVERED_STATES:
+                terminal_deliveries.add((target, run_id, session_id, turn_index))
+        elif kind == KIND_QUESTION:
             questions[message_id] = message
         elif kind in CLOSURE_KINDS and target is not None:
             closures[target] = message
@@ -1633,6 +2054,10 @@ def _message_from_record(record: dict[str, Any], seq: int) -> MailboxMessage:
         closure_id=record.get("closure_id"),
         supervision_outcome=record.get("outcome"),
         supervision_id=record.get("supervision_id"),
+        delivery_state=record.get("delivery_state"),
+        delivery_reason=record.get("delivery_reason"),
+        channel=record.get("channel"),
+        harness=record.get("harness"),
         version=record["version"],
     )
 
@@ -1813,6 +2238,10 @@ def _normalize_append_record(
     closure_id: str | None = None,
     supervision_outcome: SupervisionOutcome | str | None = None,
     supervision_id: str | None = None,
+    delivery_state: GuidanceDeliveryState | str | None = None,
+    delivery_reason: GuidanceDeliveryReason | str | None = None,
+    channel: GuidanceDeliveryChannel | str | None = None,
+    harness: str | None = None,
 ) -> dict[str, Any]:
     if kind not in MESSAGE_KINDS:
         raise MailboxError(REJECT_UNKNOWN_KIND, str(kind))
@@ -1939,6 +2368,47 @@ def _normalize_append_record(
         if note is not None:
             record["note"] = note
 
+    if kind == KIND_GUIDANCE_DELIVERY:
+        if not _is_uuid(target):
+            raise MailboxError(REJECT_INVALID_TARGET)
+        record["to"] = target
+        if delivery_state not in GUIDANCE_DELIVERY_STATES:
+            raise MailboxError(REJECT_INVALID_DELIVERY_STATE, str(delivery_state))
+        record["delivery_state"] = delivery_state
+        if channel not in GUIDANCE_DELIVERY_CHANNELS or (
+            delivery_state in GUIDANCE_DELIVERED_STATES
+            and channel != GUIDANCE_DELIVERED_STATE_CHANNEL[delivery_state]
+        ):
+            raise MailboxError(REJECT_INVALID_DELIVERY_CHANNEL, str(channel))
+        record["channel"] = channel
+        allowed_reasons = (
+            GUIDANCE_DEFERRAL_REASONS
+            if delivery_state == GUIDANCE_STATE_DEFERRED
+            else GUIDANCE_DELIVERED_REASONS
+        )
+        if delivery_reason not in allowed_reasons:
+            raise MailboxError(REJECT_INVALID_DELIVERY_REASON, str(delivery_reason))
+        record["delivery_reason"] = delivery_reason
+        identity = (run_id, session_id, turn_index)
+        if any(value is not None for value in identity) and not all(
+            value is not None for value in identity
+        ):
+            raise MailboxError(REJECT_INCOMPLETE_TURN_IDENTITY)
+        if run_id is not None:
+            if not _valid_run_id(run_id):
+                raise MailboxError(REJECT_INVALID_RUN_ID)
+            if not _valid_session_id(session_id):
+                raise MailboxError(REJECT_INVALID_SESSION_ID)
+            if not _valid_turn_index(turn_index):
+                raise MailboxError(REJECT_INVALID_TURN_INDEX)
+            record["run_id"] = run_id
+            record["session_id"] = session_id
+            record["turn_index"] = turn_index
+        if harness is not None:
+            if not _valid_harness(harness):
+                raise MailboxError(REJECT_INVALID_HARNESS)
+            record["harness"] = harness
+
     if kind == KIND_ACK:
         try:
             record["upto"] = _validate_sequence(
@@ -1975,6 +2445,10 @@ def _append_record(
     closure_id: str | None = None,
     supervision_outcome: SupervisionOutcome | str | None = None,
     supervision_id: str | None = None,
+    delivery_state: GuidanceDeliveryState | str | None = None,
+    delivery_reason: GuidanceDeliveryReason | str | None = None,
+    channel: GuidanceDeliveryChannel | str | None = None,
+    harness: str | None = None,
     commit_fields: Callable[[], Mapping[str, Any]] | None = None,
 ) -> MailboxMessage:
     fields: dict[str, Any] = {
@@ -1996,6 +2470,10 @@ def _append_record(
         "closure_id": closure_id,
         "supervision_outcome": supervision_outcome,
         "supervision_id": supervision_id,
+        "delivery_state": delivery_state,
+        "delivery_reason": delivery_reason,
+        "channel": channel,
+        "harness": harness,
     }
     record = _normalize_append_record(**fields)
     mailbox_path = mailbox_path_for_plan(plan_dir, state_dir)
@@ -2069,7 +2547,7 @@ def _append_record(
                     path=mailbox_path,
                 )
             if (
-                question.version >= MAILBOX_SCHEMA_VERSION
+                question.version >= MAILBOX_WAIT_SCHEMA_VERSION
                 and question.delivery_mode == DELIVERY_MODE_WAIT
                 and current_view.active_wait_for(question_id) is None
             ):
@@ -2079,7 +2557,7 @@ def _append_record(
                     path=mailbox_path,
                 )
             strict_wait_closure = (
-                question.version >= MAILBOX_SCHEMA_VERSION
+                question.version >= MAILBOX_WAIT_SCHEMA_VERSION
                 and question.delivery_mode == DELIVERY_MODE_WAIT
             )
             if not strict_wait_closure:
@@ -2087,6 +2565,32 @@ def _append_record(
                     candidate.kind == KIND_QUESTION
                     and current_view.active_wait_for(candidate.id) is not None
                     for candidate in current_view.messages
+                )
+
+        if kind == KIND_GUIDANCE_DELIVERY:
+            guidance_id = record["to"]
+            if not any(
+                message.kind == KIND_GUIDANCE and message.id == guidance_id
+                for message in current_view.messages
+            ):
+                raise MailboxError(
+                    REJECT_GUIDANCE_NOT_FOUND,
+                    guidance_id,
+                    path=mailbox_path,
+                )
+            if record["delivery_state"] in GUIDANCE_DELIVERED_STATES and any(
+                message.kind == KIND_GUIDANCE_DELIVERY
+                and message.to == guidance_id
+                and message.delivery_state in GUIDANCE_DELIVERED_STATES
+                and message.run_id == record.get("run_id")
+                and message.session_id == record.get("session_id")
+                and message.turn_index == record.get("turn_index")
+                for message in current_view.messages
+            ):
+                raise MailboxError(
+                    REJECT_GUIDANCE_ALREADY_DELIVERED,
+                    guidance_id,
+                    path=mailbox_path,
                 )
 
         if kind == KIND_WAIT_START:
@@ -2153,7 +2657,7 @@ def _append_record(
                 )
             active_wait = current_view.active_wait_for(question_id)
             strict = (
-                question.version >= MAILBOX_SCHEMA_VERSION
+                question.version >= MAILBOX_WAIT_SCHEMA_VERSION
                 and question.delivery_mode == DELIVERY_MODE_WAIT
             )
             if active_wait is not None and record.get("wait_id") is None:
@@ -2197,8 +2701,14 @@ def _append_record(
             )
         elif kind in CLOSURE_KINDS:
             effective_max_bytes = MAILBOX_MAX_BYTES
-        else:
+        elif kind == KIND_GUIDANCE_DELIVERY:
             effective_max_bytes = MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES
+        else:
+            effective_max_bytes = (
+                MAILBOX_MAX_BYTES
+                - MAILBOX_CLOSURE_RESERVE_BYTES
+                - MAILBOX_GUIDANCE_DELIVERY_RESERVE_BYTES
+            )
         # One correction is enough for a resolver that settles once, which is
         # what the terminal supervision record needs: it flips to `error` and
         # stays there. The bound keeps a resolver that never settles from
@@ -2295,6 +2805,10 @@ def _append_record(
         closure_id=record.get("closure_id"),
         supervision_outcome=record.get("outcome"),
         supervision_id=record.get("supervision_id"),
+        delivery_state=record.get("delivery_state"),
+        delivery_reason=record.get("delivery_reason"),
+        channel=record.get("channel"),
+        harness=record.get("harness"),
         version=record["version"],
     )
 
@@ -2315,6 +2829,87 @@ def append_guidance(
         message_id=message_id,
         created_at=created_at,
     )
+
+
+def append_guidance_delivery(
+    plan_dir: str | Path,
+    guidance_id: str,
+    *,
+    delivery_state: GuidanceDeliveryState | str,
+    delivery_reason: GuidanceDeliveryReason | str,
+    channel: GuidanceDeliveryChannel | str,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    turn_index: int | None = None,
+    harness: str | None = None,
+    state_dir: str | Path | None = None,
+    message_id: str | None = None,
+    created_at: str | None = None,
+) -> MailboxMessage:
+    """Record what one delivery attempt did with an existing guidance record.
+
+    The record names the guidance, never quotes it. ``run_id``/``session_id``/
+    ``turn_index`` are supplied together or not at all: together they are the
+    turn identity that the one-terminal-attempt-per-turn rule keys on, so a
+    partial identity is refused rather than collapsed into "no turn".
+    """
+    return _append_record(
+        plan_dir,
+        kind=KIND_GUIDANCE_DELIVERY,
+        state_dir=state_dir,
+        target=guidance_id,
+        delivery_state=delivery_state,
+        delivery_reason=delivery_reason,
+        channel=channel,
+        run_id=run_id,
+        session_id=session_id,
+        turn_index=turn_index,
+        harness=harness,
+        message_id=message_id,
+        created_at=created_at,
+    )
+
+
+def guidance_delivery_event_payload(message: MailboxMessage) -> dict[str, Any]:
+    """Return the body-free event payload for one delivery attempt.
+
+    Every field here is metadata the supervisor already knows or can look up;
+    nothing derived from the guidance body — not its text, not its length, not
+    a digest — appears, because a delivery event is evidence about transport,
+    not about content.
+    """
+    if message.kind != KIND_GUIDANCE_DELIVERY:
+        raise ValueError("message must be a guidance-delivery record")
+    return {
+        "guidance_id": message.to,
+        "delivery_id": message.id,
+        "seq": message.seq,
+        "delivery_state": message.delivery_state,
+        "delivery_reason": message.delivery_reason,
+        "channel": message.channel,
+        "harness": message.harness,
+        "run_id": message.run_id,
+        "session_id": message.session_id,
+        "turn_index": message.turn_index,
+        "created_at": message.created_at,
+    }
+
+
+def guidance_deliveries(
+    plan_dir: str | Path,
+    guidance_id: str,
+    *,
+    state_dir: str | Path | None = None,
+) -> tuple[MailboxMessage, ...]:
+    return read_mailbox(plan_dir, state_dir=state_dir).guidance_deliveries(guidance_id)
+
+
+def deliverable_guidance(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+) -> tuple[MailboxMessage, ...]:
+    return read_mailbox(plan_dir, state_dir=state_dir).deliverable_guidance
 
 
 def append_question(
@@ -2402,7 +2997,11 @@ def append_wait_question(
             fd,
             existing=existing,
             records=[question_record, wait_record],
-            effective_max_bytes=(MAILBOX_MAX_BYTES - MAILBOX_CLOSURE_RESERVE_BYTES),
+            effective_max_bytes=(
+                MAILBOX_MAX_BYTES
+                - MAILBOX_CLOSURE_RESERVE_BYTES
+                - MAILBOX_GUIDANCE_DELIVERY_RESERVE_BYTES
+            ),
             mailbox_path=mailbox_path,
         )
     except MailboxError:

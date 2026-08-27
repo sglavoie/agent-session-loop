@@ -493,6 +493,51 @@ class TailFollowerTests(unittest.TestCase):
             message,
         )
 
+    def test_mailbox_guidance_delivery_renders_transport_evidence_only(
+        self,
+    ) -> None:
+        delivered = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_GUIDANCE_DELIVERED,
+                "guidance_id": "guidance-1",
+                "delivery_id": "delivery-1",
+                "seq": 4,
+                "delivery_state": "delivered-live",
+                "delivery_reason": "delivered",
+                "channel": "live",
+                "harness": "codex",
+                "run_id": "run-abc",
+                "session_id": "9",
+                "turn_index": 3,
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: guidance delivered "
+            "(guidance guidance-1, state delivered-live, reason delivered, "
+            "channel live, harness codex, run run-abc, session 9, turn 3)",
+            delivered,
+        )
+
+        deferred = tail._event_message(
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_GUIDANCE_DELIVERY_DEFERRED,
+                "guidance_id": "guidance-1",
+                "delivery_state": "deferred",
+                "delivery_reason": "harness-unsupported",
+                "channel": "live",
+            },
+        )
+
+        self.assertEqual(
+            "mailbox: guidance delivery deferred "
+            "(guidance guidance-1, state deferred, "
+            "reason harness-unsupported, channel live)",
+            deferred,
+        )
+
     def test_every_mailbox_action_has_a_specific_tail_renderer(self) -> None:
         payload = {
             "message_id": "message-1",

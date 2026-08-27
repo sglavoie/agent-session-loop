@@ -135,12 +135,21 @@ MAILBOX_ACTION_NOTICE_PUBLISHED = "notice-published"
 MAILBOX_ACTION_WAIT_PREPARATION_FAILED = "wait-preparation-failed"
 MAILBOX_ACTION_WAIT_STARTED = "wait-started"
 MAILBOX_ACTION_WAIT_CLEARED = "wait-cleared"
+# Guidance-delivery ledger actions. The vocabulary lands with the durable
+# record so status and audit surfaces can be written against a fixed set; the
+# runner does not emit any of them until live delivery exists. Their payloads
+# are built by ``mailbox.guidance_delivery_event_payload`` and carry no
+# guidance body — not the text, not its length, not a digest.
+MAILBOX_ACTION_GUIDANCE_DELIVERED = "guidance-delivered"
+MAILBOX_ACTION_GUIDANCE_DELIVERY_DEFERRED = "guidance-delivery-deferred"
 MAILBOX_ACTIONS: tuple[str, ...] = (
     MAILBOX_ACTION_GUIDANCE_OBSERVED,
     MAILBOX_ACTION_NOTICE_PUBLISHED,
     MAILBOX_ACTION_WAIT_PREPARATION_FAILED,
     MAILBOX_ACTION_WAIT_STARTED,
     MAILBOX_ACTION_WAIT_CLEARED,
+    MAILBOX_ACTION_GUIDANCE_DELIVERED,
+    MAILBOX_ACTION_GUIDANCE_DELIVERY_DEFERRED,
 )
 # The ``action_required.reason`` values a live harness signal can carry. Each
 # names an intervention the agent asked for mid-turn, so each is only current

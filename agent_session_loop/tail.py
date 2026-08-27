@@ -355,6 +355,32 @@ def _mailbox_message(payload: dict[str, Any]) -> str:
         if run_id is not None:
             details.append(f"run {run_id}")
         return f"mailbox: reply wait preparation failed ({', '.join(details)})"
+    if action in (
+        events.MAILBOX_ACTION_GUIDANCE_DELIVERED,
+        events.MAILBOX_ACTION_GUIDANCE_DELIVERY_DEFERRED,
+    ):
+        # Delivery is evidence about transport, so the line names identity,
+        # channel, and outcome — never anything derived from the body.
+        details = [
+            f"guidance {payload.get('guidance_id', 'unknown')}",
+            f"state {payload.get('delivery_state', 'unknown')}",
+            f"reason {payload.get('delivery_reason', 'unknown')}",
+            f"channel {payload.get('channel', 'unknown')}",
+        ]
+        harness = payload.get("harness")
+        if harness is not None:
+            details.append(f"harness {harness}")
+        run_id = payload.get("run_id")
+        if run_id is not None:
+            details.append(f"run {run_id}")
+            details.append(f"session {_format_session_label(payload)}")
+            details.append(f"turn {payload.get('turn_index', 'unknown')}")
+        label = (
+            "guidance delivered"
+            if action == events.MAILBOX_ACTION_GUIDANCE_DELIVERED
+            else "guidance delivery deferred"
+        )
+        return f"mailbox: {label} ({', '.join(details)})"
     return f"mailbox: {action}"
 
 

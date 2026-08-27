@@ -65,6 +65,10 @@ SUPERVISE_LOST_HELPER_NEVER_STARTED = "helper-never-started"
 SUPERVISE_LIVENESS_GRACE_SECONDS = 120.0
 
 DEFAULT_ASK_WAIT_TIMEOUT_SECONDS = 90.0
+# A guidance delivery wait is bounded much tighter than an answer wait: it ends
+# on the run's own next delivery decision, not on a human's, and reporting
+# ``queued`` promptly is more useful to a supervisor than blocking for one.
+DEFAULT_GUIDANCE_DELIVERED_TIMEOUT_SECONDS = 30.0
 DEFAULT_OUTBOX_WAIT_TIMEOUT_SECONDS = 300.0
 DEFAULT_OUTBOX_SUPERVISE_TIMEOUT_SECONDS = 550.0
 MAX_WAIT_TIMEOUT_SECONDS = 30.0 * 60.0
@@ -1412,8 +1416,88 @@ def _record_notice_published_event(
         )
 
 
+def _delivery_wait_timeout(
+    args: argparse.Namespace,
+    *,
+    command_name: str,
+    text_label: str,
+) -> float | None:
+    """Return the validated delivery wait timeout, or None on invalid input."""
+    requested = getattr(args, "wait_timeout", None)
+    wait_delivered = bool(getattr(args, "wait_delivered", False))
+    if requested is not None and not wait_delivered:
+        _print_input_error(
+            args,
+            command_name=command_name,
+            text_label=text_label,
+            reason="invalid-timeout",
+            error="--wait-timeout requires --wait-delivered",
+        )
+        return None
+    return _validated_timeout(
+        args,
+        value=(
+            DEFAULT_GUIDANCE_DELIVERED_TIMEOUT_SECONDS
+            if requested is None
+            else requested
+        ),
+        option="--wait-timeout",
+        command_name=command_name,
+        text_label=text_label,
+    )
+
+
+def _wait_for_guidance_delivery(
+    plan_dir: str | Path,
+    guidance_id: str,
+    *,
+    state_dir: str | Path | None,
+    timeout: float,
+    active_turn: tuple[str, str, int] | None,
+) -> mailbox.MailboxMessage | None:
+    """Return the delivery attempt that ends the wait, or None on timeout.
+
+    A successful attempt always ends the wait. A deferred attempt ends it only
+    when it speaks about the turn that was live when the wait started: a stale
+    deferral from an earlier turn says nothing about whether the run is about
+    to deliver this guidance now. With no authoritative active turn, any
+    deferral is the most current statement available and ends the wait.
+    """
+    deadline = time.monotonic() + timeout
+    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
+    token: object = _MAILBOX_TOKEN_UNSEEN
+    while True:
+        current = mailbox.mailbox_change_token(mailbox_path)
+        if (
+            token is _MAILBOX_TOKEN_UNSEEN
+            or current is mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
+            or current != token
+        ):
+            view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+            token = current
+            delivered = view.successful_guidance_delivery(guidance_id)
+            if delivered is not None:
+                return delivered
+            for deferred in reversed(view.deferred_guidance_deliveries(guidance_id)):
+                if (
+                    active_turn is None
+                    or (deferred.run_id, deferred.session_id, deferred.turn_index)
+                    == active_turn
+                ):
+                    return deferred
+        now = time.monotonic()
+        if now >= deadline:
+            return None
+        time.sleep(min(ASK_WAIT_POLL_INTERVAL_SECONDS, deadline - now))
+
+
 def inbox_guidance_from_args(args: argparse.Namespace) -> int:
-    """Append supervisor guidance and renew the plan's supervisor lease."""
+    """Append supervisor guidance and renew the plan's supervisor lease.
+
+    The append and the delivery are separate facts and are reported as such.
+    A durable append is a success even when nothing has delivered it yet, so
+    the exit code follows the append alone and ``delivered`` carries the rest.
+    """
     text = _body_from_args(
         args,
         command_name=COMMAND_INBOX_GUIDANCE,
@@ -1421,6 +1505,20 @@ def inbox_guidance_from_args(args: argparse.Namespace) -> int:
     )
     if text is None:
         return 1
+    wait_delivered = bool(getattr(args, "wait_delivered", False))
+    delivery_timeout = _delivery_wait_timeout(
+        args,
+        command_name=COMMAND_INBOX_GUIDANCE,
+        text_label="inbox guidance",
+    )
+    if delivery_timeout is None:
+        return 1
+    active_turn: tuple[str, str, int] | None = None
+
+    def capture_active_turn(context: cli_common.PlanCommandContext) -> None:
+        nonlocal active_turn
+        active_turn = _active_turn_ownership(context)
+
     result = _supervisor_write(
         args,
         command_name=COMMAND_INBOX_GUIDANCE,
@@ -1430,11 +1528,32 @@ def inbox_guidance_from_args(args: argparse.Namespace) -> int:
             text,
             state_dir=args.state_dir,
         ),
+        before_lease=capture_active_turn,
     )
     if result is None:
         return 1
     context, message, supervisor_id = result
     mailbox_path = _mailbox_path(context, args)
+    delivery: mailbox.MailboxMessage | None = None
+    if wait_delivered:
+        try:
+            delivery = _wait_for_guidance_delivery(
+                context.snapshot.plan_dir,
+                message.id,
+                state_dir=args.state_dir,
+                timeout=delivery_timeout,
+                active_turn=active_turn,
+            )
+        except mailbox.MailboxError:
+            # The guidance append is authoritative. A later observation failure
+            # must stay a truthful successful append with delivered=false.
+            delivery = None
+    # Without a delivery record the guidance is queued by definition: it is
+    # durable and nothing has reported acting on it.
+    delivery_state = (
+        mailbox.GUIDANCE_STATE_QUEUED if delivery is None else delivery.delivery_state
+    )
+    delivered = delivery_state in mailbox.GUIDANCE_DELIVERED_STATES
     payload = responses.success_payload(
         COMMAND_INBOX_GUIDANCE,
         plan_dir=str(context.snapshot.plan_dir),
@@ -1444,9 +1563,21 @@ def inbox_guidance_from_args(args: argparse.Namespace) -> int:
         ),
         supervisor_id=supervisor_id,
         message=_message_payload(message),
+        appended=True,
+        waited=wait_delivered,
+        delivered=delivered,
+        delivery_state=delivery_state,
+        delivery_reason=None if delivery is None else delivery.delivery_reason,
+        delivery=None if delivery is None else _message_payload(delivery),
     )
     if args.json:
         responses.print_json(payload)
+    elif wait_delivered:
+        print(
+            f"Queued guidance {message.id} for {context.snapshot.plan_dir} "
+            f"(seq {message.seq}, mailbox {mailbox_path}, "
+            f"delivery {delivery_state})"
+        )
     else:
         print(
             f"Queued guidance {message.id} for {context.snapshot.plan_dir} "

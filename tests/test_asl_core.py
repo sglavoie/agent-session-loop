@@ -4060,18 +4060,20 @@ class ParserAndStateTests(unittest.TestCase):
                 ).encode("utf-8")
                 + b"\n"
             )
-            non_closure_cap = (
-                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_CLOSURE_RESERVE_BYTES
+            ordinary_cap = (
+                mailbox.MAILBOX_MAX_BYTES
+                - mailbox.MAILBOX_CLOSURE_RESERVE_BYTES
+                - mailbox.MAILBOX_GUIDANCE_DELIVERY_RESERVE_BYTES
             )
             mailbox.append_guidance(
                 plan_dir,
-                "x" * (non_closure_cap - record_overhead),
+                "x" * (ordinary_cap - record_overhead),
                 state_dir=state_dir,
                 message_id=message_id,
                 created_at=created_at,
             )
             self.assertEqual(
-                non_closure_cap,
+                ordinary_cap,
                 mailbox.read_mailbox(plan_dir, state_dir=state_dir).size_bytes,
             )
 
@@ -4095,7 +4097,7 @@ class ParserAndStateTests(unittest.TestCase):
 
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
             self.assertEqual(appended, view.latest_supervision_end)
-            self.assertGreater(view.size_bytes, non_closure_cap)
+            self.assertGreater(view.size_bytes, ordinary_cap)
 
     def test_supervision_end_counts_extend_the_legacy_counts_payload(
         self,
@@ -4401,33 +4403,38 @@ class ParserAndStateTests(unittest.TestCase):
                 ).encode("utf-8")
                 + b"\n"
             )
-            # Fill exactly to the shared non-reply cap. Only replies may use
-            # the final reserve below the physical file cap.
-            non_reply_cap = (
-                mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_REPLY_RESERVE_BYTES
+            # Fill exactly to the ordinary-write cap. Below it sit the
+            # guidance-delivery reserve and then the closure/reply reserve, so
+            # ordinary records stop short of both.
+            ordinary_cap = (
+                mailbox.MAILBOX_MAX_BYTES
+                - mailbox.MAILBOX_REPLY_RESERVE_BYTES
+                - mailbox.MAILBOX_GUIDANCE_DELIVERY_RESERVE_BYTES
             )
             current_size = mailbox.read_mailbox(
                 plan_dir, state_dir=state_dir
             ).size_bytes
             mailbox.append_guidance(
                 plan_dir,
-                "x" * (non_reply_cap - current_size - record_overhead),
+                "x" * (ordinary_cap - current_size - record_overhead),
                 state_dir=state_dir,
                 message_id=message_id,
                 created_at=created_at,
             )
 
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
-            self.assertEqual(non_reply_cap, view.size_bytes)
+            self.assertEqual(ordinary_cap, view.size_bytes)
             self.assertFalse(view.full)
             self.assertFalse(view.accepts_questions)
             self.assertTrue(view.accepts_replies)
             self.assertTrue(view.accepts_resolutions)
+            self.assertTrue(view.accepts_guidance_deliveries)
             view_payload = view.to_payload()
             self.assertFalse(view_payload["full"])
             self.assertFalse(view_payload["accepts_questions"])
             self.assertTrue(view_payload["accepts_replies"])
             self.assertTrue(view_payload["accepts_resolutions"])
+            self.assertTrue(view_payload["accepts_guidance_deliveries"])
             self.assertEqual(
                 mailbox.MAILBOX_CLOSURE_RESERVE_BYTES,
                 mailbox.MAILBOX_REPLY_RESERVE_BYTES,
@@ -4452,6 +4459,18 @@ class ParserAndStateTests(unittest.TestCase):
                     state_dir=state_dir,
                 )
             self.assertEqual(mailbox.ERROR_MAILBOX_FULL, raised.exception.reason)
+
+            # Guidance still owes an honest delivery outcome, so its reserve
+            # survives the ordinary-write refusals above.
+            delivery = mailbox.append_guidance_delivery(
+                plan_dir,
+                message_id,
+                delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+                delivery_reason=mailbox.GUIDANCE_REASON_STALE_TURN,
+                channel=mailbox.GUIDANCE_CHANNEL_LIVE,
+                state_dir=state_dir,
+            )
+            self.assertEqual(message_id, delivery.to)
 
             reply = mailbox.append_reply(
                 plan_dir, question.id, "x", state_dir=state_dir

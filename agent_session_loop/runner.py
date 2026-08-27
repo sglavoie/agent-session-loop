@@ -9172,7 +9172,7 @@ def _mailbox_completion_guard_evidence(
     for question in view.messages:
         if (
             question.kind != mailbox.KIND_QUESTION
-            or question.version < mailbox.MAILBOX_SCHEMA_VERSION
+            or question.version < mailbox.MAILBOX_WAIT_SCHEMA_VERSION
             or question.delivery_mode != mailbox.DELIVERY_MODE_WAIT
             or question.waiter_origin != mailbox.WAITER_ORIGIN_WORKER
             or question.run_id != run_id

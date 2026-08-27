@@ -1925,6 +1925,18 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="store_true",
         help="Read the guidance body from standard input",
     )
+    inbox_guidance_parser.add_argument(
+        "--wait-delivered",
+        action="store_true",
+        help="Wait for the run to record a delivery result for this guidance",
+    )
+    inbox_guidance_parser.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Delivery wait timeout in seconds (default: 30; maximum: 1800)",
+    )
     inbox_guidance_parser.set_defaults(
         handler_ref="mailbox_cli:inbox_guidance_from_args",
     )

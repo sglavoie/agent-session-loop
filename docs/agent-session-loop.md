@@ -1154,7 +1154,8 @@ process exits, and never affect generated review turns.
 The current net surface is three mailbox state files, eight mailbox commands, one
 model-control command, and one `mailbox` event name with
 `guidance-observed`, `notice-published`, `wait-preparation-failed`,
-`wait-started`, and `wait-cleared` action variants.
+`wait-started`, `wait-cleared`, `guidance-delivered`, and
+`guidance-delivery-deferred` action variants.
 It adds no runner or
 supervisor threads and no terminal statuses. `status --json` exposes paths,
 counts, capacity, rejected-record count, lease freshness, and compact
@@ -1176,6 +1177,11 @@ run/session/turn and notice identity, physical sequence, character length, and
 SHA-256 digest. `asl tail` renders those metadata explicitly rather than
 falling back to a bare action name; neither event carries a resolution note or
 notice body.
+`guidance-delivered` and `guidance-delivery-deferred` carry guidance and
+delivery identity, physical sequence, delivery state, stable delivery reason,
+channel, harness, and run/session/turn identity. They carry nothing derived
+from the guidance body — not its text, not its length, not a digest — because
+a delivery event is evidence about transport, not about content.
 `reply_provided` carries reply length and source identity. None of these events
 duplicates raw guidance, question, reply, resolution-note, or notice text, and
 closed waits do not increment pause metrics because those metrics count only
@@ -4287,7 +4293,8 @@ independent of the handoff, so `final-review.md` and `final-review.json` are
 digested and classified into that evidence before the correction turn starts
 and are never rewritten by it. The `mailbox` name uses
 `guidance-observed`, `notice-published`, `wait-preparation-failed`,
-`wait-started`, and `wait-cleared` action variants; mailbox activity does not
+`wait-started`, `wait-cleared`, `guidance-delivered`, and
+`guidance-delivery-deferred` action variants; mailbox activity does not
 create a separate event name per record kind. Verification heartbeats
 fire every 30 seconds while a single check is in flight, so long-running
 checks remain observable in `tail` and the live status snapshot. Verification
