@@ -462,6 +462,34 @@ class RegisteredSnapshotTests(unittest.TestCase):
             comparison["changed"]["alpha"]["head_after"],
         )
 
+    def test_history_annotation_resolves_a_linked_worktree_through_its_owner(
+        self,
+    ) -> None:
+        alpha = self.workspace / "alpha"
+        init_git_repo(alpha)
+        linked = self.root / "alpha-hardening"
+        self._git(alpha, "worktree", "add", "-b", "hardening", str(linked))
+        before = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        (linked / "README.md").write_text("hardened\n", encoding="utf-8")
+        self._git(linked, "commit", "-am", "harden")
+        after = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        comparison = repository_evidence.compare_workspace_snapshots(before, after)
+        runner._annotate_history_transitions(
+            comparison, repository_roots={"alpha": alpha}
+        )
+
+        key = repository_evidence.linked_worktree_key("alpha", linked.resolve())
+        self.assertNotIn(key, comparison["unavailable"])
+        self.assertEqual(
+            "fast-forward", comparison["changed"][key]["head_transition"]["relation"]
+        )
+
     def test_a_registered_sibling_worktree_keeps_its_own_key(self) -> None:
         alpha = self.workspace / "alpha"
         init_git_repo(alpha)

@@ -10148,6 +10148,12 @@ def _annotate_history_transitions(
             continue
         root = repository_roots.get(str(repository))
         if root is None:
+            linked = repository_evidence.split_linked_worktree_key(str(repository))
+            if linked is not None:
+                owner, worktree = linked
+                if owner in repository_roots:
+                    root = Path(worktree)
+        if root is None:
             unavailable[str(repository)] = {
                 "after": {"reason": "repository-scope-unresolved"}
             }
