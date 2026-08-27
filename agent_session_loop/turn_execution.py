@@ -47,6 +47,7 @@ from . import (
     config,
     durability,
     events,
+    guidance_delivery,
     harness_failures,
     harnesses,
     mailbox,
@@ -1861,6 +1862,10 @@ class TurnLaunch:
     model: str | None
     effort: str | None
     abort: harnesses.AbortSignal
+    #: The turn-scoped channel live guidance is delivered through. Handed over
+    #: unopened: the harness opens it around the process it owns and closes it
+    #: when that process is gone, so this object never outlives its turn.
+    live_delivery: guidance_delivery.LiveDeliveryEndpoint | None
     stream_callback: harnesses.StreamCallback | None
     build_invocation: Callable[[], harnesses.HarnessInvocation]
 
@@ -1947,6 +1952,7 @@ class TurnExecutor:
                 on_final_result=live_turn.note_final_result,
                 on_observed_model=live_turn.note_observed_model,
                 abort=launch.abort,
+                live_delivery=launch.live_delivery,
             )
         except KeyboardInterrupt:
             result = harnesses.HarnessResult(

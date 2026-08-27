@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Literal
 
-from . import config
+from . import config, guidance_delivery
 from .process_tree import (
     clear_process_tree,
     descendant_pids,
@@ -656,6 +656,23 @@ class HarnessAdapter:
             effort=effort,
         )
 
+    def live_delivery_transport(
+        self,
+        *,
+        process: subprocess.Popen,
+        invocation: HarnessInvocation,
+    ) -> guidance_delivery.GuidanceTransport | None:
+        """Return the transport that injects guidance into this live turn.
+
+        ``None`` — the base implementation, and what every adapter returns
+        today — means this harness has no live channel at all, so every
+        attempt defers with ``harness-unsupported`` rather than claiming a
+        delivery it cannot make. An adapter overrides this only once it can
+        prove same-turn injection against the real CLI.
+        """
+        del process, invocation
+        return None
+
     def run(
         self,
         *,
@@ -673,6 +690,7 @@ class HarnessAdapter:
         on_observed_model: Callable[[str], None] | None = None,
         access: AccessProfile = WORKER_ACCESS,
         abort: AbortSignal | None = None,
+        live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
     ) -> HarnessResult:
         invocation = self.build_invocation(
             cwd=cwd,
@@ -710,176 +728,221 @@ class HarnessAdapter:
             with contextlib.suppress(Exception):
                 on_spawn(process.pid)
 
-        stdout_chunks: list[str] = []
-        stderr_chunks: list[str] = []
-        stream_io: dict[str, int | float] = {
-            "stdout_chunks": 0,
-            "stderr_chunks": 0,
-            "stdout_chars": 0,
-            "stderr_chars": 0,
-            "callback_seconds": 0.0,
-        }
-        reader_errors: list[BaseException] = []
-        output_processor = self.output_processor()
-        final_result_fired = threading.Event()
-        observed_model_fired = threading.Event()
-        # Quiescence guard for abandoned readers: a reader that outlives the
-        # bounded join still holds the stream callback, hooks, and output
-        # state, so a late write from a pipe-holding descendant could fire
-        # them after this turn has finished. Every per-chunk side effect runs
-        # under this lock behind an abandonment check, and abandonment is
-        # flipped under the same lock, so once ``abandon_readers`` returns no
-        # reader can start a new side effect and any in-flight one is done.
-        side_effect_lock = threading.Lock()
-        abandoned = threading.Event()
-
-        def abandon_readers() -> None:
-            with side_effect_lock:
-                abandoned.set()
-
-        def read_stream(
-            stream_name: StreamName,
-            chunks: list[str],
-            pipe: IO[str],
-        ) -> None:
-            try:
-                for chunk in iter(pipe.readline, ""):
-                    with side_effect_lock:
-                        if abandoned.is_set():
-                            break
-                        processed_chunk = output_processor.process_chunk(
-                            stream_name,
-                            chunk,
-                        )
-                        # Only stdout parsing can flip final_result_seen, so
-                        # this branch runs on a single thread and the Event
-                        # guard makes the hook fire exactly once.
-                        if (
-                            stream_name == "stdout"
-                            and on_final_result is not None
-                            and not final_result_fired.is_set()
-                            and output_processor.final_result_seen
-                        ):
-                            final_result_fired.set()
-                            with contextlib.suppress(Exception):
-                                on_final_result()
-                        if (
-                            stream_name == "stdout"
-                            and on_observed_model is not None
-                            and not observed_model_fired.is_set()
-                        ):
-                            observed = output_processor.observed_model
-                            if observed is not None:
-                                observed_model_fired.set()
-                                with contextlib.suppress(Exception):
-                                    on_observed_model(observed)
-                        if not processed_chunk:
-                            continue
-                        chunks.append(processed_chunk)
-                        chunks_key = f"{stream_name}_chunks"
-                        chars_key = f"{stream_name}_chars"
-                        stream_io[chunks_key] = int(stream_io[chunks_key]) + 1
-                        stream_io[chars_key] = int(stream_io[chars_key]) + len(
-                            processed_chunk
-                        )
-                        if stream_callback is not None:
-                            callback_started = time.monotonic()
-                            try:
-                                stream_callback(stream_name, processed_chunk)
-                            except Exception as error:
-                                reader_errors.append(error)
-                            finally:
-                                stream_io["callback_seconds"] = float(
-                                    stream_io["callback_seconds"]
-                                ) + (time.monotonic() - callback_started)
-            except Exception as error:
-                reader_errors.append(error)
-            finally:
-                pipe.close()
-
-        if process.stdout is None or process.stderr is None:
-            raise HarnessError(f"{self.name} did not expose stdout/stderr pipes")
-
-        stdout_thread = threading.Thread(
-            target=read_stream,
-            args=("stdout", stdout_chunks, process.stdout),
-            daemon=True,
-        )
-        stderr_thread = threading.Thread(
-            target=read_stream,
-            args=("stderr", stderr_chunks, process.stderr),
-            daemon=True,
-        )
-        stdout_thread.start()
-        stderr_thread.start()
-
-        timed_out = False
-        aborted = False
-        prior_snapshot: tuple[Mapping[str, Any], ...] = ()
-        process_sweep: dict[str, Any] | None = None
-        try:
-            expired = _wait_for_turn_exit(process, timeout=timeout, abort=abort)
-            if expired is not None:
-                timed_out = expired == "timeout"
-                aborted = expired == "abort"
-                prior_snapshot = _snapshot_descendants(
-                    process.pid, _sweep_process_table()
-                )
-                _kill_process_group(process)
-                process.wait()
-
-            _join_readers(
-                (stdout_thread, stderr_thread),
-                timeout=_ABANDONED_READER_JOIN_SECONDS,
+        # Opened here, inside the boundary that owns the process, and closed in
+        # the ``finally`` below on every path out of the turn. A delivery can
+        # therefore only ever reach this exact live process: once the turn is
+        # over the endpoint answers ``stale-turn`` instead of injecting into a
+        # dead PID or into whatever turn started next.
+        if live_delivery is not None:
+            live_delivery.open(
+                self.live_delivery_transport(process=process, invocation=invocation)
             )
-            abandon_readers()
-            # After the join, so an in-group straggler gets to flush what it
-            # was writing before the sweep takes it down.
-            process_sweep = _sweep_turn_descendants(process, prior_snapshot)
-        except KeyboardInterrupt:
-            if process.poll() is None:
-                process.terminate()
+        try:
+            stdout_chunks: list[str] = []
+            stderr_chunks: list[str] = []
+            stream_io: dict[str, int | float] = {
+                "stdout_chunks": 0,
+                "stderr_chunks": 0,
+                "stdout_chars": 0,
+                "stderr_chars": 0,
+                "callback_seconds": 0.0,
+            }
+            reader_errors: list[BaseException] = []
+            output_processor = self.output_processor()
+            final_result_fired = threading.Event()
+            observed_model_fired = threading.Event()
+            # Quiescence guard for abandoned readers: a reader that outlives the
+            # bounded join still holds the stream callback, hooks, and output
+            # state, so a late write from a pipe-holding descendant could fire
+            # them after this turn has finished. Every per-chunk side effect runs
+            # under this lock behind an abandonment check, and abandonment is
+            # flipped under the same lock, so once ``abandon_readers`` returns no
+            # reader can start a new side effect and any in-flight one is done.
+            side_effect_lock = threading.Lock()
+            abandoned = threading.Event()
+
+            def abandon_readers() -> None:
+                with side_effect_lock:
+                    abandoned.set()
+
+            def read_stream(
+                stream_name: StreamName,
+                chunks: list[str],
+                pipe: IO[str],
+            ) -> None:
                 try:
-                    process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    process.kill()
+                    for chunk in iter(pipe.readline, ""):
+                        with side_effect_lock:
+                            if abandoned.is_set():
+                                break
+                            processed_chunk = output_processor.process_chunk(
+                                stream_name,
+                                chunk,
+                            )
+                            # Only stdout parsing can flip final_result_seen, so
+                            # this branch runs on a single thread and the Event
+                            # guard makes the hook fire exactly once.
+                            if (
+                                stream_name == "stdout"
+                                and on_final_result is not None
+                                and not final_result_fired.is_set()
+                                and output_processor.final_result_seen
+                            ):
+                                final_result_fired.set()
+                                with contextlib.suppress(Exception):
+                                    on_final_result()
+                            if (
+                                stream_name == "stdout"
+                                and on_observed_model is not None
+                                and not observed_model_fired.is_set()
+                            ):
+                                observed = output_processor.observed_model
+                                if observed is not None:
+                                    observed_model_fired.set()
+                                    with contextlib.suppress(Exception):
+                                        on_observed_model(observed)
+                            if not processed_chunk:
+                                continue
+                            chunks.append(processed_chunk)
+                            chunks_key = f"{stream_name}_chunks"
+                            chars_key = f"{stream_name}_chars"
+                            stream_io[chunks_key] = int(stream_io[chunks_key]) + 1
+                            stream_io[chars_key] = int(stream_io[chars_key]) + len(
+                                processed_chunk
+                            )
+                            if stream_callback is not None:
+                                callback_started = time.monotonic()
+                                try:
+                                    stream_callback(stream_name, processed_chunk)
+                                except Exception as error:
+                                    reader_errors.append(error)
+                                finally:
+                                    stream_io["callback_seconds"] = float(
+                                        stream_io["callback_seconds"]
+                                    ) + (time.monotonic() - callback_started)
+                except Exception as error:
+                    reader_errors.append(error)
+                finally:
+                    pipe.close()
+
+            if process.stdout is None or process.stderr is None:
+                raise HarnessError(f"{self.name} did not expose stdout/stderr pipes")
+
+            stdout_thread = threading.Thread(
+                target=read_stream,
+                args=("stdout", stdout_chunks, process.stdout),
+                daemon=True,
+            )
+            stderr_thread = threading.Thread(
+                target=read_stream,
+                args=("stderr", stderr_chunks, process.stderr),
+                daemon=True,
+            )
+            stdout_thread.start()
+            stderr_thread.start()
+
+            timed_out = False
+            aborted = False
+            prior_snapshot: tuple[Mapping[str, Any], ...] = ()
+            process_sweep: dict[str, Any] | None = None
+            try:
+                expired = _wait_for_turn_exit(process, timeout=timeout, abort=abort)
+                if expired is not None:
+                    timed_out = expired == "timeout"
+                    aborted = expired == "abort"
+                    prior_snapshot = _snapshot_descendants(
+                        process.pid, _sweep_process_table()
+                    )
+                    _kill_process_group(process)
                     process.wait()
-            stdout_thread.join(timeout=1)
-            stderr_thread.join(timeout=1)
-            abandon_readers()
-            # This branch returns early, so it needs its own sweep: the one on
-            # the normal path is never reached from here. Explicit signalling
-            # above is unchanged; the sweep only reaches what it left behind.
-            interrupt_sweep = _sweep_turn_descendants(process)
-            return HarnessResult(
-                name=self.name,
-                argv=invocation.argv,
-                returncode=130,
-                stdout="".join(stdout_chunks),
-                stderr="".join(stderr_chunks),
-                last_message=output_processor.last_message(
+
+                _join_readers(
+                    (stdout_thread, stderr_thread),
+                    timeout=_ABANDONED_READER_JOIN_SECONDS,
+                )
+                abandon_readers()
+                # After the join, so an in-group straggler gets to flush what it
+                # was writing before the sweep takes it down.
+                process_sweep = _sweep_turn_descendants(process, prior_snapshot)
+            except KeyboardInterrupt:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                stdout_thread.join(timeout=1)
+                stderr_thread.join(timeout=1)
+                abandon_readers()
+                # This branch returns early, so it needs its own sweep: the one on
+                # the normal path is never reached from here. Explicit signalling
+                # above is unchanged; the sweep only reaches what it left behind.
+                interrupt_sweep = _sweep_turn_descendants(process)
+                return HarnessResult(
+                    name=self.name,
+                    argv=invocation.argv,
+                    returncode=130,
                     stdout="".join(stdout_chunks),
                     stderr="".join(stderr_chunks),
-                    last_message_path=invocation.last_message_path,
-                ),
-                interrupted=True,
-                process_sweep=interrupt_sweep,
-                observed_model=output_processor.observed_model,
-                stream_io=dict(stream_io),
-            )
+                    last_message=output_processor.last_message(
+                        stdout="".join(stdout_chunks),
+                        stderr="".join(stderr_chunks),
+                        last_message_path=invocation.last_message_path,
+                    ),
+                    interrupted=True,
+                    process_sweep=interrupt_sweep,
+                    observed_model=output_processor.observed_model,
+                    stream_io=dict(stream_io),
+                )
 
-        if reader_errors:
-            raise HarnessError("stream callback failed") from reader_errors[0]
+            if reader_errors:
+                raise HarnessError("stream callback failed") from reader_errors[0]
 
-        stdout = "".join(stdout_chunks)
-        stderr = "".join(stderr_chunks)
-        if aborted:
+            stdout = "".join(stdout_chunks)
+            stderr = "".join(stderr_chunks)
+            if aborted:
+                return HarnessResult(
+                    name=self.name,
+                    argv=invocation.argv,
+                    # 128 + SIGKILL, not the timeout path's 124: a caller reading
+                    # only the returncode still has to tell the two apart.
+                    returncode=137,
+                    stdout=stdout,
+                    stderr=stderr,
+                    last_message=output_processor.last_message(
+                        stdout=stdout,
+                        stderr=stderr,
+                        last_message_path=invocation.last_message_path,
+                    ),
+                    aborted=True,
+                    process_sweep=process_sweep,
+                    observed_model=output_processor.observed_model,
+                    stream_io=dict(stream_io),
+                )
+            if timed_out:
+                return HarnessResult(
+                    name=self.name,
+                    argv=invocation.argv,
+                    returncode=124,
+                    stdout=stdout,
+                    stderr=stderr,
+                    last_message=output_processor.last_message(
+                        stdout=stdout,
+                        stderr=stderr,
+                        last_message_path=invocation.last_message_path,
+                    ),
+                    timed_out=True,
+                    process_sweep=process_sweep,
+                    observed_model=output_processor.observed_model,
+                    stream_io=dict(stream_io),
+                )
+
+            interrupted = process.returncode == -signal.SIGINT
             return HarnessResult(
                 name=self.name,
                 argv=invocation.argv,
-                # 128 + SIGKILL, not the timeout path's 124: a caller reading
-                # only the returncode still has to tell the two apart.
-                returncode=137,
+                returncode=130 if interrupted else process.returncode,
                 stdout=stdout,
                 stderr=stderr,
                 last_message=output_processor.last_message(
@@ -887,46 +950,14 @@ class HarnessAdapter:
                     stderr=stderr,
                     last_message_path=invocation.last_message_path,
                 ),
-                aborted=True,
+                interrupted=interrupted,
                 process_sweep=process_sweep,
                 observed_model=output_processor.observed_model,
                 stream_io=dict(stream_io),
             )
-        if timed_out:
-            return HarnessResult(
-                name=self.name,
-                argv=invocation.argv,
-                returncode=124,
-                stdout=stdout,
-                stderr=stderr,
-                last_message=output_processor.last_message(
-                    stdout=stdout,
-                    stderr=stderr,
-                    last_message_path=invocation.last_message_path,
-                ),
-                timed_out=True,
-                process_sweep=process_sweep,
-                observed_model=output_processor.observed_model,
-                stream_io=dict(stream_io),
-            )
-
-        interrupted = process.returncode == -signal.SIGINT
-        return HarnessResult(
-            name=self.name,
-            argv=invocation.argv,
-            returncode=130 if interrupted else process.returncode,
-            stdout=stdout,
-            stderr=stderr,
-            last_message=output_processor.last_message(
-                stdout=stdout,
-                stderr=stderr,
-                last_message_path=invocation.last_message_path,
-            ),
-            interrupted=interrupted,
-            process_sweep=process_sweep,
-            observed_model=output_processor.observed_model,
-            stream_io=dict(stream_io),
-        )
+        finally:
+            if live_delivery is not None:
+                live_delivery.close()
 
 
 class CodexAdapter(HarnessAdapter):
@@ -1139,6 +1170,7 @@ def run_harness(
     on_observed_model: Callable[[str], None] | None = None,
     access: AccessProfile = WORKER_ACCESS,
     abort: AbortSignal | None = None,
+    live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
 ) -> HarnessResult:
     """Run one harness turn through the selected adapter."""
     return get_adapter(name).run(
@@ -1156,6 +1188,7 @@ def run_harness(
         on_observed_model=on_observed_model,
         access=access,
         abort=abort,
+        live_delivery=live_delivery,
     )
 
 

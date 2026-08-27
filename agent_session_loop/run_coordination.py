@@ -77,6 +77,7 @@ from . import (
     control_queue,
     durability,
     events,
+    guidance_delivery,
     harnesses,
     mailbox,
     pause_policy,
@@ -2167,6 +2168,8 @@ class MailboxPoll:
         self._abort: harnesses.AbortSignal | None = None
         self._finalization = False
         self._evented_guidance_ids: set[str] = set()
+        self._live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None
+        self._attempted_guidance_ids: set[str] = set()
         self._mailbox_path = mailbox.mailbox_path_for_plan(
             plan_dir,
             state_dir_arg,
@@ -2192,6 +2195,29 @@ class MailboxPoll:
         """
         self._abort = abort
         self._finalization = finalization
+
+    def set_live_delivery(
+        self,
+        endpoint: guidance_delivery.LiveDeliveryEndpoint | None,
+    ) -> None:
+        """Attach the running turn's live-delivery endpoint, or detach it.
+
+        Set before the turn starts and cleared after the poll thread has been
+        joined, exactly like :meth:`set_abort`, so no tick can deliver into a
+        turn that has finished. The per-turn attempt ledger is reset with the
+        endpoint: one attempt per guidance per turn is the spine's whole bound
+        on retries, and a new turn is a new chance to deliver.
+
+        Attaching also drops the change token so the first tick of the new turn
+        parses the mailbox again. Without that, guidance deferred in the
+        previous turn would sit undelivered until something else happened to
+        write the mailbox: the unchanged-token short circuit would keep
+        returning before the delivery pass ever ran.
+        """
+        self._live_delivery = endpoint
+        self._attempted_guidance_ids = set()
+        if endpoint is not None:
+            self._last_read_token = MAILBOX_TOKEN_UNSEEN
 
     def __call__(self) -> None:
         """Drain controls, then emit once-only metadata for pending guidance."""
@@ -2264,6 +2290,81 @@ class MailboxPoll:
                 event_payload,
             )
             self._evented_guidance_ids.add(message.id)
+
+        self._deliver_guidance(view)
+
+    def _deliver_guidance(self, view: mailbox.MailboxView) -> None:
+        """Offer each undelivered guidance record to the turn now running.
+
+        Nothing happens between turns: with no endpoint there is no live
+        process to deliver into, and recording a deferral per tick would fill
+        the ledger with history about a turn that does not exist.
+        """
+        endpoint = self._live_delivery
+        if endpoint is None:
+            return
+        for message in view.deliverable_guidance:
+            if message.id in self._attempted_guidance_ids:
+                continue
+            # Marked before the submit, not after: one attempt per guidance per
+            # turn holds even if recording the outcome fails below.
+            self._attempted_guidance_ids.add(message.id)
+            outcome = endpoint.submit(
+                guidance_delivery.GuidanceRequest(
+                    guidance_id=message.id,
+                    seq=message.seq,
+                    text=message.text or "",
+                    turn=endpoint.turn,
+                )
+            )
+            self._record_delivery(message, outcome, endpoint.turn)
+
+    def _record_delivery(
+        self,
+        message: mailbox.MailboxMessage,
+        outcome: guidance_delivery.GuidanceOutcome,
+        turn: guidance_delivery.TurnIdentity,
+    ) -> None:
+        """Append the attempt to the ledger and event what it did.
+
+        The append happens only after the endpoint has returned an outcome, so
+        the record always describes something that finished. If the append
+        itself fails after a successful transport, nothing is written and the
+        guidance stays deliverable: a later turn may then deliver it a second
+        time. At-least-once is the honest guarantee, and a duplicate is a far
+        smaller harm than a durable record claiming a delivery the ledger could
+        not actually witness.
+        """
+        try:
+            record = mailbox.append_guidance_delivery(
+                self._plan_dir,
+                message.id,
+                delivery_state=outcome.delivery_state,
+                delivery_reason=outcome.reason,
+                channel=outcome.channel,
+                run_id=turn.run_id,
+                session_id=turn.session_id,
+                turn_index=turn.turn_index,
+                harness=turn.harness,
+                state_dir=self._state_dir_arg,
+            )
+        except OSError, mailbox.MailboxError:
+            # Same fail-open discipline as the read above: a mailbox that
+            # cannot record a delivery must not end the harness turn.
+            return
+        event_payload = {
+            "action": (
+                events.MAILBOX_ACTION_GUIDANCE_DELIVERED
+                if outcome.delivered
+                else events.MAILBOX_ACTION_GUIDANCE_DELIVERY_DEFERRED
+            ),
+            **mailbox.guidance_delivery_event_payload(record),
+        }
+        self._persistence.append_event(
+            self._event_path,
+            events.MAILBOX_EVENT,
+            event_payload,
+        )
 
 
 # ---------------------------------------------------------------------------

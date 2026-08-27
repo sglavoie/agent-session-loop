@@ -47,6 +47,7 @@ from . import (
     control_signal,
     durability,
     events,
+    guidance_delivery,
     harness_failures,
     harnesses,
     mailbox,
@@ -7364,6 +7365,18 @@ _drain_external_control_queue = run_coordination.drain_external_control_queue
 _MailboxPoll = run_coordination.MailboxPoll
 
 
+def _detach_turn_controls(poll: run_coordination.MailboxPoll) -> None:
+    """Take the finished turn's mid-turn inputs away from the poller.
+
+    Called from ``after_stop``, which runs once the poll thread is joined and
+    before ``active_turn`` is cleared: after this, an observed abort arms
+    nothing and observed guidance is delivered nowhere until the next turn
+    registers its own signal and endpoint.
+    """
+    poll.set_abort(None)
+    poll.set_live_delivery(None)
+
+
 def _record_abort_satisfied_by_worker(
     listener: run_control.RunControlListener,
     *,
@@ -14434,6 +14447,18 @@ def _run_locked(
             # the signal object already exists when the harness is launched.
             abort_signal = harnesses.AbortSignal()
             mailbox_poll.set_abort(abort_signal)
+            # The other turn-scoped control input beside the abort signal, and
+            # bound to the same identity the delivery ledger records. It stays
+            # inert until the harness opens it around the live process.
+            delivery_endpoint = guidance_delivery.LiveDeliveryEndpoint(
+                guidance_delivery.TurnIdentity(
+                    run_id=run_id,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    harness=turn_harness,
+                )
+            )
+            mailbox_poll.set_live_delivery(delivery_endpoint)
 
             live_turn = _LiveTurn(
                 payload=payload,
@@ -14837,6 +14862,7 @@ def _run_locked(
                     model=requested_model,
                     effort=requested_effort,
                     abort=abort_signal,
+                    live_delivery=delivery_endpoint,
                     stream_callback=stream_callback,
                     build_invocation=functools.partial(
                         build_harness_invocation,
@@ -14852,7 +14878,7 @@ def _run_locked(
                 live_turn=live_turn,
                 active_turn=active_turn,
                 payload=payload,
-                after_stop=lambda: mailbox_poll.set_abort(None),
+                after_stop=lambda: _detach_turn_controls(mailbox_poll),
                 on_failure=_abandon_turn,
             )
             result = execution.result

@@ -198,6 +198,7 @@ class TurnExecutorHarness:
             model=None,
             effort=None,
             abort=harnesses.AbortSignal(),
+            live_delivery=None,
             stream_callback=None,
             build_invocation=lambda: invocation,
         )
