@@ -9729,9 +9729,15 @@ def _ephemeral_roots() -> tuple[Path, ...]:
     platform temporary directory is where the plan directory itself lives under
     test. Resolving through symlinks matters on macOS, where ``/tmp`` and the
     per-user ``TMPDIR`` both live under ``/private``.
+
+    ``/tmp`` is listed explicitly because it is not implied by the other two:
+    :func:`tempfile.gettempdir` honours ``TMPDIR``, which on macOS is the
+    per-user ``/var/folders/.../T`` directory, so ``/tmp`` -- canonically
+    ``/private/tmp`` -- would otherwise reach the classifier unclassified and
+    fail the write guard closed the moment a turn named a scratch file there.
     """
     roots: dict[Path, None] = {}
-    for value in (tempfile.gettempdir(), os.environ.get("TMPDIR")):
+    for value in (tempfile.gettempdir(), os.environ.get("TMPDIR"), "/tmp"):
         if not value:
             continue
         roots[workspaces.canonicalize_filesystem_path(value)] = None
