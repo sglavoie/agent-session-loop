@@ -3401,14 +3401,15 @@ def _write_repair_ready_plan(
 
 
 class ReviewRepairPublicationWindowTests(unittest.TestCase):
-    """ASI-136: a selected repair child is always loop-ready.
+    """ASI-136: repair-child publication is atomic and readiness-gated.
 
     Materialization writes children, refreshes readiness, and only then runs the
     baseline + preflight gate that makes them executable. Every one of those
     boundaries is a place a refusal or a crash can strand a pending child no run
-    can select and no run can clear, so each is exercised here: the outcome is
-    always the plan the publication started from, or a loop-ready plan with the
-    children in it.
+    can select and no run can clear, so each is exercised here. The outcome is
+    always the plan the publication started from or a complete, internally
+    consistent plan with children in it; the latter is loop-ready unless the
+    operator explicitly accepts only bypassable readiness findings.
     """
 
     def setUp(self) -> None:
@@ -3608,6 +3609,44 @@ class ReviewRepairPublicationWindowTests(unittest.TestCase):
         self.assertTrue(record["recovered"])
         self.assertEqual("validating", record["phase"])
         self.assertEqual(before, self._plan_bytes())
+
+    def test_a_crash_in_the_publishing_phase_is_rolled_back(
+        self,
+    ) -> None:
+        before = self._plan_bytes()
+        advance_phase = review_repair._advance_publication_phase
+
+        def crash_after_publishing_marker(
+            window: review_repair._PublicationWindow, phase: str
+        ) -> None:
+            advance_phase(window, phase)
+            if phase == review_repair.PUBLICATION_PHASE_PUBLISHING:
+                raise _SimulatedCrash()
+
+        with (
+            mock.patch.object(
+                review_repair,
+                "_advance_publication_phase",
+                side_effect=crash_after_publishing_marker,
+            ),
+            self.assertRaises(_SimulatedCrash),
+        ):
+            self._materialize()
+
+        self.assertTrue(self._window_dir().is_dir())
+        self.assertTrue((self.plan_dir / "session-2.1.md").exists())
+        self.assertIn(
+            "**Readiness**: loop-ready",
+            (self.plan_dir / "manifest.md").read_text(encoding="utf-8"),
+        )
+
+        record = review_repair.recover_review_repair_publication(self.plan_dir)
+
+        assert record is not None
+        self.assertTrue(record["recovered"])
+        self.assertEqual("publishing", record["phase"])
+        self.assertEqual(before, self._plan_bytes())
+        self.assertFalse(self._window_dir().exists())
 
     def test_a_crashed_publication_is_recovered_by_the_next_materialization(
         self,
