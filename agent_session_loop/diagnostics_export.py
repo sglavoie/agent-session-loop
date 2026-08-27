@@ -16,7 +16,10 @@ properties that make it safe to hand to a bundle:
 
 *Bounded.* Every collection has a stated cap and every cap that bites is
 reported. A run with ten thousand events contributes counts, not ten thousand
-records, and the export never grows past :data:`MAX_EXPORT_BYTES`.
+records, and the export never grows past :data:`MAX_EXPORT_BYTES`. The bound on
+an append-only log is a bound on its *tail*, read backwards from the end: the
+records that explain a failure are the newest ones, so a cap that kept the
+oldest would bound the work and lose the evidence.
 
 *Deterministic.* The document carries no wall clock, no iteration-order
 dependence and no host entropy: over frozen inputs the same bytes come out
@@ -41,7 +44,7 @@ import os
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from . import (
     __version__,
@@ -103,10 +106,23 @@ MAX_CONTROL_RECORDS = 50
 MAX_RECEIPT_RECORDS = 50
 MAX_ISSUE_IDS = 10
 
-#: Lines read from one append-only log before the scan itself is abandoned.
-#: This bounds work, not just output: an unrotated log must not turn a debug
-#: bundle into a full-file read.
+#: Lines read from one append-only log. This bounds work, not just output: an
+#: unrotated log must not turn a debug bundle into a full-file read. The lines
+#: read are the log's *newest* ones: these files only ever grow, so a bounded
+#: prefix of one is a window onto whatever the run was doing hours ago, while
+#: the records that explain the failure being debugged are at the end.
 MAX_LOG_LINES = 20000
+
+#: Bytes read back from the end of one append-only log. ``MAX_LOG_LINES`` bounds
+#: that tail by record count, which is the bound a reader reasons about; this one
+#: exists because a log whose lines are pathologically long would otherwise have
+#: to read the whole file to reach that many of them. Whichever bites first stops
+#: the read.
+MAX_LOG_TAIL_BYTES = 16_777_216
+
+#: Bytes per backward step while locating that tail. One step covers an ordinary
+#: log's entire retained window, so the common case is a single seek and read.
+LOG_TAIL_BLOCK_BYTES = 262_144
 
 #: Longest string copied into the document. Reason and classification strings
 #: are enumerated codes in practice; the cap exists for the build that decides
@@ -316,10 +332,56 @@ class Omissions:
         ]
 
 
+def _tail_lines(handle: IO[bytes], max_lines: int) -> tuple[list[str], bool]:
+    """Return a log's newest ``max_lines`` physical lines, oldest first.
+
+    Read backwards from the end in blocks, so the cost is the retained window
+    rather than the file. Reading forwards and stopping at the cap costs the same
+    on a short log and gives the wrong answer on a long one — it keeps the oldest
+    records and never observes the newest, which are the ones an export exists to
+    carry.
+
+    The second element says whether anything was left before the window, which is
+    what separates "this is the whole log" from "this is its tail".
+    """
+    handle.seek(0, os.SEEK_END)
+    end = handle.tell()
+    position = end
+    blocks: list[bytes] = []
+    newlines = 0
+    while position > 0 and end - position < MAX_LOG_TAIL_BYTES:
+        step = min(
+            LOG_TAIL_BLOCK_BYTES, position, MAX_LOG_TAIL_BYTES - (end - position)
+        )
+        position -= step
+        handle.seek(position)
+        block = handle.read(step)
+        blocks.insert(0, block)
+        newlines += block.count(b"\n")
+        # One line past the window before stopping: until the read reaches the
+        # start of the file its first line may have begun earlier, so that line
+        # is not one this pass may keep, and the window has to be complete
+        # without it. Splitting on b"\n" is safe on UTF-8, whose multi-byte
+        # sequences never contain that byte.
+        if newlines > max_lines:
+            break
+    lines = b"".join(blocks).splitlines(keepends=True)
+    if position > 0 and lines:
+        lines = lines[1:]
+    truncated = position > 0 or len(lines) > max_lines
+    selected = lines[-max_lines:] if max_lines > 0 else []
+    return [line.decode("utf-8", "replace") for line in selected], truncated
+
+
 def _read_jsonl(
     path: Path, section: str, omissions: Omissions
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Read a bounded prefix of an append-only JSON-lines log.
+    """Read a bounded tail of an append-only JSON-lines log.
+
+    The bound is the file's actual tail, not a prefix of it, and ``scanned``
+    counts the lines that tail contained. Everything downstream — the malformed
+    tally, the omission digests, the per-section ``_tail`` caps — then applies to
+    the newest records rather than to the oldest ones.
 
     Damage is counted rather than raised: a log that a crash truncated mid-line
     is itself evidence, and refusing to export the surrounding run because of it
@@ -333,7 +395,7 @@ def _read_jsonl(
         "truncated": False,
     }
     try:
-        handle = path.open("r", encoding="utf-8", errors="replace")
+        handle = path.open("rb")
     except FileNotFoundError:
         summary["reason"] = OMISSION_MISSING
         omissions.record(section, OMISSION_MISSING, path.name)
@@ -343,34 +405,44 @@ def _read_jsonl(
         omissions.record(section, OMISSION_UNREADABLE, path.name)
         return [], summary
 
+    try:
+        with handle:
+            lines, truncated = _tail_lines(handle, MAX_LOG_LINES)
+    except OSError:
+        # A tail read seeks, so an input a forward read would have streamed —
+        # a FIFO left in the state directory — fails here instead. Every
+        # unavailable input degrades to a named reason rather than to a raise.
+        summary["reason"] = OMISSION_UNREADABLE
+        omissions.record(section, OMISSION_UNREADABLE, path.name)
+        return [], summary
+
+    if truncated:
+        summary["truncated"] = True
+        omissions.record(section, OMISSION_BOUNDED, [path.name, "scan"])
+    summary["scanned"] = len(lines)
+
     records: list[dict[str, Any]] = []
-    with handle:
-        for index, line in enumerate(handle):
-            if index >= MAX_LOG_LINES:
-                summary["truncated"] = True
-                omissions.record(section, OMISSION_BOUNDED, [path.name, "scan"])
-                break
-            summary["scanned"] = index + 1
-            if not line.strip():
-                continue
-            try:
-                parsed = json.loads(line)
-            except json.JSONDecodeError, ValueError:
-                summary["rejected"] += 1
-                # The digest covers the line's own hash, never the line: a
-                # malformed record is exactly the record most likely to be a
-                # half-written body.
-                omissions.record(
-                    section,
-                    OMISSION_MALFORMED,
-                    hashlib.sha256(line.encode("utf-8", "replace")).hexdigest(),
-                )
-                continue
-            if not isinstance(parsed, dict):
-                summary["rejected"] += 1
-                omissions.record(section, OMISSION_MALFORMED, path.name)
-                continue
-            records.append(parsed)
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError, ValueError:
+            summary["rejected"] += 1
+            # The digest covers the line's own hash, never the line: a
+            # malformed record is exactly the record most likely to be a
+            # half-written body.
+            omissions.record(
+                section,
+                OMISSION_MALFORMED,
+                hashlib.sha256(line.encode("utf-8", "replace")).hexdigest(),
+            )
+            continue
+        if not isinstance(parsed, dict):
+            summary["rejected"] += 1
+            omissions.record(section, OMISSION_MALFORMED, path.name)
+            continue
+        records.append(parsed)
     summary["available"] = True
     return records, summary
 
@@ -734,6 +806,7 @@ def _limits() -> dict[str, int]:
         "max_receipt_records": MAX_RECEIPT_RECORDS,
         "max_issue_ids": MAX_ISSUE_IDS,
         "max_log_lines": MAX_LOG_LINES,
+        "max_log_tail_bytes": MAX_LOG_TAIL_BYTES,
         "max_string_chars": MAX_STRING_CHARS,
         "max_export_bytes": MAX_EXPORT_BYTES,
     }

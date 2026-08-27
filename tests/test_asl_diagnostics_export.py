@@ -351,6 +351,13 @@ class ExportShapeTests(ExportTestBase):
         self.assertEqual(
             limits["max_export_bytes"], diagnostics_export.MAX_EXPORT_BYTES
         )
+        # Both halves of the log-tail bound are published, because a reader that
+        # sees a bounded omission on a log section needs to know which of the two
+        # stopped the read.
+        self.assertEqual(limits["max_log_lines"], diagnostics_export.MAX_LOG_LINES)
+        self.assertEqual(
+            limits["max_log_tail_bytes"], diagnostics_export.MAX_LOG_TAIL_BYTES
+        )
 
     def test_digest_covers_the_document_and_nothing_else(self) -> None:
         document = self.export()
@@ -650,6 +657,123 @@ class ExportBoundsTests(ExportTestBase):
         self.assertEqual(summary["scanned"], diagnostics_export.MAX_LOG_LINES)
         self.assertIsNotNone(
             self.omission(document, "events", diagnostics_export.OMISSION_BOUNDED)
+        )
+
+    def test_log_scan_keeps_the_actual_newest_records(self) -> None:
+        """The scan bound is a tail of the log, not a prefix of it.
+
+        A prefix-bounded scan produces the same ``scanned`` count, the same
+        ``truncated`` flag and the same bounded omission as a tail-bounded one,
+        so none of those separate the two. What separates them is which records
+        survive: here the newest delivery and the newest receipt lie past
+        ``MAX_LOG_LINES`` and must be exported, while the oldest of each lies
+        before the retained window and must not be. Both logs are asserted
+        because both go through the same reader and each has its own consumer.
+        """
+        plan_dir = self.tmp_path / "plan-rotating"
+        plan_dir.mkdir()
+        self.seed_state(plan_dir)
+        target = self.plan_state_dir(plan_dir)
+
+        def delivery(event_id: str) -> str:
+            return json.dumps(
+                {
+                    "name": events.AGENT_MUX_DELIVERY_EVENT,
+                    "payload": {
+                        "run_id": RUN_ID,
+                        "source_event_id": event_id,
+                        "final_status": "accepted",
+                    },
+                }
+            )
+
+        heartbeat = json.dumps(
+            {"name": events.TURN_HEARTBEAT_EVENT, "payload": {"run_id": RUN_ID}}
+        )
+        with (target / events.EVENTS_FILE_NAME).open("w", encoding="utf-8") as handle:
+            handle.write(delivery("src-oldest") + "\n")
+            for _ in range(diagnostics_export.MAX_LOG_LINES):
+                handle.write(heartbeat + "\n")
+            handle.write(delivery("src-newest") + "\n")
+
+        def receipt(seq: int, message_id: str) -> str:
+            return json.dumps(
+                {
+                    "seq": seq,
+                    "id": message_id,
+                    "kind": "question",
+                    "run_id": RUN_ID,
+                    "created_at": "2026-01-02T00:00:00Z",
+                }
+            )
+
+        # The filler belongs to another run, so it occupies lines without
+        # reaching either section's own record cap. That keeps each bounded
+        # omission attributable to the scan alone.
+        filler = json.dumps({"seq": 0, "kind": "receipt", "run_id": "run-other-0002"})
+        with (target / mailbox.MAILBOX_FILE_NAME).open("w", encoding="utf-8") as handle:
+            handle.write(receipt(1, "msg-oldest") + "\n")
+            for _ in range(diagnostics_export.MAX_LOG_LINES):
+                handle.write(filler + "\n")
+            handle.write(receipt(2, "msg-newest") + "\n")
+
+        document = self.export()
+        run = document["runs"][0]
+
+        self.assertTrue(run["events"]["truncated"])
+        self.assertEqual(run["events"]["scanned"], diagnostics_export.MAX_LOG_LINES)
+        self.assertEqual(
+            [record["source_event_id"] for record in run["delivery"]["records"]],
+            ["src-newest"],
+        )
+        self.assertEqual(
+            self.omission(document, "events", diagnostics_export.OMISSION_BOUNDED)[
+                "count"
+            ],
+            1,
+        )
+
+        self.assertTrue(run["receipts"]["available"])
+        self.assertEqual(
+            [record["id"] for record in run["receipts"]["records"]],
+            ["msg-newest"],
+        )
+        self.assertEqual(
+            self.omission(document, "receipts", diagnostics_export.OMISSION_BOUNDED)[
+                "count"
+            ],
+            1,
+        )
+
+    def test_malformed_accounting_follows_the_retained_tail(self) -> None:
+        """Damage is counted where it is looked at, and only there.
+
+        ``rejected`` and the malformed omission describe the records this export
+        actually inspected. A line mangled before the retained window is outside
+        that account — counting it would claim an inspection that never
+        happened — while one inside it is counted and digested rather than
+        quoted.
+        """
+        plan_dir = self.tmp_path / "plan-damaged-tail"
+        plan_dir.mkdir()
+        self.seed_state(plan_dir)
+        target = self.plan_state_dir(plan_dir)
+        heartbeat = json.dumps(
+            {"name": events.TURN_HEARTBEAT_EVENT, "payload": {"run_id": RUN_ID}}
+        )
+        with (target / events.EVENTS_FILE_NAME).open("w", encoding="utf-8") as handle:
+            handle.write(f'{{"name": "run_started", "prompt": "{CANARIES[4]}"\n')
+            for _ in range(diagnostics_export.MAX_LOG_LINES):
+                handle.write(heartbeat + "\n")
+            handle.write(f'{{"name": "run_finished", "prompt": "{CANARIES[4]}"\n')
+        document = self.export()
+        self.assert_no_canaries(document)
+        self.assertEqual(document["runs"][0]["events"]["rejected"], 1)
+        self.assertEqual(
+            self.omission(document, "events", diagnostics_export.OMISSION_MALFORMED)[
+                "count"
+            ],
+            1,
         )
 
 

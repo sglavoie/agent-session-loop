@@ -7013,10 +7013,17 @@ Three properties make the document safe to put in a shareable bundle.
 **Bounded.** Every collection has a cap, every cap is published in the
 document's own `limits` block, and every cap that bites is counted in
 `omissions`. A run with a hundred thousand events contributes counts, not
-records. The scan itself is bounded too, at `max_log_lines`, so an
-unrotated log cannot turn a debug capture into a full-file read. The
-serialized document never exceeds `max_export_bytes`; runs are dropped
-from the end until it fits, and each drop is recorded.
+records. The scan itself is bounded too, at `max_log_lines` and
+`max_log_tail_bytes`, so an unrotated log cannot turn a debug capture into
+a full-file read. That bound is a bound on the log's *tail*: an
+append-only log is read backwards from its end, because the records that
+explain a failure are the newest ones and a bounded prefix of a long log
+would report on whatever the run was doing hours earlier. What was left
+before the retained window is counted as a bounded omission, and
+`scanned`, `rejected` and the malformed digests describe that window and
+nothing outside it. The serialized document never exceeds
+`max_export_bytes`; runs are dropped from the end until it fits, and each
+drop is recorded.
 
 **Deterministic.** The document carries no wall clock, no host entropy and
 no iteration-order dependence — runs are ordered by the projection's
