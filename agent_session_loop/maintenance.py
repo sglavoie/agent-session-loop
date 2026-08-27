@@ -35,13 +35,18 @@ than carried forward. The thresholds are re-measured once the claim is held,
 and a pass that finds the pressure already relieved by whoever it waited for
 returns without mutating unless ``force`` was asked for explicitly. Liveness,
 pins, and plan locks are re-read under the claim to narrow the plan, and then
-again immediately before each individual removal, compression, and body
-deletion, so a protection that lands mid-pass stops the very next action rather
-than only the first one. Every removal writes its metadata durably before the
-bytes go, so an interrupted pass can leave a tombstone with nothing removed but
-never removed bytes with no tombstone. Byte accounting is measured after the
-fact, never assumed: a failed removal reports the bytes that are still
-allocated instead of counting them as reclaimed.
+again at every ``unlink`` rather than merely in front of the operation that
+contains one: compressing a multi-gigabyte body and digesting one both take real
+time, so a fence taken before that work has gone stale by the moment the bytes
+actually go. A protection that lands during the preparation therefore still
+wins, and what it leaves on disk is true — a staged gzip nobody published is
+discarded, a published gzip and its sidecar describe a body that is still there
+and say so, and a tombstone written for a removal that then did not happen is
+withdrawn. Every removal writes its metadata durably before the bytes go, so an
+interrupted pass can leave a tombstone with nothing removed but never removed
+bytes with no tombstone. Byte accounting is measured after the fact, never
+assumed: a failed removal reports the bytes that are still allocated instead of
+counting them as reclaimed.
 
 When protected data alone still exceeds the budget, maintenance deletes nothing
 outside policy and raises a strict health finding instead. That is the one
@@ -520,6 +525,11 @@ class _SafetyReading:
 #: Reads current plan-lock, liveness, and pin state for one run, right now.
 _Fence = Callable[[str, str, str], str]
 
+#: The same reading, already bound to one run, so an operation deep inside a
+#: body can re-take it at its own destructive boundary without knowing which run
+#: it belongs to.
+_Blocker = Callable[[], str]
+
 
 def _drop(
     *, lane: str, stage: str, plan_dir: str, run_id: str, reason: str
@@ -621,6 +631,21 @@ class _Body:
     stored: Path
     compressed: bool
     stored_bytes: int
+
+
+@dataclass(frozen=True)
+class _BodyOutcome:
+    """What one compression left behind: a compacted body, or why it stopped.
+
+    ``body`` is the compacted replacement when the whole operation landed.
+    ``blocked`` is non-empty when protection arrived mid-flight, which is not a
+    failure — nothing is broken and nothing is lost — but does end this run's
+    compaction. Both empty means the compression failed and said so in
+    ``failures``.
+    """
+
+    body: _Body | None
+    blocked: str
 
 
 def _iter_bodies(run_dir: Path) -> list[_Body]:
@@ -920,6 +945,13 @@ class _Mutator:
     said was safe is re-established against current state at the instant each
     action is taken, and a candidate the fence refuses is dropped and reported
     instead of deleted.
+
+    "The instant each action is taken" means the ``unlink``, not the call that
+    leads to one. Compression and budgeted removal both read a whole body before
+    they destroy anything, so they carry the fence inside and re-take it at that
+    boundary; a body they were told to stop touching keeps its bytes, and any
+    metadata they had already published about it is corrected rather than left
+    describing a removal that did not happen.
     """
 
     def __init__(self, *, deadline: _Deadline, now: datetime, fence: _Fence) -> None:
@@ -987,21 +1019,45 @@ class _Mutator:
             )
         )
 
-    def compress_body(self, body: _Body) -> _Body | None:
-        """Replace one raw body with its gzip, recording the original first."""
+    def compress_body(self, body: _Body, *, blocker: _Blocker) -> _BodyOutcome:
+        """Replace one raw body with its gzip, recording the original first.
+
+        The fence in front of this call proves only that the body was
+        unprotected when compression *started*, and compressing a body is the
+        slowest thing maintenance does. ``blocker`` is therefore re-read twice
+        more: once with the gzip merely staged, where a refusal costs a
+        temporary file and changes nothing else, and once immediately before the
+        original is unlinked, which is the only destructive instruction here.
+        """
         target = body.source.with_name(f"{body.source.name}.gz")
-        try:
-            digest, byte_count, stored_bytes = _compress_file(body.source, target)
-        except OSError as error:
+
+        def failed(error: str) -> _BodyOutcome:
             self.failures.append(
                 MaintenanceFailure(
                     kind=FAILURE_BODY_COMPRESS,
                     target=str(body.source),
-                    error=str(error),
+                    error=error,
                     bytes_still_allocated=_file_size(body.source),
                 )
             )
-            return None
+            return _BodyOutcome(body=None, blocked="")
+
+        try:
+            staged, digest, byte_count = _stage_compressed(body.source, target)
+        except OSError as error:
+            return failed(str(error))
+        reason = blocker()
+        if reason:
+            # Nothing has been published, so withdrawing is exact: the staged
+            # copy goes and the corpus is byte-for-byte what it was before.
+            _discard_staged(staged)
+            return _BodyOutcome(body=None, blocked=reason)
+        try:
+            os.replace(staged, target)
+        except OSError as error:
+            _discard_staged(staged)
+            return failed(str(error))
+        stored_bytes = _file_size(target)
         ledger = {
             "schema_version": BODY_LEDGER_SCHEMA_VERSION,
             "path": str(body.source),
@@ -1017,40 +1073,41 @@ class _Mutator:
         try:
             _write_ledger(body.source, ledger)
         except OSError as error:
-            self.failures.append(
-                MaintenanceFailure(
-                    kind=FAILURE_BODY_COMPRESS,
-                    target=str(body.source),
-                    error=f"could not record the body ledger: {error}",
-                    bytes_still_allocated=_file_size(body.source),
-                )
-            )
-            return None
+            return failed(f"could not record the body ledger: {error}")
+        reason = blocker()
+        if reason:
+            # The gzip and its ledger are published, and both are true: the
+            # ledger says the body is not removed, and it is not. This is the
+            # same recoverable shape an interrupted pass leaves — original plus
+            # gzip plus sidecar — which the next unprotected pass converges.
+            return _BodyOutcome(body=None, blocked=reason)
         try:
             body.source.unlink()
         except OSError as error:
-            self.failures.append(
-                MaintenanceFailure(
-                    kind=FAILURE_BODY_COMPRESS,
-                    target=str(body.source),
-                    error=str(error),
-                    bytes_still_allocated=_file_size(body.source),
-                )
-            )
-            return None
+            return failed(str(error))
         self.compressed_body_count += 1
         self.compaction_reclaimed_bytes += max(0, byte_count - stored_bytes)
-        return _Body(
-            source=body.source,
-            stored=target,
-            compressed=True,
-            stored_bytes=stored_bytes,
+        return _BodyOutcome(
+            body=_Body(
+                source=body.source,
+                stored=target,
+                compressed=True,
+                stored_bytes=stored_bytes,
+            ),
+            blocked="",
         )
 
-    def remove_body(self, body: _Body) -> None:
-        """Remove one over-budget body, leaving its identity behind on disk."""
-        ledger = _read_ledger(body.source)
-        if not ledger.get("sha256"):
+    def remove_body(self, body: _Body, *, blocker: _Blocker) -> str:
+        """Remove one over-budget body, leaving its identity behind on disk.
+
+        Returns the reason protection forbade the removal, or ``""``. Digesting
+        a body that has no ledger yet reads every byte of it, so ``blocker`` is
+        re-read after that preparation and again immediately before the unlink;
+        a tombstone published in between is withdrawn rather than left standing
+        over a body that is still there.
+        """
+        prepared = _read_ledger(body.source)
+        if not prepared.get("sha256"):
             try:
                 digest, byte_count = _digest_file(body.stored)
             except OSError as error:
@@ -1062,8 +1119,8 @@ class _Mutator:
                         bytes_still_allocated=body.stored_bytes,
                     )
                 )
-                return
-            ledger = {
+                return ""
+            prepared = {
                 "schema_version": BODY_LEDGER_SCHEMA_VERSION,
                 "path": str(body.source),
                 "byte_count": byte_count,
@@ -1075,8 +1132,13 @@ class _Mutator:
                 "removed_at": None,
                 "reason": "",
             }
+        reason = blocker()
+        if reason:
+            # Caught before the tombstone was published, so nothing on disk has
+            # to be walked back at all.
+            return reason
         ledger = {
-            **ledger,
+            **prepared,
             "removed": True,
             "removed_at": self.now.isoformat(),
             "reason": REASON_LOG_BODY_BUDGET,
@@ -1094,7 +1156,11 @@ class _Mutator:
                     bytes_still_allocated=body.stored_bytes,
                 )
             )
-            return
+            return ""
+        reason = blocker()
+        if reason:
+            self._withdraw_tombstone(body, prepared)
+            return reason
         try:
             body.stored.unlink()
         except OSError as error:
@@ -1106,9 +1172,37 @@ class _Mutator:
                     bytes_still_allocated=_file_size(body.stored),
                 )
             )
-            return
+            return ""
         self.removed_body_count += 1
         self.compaction_reclaimed_bytes += body.stored_bytes
+        return ""
+
+    def _withdraw_tombstone(self, body: _Body, prepared: dict[str, Any]) -> None:
+        """Undo a published tombstone for a body protection saved from removal.
+
+        A ledger saying ``removed`` over a body that is still on disk is a lie
+        an operator would act on, so it is rewritten to the pre-removal record —
+        which keeps the digest the preparation just paid for. A rewrite that
+        fails is a real partial failure: the bytes are safe, but the metadata
+        beside them is wrong until a human or a later pass fixes it.
+        """
+        retracted = {
+            key: value
+            for key, value in prepared.items()
+            if key not in ("removed_path", "removed_bytes")
+        }
+        retracted.update(removed=False, removed_at=None, reason="")
+        try:
+            _write_ledger(body.source, retracted)
+        except OSError as error:
+            self.failures.append(
+                MaintenanceFailure(
+                    kind=FAILURE_BODY_REMOVE,
+                    target=str(body.stored),
+                    error=f"could not withdraw the body ledger: {error}",
+                    bytes_still_allocated=body.stored_bytes,
+                )
+            )
 
     def compact_run(self, target: _Compaction, *, log_body_budget_bytes: int) -> bool:
         """Compress then budget one run's bodies. False when the deadline hit.
@@ -1116,14 +1210,23 @@ class _Mutator:
         Compression is destructive too — the original is unlinked once the gzip
         and its ledger are durable — so the fence guards it as well as removal,
         and a run that acquires protection midway keeps every body it still has.
+        The fence is handed down into both operations rather than only checked
+        in front of them, because each one spends real time preparing before it
+        destroys anything, and a reading that old is a memory, not a fence.
         """
 
-        def blocked() -> bool:
-            return self._fenced_out(
-                lane=LANE_COMPACTION,
-                plan_dir=target.plan_dir,
-                plan_state_dir=target.plan_state_dir,
-                run_id=target.run_id,
+        def blocker() -> str:
+            return self.fence(target.plan_dir, target.plan_state_dir, target.run_id)
+
+        def dropped(reason: str) -> None:
+            self.drops.append(
+                _drop(
+                    lane=LANE_COMPACTION,
+                    stage=STAGE_MUTATION,
+                    plan_dir=target.plan_dir,
+                    run_id=target.run_id,
+                    reason=reason,
+                )
             )
 
         bodies: list[_Body] = []
@@ -1133,19 +1236,29 @@ class _Mutator:
             if body.compressed:
                 bodies.append(body)
                 continue
-            if blocked():
+            reason = blocker()
+            if reason:
+                dropped(reason)
                 return True
-            compressed = self.compress_body(body)
-            bodies.append(compressed if compressed is not None else body)
+            outcome = self.compress_body(body, blocker=blocker)
+            if outcome.blocked:
+                dropped(outcome.blocked)
+                return True
+            bodies.append(outcome.body if outcome.body is not None else body)
         selected, _removable = _over_budget_selection(
             bodies, budget_bytes=log_body_budget_bytes
         )
         for body in selected:
             if self.out_of_time():
                 return False
-            if blocked():
+            reason = blocker()
+            if reason:
+                dropped(reason)
                 return True
-            self.remove_body(body)
+            reason = self.remove_body(body, blocker=blocker)
+            if reason:
+                dropped(reason)
+                return True
         return True
 
 
@@ -1162,14 +1275,20 @@ def _digest_file(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), total
 
 
-def _compress_file(source: Path, target: Path) -> tuple[str, int, int]:
-    """Stream ``source`` into a deterministic gzip at ``target``.
+def _stage_compressed(source: Path, target: Path) -> tuple[Path, str, int]:
+    """Stream ``source`` into a deterministic gzip staged beside ``target``.
 
     Streaming and not ``gzip.compress``: a multi-gigabyte ``stderr.log`` is
     exactly the case this exists for, and reading one into memory to save it
     would be the wrong kind of maintenance. The digest is taken on the same
     pass, so the original is read once. ``mtime=0`` keeps identical input
     byte-identical output, which is what makes a repeated pass a no-op.
+
+    Staging stops one file short of publication on purpose. Compressing a
+    multi-gigabyte body is the longest thing this module does, and it is exactly
+    the window in which a plan lock, a run, or an assurance pin can appear, so
+    the caller gets the chance to re-read protection while the only thing on
+    disk is a dot-prefixed temporary it can discard.
     """
     temporary = target.with_name(f".{target.name}.tmp")
     digest = hashlib.sha256()
@@ -1188,12 +1307,28 @@ def _compress_file(source: Path, target: Path) -> tuple[str, int, int]:
                     compressed.write(chunk)
             staged.flush()
             durability.fullsync(staged.fileno())
-        os.replace(temporary, target)
     except OSError:
         with contextlib.suppress(OSError):
             temporary.unlink()
         raise
-    return digest.hexdigest(), total, _file_size(target)
+    return temporary, digest.hexdigest(), total
+
+
+def _discard_staged(temporary: Path) -> None:
+    """Drop a staged gzip that was never published, leaving the corpus as it was."""
+    with contextlib.suppress(OSError):
+        temporary.unlink()
+
+
+def _compress_file(source: Path, target: Path) -> tuple[str, int, int]:
+    """Stage ``source``'s gzip and publish it at ``target`` in one step."""
+    temporary, digest, total = _stage_compressed(source, target)
+    try:
+        os.replace(temporary, target)
+    except OSError:
+        _discard_staged(temporary)
+        raise
+    return digest, total, _file_size(target)
 
 
 def _revalidate(

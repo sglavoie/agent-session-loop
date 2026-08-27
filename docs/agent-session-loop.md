@@ -2786,7 +2786,24 @@ survives it. Every destructive action is fenced by its own reading taken
 immediately before it acts: each whole-run removal, each body compression (which
 unlinks the original once the gzip and its sidecar are durable), and each
 budgeted body removal re-reads the plan lock, the live-run set, and the pin set
-first. Anything that came alive, acquired a pin, or acquired a lock — whether
+first.
+
+That reading is taken at the `unlink` itself, not only at the top of the
+operation containing it, because both compaction operations read an entire body
+before they destroy anything and a body can be gigabytes: compression streams
+the gzip and takes the digest on the same pass, and a removal with no sidecar
+yet digests what it is about to delete. A pin, plan lock, or live run appearing
+during that preparation still stops the deletion, and what it leaves behind is
+true in every case. A gzip that was only staged is discarded, so the corpus is
+byte-for-byte what it was. A gzip already published keeps its `<name>.body.json`
+sidecar saying `removed: false` beside the original that is still there — the
+same recoverable shape an interrupted pass leaves, which the next unprotected
+pass converges. A removal tombstone already made durable is withdrawn back to
+its pre-removal record, keeping the digest that preparation paid for, so no
+sidecar ever claims a removal that did not happen; a withdrawal that cannot
+itself be written is reported as a `partial-failure` rather than left standing.
+
+Anything that came alive, acquired a pin, or acquired a lock — whether
 since planning or since the last action in the same pass — is dropped and listed
 in `revalidation_drops`, where each entry names its `lane` (`reclaim` or
 `compaction`) and the `stage` at which it was caught (`revalidation` or
