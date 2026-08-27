@@ -16,7 +16,6 @@ import contextlib
 import functools
 import hashlib
 import json
-import math
 import os
 import re
 import shlex
@@ -27,12 +26,11 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from dataclasses import replace as dataclass_replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, TextIO
@@ -46,7 +44,6 @@ from . import (
     commit_message,
     config,
     contracts,
-    control_queue,
     control_signal,
     durability,
     events,
@@ -72,6 +69,7 @@ from . import (
     review_transitions,
     run_contention,
     run_control,
+    run_coordination,
     run_flags,
     state,
     supervisor_audit,
@@ -172,36 +170,9 @@ SESSION_KINDS: tuple[str, ...] = plans.SESSION_KINDS
 TRUSTED_RUNNER_SIGNAL_SOURCES = turn_execution.TRUSTED_RUNNER_SIGNAL_SOURCES
 RUNNER_STATUS_SOURCE_ABSENT = turn_execution.RUNNER_STATUS_SOURCE_ABSENT
 APPROVAL_SIGNAL_PATTERNS = turn_execution.APPROVAL_SIGNAL_PATTERNS
-RUN_CONTROL_EVENT_ACTIONS: dict[str, str] = {
-    "request": events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
-    "cancel": events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CANCELED,
-    "consumed": events.RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CONSUMED,
-    "abort-requested": events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED,
-    # Consumption has two outcomes with one state transition behind them, so
-    # the satisfied-by-worker case overrides this default at its call site.
-    "abort-consumed": events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED,
-    "tail-enabled": events.RUN_CONTROL_ACTION_TAIL_ENABLED,
-    "tail-disabled": events.RUN_CONTROL_ACTION_TAIL_DISABLED,
-    "harness-selected": events.RUN_CONTROL_ACTION_HARNESS_SELECTED,
-    "implementation-model-updated": (
-        events.RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED
-    ),
-}
-RUN_CONTROL_EVENT_MESSAGES: dict[str, str] = {
-    "request": "stop-after-current requested",
-    "cancel": "stop-after-current canceled",
-    "consumed": "stop-after-current consumed",
-    "abort-requested": "turn abort requested",
-    "abort-consumed": "turn abort honored",
-    "tail-enabled": "live tail enabled",
-    "tail-disabled": "live tail disabled",
-    "harness-selected": "next harness selected",
-    "implementation-model-updated": "implementation model controls updated",
-}
-# Reason recorded for an abort command that carried none. The value reaches the
-# worker's guidance record and the aborted session's Handoff note, so it has to
-# read as an explanation on its own.
-ABORT_TURN_DEFAULT_REASON = "supervisor requested abort"
+RUN_CONTROL_EVENT_ACTIONS = run_coordination.RUN_CONTROL_EVENT_ACTIONS
+RUN_CONTROL_EVENT_MESSAGES = run_coordination.RUN_CONTROL_EVENT_MESSAGES
+ABORT_TURN_DEFAULT_REASON = run_coordination.ABORT_TURN_DEFAULT_REASON
 AGENT_MUX_START_EVENT = agent_mux_delivery.START_EVENT
 AGENT_MUX_TURN_START_EVENT = agent_mux_delivery.TURN_START_EVENT
 AGENT_MUX_TURN_HEARTBEAT_EVENT = agent_mux_delivery.TURN_HEARTBEAT_EVENT
@@ -282,78 +253,48 @@ WORKER_MODE_SKILL = "skill"
 # complete review turn.
 REVIEW_GUARD_EXCLUDE_ENV_VAR = "ASL_REVIEW_GUARD_EXCLUDE"
 
-# A runner that receives a reply-capable pause remains live for five minutes.
-# An active supervisor lease may extend that deadline one minute at a time.
-# The ceiling below bounds *unsupervised* time, not wall clock: it is measured
-# from the last lease that proved a supervisor alive, so a watched wait outlives
-# it while an unwatched one still ends within thirty minutes. Environment
-# overrides are deliberately narrow test seams; invalid, non-finite, or
-# non-positive values fall back to these production defaults.
-MAILBOX_REPLY_WAIT_BASE_SECONDS = 5 * 60.0
-MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS = 60.0
-MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS = 30 * 60.0
-MAILBOX_REPLY_WAIT_POLL_SECONDS = 2.0
-MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS = 10.0
-# The wait paces itself on the monotonic clock, which freezes across system
-# sleep on macOS, while the persisted deadlines are wall clock. Between two
-# poll iterations the wall clock can only run ahead of the monotonic clock by
-# scheduler jitter, so drift beyond one whole poll interval plus margin must
-# be a suspend (or a clock step): the wait then re-anchors the persisted
-# deadlines around its surviving monotonic budget. Suspend detection is
-# exercised through the injected clock seams, so unlike the budgets above
-# this threshold deliberately has no environment override.
-MAILBOX_REPLY_WAIT_SUSPEND_SKEW_SECONDS = 5.0
-# For a few seconds after wake the on-disk lease is legitimately wall-clock
-# ancient: the autopilot has not polled yet, and a lease probe landing in that
-# window would kill a healthy wait. After a detected suspend the supervisor
-# therefore gets this much *awake* (monotonic) time to re-prove liveness
-# before a non-fresh lease ends the wait. It equals one full lease freshness
-# window (mailbox.MAILBOX_LEASE_FRESH_SECONDS, 90 seconds) — roughly eighteen
-# chances at the autopilot's 5-second poll cadence, the tick that actually
-# republishes the projection. Inside the grace a stale lease neither ends the
-# wait nor extends the active deadline, and the grace never extends the
-# unsupervised ceiling. Like the skew threshold above, this is a detection
-# bound rather than an operator budget, exercised through the injected clock
-# seams, so it deliberately has no environment override.
-MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS = mailbox.MAILBOX_LEASE_FRESH_SECONDS
-# A question body is the worker's last-message artifact, which is unbounded,
-# while the mailbox log is capped at 4 MiB with no rotation — one oversized
-# message could consume it. Longer bodies are truncated deterministically to
-# this many characters plus a footer naming the on-disk artifact that holds
-# the full text. Determinism is load-bearing: a retried wait preparation must
-# recompute a byte-identical body or the question-reuse equality check in
-# _ensure_mailbox_question would degrade the retry to a terminal pause. Like
-# the suspend bounds above this is a protocol bound rather than an operator
-# budget, so it deliberately has no environment override.
-MAILBOX_QUESTION_TEXT_MAX_CHARS = 16000
-MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST = "supervisor-lost"
-MAILBOX_REPLY_WAIT_PREPARATION_REASONS: tuple[str, ...] = (
-    mailbox.LEASE_MISSING,
-    mailbox.LEASE_INVALID_SIZE,
-    mailbox.LEASE_EMPTY,
-    mailbox.LEASE_INVALID_JSON,
-    mailbox.LEASE_NOT_OBJECT,
-    mailbox.LEASE_UNSUPPORTED_VERSION,
-    mailbox.LEASE_INVALID_SUPERVISOR_ID,
-    mailbox.LEASE_INVALID_UPDATED_AT,
-    mailbox.LEASE_FUTURE_UPDATED_AT,
-    mailbox.LEASE_EXPIRED,
-    mailbox.ERROR_LEASE_READ,
-    mailbox.ERROR_MAILBOX_FULL,
-    mailbox.ERROR_MAILBOX_READ,
-    mailbox.ERROR_MAILBOX_WRITE,
-    *qna.QNA_ERROR_REASONS,
+# Bounded mailbox reply waits, supervisor leases, the external control plane,
+# and terminal assurance are coordination, not run-loop logic: they live in
+# :mod:`agent_session_loop.run_coordination` behind typed APIs that own their
+# durable slots. The aliases here and below keep the runner's historical
+# vocabulary resolving for in-tree callers and for tests that patch these
+# names on this module.
+MAILBOX_REPLY_WAIT_BASE_SECONDS = run_coordination.MAILBOX_REPLY_WAIT_BASE_SECONDS
+MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS = (
+    run_coordination.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS
 )
-MAILBOX_REPLY_WAIT_BASE_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_BASE_SECONDS"
+MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS = (
+    run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS
+)
+MAILBOX_REPLY_WAIT_POLL_SECONDS = run_coordination.MAILBOX_REPLY_WAIT_POLL_SECONDS
+MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS = (
+    run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS
+)
+MAILBOX_REPLY_WAIT_SUSPEND_SKEW_SECONDS = (
+    run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_SKEW_SECONDS
+)
+MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS = (
+    run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS
+)
+MAILBOX_QUESTION_TEXT_MAX_CHARS = run_coordination.MAILBOX_QUESTION_TEXT_MAX_CHARS
+MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST = (
+    run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST
+)
+MAILBOX_REPLY_WAIT_PREPARATION_REASONS = (
+    run_coordination.MAILBOX_REPLY_WAIT_PREPARATION_REASONS
+)
+MAILBOX_REPLY_WAIT_BASE_ENV_VAR = run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR
 MAILBOX_REPLY_WAIT_LEASE_EXTENSION_ENV_VAR = (
-    "ASL_MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS"
+    run_coordination.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_ENV_VAR
 )
 MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR = (
-    "ASL_MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS"
+    run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR
 )
-MAILBOX_REPLY_WAIT_POLL_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_POLL_SECONDS"
-MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR = "ASL_MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS"
-_MAILBOX_TOKEN_UNSEEN = object()
+MAILBOX_REPLY_WAIT_POLL_ENV_VAR = run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR
+MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR = (
+    run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR
+)
+_MAILBOX_TOKEN_UNSEEN = run_coordination.MAILBOX_TOKEN_UNSEEN
 
 # Verification-repair and review-verdict-repair loop control. Both budgets and
 # both fingerprint prefixes are declared beside the transitions that spend them
@@ -4243,19 +4184,8 @@ _write_json_file = durability.write_json_file
 _write_bytes_file = durability.write_bytes_file
 
 
-def _read_optional_bytes(path: Path) -> bytes | None:
-    try:
-        return path.read_bytes()
-    except FileNotFoundError:
-        return None
-
-
-def _restore_optional_bytes(path: Path, payload: bytes | None) -> None:
-    if payload is None:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-        return
-    _write_bytes_file(path, payload)
+_read_optional_bytes = run_coordination.read_optional_bytes
+_restore_optional_bytes = run_coordination.restore_optional_bytes
 
 
 def _commit_status_result(
@@ -5009,6 +4939,41 @@ def _notify_agent_mux_loop_wait_ended(
     )
 
 
+@dataclass(frozen=True)
+class _AgentMuxWaitNotifier:
+    """Bind a live wait's lifecycle to this run's AgentMux projection.
+
+    The coordination boundary announces a wait through
+    :class:`run_coordination.WaitNotifier` rather than reaching for the
+    projection itself, because who hears about a wait is a runner concern and
+    the delivery seam is already fail-open here: ``_notify_agent_mux_loop``
+    swallows its own errors, so neither call can end a wait a supervisor is
+    still answering.
+    """
+
+    payload: dict[str, Any]
+    persistence: _RunPersistence
+
+    def wait_started(self, *, question_id: str, question_text: str | None) -> None:
+        _notify_agent_mux_loop_wait_started(
+            self.payload,
+            question_id=question_id,
+            question_text=question_text,
+            persistence=self.persistence,
+        )
+
+    def wait_ended(
+        self, *, question_id: str, wait_reason: str, closure_id: str | None
+    ) -> None:
+        _notify_agent_mux_loop_wait_ended(
+            self.payload,
+            question_id=question_id,
+            wait_reason=wait_reason,
+            closure_id=closure_id,
+            persistence=self.persistence,
+        )
+
+
 def _notify_agent_mux_loop_paused(
     payload: dict[str, Any],
     persistence: _RunPersistence | None = None,
@@ -5128,978 +5093,39 @@ def _append_harness_degradation_event(
     )
 
 
-def _waiting_for_reply_payload(
-    *,
-    question_id: str,
-    session_id: str,
-    turn_index: int,
-    started_at: datetime,
-    base_deadline: datetime,
-    unsupervised_deadline_at: datetime,
-    unsupervised_ceiling_seconds: float,
-    last_lease_activity_at: datetime | None,
-) -> dict[str, Any]:
-    """Build the compact persisted identity and deadline record for a live wait."""
-    if not isinstance(question_id, str) or not question_id:
-        raise ValueError("question_id must be a non-empty string")
-    plans.parse_session_id(session_id)
-    if (
-        isinstance(turn_index, bool)
-        or not isinstance(turn_index, int)
-        or turn_index < 1
-    ):
-        raise ValueError("turn_index must be a positive integer")
-    moments = (
-        ("started_at", started_at),
-        ("base_deadline", base_deadline),
-        ("unsupervised_deadline_at", unsupervised_deadline_at),
-    )
-    if last_lease_activity_at is not None:
-        moments += (("last_lease_activity_at", last_lease_activity_at),)
-    for name, moment in moments:
-        if moment.tzinfo is None or moment.utcoffset() is None:
-            raise ValueError(f"{name} must be timezone-aware")
-    if base_deadline < started_at:
-        raise ValueError("base_deadline must not precede started_at")
-    if (
-        isinstance(unsupervised_ceiling_seconds, bool)
-        or not isinstance(unsupervised_ceiling_seconds, (int, float))
-        or not math.isfinite(unsupervised_ceiling_seconds)
-        or unsupervised_ceiling_seconds <= 0
-    ):
-        raise ValueError(
-            "unsupervised_ceiling_seconds must be a finite positive number"
-        )
-    # The two deadlines no longer share an anchor: the base ratchets off the
-    # last lease probe while the ceiling rolls off the last *fresh* one, so a
-    # supervised wait legitimately holds a base beyond the current ceiling.
-    # ``unsupervised_deadline_at`` is the ceiling as of the last anchor the
-    # runner persisted; a reader rolls it forward from ``last_lease_activity_at``
-    # and the ceiling span rather than treating it as terminal.
-    return {
-        "question_id": question_id,
-        **_session_identity_payload(session_id),
-        "turn_index": turn_index,
-        "started_at": _isoformat(started_at),
-        "base_deadline": _isoformat(base_deadline),
-        "unsupervised_deadline_at": _isoformat(unsupervised_deadline_at),
-        "unsupervised_ceiling_seconds": float(unsupervised_ceiling_seconds),
-        "last_lease_activity_at": (
-            _isoformat(last_lease_activity_at)
-            if last_lease_activity_at is not None
-            else None
-        ),
-    }
-
-
-def _set_waiting_for_reply(
-    event_path: Path,
-    payload: dict[str, Any],
-    waiting_for_reply: Mapping[str, Any],
-    *,
-    pending_outbox: int,
-    persistence: _RunPersistence | None = None,
-) -> dict[str, Any]:
-    """Persist a live wait and its nonterminal mailbox event atomically."""
-    if (
-        isinstance(pending_outbox, bool)
-        or not isinstance(pending_outbox, int)
-        or pending_outbox < 0
-    ):
-        raise ValueError("pending_outbox must be a non-negative integer")
-    persistence = _run_persistence(persistence)
-    waiting = dict(waiting_for_reply)
-    with persistence.lock:
-        payload["waiting_for_reply"] = waiting
-        persistence.append_event(
-            event_path,
-            events.MAILBOX_EVENT,
-            {
-                "run_id": payload.get("run_id"),
-                **waiting,
-                "pending_outbox": pending_outbox,
-                "action": events.MAILBOX_ACTION_WAIT_STARTED,
-            },
-        )
-        persistence.write_state(payload)
-    return waiting
-
-
-def _clear_waiting_for_reply(
-    event_path: Path,
-    payload: dict[str, Any],
-    *,
-    reason: str,
-    pending_outbox: int | None,
-    lease_updated_at: str | None = None,
-    lease_reason: str | None = None,
-    lease_supervisor_id: str | None = None,
-    suspend_skew_seconds: float | None = None,
-    suspend_lease_grace_seconds: float | None = None,
-    unsupervised_seconds: float | None = None,
-    resolution_action: mailbox.ResolutionAction | None = None,
-    resolution_message_id: str | None = None,
-    resolution_seq: int | None = None,
-    persistence: _RunPersistence | None = None,
-) -> None:
-    """Remove live-wait state and make its outcome observable to event readers."""
-    if not isinstance(reason, str) or not reason:
-        raise ValueError("reason must be a non-empty string")
-    if pending_outbox is not None and (
-        isinstance(pending_outbox, bool)
-        or not isinstance(pending_outbox, int)
-        or pending_outbox < 0
-    ):
-        raise ValueError("pending_outbox must be a non-negative integer or None")
-    resolution_values = (
-        resolution_action,
-        resolution_message_id,
-        resolution_seq,
-    )
-    if any(value is not None for value in resolution_values):
-        if reason != "resolution" or any(value is None for value in resolution_values):
-            raise ValueError(
-                "resolution metadata must be complete and use reason resolution"
-            )
-        if resolution_action not in mailbox.RESOLUTION_ACTIONS:
-            raise ValueError("resolution_action must be continue or pause")
-        if not isinstance(resolution_message_id, str) or not resolution_message_id:
-            raise ValueError("resolution_message_id must be a non-empty string")
-        if (
-            isinstance(resolution_seq, bool)
-            or not isinstance(resolution_seq, int)
-            or resolution_seq < 1
-        ):
-            raise ValueError("resolution_seq must be a positive integer")
-    elif reason == "resolution":
-        raise ValueError("reason resolution requires resolution metadata")
-    persistence = _run_persistence(persistence)
-    with persistence.lock:
-        waiting = payload.pop("waiting_for_reply", None)
-        if isinstance(waiting, dict):
-            event_payload = {
-                "run_id": payload.get("run_id"),
-                **waiting,
-                "reason": reason,
-                "action": events.MAILBOX_ACTION_WAIT_CLEARED,
-            }
-            if pending_outbox is not None:
-                event_payload["pending_outbox"] = pending_outbox
-            for key, value in (
-                ("lease_updated_at", lease_updated_at),
-                ("lease_reason", lease_reason),
-                ("lease_supervisor_id", lease_supervisor_id),
-                ("suspend_skew_seconds", suspend_skew_seconds),
-                ("suspend_lease_grace_seconds", suspend_lease_grace_seconds),
-                ("unsupervised_seconds", unsupervised_seconds),
-                ("resolution_action", resolution_action),
-                ("resolution_message_id", resolution_message_id),
-                ("resolution_seq", resolution_seq),
-            ):
-                if value is not None:
-                    event_payload[key] = value
-            persistence.append_event(
-                event_path,
-                events.MAILBOX_EVENT,
-                event_payload,
-            )
-        persistence.write_state(payload)
-
-
-def _record_mailbox_reply_wait_preparation_failed(
-    event_path: Path,
-    payload: Mapping[str, Any],
-    *,
-    session_id: str,
-    turn_index: int,
-    reason: str,
-    persistence: _RunPersistence | None = None,
-) -> None:
-    """Record why a reply-capable pause could not enter a live mailbox wait."""
-    if not isinstance(reason, str) or not reason:
-        raise ValueError("reason must be a non-empty string")
-    persistence = _run_persistence(persistence)
-    persistence.append_event(
-        event_path,
-        events.MAILBOX_EVENT,
-        {
-            "run_id": payload.get("run_id"),
-            **_session_identity_payload(session_id),
-            "turn_index": turn_index,
-            "reason": reason,
-            "action": events.MAILBOX_ACTION_WAIT_PREPARATION_FAILED,
-        },
-    )
-
-
-@dataclass(frozen=True)
-class _MailboxReplyWaitSettings:
-    base_seconds: float
-    lease_extension_seconds: float
-    unsupervised_ceiling_seconds: float
-    poll_seconds: float
-    io_grace_seconds: float
-
-
-@dataclass(frozen=True)
-class _PreparedMailboxReplyWait:
-    context: qna.QnAContext
-    question: mailbox.MailboxMessage
-    wait_start: mailbox.MailboxMessage
-    waiting_for_reply: dict[str, Any]
-    pending_outbox: int
-    settings: _MailboxReplyWaitSettings
-    started_monotonic: float
-
-
-@dataclass(frozen=True)
-class _MailboxReplyWaitResult:
-    reason: str
-    pending_outbox: int | None
-    reply: mailbox.MailboxMessage | None = None
-    resolution: mailbox.MailboxMessage | None = None
-    lease_updated_at: str | None = None
-    lease_reason: str | None = None
-    lease_supervisor_id: str | None = None
-    suspend_skew_seconds: float | None = None
-    suspend_lease_grace_seconds: float | None = None
-    unsupervised_seconds: float | None = None
-
-
-class _MailboxReplyWaitUnavailable(Exception):
-    """Internal control flow for a wait that must degrade to a real pause."""
-
-    def __init__(self, reason: str) -> None:
-        self.reason = reason
-        super().__init__(reason)
-
-
-def _finite_positive_env(
-    name: str,
-    default: float,
-    *,
-    environ: Mapping[str, str] | None = None,
-) -> float:
-    source = os.environ if environ is None else environ
-    raw = source.get(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw.strip())
-    except AttributeError, ValueError:
-        return default
-    if not math.isfinite(value) or value <= 0:
-        return default
-    return value
-
-
-def _mailbox_reply_wait_settings(
-    environ: Mapping[str, str] | None = None,
-) -> _MailboxReplyWaitSettings:
-    """Resolve bounded wait timings, falling back safely on bad overrides."""
-    base_seconds = _finite_positive_env(
-        MAILBOX_REPLY_WAIT_BASE_ENV_VAR,
-        MAILBOX_REPLY_WAIT_BASE_SECONDS,
-        environ=environ,
-    )
-    lease_extension_seconds = _finite_positive_env(
-        MAILBOX_REPLY_WAIT_LEASE_EXTENSION_ENV_VAR,
-        MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS,
-        environ=environ,
-    )
-    unsupervised_ceiling_seconds = _finite_positive_env(
-        MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR,
-        MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
-        environ=environ,
-    )
-    poll_seconds = _finite_positive_env(
-        MAILBOX_REPLY_WAIT_POLL_ENV_VAR,
-        MAILBOX_REPLY_WAIT_POLL_SECONDS,
-        environ=environ,
-    )
-    io_grace_seconds = _finite_positive_env(
-        MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR,
-        MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS,
-        environ=environ,
-    )
-    # A malformed cross-field override must not move the base deadline beyond
-    # the unsupervised ceiling. Clamp the base instead of raising the ceiling
-    # so an unwatched wait remains bounded under every environment value.
-    base_seconds = min(base_seconds, unsupervised_ceiling_seconds)
-    return _MailboxReplyWaitSettings(
-        base_seconds=base_seconds,
-        lease_extension_seconds=lease_extension_seconds,
-        unsupervised_ceiling_seconds=unsupervised_ceiling_seconds,
-        poll_seconds=poll_seconds,
-        io_grace_seconds=io_grace_seconds,
-    )
-
-
-def _mailbox_question_id(
-    *,
-    plan_dir: Path,
-    run_id: str,
-    session_id: str,
-    turn_index: int,
-) -> str:
-    """Return the retry-stable UUID5 identity for one completed turn."""
-    identity = (
-        f"asl-mailbox-question:{plan_dir.resolve()}:{run_id}:{session_id}:{turn_index}"
-    )
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
-
-
-def _runner_pause_can_wait_for_mailbox_reply(
-    *,
-    mailbox_enabled: bool,
-    pause_reason: str,
-    result: harnesses.HarnessResult,
-) -> bool:
-    """Return whether an operator answer can usefully clear this pause."""
-    if not mailbox_enabled or result.returncode != 0:
-        return False
-    policy = pause_policy.classify_pause(pause_reason)
-    return bool(policy["user_action"] == pause_policy.USER_ACTION_REPLY)
-
-
-def _worker_pause_resolution_for_turn(
-    *,
-    plan_dir: Path,
-    state_dir_arg: str | None,
-    run_id: str,
-    session_id: str,
-    turn_index: int,
-) -> mailbox.MailboxMessage | None:
-    """Return this worker turn's committed pause resolution, if any.
-
-    This lookup is deliberately fail-open: a mailbox read failure or any
-    incomplete/stale ownership tuple leaves the ordinary runner-owned question
-    path intact. Only a first-close-wins resolution targeting a question owned
-    by this exact worker turn can suppress that second question.
-    """
-    try:
-        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir_arg)
-    except OSError, mailbox.MailboxError:
-        return None
-
-    worker_question_ids = {
-        message.id
-        for message in view.messages
-        if message.kind == mailbox.KIND_QUESTION
-        and message.run_id == run_id
-        and message.session_id == session_id
-        and message.turn_index == turn_index
-        and message.waiter_origin == mailbox.WAITER_ORIGIN_WORKER
-    }
-    for message in view.messages:
-        if (
-            message.kind == mailbox.KIND_RESOLUTION
-            and message.action == mailbox.RESOLUTION_ACTION_PAUSE
-            and message.run_id == run_id
-            and message.to in worker_question_ids
-        ):
-            return message
-    return None
-
-
-def _mailbox_question_text(context: qna.QnAContext) -> str:
-    """Return the question body, bounded and byte-stable across retries."""
-    text = context.last_message
-    if len(text) <= MAILBOX_QUESTION_TEXT_MAX_CHARS:
-        return text
-    return (
-        text[:MAILBOX_QUESTION_TEXT_MAX_CHARS]
-        + "\n\n[question truncated to the first "
-        + str(MAILBOX_QUESTION_TEXT_MAX_CHARS)
-        + f" of {len(text)} characters; full text: "
-        + str(context.last_message_path)
-        + "]"
-    )
-
-
-def _ensure_mailbox_question(
-    *,
-    plan_dir: Path,
-    state_dir_arg: str | None,
-    question_id: str,
-    text: str,
-    run_id: str,
-    session_id: str,
-    turn_index: int,
-) -> mailbox.MailboxMessage:
-    """Append one deterministic question or reuse the identical existing one."""
-
-    def existing_question(
-        view: mailbox.MailboxView,
-    ) -> mailbox.MailboxMessage | None:
-        existing = next(
-            (message for message in view.messages if message.id == question_id),
-            None,
-        )
-        if existing is None:
-            return None
-        closed = view.closure_for(existing.id)
-        if (
-            existing.kind != mailbox.KIND_QUESTION
-            or existing.text != text
-            or existing.run_id != run_id
-            or existing.session_id != session_id
-            or existing.turn_index != turn_index
-            or existing.waiter_origin != mailbox.WAITER_ORIGIN_RUNNER
-            or (existing.delivery_mode != mailbox.DELIVERY_MODE_WAIT and closed is None)
-        ):
-            raise _MailboxReplyWaitUnavailable(qna.REASON_MISSING_QUESTION_CONTEXT)
-        return existing
-
-    try:
-        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir_arg)
-    except (OSError, mailbox.MailboxError) as error:
-        reason = (
-            error.reason
-            if isinstance(error, mailbox.MailboxError)
-            else mailbox.ERROR_MAILBOX_READ
-        )
-        raise _MailboxReplyWaitUnavailable(reason) from error
-    existing = existing_question(view)
-    if existing is not None:
-        if (
-            existing.delivery_mode == mailbox.DELIVERY_MODE_WAIT
-            and view.active_wait_for(existing.id) is None
-            and view.closure_for(existing.id) is None
-        ):
-            mailbox.append_wait_start(plan_dir, existing.id, state_dir=state_dir_arg)
-        return existing
-    # A question append is refused at the reduced question cap, not the file
-    # cap; the wait loop's own guard stays on ``view.full`` because there the
-    # question is whether the *reply* can still land.
-    if not view.accepts_questions:
-        raise _MailboxReplyWaitUnavailable(mailbox.ERROR_MAILBOX_FULL)
-
-    try:
-        question, _wait_start = mailbox.append_wait_question(
-            plan_dir,
-            text,
-            state_dir=state_dir_arg,
-            message_id=question_id,
-            run_id=run_id,
-            session_id=session_id,
-            turn_index=turn_index,
-            waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
-        )
-        return question
-    except mailbox.MailboxError as error:
-        if error.reason != mailbox.REJECT_DUPLICATE_ID:
-            raise _MailboxReplyWaitUnavailable(error.reason) from error
-
-    # Another process can win the deterministic append race. Re-read and
-    # accept only the exact question this turn intended to publish.
-    try:
-        raced_view = mailbox.read_mailbox(plan_dir, state_dir=state_dir_arg)
-    except (OSError, mailbox.MailboxError) as error:
-        reason = (
-            error.reason
-            if isinstance(error, mailbox.MailboxError)
-            else mailbox.ERROR_MAILBOX_READ
-        )
-        raise _MailboxReplyWaitUnavailable(reason) from error
-    raced = existing_question(raced_view)
-    if raced is None:
-        raise _MailboxReplyWaitUnavailable(qna.REASON_MISSING_QUESTION_CONTEXT)
-    return raced
-
-
-def _prepare_mailbox_reply_wait(
-    *,
-    snapshot: plans.PlanSnapshot,
-    payload: dict[str, Any],
-    plan_state: Path,
-    state_path: Path,
-    state_dir_arg: str | None,
-    run_id: str,
-    session_id: str,
-    turn_index: int,
-    started_at: datetime | None = None,
-    environ: Mapping[str, str] | None = None,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> _PreparedMailboxReplyWait:
-    """Validate turn context, ensure its question, and prepare persisted state."""
-    try:
-        lease = mailbox.read_lease(
-            snapshot.plan_dir,
-            state_dir=state_dir_arg,
-        )
-    except (OSError, mailbox.MailboxError) as error:
-        reason = (
-            error.reason
-            if isinstance(error, mailbox.MailboxError)
-            else mailbox.ERROR_LEASE_READ
-        )
-        raise _MailboxReplyWaitUnavailable(reason) from error
-    if not lease.fresh:
-        raise _MailboxReplyWaitUnavailable(lease.reason or mailbox.ERROR_LEASE_READ)
-
-    settings = _mailbox_reply_wait_settings(environ)
-    started_monotonic = monotonic()
-    resolved_started_at = _utc_now() if started_at is None else started_at
-    question_id = _mailbox_question_id(
-        plan_dir=snapshot.plan_dir,
-        run_id=run_id,
-        session_id=session_id,
-        turn_index=turn_index,
-    )
-    waiting_for_reply = _waiting_for_reply_payload(
-        question_id=question_id,
-        session_id=session_id,
-        turn_index=turn_index,
-        started_at=resolved_started_at,
-        base_deadline=(resolved_started_at + timedelta(seconds=settings.base_seconds)),
-        unsupervised_deadline_at=(
-            resolved_started_at
-            + timedelta(seconds=settings.unsupervised_ceiling_seconds)
-        ),
-        unsupervised_ceiling_seconds=settings.unsupervised_ceiling_seconds,
-        last_lease_activity_at=None,
-    )
-    try:
-        context = qna.build_qna_context(
-            snapshot,
-            payload,
-            plan_state=plan_state,
-            state_path=state_path,
-            waiting_for_reply=waiting_for_reply,
-        )
-    except qna.QnAError as error:
-        raise _MailboxReplyWaitUnavailable(error.reason) from error
-
-    question = _ensure_mailbox_question(
-        plan_dir=snapshot.plan_dir,
-        state_dir_arg=state_dir_arg,
-        question_id=question_id,
-        text=_mailbox_question_text(context),
-        run_id=run_id,
-        session_id=session_id,
-        turn_index=turn_index,
-    )
-    try:
-        prepared_view = mailbox.read_mailbox(
-            snapshot.plan_dir,
-            state_dir=state_dir_arg,
-        )
-    except (OSError, mailbox.MailboxError) as error:
-        reason = (
-            error.reason
-            if isinstance(error, mailbox.MailboxError)
-            else mailbox.ERROR_MAILBOX_READ
-        )
-        raise _MailboxReplyWaitUnavailable(reason) from error
-    wait_start = prepared_view.active_wait_for(question.id)
-    if wait_start is None:
-        raise _MailboxReplyWaitUnavailable(mailbox.REJECT_QUESTION_NOT_WAITING)
-    return _PreparedMailboxReplyWait(
-        context=context,
-        question=question,
-        wait_start=wait_start,
-        waiting_for_reply=waiting_for_reply,
-        pending_outbox=len(prepared_view.open_questions(run_id)),
-        settings=settings,
-        started_monotonic=started_monotonic,
-    )
-
-
-def _record_waiting_lease_activity(
-    payload: dict[str, Any],
-    *,
-    question_id: str,
-    updated_at: str,
-    persistence: _RunPersistence,
-) -> None:
-    """Persist a newly observed lease timestamp without emitting a new event."""
-    with persistence.lock:
-        current = payload.get("waiting_for_reply")
-        if not isinstance(current, dict):
-            return
-        if current.get("question_id") != question_id:
-            return
-        if current.get("last_lease_activity_at") == updated_at:
-            return
-        waiting = dict(current)
-        waiting["last_lease_activity_at"] = updated_at
-        payload["waiting_for_reply"] = waiting
-        persistence.write_state(payload)
-
-
-def _rebase_waiting_deadlines(
-    payload: dict[str, Any],
-    *,
-    question_id: str,
-    base_deadline: datetime,
-    unsupervised_deadline_at: datetime,
-    persistence: _RunPersistence,
-) -> None:
-    """Re-anchor persisted wall-clock deadlines without emitting a new event."""
-    for name, moment in (
-        ("base_deadline", base_deadline),
-        ("unsupervised_deadline_at", unsupervised_deadline_at),
-    ):
-        if moment.tzinfo is None or moment.utcoffset() is None:
-            raise ValueError(f"{name} must be timezone-aware")
-    with persistence.lock:
-        current = payload.get("waiting_for_reply")
-        if not isinstance(current, dict):
-            return
-        if current.get("question_id") != question_id:
-            return
-        rebased = {
-            "base_deadline": _isoformat(base_deadline),
-            "unsupervised_deadline_at": _isoformat(unsupervised_deadline_at),
-        }
-        if all(current.get(key) == value for key, value in rebased.items()):
-            return
-        waiting = dict(current)
-        waiting.update(rebased)
-        payload["waiting_for_reply"] = waiting
-        persistence.write_state(payload)
-
-
-def _lease_evidence(
-    lease: mailbox.MailboxLeaseView | None,
-    *,
-    suspend_skew_seconds: float = 0.0,
-    suspend_lease_grace_seconds: float = 0.0,
-    unsupervised_seconds: float | None = None,
-) -> dict[str, str | float | None]:
-    """Name the lease and clock skew a failing wait saw, so the exit is attributable."""
-    evidence: dict[str, str | float | None] = {}
-    if lease is not None:
-        evidence.update(
-            lease_updated_at=lease.updated_at,
-            lease_reason=lease.reason,
-            lease_supervisor_id=lease.supervisor_id,
-        )
-    if suspend_skew_seconds > 0.0:
-        evidence["suspend_skew_seconds"] = suspend_skew_seconds
-    if suspend_lease_grace_seconds > 0.0:
-        evidence["suspend_lease_grace_seconds"] = suspend_lease_grace_seconds
-    if unsupervised_seconds is not None:
-        evidence["unsupervised_seconds"] = unsupervised_seconds
-    return evidence
-
-
-def _wait_for_mailbox_reply(
-    *,
-    plan_dir: Path,
-    state_dir_arg: str | None,
-    payload: dict[str, Any],
-    question_id: str,
-    run_id: str,
-    settings: _MailboxReplyWaitSettings,
-    persistence: _RunPersistence,
-    poll_controls: Callable[[], None] | None = None,
-    started_monotonic: float | None = None,
-    monotonic: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], None] = time.sleep,
-    wall_clock: Callable[[], datetime] = _utc_now,
-) -> _MailboxReplyWaitResult:
-    """Poll one closure under monotonic base, lease-extension, and ceiling bounds."""
-    started = monotonic() if started_monotonic is None else started_monotonic
-    active_deadline = started + settings.base_seconds
-    io_failure_started: float | None = None
-    pending_outbox: int | None = None
-    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir_arg)
-    last_successful_view: mailbox.MailboxView | None = None
-    last_read_token: object = _MAILBOX_TOKEN_UNSEEN
-    last_lease: mailbox.MailboxLeaseView | None = None
-    suspend_skew_seconds = 0.0
-    suspend_lease_grace_seconds = 0.0
-    lease_grace_until: float | None = None
-    # The wait begins where supervision was last known, so a wait that never
-    # probes a lease still measures its unsupervised stretch from a real
-    # instant rather than from nothing.
-    last_fresh_lease = started
-    last_skew_monotonic = monotonic()
-    last_skew_wall = wall_clock()
-
-    def unsupervised_elapsed() -> float:
-        return max(0.0, monotonic() - last_fresh_lease)
-
-    # The ceiling bounds unsupervised time, so it rolls forward with every
-    # lease that proves a supervisor alive: a watched wait has no terminal
-    # instant, while an unwatched one ends a full ceiling after the last proof.
-    def unsupervised_deadline() -> float:
-        return last_fresh_lease + settings.unsupervised_ceiling_seconds
-
-    while True:
-        if poll_controls is not None:
-            poll_controls()
-
-        # The monotonic clock freezes across system sleep while the wall
-        # clock keeps running, so wall time gaining more than the skew
-        # threshold on monotonic time since the previous iteration means the
-        # process was suspended for ~skew seconds. Re-express the persisted
-        # wall-clock deadlines around the surviving monotonic budget so
-        # status tooling keeps reporting this wait live; the active deadline
-        # itself is deliberately not extended.
-        skew_monotonic = monotonic()
-        skew_wall = wall_clock()
-        skew = (skew_wall - last_skew_wall).total_seconds() - (
-            skew_monotonic - last_skew_monotonic
-        )
-        last_skew_monotonic = skew_monotonic
-        last_skew_wall = skew_wall
-        if skew > MAILBOX_REPLY_WAIT_SUSPEND_SKEW_SECONDS:
-            suspend_skew_seconds += skew
-            suspend_lease_grace_seconds = MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS
-            lease_grace_until = (
-                skew_monotonic + MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS
-            )
-            # Suspended time is not supervision loss: nobody could have proven
-            # liveness while the machine slept, so the unsupervised stretch
-            # restarts at the wake instant.
-            last_fresh_lease = skew_monotonic
-            _rebase_waiting_deadlines(
-                payload,
-                question_id=question_id,
-                base_deadline=skew_wall
-                + timedelta(seconds=max(0.0, active_deadline - skew_monotonic)),
-                unsupervised_deadline_at=skew_wall
-                + timedelta(seconds=max(0.0, unsupervised_deadline() - skew_monotonic)),
-                persistence=persistence,
-            )
-
-        io_failure_reason: str | None = None
-        current_token = mailbox.mailbox_change_token(mailbox_path)
-        view = last_successful_view
-        if (
-            last_read_token is _MAILBOX_TOKEN_UNSEEN
-            or current_token is mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
-            or current_token != last_read_token
-        ):
-            try:
-                view = mailbox.read_mailbox(
-                    plan_dir,
-                    state_dir=state_dir_arg,
-                )
-            except (OSError, mailbox.MailboxError) as error:
-                view = None
-                io_failure_reason = (
-                    error.reason
-                    if isinstance(error, mailbox.MailboxError)
-                    else mailbox.ERROR_MAILBOX_READ
-                )
-            else:
-                last_successful_view = view
-                # Retain the token captured before the locked read. An append
-                # racing that read will conservatively trigger another parse.
-                last_read_token = current_token
-
-        if view is not None:
-            pending_outbox = len(view.open_questions(run_id))
-            closure = view.closure_for(question_id)
-            if closure is not None and closure.kind == mailbox.KIND_REPLY:
-                return _MailboxReplyWaitResult(
-                    reason="reply",
-                    pending_outbox=pending_outbox,
-                    reply=closure,
-                )
-            if closure is not None and closure.kind == mailbox.KIND_RESOLUTION:
-                return _MailboxReplyWaitResult(
-                    reason="resolution",
-                    pending_outbox=pending_outbox,
-                    resolution=closure,
-                )
-            if view.full:
-                return _MailboxReplyWaitResult(
-                    reason=mailbox.ERROR_MAILBOX_FULL,
-                    pending_outbox=pending_outbox,
-                    **_lease_evidence(
-                        last_lease,
-                        suspend_skew_seconds=suspend_skew_seconds,
-                        suspend_lease_grace_seconds=(suspend_lease_grace_seconds),
-                        unsupervised_seconds=unsupervised_elapsed(),
-                    ),
-                )
-            question = next(
-                (
-                    message
-                    for message in view.messages
-                    if message.id == question_id
-                    and message.kind == mailbox.KIND_QUESTION
-                ),
-                None,
-            )
-            if question is None:
-                return _MailboxReplyWaitResult(
-                    reason=qna.REASON_MISSING_QUESTION_CONTEXT,
-                    pending_outbox=pending_outbox,
-                    **_lease_evidence(
-                        last_lease,
-                        suspend_skew_seconds=suspend_skew_seconds,
-                        suspend_lease_grace_seconds=(suspend_lease_grace_seconds),
-                        unsupervised_seconds=unsupervised_elapsed(),
-                    ),
-                )
-
-        now = monotonic()
-        if (
-            io_failure_reason is None
-            and now < unsupervised_deadline()
-            and now >= active_deadline
-        ):
-            try:
-                lease = mailbox.read_lease(
-                    plan_dir,
-                    state_dir=state_dir_arg,
-                )
-            except (OSError, mailbox.MailboxError) as error:
-                io_failure_reason = (
-                    error.reason
-                    if isinstance(error, mailbox.MailboxError)
-                    else mailbox.ERROR_LEASE_READ
-                )
-            else:
-                last_lease = lease
-                if lease.updated_at is not None:
-                    _record_waiting_lease_activity(
-                        payload,
-                        question_id=question_id,
-                        updated_at=lease.updated_at,
-                        persistence=persistence,
-                    )
-                if lease.fresh:
-                    # A fresh lease is proof of supervision, so it moves the
-                    # ceiling with it; clamping the extension against a bound
-                    # that just rolled away would be meaningless.
-                    last_fresh_lease = now
-                    active_deadline = now + settings.lease_extension_seconds
-                elif lease_grace_until is None or now >= lease_grace_until:
-                    return _MailboxReplyWaitResult(
-                        reason=MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
-                        pending_outbox=pending_outbox,
-                        **_lease_evidence(
-                            last_lease,
-                            suspend_skew_seconds=suspend_skew_seconds,
-                            suspend_lease_grace_seconds=(suspend_lease_grace_seconds),
-                            unsupervised_seconds=unsupervised_elapsed(),
-                        ),
-                    )
-                # A non-fresh lease inside the post-suspend grace neither
-                # ends the wait nor ratchets the active deadline: it proves
-                # nothing, so the wait keeps advancing toward the ceiling
-                # while the supervisor re-proves liveness.
-
-        if io_failure_reason is not None:
-            if io_failure_started is None:
-                io_failure_started = now
-            if (
-                now - io_failure_started >= settings.io_grace_seconds
-                or now >= unsupervised_deadline()
-            ):
-                return _MailboxReplyWaitResult(
-                    reason=io_failure_reason,
-                    pending_outbox=pending_outbox,
-                    **_lease_evidence(
-                        last_lease,
-                        suspend_skew_seconds=suspend_skew_seconds,
-                        suspend_lease_grace_seconds=suspend_lease_grace_seconds,
-                        unsupervised_seconds=unsupervised_elapsed(),
-                    ),
-                )
-            sleep(
-                max(
-                    0.0,
-                    min(
-                        settings.poll_seconds,
-                        (io_failure_started + settings.io_grace_seconds) - now,
-                        unsupervised_deadline() - now,
-                    ),
-                )
-            )
-            continue
-        io_failure_started = None
-
-        if now >= unsupervised_deadline():
-            return _MailboxReplyWaitResult(
-                reason="timeout",
-                pending_outbox=pending_outbox,
-                **_lease_evidence(
-                    last_lease,
-                    suspend_skew_seconds=suspend_skew_seconds,
-                    suspend_lease_grace_seconds=suspend_lease_grace_seconds,
-                    unsupervised_seconds=unsupervised_elapsed(),
-                ),
-            )
-
-        # During a post-suspend lease grace the active deadline stays in the
-        # past, so it bounds the sleep only while it is still ahead — pacing
-        # on a passed deadline would busy-spin at zero-length sleeps.
-        sleep_bound = min(settings.poll_seconds, unsupervised_deadline() - now)
-        if now < active_deadline:
-            sleep_bound = min(sleep_bound, active_deadline - now)
-        sleep(max(0.0, sleep_bound))
-
-
-def _finish_mailbox_reply_wait_lifecycle(
-    *,
-    plan_dir: Path,
-    state_dir_arg: str | None,
-    question_id: str,
-    wait_id: str,
-    result: _MailboxReplyWaitResult,
-) -> _MailboxReplyWaitResult:
-    """Commit wait termination and let a lock-winning closure override timeout."""
-    completion = mailbox.finish_wait(
-        plan_dir,
-        question_id,
-        wait_id,
-        reason=(
-            mailbox.WAIT_END_REASON_TIMEOUT
-            if result.reason == "timeout"
-            else mailbox.WAIT_END_REASON_ERROR
-        ),
-        state_dir=state_dir_arg,
-    )
-    closure = completion.closure
-    if closure is None:
-        return result
-    common = {
-        "pending_outbox": result.pending_outbox,
-        "lease_updated_at": result.lease_updated_at,
-        "lease_reason": result.lease_reason,
-        "lease_supervisor_id": result.lease_supervisor_id,
-        "suspend_skew_seconds": result.suspend_skew_seconds,
-        "suspend_lease_grace_seconds": result.suspend_lease_grace_seconds,
-        "unsupervised_seconds": result.unsupervised_seconds,
-    }
-    if closure.kind == mailbox.KIND_REPLY:
-        return _MailboxReplyWaitResult(reason="reply", reply=closure, **common)
-    return _MailboxReplyWaitResult(reason="resolution", resolution=closure, **common)
-
-
-class _ReplyStatePreserver:
-    """Restore paused Q&A state when a reply attempt fails before consumption."""
-
-    def __init__(
-        self,
-        *,
-        state_path: Path,
-        event_path: Path,
-        enabled: bool,
-    ) -> None:
-        self._enabled = enabled
-        self._consumed = False
-        self._state_path = state_path
-        self._event_path = event_path
-        self._state_bytes = _read_optional_bytes(state_path) if enabled else None
-        self._event_bytes = _read_optional_bytes(event_path) if enabled else None
-
-    def mark_consumed(self) -> None:
-        self._consumed = True
-
-    def restore_if_unconsumed(self) -> None:
-        if not self._enabled or self._consumed:
-            return
-        _restore_optional_bytes(self._state_path, self._state_bytes)
-        _restore_optional_bytes(self._event_path, self._event_bytes)
+# The bounded mailbox reply wait, its durable ``waiting_for_reply`` slot, and
+# the reply rollback that guards an unconsumed attempt are all coordination
+# across the run's process boundary, so they live behind the typed APIs in
+# :mod:`agent_session_loop.run_coordination`. These aliases keep every in-tree
+# call site and every ``mock.patch.object(runner, ...)`` target resolving.
+_waiting_for_reply_payload = run_coordination.waiting_for_reply_payload
+_set_waiting_for_reply = run_coordination.set_waiting_for_reply
+_clear_waiting_for_reply = run_coordination.clear_waiting_for_reply
+_record_mailbox_reply_wait_preparation_failed = (
+    run_coordination.record_mailbox_reply_wait_preparation_failed
+)
+_MailboxReplyWaitSettings = run_coordination.MailboxWaitSettings
+_PreparedMailboxReplyWait = run_coordination.PreparedMailboxWait
+_MailboxReplyWaitResult = run_coordination.MailboxWaitResult
+_MailboxReplyWaitUnavailable = run_coordination.MailboxWaitUnavailable
+_finite_positive_env = run_coordination.finite_positive_env
+_mailbox_reply_wait_settings = run_coordination.mailbox_reply_wait_settings
+_mailbox_question_id = run_coordination.mailbox_question_id
+_runner_pause_can_wait_for_mailbox_reply = (
+    run_coordination.runner_pause_can_wait_for_mailbox_reply
+)
+_worker_pause_resolution_for_turn = run_coordination.worker_pause_resolution_for_turn
+_mailbox_question_text = run_coordination.mailbox_question_text
+_ensure_mailbox_question = run_coordination.ensure_mailbox_question
+_prepare_mailbox_reply_wait = run_coordination.prepare_mailbox_reply_wait
+_record_waiting_lease_activity = run_coordination.record_waiting_lease_activity
+_rebase_waiting_deadlines = run_coordination.rebase_waiting_deadlines
+_lease_evidence = run_coordination.lease_evidence
+_wait_for_mailbox_reply = run_coordination.wait_for_mailbox_reply
+_finish_mailbox_reply_wait_lifecycle = (
+    run_coordination.finish_mailbox_reply_wait_lifecycle
+)
+_ReplyStatePreserver = run_coordination.ReplyStatePreserver
 
 
 def _run_persistence(
@@ -6108,116 +5134,9 @@ def _run_persistence(
     return _RunPersistence() if persistence is None else persistence
 
 
-def _initial_control_payload() -> dict[str, Any]:
-    return {
-        "stop_after_current": False,
-        "tail_enabled": False,
-        "abort_turn_requested": False,
-        "abort_grace_seconds": None,
-        "abort_reason": None,
-        "abort_deadline": None,
-        "next_harness": None,
-        "target_harness": None,
-        "changed_fields": [],
-        "implementation_overrides": {},
-        "consumed": False,
-        "last_action": None,
-    }
-
-
-def _apply_run_control_action(
-    control_payload: dict[str, Any],
-    action: run_control.RunControlAction,
-    *,
-    event_action: str | None = None,
-) -> str:
-    if event_action is None:
-        event_action = RUN_CONTROL_EVENT_ACTIONS[action.action]
-    control_payload["stop_after_current"] = action.stop_after_current
-    control_payload["tail_enabled"] = action.tail_enabled
-    # A consumed abort still carries the grace and reason it was acted on so
-    # the event stays legible, but the payload mirrors the cleared state.
-    abort_pending = action.abort_requested and action.action != "abort-consumed"
-    control_payload["abort_turn_requested"] = abort_pending
-    control_payload["abort_grace_seconds"] = (
-        action.abort_grace_seconds if abort_pending else None
-    )
-    control_payload["abort_reason"] = action.abort_reason if abort_pending else None
-    if not abort_pending:
-        # The deadline is stamped beside the request; nothing pending, nothing
-        # left for a status surface to count down to.
-        control_payload["abort_deadline"] = None
-    control_payload["next_harness"] = action.next_harness
-    control_payload["target_harness"] = action.target_harness
-    control_payload["changed_fields"] = list(action.changed_fields)
-    if action.implementation_overrides is not None:
-        control_payload["implementation_overrides"] = {
-            harness: dict(values)
-            for harness, values in action.implementation_overrides.items()
-        }
-    if action.action == "consumed":
-        control_payload["consumed"] = True
-    control_payload["last_action"] = event_action
-    return event_action
-
-
-def _record_run_control_action(
-    *,
-    event_path: Path,
-    payload: dict[str, Any],
-    control_payload: dict[str, Any],
-    action: run_control.RunControlAction,
-    context: Mapping[str, Any] | None = None,
-    persistence: _RunPersistence | None = None,
-    event_action: str | None = None,
-    message: str | None = None,
-) -> None:
-    persistence = _run_persistence(persistence)
-    with persistence.lock:
-        previous_harness = control_payload.get("next_harness") or payload.get("harness")
-        event_action = _apply_run_control_action(
-            control_payload, action, event_action=event_action
-        )
-        payload["control"] = dict(control_payload)
-        event_payload = {
-            "run_id": payload.get("run_id"),
-            "action": event_action,
-            "stop_after_current": action.stop_after_current,
-            "tail_enabled": action.tail_enabled,
-            "abort_requested": action.abort_requested,
-            "abort_grace_seconds": action.abort_grace_seconds,
-            "abort_reason": action.abort_reason,
-            "abort_deadline": control_payload.get("abort_deadline"),
-            "next_harness": action.next_harness,
-            "target_harness": action.target_harness,
-            "changed_fields": list(action.changed_fields),
-            "implementation_overrides": {
-                harness: dict(values)
-                for harness, values in control_payload.get(
-                    "implementation_overrides", {}
-                ).items()
-            },
-            "message": (
-                RUN_CONTROL_EVENT_MESSAGES[action.action]
-                if message is None
-                else message
-            ),
-        }
-        if context is not None:
-            for key in ("session", "turn_index", "total_sessions"):
-                value = context.get(key)
-                if value is not None:
-                    event_payload[key] = value
-        if action.action == "harness-selected":
-            current_harness = (
-                context.get("harness")
-                if context is not None and context.get("harness") is not None
-                else previous_harness
-            )
-            event_payload["current_harness"] = current_harness
-            event_payload["selected_harness"] = action.next_harness
-        persistence.append_event(event_path, events.RUN_CONTROL_EVENT, event_payload)
-        persistence.write_state(payload)
+_initial_control_payload = run_coordination.initial_control_payload
+_apply_run_control_action = run_coordination.apply_run_control_action
+_record_run_control_action = run_coordination.record_run_control_action
 
 
 def _local_timestamp(moment: datetime | None = None) -> str:
@@ -8006,27 +6925,8 @@ _UNAUDITED_TERMINAL_OUTCOMES = frozenset({"dry-run"})
 
 #: Assurance states a terminating run still owes an audit for. ``skipped`` is a
 #: settled decision to run no checks; anything else is already a verdict.
-_AUDITABLE_ASSURANCE_STATES = frozenset({"pending", "unavailable"})
-
-
-@dataclass(frozen=True)
-class _TerminalAuditContext:
-    """Everything the terminal audit needs, resolved once per run."""
-
-    plan: supervisor_audit.AuditPlan
-    run_dir: Path
-    state_dir: Path
-    plan_dir: Path
-    workspace_root: Path
-    #: The state root holding the one shared assurance ledger, not this plan's
-    #: state directory. ``None`` resolves to the default root.
-    ledger_state_dir: Path | None = None
-    #: Workspace-relative paths of the repositories the plan registered, which
-    #: are the only ones the audit's read-only boundary check fingerprints.
-    repositories: tuple[str, ...] = ()
-    #: Whether those paths came from a plan registry rather than being
-    #: synthesized for a legacy plan that registered none.
-    registry_declared: bool = True
+_AUDITABLE_ASSURANCE_STATES = run_coordination.AUDITABLE_ASSURANCE_STATES
+_TerminalAuditContext = run_coordination.TerminalAuditContext
 
 
 def _audited_repositories(
@@ -8074,74 +6974,22 @@ def _attach_terminal_assurance(
     persistence: _RunPersistence,
     abort: harnesses.AbortSignal | None = None,
 ) -> bool:
-    """Audit the run, publish the verdict, and attach the bounded summary.
+    """Audit the run and publish the verdict, over the runner's state projection.
 
-    A run that resolved no independent role starts ``unavailable`` and is still
-    audited, because the deterministic half needs no agent and the reason the
-    run could not be graded belongs in the shared inbox rather than only in its
-    own state.
-
-    Returns whether the audit was cancelled rather than completed.
+    A thin binding rather than an alias: the coordination boundary is told how
+    to compact this run's payload instead of importing the projection, and the
+    runner is the only place that knows.
     """
-    assurance = payload.get("assurance")
-    if not isinstance(assurance, Mapping) or not assurance.get("eligible"):
-        return False
-    if assurance.get("state") not in _AUDITABLE_ASSURANCE_STATES:
-        return False
-    with persistence.lock:
-        state_payload = _compact_state_payload(payload)
-    cancelled = False
-    try:
-        summary = supervisor_audit.audit_terminal_run(
-            context.plan,
-            run_id=str(payload.get("run_id")),
-            run_dir=context.run_dir,
-            state_dir=context.state_dir,
-            plan_dir=context.plan_dir,
-            workspace_root=context.workspace_root,
-            ledger_state_dir=context.ledger_state_dir,
-            state_payload=state_payload,
-            repositories=context.repositories,
-            registry_declared=context.registry_declared,
-            abort=abort,
-        )
-    except KeyboardInterrupt, supervisor_audit.AuditCancelled:
-        # Cancelling an advisory audit cancels the audit alone: the outcome and
-        # the exit code were decided before this ran, and the terminal record
-        # they belong to has still not been written.
-        summary = supervisor_audit.cancelled_summary(
-            context.plan, run_id=str(payload.get("run_id"))
-        )
-        cancelled = True
-    with persistence.lock:
-        payload["assurance"] = summary.to_dict()
-    return cancelled
-
-
-def _attach_assurance_report(
-    payload: dict[str, Any],
-    context: _TerminalAuditContext,
-    persistence: _RunPersistence,
-) -> None:
-    """Attach the additive operator projection of this run's assurance object.
-
-    Written beside the assurance object rather than inside it: the per-run
-    object is a validated schema that rejects unknown keys, while this block is
-    a derived view whose open-issue count is a fact about the whole inbox at the
-    moment the run ended.
-    """
-    with persistence.lock:
-        assurance = payload.get("assurance")
-        run_dir = payload.get("run_dir")
-    report = assurance_report.build_run_report(
-        assurance,
-        run_dir=run_dir,
-        state_dir=context.ledger_state_dir,
+    return run_coordination.attach_terminal_assurance(
+        payload,
+        context,
+        persistence,
+        abort=abort,
+        state_snapshot=_compact_state_payload,
     )
-    if report is None:
-        return
-    with persistence.lock:
-        payload["assurance_report"] = report
+
+
+_attach_assurance_report = run_coordination.attach_assurance_report
 
 
 #: Stable terminal pause reasons the adjudicator imposes on a run that reached
@@ -8162,7 +7010,7 @@ _PLAN_COMPLETION_REASONS = verification_transitions.PLAN_COMPLETION_REASONS
 
 #: Assurance states that leave the optional post-run audit unable to speak.
 #: ``skipped`` is a settled decision not to audit and is not a degradation.
-_DEGRADED_ASSURANCE_STATES = frozenset({"unavailable", "partial"})
+_DEGRADED_ASSURANCE_STATES = run_coordination.DEGRADED_ASSURANCE_STATES
 
 #: Session 2's terminal success policy, now declared beside the verification
 #: states it reads. Bound here because the run's terminal paths and the suite's
@@ -8261,40 +7109,7 @@ def _adjudicate_terminal_run(
     return adjudication
 
 
-def _record_degraded_assurance(
-    payload: dict[str, Any], *, persistence: _RunPersistence
-) -> None:
-    """Record that optional assurance could not speak, without blocking on it.
-
-    Post-run assurance is advisory by design, so its unavailability may not
-    turn a run that earned its success into a failure. What it may not do is
-    disappear: a run whose audit never rendered a verdict is a *degraded*
-    success, and this states that explicitly beside the evidence the audit did
-    leave behind, so an operator reading a green run can tell the difference
-    between "graded clean" and "not graded".
-    """
-    with persistence.lock:
-        assurance = payload.get("assurance")
-        assurance = assurance if isinstance(assurance, Mapping) else {}
-        state = assurance.get("state")
-        if state not in _DEGRADED_ASSURANCE_STATES:
-            payload.pop("assurance_degraded", None)
-            return
-        artifacts = assurance.get("artifacts")
-        evidence = [
-            item.get("locator")
-            for item in (artifacts if isinstance(artifacts, list) else [])
-            if isinstance(item, Mapping) and item.get("locator")
-        ]
-        payload["assurance_degraded"] = {
-            "assurance_state": state,
-            "reason": assurance.get("reason"),
-            "blocking": False,
-            "run_ok": bool(payload.get("ok")),
-            "evidence": evidence,
-            "issue_ids": list(assurance.get("issue_ids") or ()),
-        }
-        persistence.write_state(payload)
+_record_degraded_assurance = run_coordination.record_degraded_assurance
 
 
 def _terminalize_run(
@@ -8338,27 +7153,25 @@ def _terminalize_run(
     with resolved_persistence.lock:
         outcome = _terminal_outcome(payload)
     if audit_context is not None and outcome not in _UNAUDITED_TERMINAL_OUTCOMES:
-        finalization = _LiveFinalization(
-            event_path=event_path,
+        # The coordinator owns the one invariant this block existed for: the
+        # published finalization phase is closed exactly once, cancelled or
+        # not, however the advisory audit inside it ends.
+        run_coordination.TerminalAssuranceCoordinator(
             payload=payload,
+            context=audit_context,
             persistence=resolved_persistence,
-            run_id=payload.get("run_id"),
-            phase=FINALIZATION_PHASE_ASSURANCE_AUDIT,
-            cancellable=cancel is not None,
-            poll=poll,
-        )
-        finalization.start()
-        cancelled = False
-        try:
-            cancelled = _attach_terminal_assurance(
-                payload,
-                audit_context,
-                resolved_persistence,
-                abort=cancel,
-            )
-            _attach_assurance_report(payload, audit_context, resolved_persistence)
-        finally:
-            finalization.finish(cancelled=cancelled)
+            phase=_LiveFinalization(
+                event_path=event_path,
+                payload=payload,
+                persistence=resolved_persistence,
+                run_id=payload.get("run_id"),
+                phase=FINALIZATION_PHASE_ASSURANCE_AUDIT,
+                cancellable=cancel is not None,
+                poll=poll,
+            ),
+            state_snapshot=_compact_state_payload,
+            abort=cancel,
+        ).run()
     _record_degraded_assurance(payload, persistence=resolved_persistence)
     _finish_run(event_path, payload, progress, persistence=persistence)
     return exit_code
@@ -8537,421 +7350,18 @@ def _pause_run(
     _notify_agent_mux_loop_paused(payload, persistence)
 
 
-def _apply_external_control_command(
-    command: control_queue.ControlCommand,
-    control_state: run_control.RunControlState,
-) -> run_control.RunControlAction | None:
-    """Translate one queued command into a RunControlAction, if it changes state."""
-    if command.command == control_queue.COMMAND_REQUEST_STOP_AFTER_CURRENT:
-        return control_state.request_stop_after_current()
-    if command.command == control_queue.COMMAND_SELECT_FUTURE_HARNESS:
-        assert command.harness is not None
-        return control_state.select_harness(command.harness)
-    if command.command == control_queue.COMMAND_SET_IMPLEMENTATION_MODEL:
-        return control_state.set_implementation_model(
-            target_harness=command.harness,
-            model=command.model_operation,
-            effort=command.effort_operation,
-        )
-    if command.command == control_queue.COMMAND_REQUEST_ABORT_TURN:
-        return control_state.request_abort_turn(
-            grace_seconds=command.grace_seconds,
-            reason=command.reason,
-        )
-    return None
-
-
-def _record_control_command_observed(
-    *,
-    event_path: Path,
-    payload: dict[str, Any],
-    control_payload: dict[str, Any],
-    command: control_queue.ControlCommand,
-    context: Mapping[str, Any] | None,
-    persistence: _RunPersistence,
-) -> None:
-    """Append the delivery receipt for one accepted external control command.
-
-    Recorded before the command is translated, and for every accepted command
-    rather than only the ones that change state: a duplicate, an
-    already-applied request, and a command this runner has no branch for all
-    leave no other trace, which is what makes them indistinguishable from a
-    command that never arrived. No state transition happened, so this appends
-    an event and writes no state.
-    """
-    event_payload: dict[str, Any] = {
-        "run_id": payload.get("run_id"),
-        "action": events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
-        "command_id": command.id,
-        "queue_command": command.command,
-        "stop_after_current": bool(control_payload.get("stop_after_current")),
-        "message": "control command observed",
-    }
-    if context is not None:
-        for key in ("session", "turn_index", "total_sessions"):
-            value = context.get(key)
-            if value is not None:
-                event_payload[key] = value
-    persistence.append_event(event_path, events.RUN_CONTROL_EVENT, event_payload)
-
-
-def _abort_turn_guidance_text(
-    *,
-    reason: str,
-    grace_seconds: int,
-    deadline: str,
-) -> str:
-    return (
-        "Supervisor abort requested for the turn now in flight "
-        f"(reason: {reason}). Wind down immediately: make no further "
-        "changes, leave this session pending, and emit `RUNNER_PAUSE: "
-        f"supervisor requested abort - {reason}`. The harness process group "
-        f"is killed at {deadline} ({grace_seconds}s grace) if the turn is "
-        "still running then."
-    )
-
-
-def _arm_requested_abort(
-    action: run_control.RunControlAction,
-    *,
-    abort: harnesses.AbortSignal,
-    plan_dir: Path,
-    state_dir_arg: str | None,
-    control_payload: dict[str, Any],
-    mailbox_enabled: bool,
-    finalization: bool = False,
-) -> None:
-    """Start the grace window for an observed abort and warn the worker.
-
-    Called from the poll thread while the harness turn it aborts is still
-    running. ``abort`` is the only state shared with that turn's wait loop,
-    which owns expiry from here; the guidance record is what lets a compliant
-    worker end the turn itself before the kill lands.
-
-    ``finalization`` arms the kill immediately and warns nobody. The grace
-    window exists so a worker can wind its own turn down and leave usable work
-    behind; the terminal audit is advisory and read-only, there is no session
-    to preserve, and the run is holding the plan lock while it waits — so the
-    window would only delay the cancellation the supervisor just asked for.
-    """
-    grace_seconds = (
-        0
-        if finalization
-        else (
-            control_queue.DEFAULT_ABORT_GRACE_SECONDS
-            if action.abort_grace_seconds is None
-            else action.abort_grace_seconds
-        )
-    )
-    reason = action.abort_reason or ABORT_TURN_DEFAULT_REASON
-    deadline = _isoformat(_utc_now() + timedelta(seconds=grace_seconds))
-    abort.arm(reason, grace_seconds=float(grace_seconds))
-    control_payload["abort_deadline"] = deadline
-    if finalization or not mailbox_enabled:
-        return
-    # The kill is already armed; failing to warn the worker must not
-    # terminate the turn or lose the abort.
-    with contextlib.suppress(OSError, mailbox.MailboxError):
-        mailbox.append_guidance(
-            plan_dir,
-            _abort_turn_guidance_text(
-                reason=reason,
-                grace_seconds=grace_seconds,
-                deadline=deadline,
-            ),
-            state_dir=state_dir_arg,
-        )
-
-
-def _degrade_abort_to_stop_after_current(
-    action: run_control.RunControlAction,
-    *,
-    control_state: run_control.RunControlState,
-    payload: dict[str, Any],
-    event_path: Path,
-    control_payload: dict[str, Any],
-    context: Mapping[str, Any] | None,
-    persistence: _RunPersistence,
-) -> None:
-    """Turn an abort observed with no turn in flight into a clean early stop.
-
-    There is nothing to kill, and dropping the command would make
-    ``asl control abort`` a silent no-op between turns, so the request becomes
-    the strongest thing it can still mean: no further session starts.
-    """
-    consumed = control_state.consume_abort_turn()
-    if consumed is not None:
-        _record_run_control_action(
-            event_path=event_path,
-            payload=payload,
-            control_payload=control_payload,
-            action=consumed,
-            context=context,
-            persistence=persistence,
-            message=("turn abort degraded to stop-after-current: no turn in flight"),
-        )
-    requested = control_state.request_stop_after_current()
-    if requested is not None:
-        _record_run_control_action(
-            event_path=event_path,
-            payload=payload,
-            control_payload=control_payload,
-            action=requested,
-            context=context,
-            persistence=persistence,
-        )
-
-
-def _drain_external_control_queue(
-    *,
-    plan_dir: Path,
-    state_dir_arg: str | None,
-    control_state: run_control.RunControlState,
-    seen_ids: set[str],
-    payload: dict[str, Any],
-    event_path: Path,
-    control_payload: dict[str, Any],
-    context: Mapping[str, Any] | None,
-    persistence: _RunPersistence,
-    run_control_lock: threading.Lock,
-    wakeup: threading.Event | None = None,
-    abort: harnesses.AbortSignal | None = None,
-    mailbox_enabled: bool = False,
-    finalization: bool = False,
-) -> control_queue.DrainResult:
-    """Drain queued external control commands and record any state changes.
-
-    Each accepted command is translated into the same ``RunControlAction``
-    the keyboard listener would emit and persisted through
-    ``_record_run_control_action`` so events and the ``control`` payload
-    look identical regardless of source. Commands whose IDs are already
-    in ``seen_ids`` are rejected by the drain function itself. Accepted
-    IDs are added to ``seen_ids`` so even a queue file rewritten by an
-    external producer cannot replay the same command in this process.
-
-    Every accepted command first gets a ``control-command-observed`` receipt
-    carrying its ID, which is what ``asl control --wait`` tails; the state
-    transition, if there is one, is recorded after it.
-
-    ``wakeup`` is cleared *before* the read, not after: a wakeup that arrives
-    while this drain runs may name a command appended after the read, so
-    clearing afterwards would swallow it. Clearing first costs at most one
-    redundant drain.
-
-    ``abort`` is the in-flight turn's signal, supplied only by the poll thread
-    that runs alongside a turn. Its presence is what tells an observed abort
-    command there is something to kill: without it the request degrades to
-    stop-after-current instead of dying quietly.
-
-    ``finalization`` says the signal belongs to the run's terminal work rather
-    than to a turn. What changes is that the kill is armed without a grace
-    window and warns nobody — there is no turn in flight to wind down — and the
-    action is recorded as a finalization abort so a supervisor can tell the two
-    apart.
-    """
-    if wakeup is not None:
-        wakeup.clear()
-    try:
-        result = control_queue.drain_queue(
-            plan_dir,
-            state_dir=state_dir_arg,
-            seen_ids=seen_ids,
-        )
-    except OSError:
-        return control_queue.DrainResult(
-            queue_path=control_queue.queue_path_for_plan(plan_dir, state_dir_arg)
-        )
-
-    for command in result.accepted:
-        seen_ids.add(command.id)
-        with run_control_lock:
-            _record_control_command_observed(
-                event_path=event_path,
-                payload=payload,
-                control_payload=control_payload,
-                command=command,
-                context=context,
-                persistence=persistence,
-            )
-            action = _apply_external_control_command(command, control_state)
-            if action is None:
-                continue
-            aborting = action.action == "abort-requested"
-            finalization_abort = aborting and finalization and abort is not None
-            if aborting and abort is not None:
-                # Armed before the action is recorded so the requested event and
-                # the `control` payload already carry the deadline the turn is
-                # counting down to.
-                _arm_requested_abort(
-                    action,
-                    abort=abort,
-                    plan_dir=plan_dir,
-                    state_dir_arg=state_dir_arg,
-                    control_payload=control_payload,
-                    mailbox_enabled=mailbox_enabled,
-                    finalization=finalization,
-                )
-            _record_run_control_action(
-                event_path=event_path,
-                payload=payload,
-                control_payload=control_payload,
-                action=action,
-                context=context,
-                persistence=persistence,
-                event_action=(
-                    events.RUN_CONTROL_ACTION_FINALIZATION_ABORT_HONORED
-                    if finalization_abort
-                    else None
-                ),
-                message=(
-                    "abort observed while finalizing: cancelling the terminal audit"
-                    if finalization_abort
-                    else None
-                ),
-            )
-            if aborting and abort is None:
-                _degrade_abort_to_stop_after_current(
-                    action,
-                    control_state=control_state,
-                    payload=payload,
-                    event_path=event_path,
-                    control_payload=control_payload,
-                    context=context,
-                    persistence=persistence,
-                )
-    return result
-
-
-class _MailboxPoll:
-    """Observe live mailbox guidance alongside external control commands."""
-
-    def __init__(
-        self,
-        *,
-        plan_dir: Path,
-        state_dir_arg: str | None,
-        control_state: run_control.RunControlState,
-        seen_control_ids: set[str],
-        payload: dict[str, Any],
-        event_path: Path,
-        control_payload: dict[str, Any],
-        persistence: _RunPersistence,
-        run_control_lock: threading.Lock,
-        enabled: bool = True,
-        wakeup: threading.Event | None = None,
-    ) -> None:
-        self._plan_dir = plan_dir
-        self._state_dir_arg = state_dir_arg
-        self._control_state = control_state
-        self._seen_control_ids = seen_control_ids
-        self._payload = payload
-        self._event_path = event_path
-        self._control_payload = control_payload
-        self._persistence = persistence
-        self._run_control_lock = run_control_lock
-        self._enabled = enabled
-        self._wakeup = wakeup
-        self._context: dict[str, Any] | None = None
-        self._abort: harnesses.AbortSignal | None = None
-        self._finalization = False
-        self._evented_guidance_ids: set[str] = set()
-        self._mailbox_path = mailbox.mailbox_path_for_plan(
-            plan_dir,
-            state_dir_arg,
-        )
-        self._last_read_token: object = _MAILBOX_TOKEN_UNSEEN
-
-    def set_context(self, context: Mapping[str, Any] | None) -> None:
-        """Set the active turn metadata attached to subsequent poll events."""
-        self._context = None if context is None else dict(context)
-
-    def set_abort(
-        self,
-        abort: harnesses.AbortSignal | None,
-        *,
-        finalization: bool = False,
-    ) -> None:
-        """Attach the signal an observed abort should arm, or detach it.
-
-        Set while a turn is in flight and cleared once it has finished, so an
-        abort observed between turns (during a mailbox reply wait, for example)
-        cannot arm a signal no running turn is watching. ``finalization`` marks
-        the signal as belonging to the run's terminal work instead of a turn.
-        """
-        self._abort = abort
-        self._finalization = finalization
-
-    def __call__(self) -> None:
-        """Drain controls, then emit once-only metadata for pending guidance."""
-        _drain_external_control_queue(
-            plan_dir=self._plan_dir,
-            state_dir_arg=self._state_dir_arg,
-            control_state=self._control_state,
-            seen_ids=self._seen_control_ids,
-            payload=self._payload,
-            event_path=self._event_path,
-            control_payload=self._control_payload,
-            context=self._context,
-            persistence=self._persistence,
-            run_control_lock=self._run_control_lock,
-            wakeup=self._wakeup,
-            abort=self._abort,
-            mailbox_enabled=self._enabled,
-            finalization=self._finalization,
-        )
-
-        if not self._enabled:
-            return
-
-        current_token = mailbox.mailbox_change_token(self._mailbox_path)
-        if (
-            self._last_read_token is not _MAILBOX_TOKEN_UNSEEN
-            and current_token is not mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
-            and current_token == self._last_read_token
-        ):
-            return
-
-        try:
-            view = mailbox.read_mailbox(
-                self._plan_dir,
-                state_dir=self._state_dir_arg,
-            )
-        except OSError, mailbox.MailboxError:
-            # Mailbox status remains authoritative through its own direct read;
-            # a live observation failure must not terminate the harness turn.
-            return
-
-        # Retain the token captured before the locked read. An append racing
-        # that read will conservatively trigger another parse on the next tick.
-        self._last_read_token = current_token
-        for message in view.pending_guidance:
-            if message.id in self._evented_guidance_ids:
-                continue
-            text = message.text or ""
-            event_payload = {
-                "run_id": self._payload.get("run_id"),
-                "action": events.MAILBOX_ACTION_GUIDANCE_OBSERVED,
-                "message_id": message.id,
-                "seq": message.seq,
-                "length": len(text),
-                "digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            }
-            if self._context is not None:
-                for key in (
-                    "session",
-                    "session_id",
-                    "turn_index",
-                    "total_sessions",
-                ):
-                    value = self._context.get(key)
-                    if value is not None:
-                        event_payload[key] = value
-            self._persistence.append_event(
-                self._event_path,
-                events.MAILBOX_EVENT,
-                event_payload,
-            )
-            self._evented_guidance_ids.add(message.id)
+# The external control plane owns ``payload["control"]`` and the receipts an
+# `asl control --wait` client tails, so it moves with the rest of the
+# coordination boundary. Aliases only; nothing here is runner-specific.
+_apply_external_control_command = run_coordination.apply_external_control_command
+_record_control_command_observed = run_coordination.record_control_command_observed
+_abort_turn_guidance_text = run_coordination.abort_turn_guidance_text
+_arm_requested_abort = run_coordination.arm_requested_abort
+_degrade_abort_to_stop_after_current = (
+    run_coordination.degrade_abort_to_stop_after_current
+)
+_drain_external_control_queue = run_coordination.drain_external_control_queue
+_MailboxPoll = run_coordination.MailboxPoll
 
 
 def _record_abort_satisfied_by_worker(
@@ -16912,119 +15322,26 @@ def _run_locked(
                         # structural refresh at the top of the loop.
                         runner_work_finished_at = _utc_now()
                         idle_baseline_pinned = True
-                        _set_waiting_for_reply(
-                            event_path,
-                            payload,
-                            prepared_wait.waiting_for_reply,
-                            pending_outbox=prepared_wait.pending_outbox,
-                            persistence=persistence,
-                        )
-                        _notify_agent_mux_loop_wait_started(
-                            payload,
-                            question_id=prepared_wait.question.id,
-                            question_text=prepared_wait.question.text,
-                            persistence=persistence,
-                        )
-                        wait_result: _MailboxReplyWaitResult | None = None
-                        try:
-                            wait_result = _wait_for_mailbox_reply(
-                                plan_dir=after.plan_dir,
-                                state_dir_arg=args.state_dir,
+                        wait_result = run_coordination.MailboxWaitCoordinator(
+                            plan_dir=after.plan_dir,
+                            state_dir_arg=args.state_dir,
+                            prepared=prepared_wait,
+                            run_id=run_id,
+                            store=run_coordination.WaitStateStore(
+                                event_path=event_path,
                                 payload=payload,
-                                question_id=prepared_wait.question.id,
-                                run_id=run_id,
-                                settings=prepared_wait.settings,
                                 persistence=persistence,
-                                poll_controls=mailbox_poll,
-                                started_monotonic=(prepared_wait.started_monotonic),
-                            )
-                            wait_result = _finish_mailbox_reply_wait_lifecycle(
-                                plan_dir=after.plan_dir,
-                                state_dir_arg=args.state_dir,
-                                question_id=prepared_wait.question.id,
-                                wait_id=prepared_wait.wait_start.id,
-                                result=wait_result,
-                            )
-                        finally:
-                            wait_reason = (
-                                wait_result.reason
-                                if wait_result is not None
-                                else "error"
-                            )
-                            _clear_waiting_for_reply(
-                                event_path,
-                                payload,
-                                reason=wait_reason,
-                                pending_outbox=(
-                                    wait_result.pending_outbox
-                                    if wait_result is not None
-                                    else None
-                                ),
-                                lease_updated_at=(
-                                    wait_result.lease_updated_at
-                                    if wait_result is not None
-                                    else None
-                                ),
-                                lease_reason=(
-                                    wait_result.lease_reason
-                                    if wait_result is not None
-                                    else None
-                                ),
-                                lease_supervisor_id=(
-                                    wait_result.lease_supervisor_id
-                                    if wait_result is not None
-                                    else None
-                                ),
-                                suspend_skew_seconds=(
-                                    wait_result.suspend_skew_seconds
-                                    if wait_result is not None
-                                    else None
-                                ),
-                                suspend_lease_grace_seconds=(
-                                    wait_result.suspend_lease_grace_seconds
-                                    if wait_result is not None
-                                    else None
-                                ),
-                                unsupervised_seconds=(
-                                    wait_result.unsupervised_seconds
-                                    if wait_result is not None
-                                    else None
-                                ),
-                                resolution_action=(
-                                    wait_result.resolution.action
-                                    if wait_result is not None
-                                    and wait_result.resolution is not None
-                                    else None
-                                ),
-                                resolution_message_id=(
-                                    wait_result.resolution.id
-                                    if wait_result is not None
-                                    and wait_result.resolution is not None
-                                    else None
-                                ),
-                                resolution_seq=(
-                                    wait_result.resolution.seq
-                                    if wait_result is not None
-                                    and wait_result.resolution is not None
-                                    else None
-                                ),
-                                persistence=persistence,
-                            )
-                            _notify_agent_mux_loop_wait_ended(
-                                payload,
-                                question_id=prepared_wait.question.id,
-                                wait_reason=wait_reason,
-                                closure_id=(
-                                    wait_result.reply.id
-                                    if wait_result is not None
-                                    and wait_result.reply is not None
-                                    else wait_result.resolution.id
-                                    if wait_result is not None
-                                    and wait_result.resolution is not None
-                                    else None
-                                ),
-                                persistence=persistence,
-                            )
+                            ),
+                            persistence=persistence,
+                            notifier=_AgentMuxWaitNotifier(payload, persistence),
+                            poll_controls=mailbox_poll,
+                            # Resolved here rather than inside the coordinator
+                            # so this module keeps owning both names: callers
+                            # patch them on the runner to assert a wait was or
+                            # was not entered.
+                            wait_for_reply=_wait_for_mailbox_reply,
+                            finish_lifecycle=_finish_mailbox_reply_wait_lifecycle,
+                        ).run()
 
                         if wait_result.reply is not None:
                             reply_message = wait_result.reply

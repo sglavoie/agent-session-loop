@@ -1932,6 +1932,45 @@ falling through. The modules return frozen decisions only; pausing, reverting,
 and every durable write stay in the runner, and the durable event and result
 schemas are unchanged.
 
+Everything that races the run loop from outside it is declared the same way.
+`agent_session_loop/run_coordination.py` owns the three durable slots a
+non-loop actor writes: `waiting_for_reply` belongs to a `WaitStateStore` whose
+every begin, lease stamp, deadline rebase, and clear is a compare-and-set
+against the question that opened the wait, so a lease probe for a wait the loop
+has already finished is dropped rather than resurrecting it; `control` is
+written only through `record_run_control_action`, so an event and the control
+payload can never disagree about what was requested; and `assurance` is
+published by a `TerminalAssuranceCoordinator` that closes its finalization
+phase whether the audit rendered a verdict, was cancelled, or raised. A
+`MailboxWaitCoordinator` brackets one reply-capable pause end to end — the wait
+is announced before it can block and cleared after it stops, including when the
+poll raises — and a `SupervisionCursor` carries the lease-and-clock ratchet a
+bounded wait advances, where a fresh lease is the only thing that rolls the
+unsupervised ceiling forward and a suspend restarts it at the wake instant. The
+exactly-once reply guarantee is unchanged and now stated in one place: the poll
+loop reads the mailbox without its lock, so `mailbox.finish_wait` re-checks
+under it and whatever closure it finds there overrides the timeout the loop
+arrived with. Like the lane modules, `run_coordination.py` never imports the
+runner — serialized persistence, the AgentMux notification seam, and the
+compacted state projection the audit reads enter through the
+`CoordinationPersistence`, `WaitNotifier`, and `state_snapshot` seams — and the
+runner keeps a module-level alias for each moved symbol so existing
+`mock.patch.object` targets still resolve. Coordination no longer depends on
+incidental mutation of runner-owned dictionaries.
+
+The typed boundaries carry a ratchet rather than a convention.
+`tests/test_asl_typing_ratchet.py` fails if a code joins the repository-wide
+`disable_error_code` baseline, if any per-module override adds a suppression of
+its own (mypy unions those with the global list, so a narrow disable is a
+repository-wide one wearing a shorter name), or if a module leaves the
+`enable_error_code` list of extracted boundaries. It also lints the shape mypy
+would otherwise have to trust: every public signature in a ratcheted module is
+fully annotated, no durable payload crosses one of those boundaries as a bare
+`dict`, `Mapping`, or `list`, no ratcheted module carries a `type: ignore`, and
+none of them imports the runner. A future extraction adds its module to the
+override list in `pyproject.toml`, to `REQUIRED_RATCHETED_MODULES`, and to
+`FAST_MODULES` in `tests/run_suite.py`.
+
 Optional post-run assurance stays advisory and never blocks. A run whose audit
 landed `unavailable` or `partial` keeps the success it earned and carries an
 additive `assurance_degraded` block naming `assurance_state`, `reason`,

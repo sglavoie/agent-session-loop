@@ -47,22 +47,30 @@ disable_error_code = [
     "annotation-unchecked",
 ]
 
-# The turn-execution boundary is typed, so it opts back in to the three codes
-# the repository-wide baseline still hides. It is the one path where an
+# The extracted durable boundaries are typed, so they opt back in to the three
+# codes the repository-wide baseline still hides. These are the paths where an
 # argument of the wrong type, an attribute read off an optional, or an index
-# into something that is not a mapping would corrupt a durable turn record
-# rather than raise at the call site. New turn modules belong on this list;
-# nothing here is a suppression, so the baseline above only ever shrinks.
-# `enable_error_code`, not a shorter `disable_error_code`: a per-module
-# disable list is unioned with the global one, so re-enabling is the only
-# way back in.
+# into something that is not a mapping would corrupt a durable record — a turn,
+# a transition, a mailbox wait, a control command, a projection payload —
+# rather than raise at the call site. Every module extracted out of the runner
+# belongs on this list; nothing here is a suppression, so the baseline above
+# only ever shrinks. `enable_error_code`, not a shorter `disable_error_code`: a
+# per-module disable list is unioned with the global one, so re-enabling is the
+# only way back in.
+#
+# `tests/test_asl_typing_ratchet.py` enforces both halves of that: the global
+# list may only shrink, and this list may only grow.
 [[tool.mypy.overrides]]
 module = [
+    "agent_session_loop.agent_mux_delivery",
+    "agent_session_loop.agent_mux_projection",
     "agent_session_loop.clock",
-    "agent_session_loop.turn_execution",
-    "agent_session_loop.transitions",
-    "agent_session_loop.verification_transitions",
+    "agent_session_loop.durability",
     "agent_session_loop.review_transitions",
+    "agent_session_loop.run_coordination",
+    "agent_session_loop.transitions",
+    "agent_session_loop.turn_execution",
+    "agent_session_loop.verification_transitions",
 ]
 enable_error_code = [
     "arg-type",

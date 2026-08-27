@@ -58,6 +58,8 @@ FAST_MODULES = (
     "tests.test_asl_verification_transitions",
     "tests.test_asl_review_transitions",
     "tests.test_asl_transitions",
+    "tests.test_asl_run_coordination",
+    "tests.test_asl_typing_ratchet",
     "tests.test_asl_turn_finalization",
     "tests.test_asl_turn_commit",
     "tests.test_asl_commit_groups",
