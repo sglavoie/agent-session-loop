@@ -2765,10 +2765,33 @@ repeated pass is a no-op.
 
 The whole mutating pass runs under a single state-root-wide `flock`
 (`maintenance.lock`), so two passes can never interleave; a pass that cannot
-claim it reports `lock-unavailable` and mutates nothing. Liveness, pins, and
-plan locks are re-read *under that claim, immediately before the first
-mutation*: anything that came alive, acquired a pin, or acquired a lock since
-planning is dropped from the plan and listed in `revalidation_drops`. A failed
+claim it reports `lock-unavailable` and mutates nothing. That claim is the only
+thing the corpus's other writers do *not* participate in — runners, lock
+writers, and assurance publishers never take it — so every fact that authorizes
+a deletion is read again at the moment it is used, rather than once per pass.
+
+Pressure is measured twice. The reading that decides whether to request the
+claim at all is taken before the wait, and a pass that then blocks behind
+another pass is holding exactly the number the pass ahead of it exists to
+falsify, so the corpus is measured a second time once the claim is granted. If
+it is back under both thresholds by then, the outcome is `pressure-relieved`,
+nothing is planned, and nothing is touched; `--force` is the only thing that
+overrides that second reading. Both readings are kept in the result and the
+manifest: `usage` is the pre-claim measurement that admitted the pass and
+`usage_at_claim` is the one taken under the claim.
+
+Liveness, pins, and plan locks are then re-read under the claim to narrow the
+plan — but narrowing is all that reading does, and it never authorizes what
+survives it. Every destructive action is fenced by its own reading taken
+immediately before it acts: each whole-run removal, each body compression (which
+unlinks the original once the gzip and its sidecar are durable), and each
+budgeted body removal re-reads the plan lock, the live-run set, and the pin set
+first. Anything that came alive, acquired a pin, or acquired a lock — whether
+since planning or since the last action in the same pass — is dropped and listed
+in `revalidation_drops`, where each entry names its `lane` (`reclaim` or
+`compaction`) and the `stage` at which it was caught (`revalidation` or
+`mutation`). A run fenced out midway through compaction keeps every body it
+still has and the pass moves on to the next run. A failed
 mutation is reported with the bytes it left allocated, and those bytes are never
 counted as reclaimed — a partial `rmtree` re-measures the directory and counts
 only the difference. `--max-runtime-seconds` (default 900) bounds the pass; work

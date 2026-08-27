@@ -130,6 +130,30 @@ class MaintenanceTestBase(unittest.TestCase):
     def _run_path(self, run_id: str, plan_dir: Path | None = None) -> Path:
         return self._state_dir(plan_dir) / state.RUNS_DIR_NAME / run_id
 
+    def _pin_run(self, run_id: str) -> None:
+        """Open a real assurance issue against `run_id`, pinning its artifacts."""
+        finding = models.Finding(
+            category="lifecycle",
+            component="agent_session_loop/runner.py",
+            invariant_key="retry.budget",
+            lane="lifecycle-retry-resume",
+            severity="high",
+            summary="A retry ran after the budget was exhausted.",
+            recommendation="Clamp the retry counter before relaunching.",
+            evidence=("events.jsonl",),
+        )
+        projection.publish_audit(
+            projection.AuditPublication(
+                run_id=run_id,
+                state="findings",
+                eligible=True,
+                findings=(finding,),
+                completed_at=AUDIT_STAMP,
+            ),
+            state_dir=self.state_root,
+            recorded_at=AUDIT_STAMP,
+        )
+
 
 class ThresholdTests(MaintenanceTestBase):
     """Nothing happens until the corpus is over budget or the volume is low."""
@@ -225,27 +249,7 @@ class ProtectedEvidenceTests(MaintenanceTestBase):
             RUN_OLD, finished_at=_stamp(200), bodies={"stderr.log": b"y" * 512}
         )
         self._write_run(RUN_NEWEST, finished_at=_stamp(1))
-        finding = models.Finding(
-            category="lifecycle",
-            component="agent_session_loop/runner.py",
-            invariant_key="retry.budget",
-            lane="lifecycle-retry-resume",
-            severity="high",
-            summary="A retry ran after the budget was exhausted.",
-            recommendation="Clamp the retry counter before relaunching.",
-            evidence=("events.jsonl",),
-        )
-        projection.publish_audit(
-            projection.AuditPublication(
-                run_id=RUN_OLD,
-                state="findings",
-                eligible=True,
-                findings=(finding,),
-                completed_at=AUDIT_STAMP,
-            ),
-            state_dir=self.state_root,
-            recorded_at=AUDIT_STAMP,
-        )
+        self._pin_run(RUN_OLD)
 
         result = self._run(apply=True)
 
@@ -292,7 +296,13 @@ class ProtectedEvidenceTests(MaintenanceTestBase):
 
 
 class RevalidationTests(MaintenanceTestBase):
-    """Liveness and pins are re-read under the lock, not trusted from before it."""
+    """Liveness and pins are re-read under the lock, not trusted from before it.
+
+    Re-read twice, in fact: once to narrow the plan, and once more immediately
+    before each destructive action. Nothing that writes a plan lock, starts a
+    run, or opens an assurance issue takes the maintenance claim, so a single
+    revalidation only proves the corpus was safe to delete at one past instant.
+    """
 
     def test_a_run_that_becomes_live_after_planning_is_dropped(self) -> None:
         expired = self._write_run(RUN_OLD, finished_at=_stamp(200))
@@ -338,7 +348,95 @@ class RevalidationTests(MaintenanceTestBase):
         self.assertEqual(result.removed_run_ids, ())
         self.assertTrue(expired.is_dir())
         self.assertEqual(len(result.revalidation_drops), 1)
-        self.assertIn("plan lock is active", result.revalidation_drops[0]["reason"])
+        drop = result.revalidation_drops[0]
+        self.assertIn("plan lock is active", drop["reason"])
+        self.assertEqual(drop["stage"], maintenance.STAGE_REVALIDATION)
+
+    def test_pin_acquired_after_initial_revalidation_blocks_removal(self) -> None:
+        """A pin that lands between revalidation and removal still protects."""
+        expired = self._write_run(
+            RUN_OLD, finished_at=_stamp(200), bodies={"stderr.log": b"p" * 512}
+        )
+        self._write_run(RUN_NEWEST, finished_at=_stamp(1))
+        real = maintenance._revalidate
+
+        def revalidate_then_pin(*args: Any, **kwargs: Any) -> Any:
+            approved = real(*args, **kwargs)
+            # The issue is opened after the plan has been revalidated and
+            # cleared for removal. Nothing but a reading taken at the moment of
+            # deletion can see it, because the assurance writer never took the
+            # maintenance claim and was free to land here.
+            self._pin_run(RUN_OLD)
+            return approved
+
+        with unittest.mock.patch.object(
+            maintenance, "_revalidate", revalidate_then_pin
+        ):
+            result = self._run(apply=True)
+
+        self.assertEqual(result.removed_run_ids, ())
+        self.assertEqual(result.reclaimed_bytes, 0)
+        self.assertTrue(expired.is_dir())
+        self.assertEqual(len(result.revalidation_drops), 1)
+        drop = result.revalidation_drops[0]
+        self.assertEqual(drop["run_id"], RUN_OLD)
+        self.assertEqual(drop["lane"], maintenance.LANE_RECLAIM)
+        # Recorded as a mutation-time drop: the plan cleared this run and the
+        # fence in front of the removal itself is what saved it.
+        self.assertEqual(drop["stage"], maintenance.STAGE_MUTATION)
+        self.assertIn("assurance pin", drop["reason"])
+
+    def test_a_lock_acquired_after_initial_revalidation_blocks_removal(self) -> None:
+        expired = self._write_run(RUN_OLD, finished_at=_stamp(200))
+        self._write_run(RUN_NEWEST, finished_at=_stamp(1))
+        real = maintenance._revalidate
+
+        def revalidate_then_lock(*args: Any, **kwargs: Any) -> Any:
+            approved = real(*args, **kwargs)
+            self._write_lock(pid=os.getpid())
+            return approved
+
+        with unittest.mock.patch.object(
+            maintenance, "_revalidate", revalidate_then_lock
+        ):
+            result = self._run(apply=True)
+
+        self.assertEqual(result.removed_run_ids, ())
+        self.assertTrue(expired.is_dir())
+        self.assertEqual(len(result.revalidation_drops), 1)
+        drop = result.revalidation_drops[0]
+        self.assertEqual(drop["stage"], maintenance.STAGE_MUTATION)
+        self.assertIn("plan lock is active", drop["reason"])
+
+    def test_a_pin_acquired_after_initial_revalidation_blocks_compaction(self) -> None:
+        """The compaction lane is fenced too: compressing unlinks the original."""
+        payload = b"repeat me " * 4096
+        run_dir = self._write_run(
+            RUN_OLD, finished_at=_stamp(200), bodies={"stderr.log": payload}
+        )
+        real = maintenance._revalidate
+
+        def revalidate_then_pin(*args: Any, **kwargs: Any) -> Any:
+            approved = real(*args, **kwargs)
+            self._pin_run(RUN_OLD)
+            return approved
+
+        with unittest.mock.patch.object(
+            maintenance, "_revalidate", revalidate_then_pin
+        ):
+            result = self._run(apply=True)
+
+        turn = run_dir / "turn-0001-session-1"
+        self.assertTrue((turn / "stderr.log").is_file())
+        self.assertEqual((turn / "stderr.log").read_bytes(), payload)
+        self.assertFalse((turn / "stderr.log.gz").exists())
+        self.assertEqual(result.compressed_body_count, 0)
+        self.assertEqual(result.removed_body_count, 0)
+        self.assertEqual(len(result.revalidation_drops), 1)
+        drop = result.revalidation_drops[0]
+        self.assertEqual(drop["lane"], maintenance.LANE_COMPACTION)
+        self.assertEqual(drop["stage"], maintenance.STAGE_MUTATION)
+        self.assertIn("assurance pin", drop["reason"])
 
 
 class CompactionTests(MaintenanceTestBase):
@@ -730,6 +828,105 @@ class ConcurrencyTests(MaintenanceTestBase):
         self.assertEqual(len(outcomes), 2)
         self.assertEqual(outcomes.count(maintenance.OUTCOME_APPLIED), 1)
         self.assertEqual(outcomes.count(maintenance.OUTCOME_LOCK_UNAVAILABLE), 1)
+
+    def test_waiting_pass_remeasures_pressure_after_acquiring_claim(self) -> None:
+        """The pass that waited its turn deletes nothing if the wait fixed it.
+
+        Pressure is what authorizes a pass to delete, and it is read before the
+        claim is even requested. A pass that then blocks behind another pass is
+        holding a fact that the other pass exists to falsify, so it reads it
+        again once the claim is its own.
+        """
+        # Over budget when the waiting pass measures; under it once the pass
+        # ahead reclaims the other plan's expired run.
+        half = b"x" * (1 << 20)
+        expired = self._write_run(
+            RUN_OLD, finished_at=_stamp(200), bodies={"stderr.log": half}
+        )
+        self._write_run(RUN_NEWEST, finished_at=_stamp(1))
+        other_plan = self._make_plan("other")
+        relieving = self._write_run(
+            RUN_ANCIENT,
+            finished_at=_stamp(300),
+            plan_dir=other_plan,
+            bodies={"stderr.log": half},
+        )
+        self._write_run(RUN_NEWEST, finished_at=_stamp(1), plan_dir=other_plan)
+        # Both bodies together are over; either one alone is under.
+        budget = 3 * (1 << 19)
+
+        measured = threading.Event()
+        real_measure = maintenance.measure_corpus
+
+        def measure_then_signal(*args: Any, **kwargs: Any) -> Any:
+            usage = real_measure(*args, **kwargs)
+            # The pre-claim reading is done; the waiting pass is now parked on
+            # the claim this thread holds, which is the exact race to reproduce.
+            measured.set()
+            return usage
+
+        results: list[maintenance.MaintenanceResult] = []
+
+        def worker() -> None:
+            results.append(
+                maintenance.run_maintenance(
+                    self.state_root,
+                    apply=True,
+                    force=False,
+                    now=NOW,
+                    budget_bytes=budget,
+                    min_free_fraction=NEVER_LOW,
+                    lock_wait_seconds=30.0,
+                    record=False,
+                )
+            )
+
+        claim = maintenance._maintenance_claim(
+            maintenance.lock_path(self.state_root), wait_seconds=0.0
+        )
+        with claim as held:
+            self.assertTrue(held)
+            with unittest.mock.patch.object(
+                maintenance, "measure_corpus", measure_then_signal
+            ):
+                thread = threading.Thread(target=worker)
+                thread.start()
+                self.assertTrue(measured.wait(timeout=10))
+                # Stand in for the pass ahead: relieve the pressure, then hand
+                # the claim over.
+                self.assertEqual(retention.remove_run_directory(relieving), "")
+        thread.join(timeout=20)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(results), 1)
+        result = results[0]
+        self.assertEqual(result.outcome, maintenance.OUTCOME_PRESSURE_RELIEVED)
+        self.assertFalse(result.applied)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.removed_run_ids, ())
+        self.assertIsNone(result.plan)
+        # Both readings are kept: the one that admitted the pass, and the one
+        # that sent it home.
+        self.assertTrue(result.usage.over_budget)
+        self.assertIsNotNone(result.usage_at_claim)
+        assert result.usage_at_claim is not None
+        self.assertFalse(result.usage_at_claim.triggered)
+        self.assertEqual(result.trigger, maintenance.TRIGGER_NONE)
+        self.assertTrue(expired.is_dir())
+
+        # And the run was genuinely reclaimable: only the remeasure spared it.
+        forced = self._run(apply=True, budget_bytes=budget)
+        self.assertEqual(forced.removed_run_ids, (RUN_OLD,))
+
+    def test_a_relieved_pass_still_acts_when_force_was_requested(self) -> None:
+        expired = self._write_run(RUN_OLD, finished_at=_stamp(200))
+        self._write_run(RUN_NEWEST, finished_at=_stamp(1))
+
+        result = self._run(apply=True, force=True)
+
+        self.assertEqual(result.outcome, maintenance.OUTCOME_APPLIED)
+        self.assertEqual(result.removed_run_ids, (RUN_OLD,))
+        self.assertFalse(expired.exists())
 
 
 class DeadlineTests(MaintenanceTestBase):

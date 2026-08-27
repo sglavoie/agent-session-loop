@@ -27,14 +27,21 @@ reproducible log bodies may be compressed, and the bytes above
 any lane.
 
 **Nothing is deleted on stale knowledge.** The whole mutating pass runs under a
-single state-root-wide ``flock``, so two maintenance runs can never interleave,
-and liveness and pins are re-read *under that lock, immediately before the first
-mutation*: a run that came alive or acquired a pin while the plan was being
-computed is dropped from the plan and reported. Every removal writes its
-metadata durably before the bytes go, so an interrupted pass can leave a
-tombstone with nothing removed but never removed bytes with no tombstone. Byte
-accounting is measured after the fact, never assumed: a failed removal reports
-the bytes that are still allocated instead of counting them as reclaimed.
+single state-root-wide ``flock``, so two maintenance runs can never interleave.
+That claim bounds only other maintenance passes, though — a run lock, a live
+runner, and an assurance pin are all written by processes that never take it —
+so every fact this module deletes on is re-read at the moment it is used rather
+than carried forward. The thresholds are re-measured once the claim is held,
+and a pass that finds the pressure already relieved by whoever it waited for
+returns without mutating unless ``force`` was asked for explicitly. Liveness,
+pins, and plan locks are re-read under the claim to narrow the plan, and then
+again immediately before each individual removal, compression, and body
+deletion, so a protection that lands mid-pass stops the very next action rather
+than only the first one. Every removal writes its metadata durably before the
+bytes go, so an interrupted pass can leave a tombstone with nothing removed but
+never removed bytes with no tombstone. Byte accounting is measured after the
+fact, never assumed: a failed removal reports the bytes that are still
+allocated instead of counting them as reclaimed.
 
 When protected data alone still exceeds the budget, maintenance deletes nothing
 outside policy and raises a strict health finding instead. That is the one
@@ -57,7 +64,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -78,8 +85,13 @@ __all__ = [
     "LOG_BODY_NAMES",
     "OUTCOME_UNDER_THRESHOLD",
     "OUTCOME_LOCK_UNAVAILABLE",
+    "OUTCOME_PRESSURE_RELIEVED",
     "OUTCOME_PLANNED",
     "OUTCOME_APPLIED",
+    "LANE_RECLAIM",
+    "LANE_COMPACTION",
+    "STAGE_REVALIDATION",
+    "STAGE_MUTATION",
     "TRIGGER_NONE",
     "TRIGGER_FORCED",
     "TRIGGER_CORPUS_OVER_BUDGET",
@@ -168,8 +180,18 @@ TRIGGER_LOW_FREE_SPACE = "filesystem-low-free-space"
 
 OUTCOME_UNDER_THRESHOLD = "under-threshold"
 OUTCOME_LOCK_UNAVAILABLE = "lock-unavailable"
+#: A pass that waited for the claim and found the corpus healthy by the time it
+#: was granted. The pressure that admitted it was relieved by whoever it waited
+#: for, so there is nothing left for it to justify deleting.
+OUTCOME_PRESSURE_RELIEVED = "pressure-relieved"
 OUTCOME_PLANNED = "planned"
 OUTCOME_APPLIED = "applied"
+
+#: The two lanes a run can be dropped from, and when the drop was decided.
+LANE_RECLAIM = "reclaim"
+LANE_COMPACTION = "compaction"
+STAGE_REVALIDATION = "revalidation"
+STAGE_MUTATION = "mutation"
 
 HEALTH_PROTECTED_OVER_BUDGET = "protected-over-budget"
 HEALTH_PARTIAL_FAILURE = "partial-failure"
@@ -462,6 +484,79 @@ class MaintenancePlan:
         }
 
 
+class _SafetyReading:
+    """One reading of the three facts that forbid touching a run's evidence.
+
+    A plan lock, a live run, and an open assurance pin are each written by
+    processes that know nothing about the maintenance claim, so holding that
+    claim proves only that no *other maintenance pass* is running — never that
+    the corpus stopped changing. The reading is therefore a value with a moment
+    attached rather than a cache: whoever is about to delete something takes a
+    fresh one, and the memo below lives only for the duration of this one.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._live = retention.live_run_keys(root)
+        self._pinned = retention.pinned_run_ids(root)
+        self._locks: dict[str, str] = {}
+
+    def blocker(self, *, plan_dir: str, plan_state_dir: str, run_id: str) -> str:
+        """Return why this run may not be touched now, or ``""`` when it may."""
+        if plan_dir not in self._locks:
+            info = state.inspect_lock_info(Path(plan_dir), self._root)
+            self._locks[plan_dir] = retention.lock_blocker(info)
+        if self._locks[plan_dir]:
+            return self._locks[plan_dir]
+        if (plan_state_dir, run_id) in self._live:
+            return "run became live after the plan was computed"
+        if not self._pinned.available:
+            return f"assurance ledger became unreadable: {self._pinned.error}"
+        if run_id in self._pinned.run_ids:
+            return "run acquired an open assurance pin"
+        return ""
+
+
+#: Reads current plan-lock, liveness, and pin state for one run, right now.
+_Fence = Callable[[str, str, str], str]
+
+
+def _drop(
+    *, lane: str, stage: str, plan_dir: str, run_id: str, reason: str
+) -> dict[str, str]:
+    """One run this pass declined to touch, and the state that forbade it."""
+    return {
+        "lane": lane,
+        "stage": stage,
+        "plan_dir": plan_dir,
+        "run_id": run_id,
+        "reason": reason,
+    }
+
+
+@dataclass(frozen=True)
+class _Removal:
+    """One run the reclaim lane may delete, carrying what its fence needs."""
+
+    plan_dir: str
+    plan_state_dir: str
+    candidate: retention.RunCandidate
+
+    @property
+    def run_id(self) -> str:
+        return self.candidate.run_id
+
+
+@dataclass(frozen=True)
+class _Compaction:
+    """One run the compaction lane may touch, carrying what its fence needs."""
+
+    plan_dir: str
+    plan_state_dir: str
+    run_id: str
+    run_path: Path
+
+
 class _Deadline:
     """The wall-clock bound on one pass, checked between units of work."""
 
@@ -744,6 +839,7 @@ class MaintenanceResult:
     finished_at: str
     duration_seconds: float
     usage: CorpusUsage
+    usage_at_claim: CorpusUsage | None
     usage_after: CorpusUsage | None
     plan: MaintenancePlan | None
     removed_run_ids: tuple[str, ...]
@@ -773,6 +869,11 @@ class MaintenanceResult:
             "finished_at": self.finished_at,
             "duration_seconds": self.duration_seconds,
             "usage": self.usage.to_dict(),
+            "usage_at_claim": (
+                self.usage_at_claim.to_dict()
+                if self.usage_at_claim is not None
+                else None
+            ),
             "usage_after": (
                 self.usage_after.to_dict() if self.usage_after is not None else None
             ),
@@ -812,17 +913,26 @@ class MaintenanceResult:
 
 
 class _Mutator:
-    """Applies one plan under the claim, accounting only for bytes truly freed."""
+    """Applies one plan under the claim, accounting only for bytes truly freed.
 
-    def __init__(self, *, deadline: _Deadline, now: datetime) -> None:
+    Every method here that destroys something asks ``fence`` first, so the plan
+    is a list of *candidates* rather than a list of permissions: what the plan
+    said was safe is re-established against current state at the instant each
+    action is taken, and a candidate the fence refuses is dropped and reported
+    instead of deleted.
+    """
+
+    def __init__(self, *, deadline: _Deadline, now: datetime, fence: _Fence) -> None:
         self.deadline = deadline
         self.now = now
+        self.fence = fence
         self.removed_run_ids: list[str] = []
         self.reclaimed_bytes = 0
         self.compressed_body_count = 0
         self.removed_body_count = 0
         self.compaction_reclaimed_bytes = 0
         self.failures: list[MaintenanceFailure] = []
+        self.drops: list[dict[str, str]] = []
         self.deadline_hit = False
 
     def out_of_time(self) -> bool:
@@ -831,8 +941,34 @@ class _Mutator:
             return True
         return False
 
-    def remove_run(self, candidate: retention.RunCandidate) -> None:
+    def _fenced_out(
+        self, *, lane: str, plan_dir: str, plan_state_dir: str, run_id: str
+    ) -> bool:
+        """True when current state forbids touching this run, recording why."""
+        reason = self.fence(plan_dir, plan_state_dir, run_id)
+        if not reason:
+            return False
+        self.drops.append(
+            _drop(
+                lane=lane,
+                stage=STAGE_MUTATION,
+                plan_dir=plan_dir,
+                run_id=run_id,
+                reason=reason,
+            )
+        )
+        return True
+
+    def remove_run(self, target: _Removal) -> None:
         """Delete one run directory, counting only the bytes that actually went."""
+        if self._fenced_out(
+            lane=LANE_RECLAIM,
+            plan_dir=target.plan_dir,
+            plan_state_dir=target.plan_state_dir,
+            run_id=target.run_id,
+        ):
+            return
+        candidate = target.candidate
         error = retention.remove_run_directory(candidate.path)
         if not error:
             self.removed_run_ids.append(candidate.run_id)
@@ -974,15 +1110,31 @@ class _Mutator:
         self.removed_body_count += 1
         self.compaction_reclaimed_bytes += body.stored_bytes
 
-    def compact_run(self, run_path: Path, *, log_body_budget_bytes: int) -> bool:
-        """Compress then budget one run's bodies. False when the deadline hit."""
+    def compact_run(self, target: _Compaction, *, log_body_budget_bytes: int) -> bool:
+        """Compress then budget one run's bodies. False when the deadline hit.
+
+        Compression is destructive too — the original is unlinked once the gzip
+        and its ledger are durable — so the fence guards it as well as removal,
+        and a run that acquires protection midway keeps every body it still has.
+        """
+
+        def blocked() -> bool:
+            return self._fenced_out(
+                lane=LANE_COMPACTION,
+                plan_dir=target.plan_dir,
+                plan_state_dir=target.plan_state_dir,
+                run_id=target.run_id,
+            )
+
         bodies: list[_Body] = []
-        for body in _iter_bodies(run_path):
+        for body in _iter_bodies(target.run_path):
             if self.out_of_time():
                 return False
             if body.compressed:
                 bodies.append(body)
                 continue
+            if blocked():
+                return True
             compressed = self.compress_body(body)
             bodies.append(compressed if compressed is not None else body)
         selected, _removable = _over_budget_selection(
@@ -991,6 +1143,8 @@ class _Mutator:
         for body in selected:
             if self.out_of_time():
                 return False
+            if blocked():
+                return True
             self.remove_body(body)
         return True
 
@@ -1044,78 +1198,78 @@ def _compress_file(source: Path, target: Path) -> tuple[str, int, int]:
 
 def _revalidate(
     plan: MaintenancePlan, *, state_dir: str | Path | None
-) -> tuple[
-    list[tuple[str, retention.RunCandidate]],
-    list[tuple[str, Path]],
-    list[dict[str, str]],
-]:
-    """Re-read liveness, pins, and locks under the claim, immediately pre-mutation.
+) -> tuple[list[_Removal], list[_Compaction], list[dict[str, str]]]:
+    """Filter the plan against one reading taken under the claim.
 
     Everything in ``plan`` was judged against a snapshot taken before — possibly
     long before — the claim was granted. A run that came alive, acquired a pin,
-    or whose plan acquired a lock in between is dropped here and reported, so no
-    deletion is ever made against knowledge that was true only in the past.
+    or whose plan acquired a lock in between is dropped here and reported.
+
+    This narrows the plan; it does not authorize it. Nothing read here is
+    carried into a deletion: :class:`_Mutator` fences every action against its
+    own fresh reading, because the writers of these facts do not participate in
+    the maintenance claim and a corpus can change again the moment after this.
     """
     root = state.state_root(state_dir)
-    live = retention.live_run_keys(root)
-    pinned = retention.pinned_run_ids(root)
-    locks: dict[str, str] = {}
+    reading = _SafetyReading(root)
     drops: list[dict[str, str]] = []
 
-    def _blocked(plan_dir: str, state_directory: str, run_id: str) -> str:
-        if plan_dir not in locks:
-            info = state.inspect_lock_info(Path(plan_dir), root)
-            locks[plan_dir] = retention.lock_blocker(info)
-        if locks[plan_dir]:
-            return locks[plan_dir]
-        if (state_directory, run_id) in live:
-            return "run became live after the plan was computed"
-        if not pinned.available:
-            return f"assurance ledger became unreadable: {pinned.error}"
-        if run_id in pinned.run_ids:
-            return "run acquired an open assurance pin"
-        return ""
-
-    removals: list[tuple[str, retention.RunCandidate]] = []
+    removals: list[_Removal] = []
     for entry in plan.reclaim.plans:
         plan_dir = entry.retention.plan_dir
-        state_directory = entry.retention.state_dir
+        plan_state_dir = entry.retention.state_dir
         for run in entry.retention.reclaimable_runs:
-            reason = _blocked(plan_dir, state_directory, run.run_id)
+            reason = reading.blocker(
+                plan_dir=plan_dir, plan_state_dir=plan_state_dir, run_id=run.run_id
+            )
             if reason:
                 drops.append(
-                    {
-                        "lane": "reclaim",
-                        "plan_dir": plan_dir,
-                        "run_id": run.run_id,
-                        "reason": reason,
-                    }
+                    _drop(
+                        lane=LANE_RECLAIM,
+                        stage=STAGE_REVALIDATION,
+                        plan_dir=plan_dir,
+                        run_id=run.run_id,
+                        reason=reason,
+                    )
                 )
                 continue
-            removals.append((plan_dir, run))
+            removals.append(
+                _Removal(
+                    plan_dir=plan_dir, plan_state_dir=plan_state_dir, candidate=run
+                )
+            )
 
     state_dirs = {
         entry.retention.plan_dir: entry.retention.state_dir
         for entry in plan.reclaim.plans
     }
-    compactions: list[tuple[str, Path]] = []
+    compactions: list[_Compaction] = []
     for candidate in plan.compactions:
-        reason = _blocked(
-            candidate.plan_dir,
-            state_dirs.get(candidate.plan_dir, ""),
-            candidate.run_id,
+        plan_state_dir = state_dirs.get(candidate.plan_dir, "")
+        reason = reading.blocker(
+            plan_dir=candidate.plan_dir,
+            plan_state_dir=plan_state_dir,
+            run_id=candidate.run_id,
         )
         if reason:
             drops.append(
-                {
-                    "lane": "compaction",
-                    "plan_dir": candidate.plan_dir,
-                    "run_id": candidate.run_id,
-                    "reason": reason,
-                }
+                _drop(
+                    lane=LANE_COMPACTION,
+                    stage=STAGE_REVALIDATION,
+                    plan_dir=candidate.plan_dir,
+                    run_id=candidate.run_id,
+                    reason=reason,
+                )
             )
             continue
-        compactions.append((candidate.run_id, Path(candidate.run_path)))
+        compactions.append(
+            _Compaction(
+                plan_dir=candidate.plan_dir,
+                plan_state_dir=plan_state_dir,
+                run_id=candidate.run_id,
+                run_path=Path(candidate.run_path),
+            )
+        )
     return removals, compactions, drops
 
 
@@ -1230,9 +1384,12 @@ def run_maintenance(
 ) -> MaintenanceResult:
     """Measure, plan and — under ``apply`` — perform one maintenance pass.
 
-    The pass is a no-op unless a threshold is crossed or ``force`` is set. Every
-    mutation happens under the state-root-wide claim, after liveness and pins
-    have been re-read under it. ``record`` writes the durable manifest and is
+    The pass is a no-op unless a threshold is crossed or ``force`` is set, and
+    the thresholds are measured twice: once to decide whether to queue for the
+    claim, and again once it is held, because waiting is exactly the situation
+    in which the reason for deleting can expire. Every mutation happens under
+    that claim, and each one re-reads liveness, pins, and plan locks for itself
+    immediately before it acts. ``record`` writes the durable manifest and is
     only turned off by a caller that is measuring, not maintaining.
     """
     moment = _now(now)
@@ -1250,6 +1407,7 @@ def run_maintenance(
         outcome: str,
         plan: MaintenancePlan | None,
         applied: bool,
+        usage_at_claim: CorpusUsage | None = None,
         usage_after: CorpusUsage | None = None,
         mutator: _Mutator | None = None,
         drops: tuple[dict[str, str], ...] = (),
@@ -1266,13 +1424,18 @@ def run_maintenance(
             ok=not failures and not any(finding.strict for finding in findings),
             schema_version=MANIFEST_SCHEMA_VERSION,
             outcome=outcome,
-            trigger=plan.trigger if plan is not None else usage.trigger,
+            trigger=(
+                plan.trigger
+                if plan is not None
+                else (usage_at_claim if usage_at_claim is not None else usage).trigger
+            ),
             applied=applied,
             state_root=str(root),
             started_at=moment.isoformat(),
             finished_at=_now(now).isoformat(),
             duration_seconds=deadline.elapsed(),
             usage=usage,
+            usage_at_claim=usage_at_claim,
             usage_after=usage_after,
             plan=plan,
             removed_run_ids=tuple(mutator.removed_run_ids) if mutator else (),
@@ -1325,6 +1488,25 @@ def run_maintenance(
     with claim as held:
         if not held:
             return _finish(outcome=OUTCOME_LOCK_UNAVAILABLE, plan=None, applied=False)
+        # The pressure that admitted this pass was measured before the claim,
+        # and a pass that queued behind another one waited for exactly the pass
+        # most likely to have relieved it. Deleting evidence to answer pressure
+        # that no longer exists is deleting for no reason, so the thresholds are
+        # re-read here and only an explicit `--force` proceeds past a corpus
+        # that is now healthy.
+        at_claim = measure_corpus(
+            state_dir,
+            now=moment,
+            budget_bytes=budget_bytes,
+            min_free_fraction=min_free_fraction,
+        )
+        if not at_claim.triggered and not force:
+            return _finish(
+                outcome=OUTCOME_PRESSURE_RELIEVED,
+                plan=None,
+                applied=False,
+                usage_at_claim=at_claim,
+            )
         plan = plan_maintenance(
             state_dir,
             now=moment,
@@ -1332,22 +1514,29 @@ def run_maintenance(
             max_age_days=max_age_days,
             compaction_age_days=compaction_age_days,
             log_body_budget_bytes=log_body_budget_bytes,
-            usage=usage,
+            usage=at_claim,
         )
         removals, compactions, drops = _revalidate(plan, state_dir=state_dir)
-        mutator = _Mutator(deadline=deadline, now=moment)
+
+        def _fence(plan_dir: str, plan_state_dir: str, run_id: str) -> str:
+            """Read the safety facts now, not when the plan was computed."""
+            return _SafetyReading(root).blocker(
+                plan_dir=plan_dir, plan_state_dir=plan_state_dir, run_id=run_id
+            )
+
+        mutator = _Mutator(deadline=deadline, now=moment, fence=_fence)
         # Whole-run reclaim first: it frees the most bytes per unit of work, so
         # a pass that runs out of time has already done the cheapest thing.
         # Compaction only reaches runs the reclaim lane is forbidden to touch.
-        for _plan_dir, candidate in removals:
+        for removal in removals:
             if mutator.out_of_time():
                 break
-            mutator.remove_run(candidate)
-        for _run_id, run_path in compactions:
+            mutator.remove_run(removal)
+        for compaction in compactions:
             if mutator.out_of_time():
                 break
             if not mutator.compact_run(
-                run_path, log_body_budget_bytes=log_body_budget_bytes
+                compaction, log_body_budget_bytes=log_body_budget_bytes
             ):
                 break
         usage_after = measure_corpus(
@@ -1360,9 +1549,10 @@ def run_maintenance(
             outcome=OUTCOME_APPLIED,
             plan=plan,
             applied=True,
+            usage_at_claim=at_claim,
             usage_after=usage_after,
             mutator=mutator,
-            drops=tuple(drops),
+            drops=tuple([*drops, *mutator.drops]),
         )
 
 
@@ -1712,6 +1902,19 @@ def _print_run(result: MaintenanceResult) -> None:
         return
     if result.outcome == OUTCOME_LOCK_UNAVAILABLE:
         print("Another maintenance pass holds the claim; this one declined.")
+        return
+    if result.outcome == OUTCOME_PRESSURE_RELIEVED:
+        at_claim = result.usage_at_claim
+        if at_claim is not None:
+            print(
+                f"Under the claim the corpus measured "
+                f"{format_bytes(at_claim.corpus_bytes)} with "
+                f"{at_claim.free_fraction * 100:.1f}% free."
+            )
+        print(
+            "Both thresholds were satisfied by the time this pass held the "
+            "claim; nothing was touched. Use --force to maintain anyway."
+        )
         return
     plan = result.plan
     if plan is not None:
