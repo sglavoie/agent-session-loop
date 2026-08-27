@@ -556,11 +556,16 @@ asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
+asl maintenance install [--executable PATH] [--state-dir DIR] [--hour HOUR] [--minute MINUTE] [--max-runtime-seconds SECONDS] [--no-bootstrap] [--json]
+asl maintenance run [--state-dir DIR] [--dry-run|--apply] [--force] [--max-age-days DAYS] [--max-runtime-seconds SECONDS] [--json]
+asl maintenance status [--state-dir DIR] [--executable PATH] [--no-probe] [--json]
+asl maintenance uninstall [--state-dir DIR] [--no-bootstrap] [--json]
 asl migrate-state PLAN_DIR [--from OLD_PLAN_PATH] [--state-dir DIR] [--apply] [--json]
 asl metrics [--since-days N] [--state-dir DIR] [--json]
 asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guidance TEXT] [--from-id SHA] [--pathspec PATH ...] [--expect-snapshot TOKEN] [--harness codex|claude|copilot] [--model MODEL] [--effort EFFORT] [--timeout SECONDS] [--prepare-only] [--message-file PATH] [--json]
 asl bridge serve [--stdio] [--protocol VERSION] [--state-dir DIR] [--plan-root DIR]
 asl agent-mux pairing [--state-dir DIR] [--migrate] [--json]
+asl diagnostics export --agent-mux [--state-dir DIR] [--run-id ID] [--plan-dir DIR] [--output PATH] [--json]
 ```
 
 `asl commit` writes Conventional Commits messages for the worktree containing
@@ -2712,6 +2717,79 @@ no longer decide a retain question by removing the lock that answers it.
 is never an applied action either.
 `--json` emits the full per-plan projection, including every run's size and
 retain reason.
+
+`maintenance` is the scheduled counterpart to `gc`: the same reclaim, performed
+daily by a job ASL installs and owns, plus one additional lane `gc` does not
+have. `asl maintenance install` writes
+`~/Library/LaunchAgents/com.sglavoie.asl-maintenance.plist` and bootstraps it
+into the calling user's GUI domain; `asl maintenance uninstall` boots it out and
+deletes the definition, removing nothing from the state corpus. The plist is
+written by the command rather than stowed from `launchagents/` on purpose: the
+repo's `just load-agents` bootstraps every plist in that package, so shipping
+one there would give the label two owners and let a `just all` silently re-load
+a job the operator had deliberately uninstalled. The rendered job runs
+`asl maintenance run --apply --max-runtime-seconds 900 --json` once a day at
+03:30 with `RunAtLoad` false, `ProcessType` `Background`, and `LowPriorityIO`,
+and appends its own output to `maintenance.log` under the state root. The
+executable is resolved to an absolute path at install time because a launchd job
+inherits no shell `PATH`. Nothing in the job depends on Agent Mux, and nothing in
+it requires a cockpit to be installed.
+
+`asl maintenance run` measures the corpus against two thresholds and does
+nothing at all unless one is crossed: more than 8 GiB of state, or less than 15%
+free on the volume holding it. Under both thresholds the outcome is
+`under-threshold` and the pass costs one stat walk, which is what makes a daily
+job affordable. `--force` plans and applies regardless; it relaxes the trigger,
+never the policy. When a threshold is crossed, maintenance reclaims in two lanes.
+The first is `gc`'s: whole expired `runs/<run-id>/` directories, selected by the
+same retention classifier, so `plan-locked`, `live-run`, `pin-unknown`,
+`open-issue`, `unfinished`, `undated`, `newest-run`, and `within-cutoff` all
+protect a run here exactly as they do there. The second lane touches only runs
+the first is forbidden to delete: a run retained as `newest-run` whose finish
+time is more than 90 days old has its reproducible per-turn bodies
+(`stdout.log`, `stderr.log`, `last-message.txt`) gzipped in place, and once
+compressed detail still exceeds 64 MiB for that run, bodies are removed
+largest-first until it fits. `state.json`, `events.jsonl`, and every
+`result.json` are never compressed and never removed by either lane, so a
+compacted run keeps its authoritative state, event, and result records intact.
+
+Every removed or compressed body leaves a durable `<name>.body.json` sidecar
+recording the original path, byte count, SHA-256, compressed location, removal
+timestamp, and the `log-body-budget` reason. The sidecar is fsynced *before* the
+bytes go, so an interrupted pass can leave metadata describing a body that is
+still present, but never a removed body with no metadata. Compression is
+deterministic (pinned gzip mtime) and the removal order is a pure function of
+on-disk sizes, so the same corpus plans the same actions on every host and a
+repeated pass is a no-op.
+
+The whole mutating pass runs under a single state-root-wide `flock`
+(`maintenance.lock`), so two passes can never interleave; a pass that cannot
+claim it reports `lock-unavailable` and mutates nothing. Liveness, pins, and
+plan locks are re-read *under that claim, immediately before the first
+mutation*: anything that came alive, acquired a pin, or acquired a lock since
+planning is dropped from the plan and listed in `revalidation_drops`. A failed
+mutation is reported with the bytes it left allocated, and those bytes are never
+counted as reclaimed — a partial `rmtree` re-measures the directory and counts
+only the difference. `--max-runtime-seconds` (default 900) bounds the pass; work
+stops cleanly at the deadline and the remainder is reported as a non-strict
+`deadline-exceeded` finding for the next scheduled run.
+
+When protected evidence alone still exceeds the budget, maintenance deletes
+nothing outside policy and raises the strict `protected-over-budget` health
+finding instead, exiting nonzero: that is a human decision (close an open
+assurance issue, `asl unlock` a stale plan lock, or raise the budget), not one
+an unattended sweeper should make. A pass that suffered a partial failure
+reports `partial-failure` and suppresses the over-budget verdict, because a
+corpus that failed to shrink has not proven that policy cannot shrink it.
+
+Each pass fsyncs a `maintenance.json` manifest under the state root holding the
+full last result plus a bounded 10-entry history. `asl maintenance status` reads
+it back and reports job presence, whether the installed definition still matches
+what this version would render, whether launchd has it loaded, and the last run's
+outcome, reclaimed bytes, and failures; it exits nonzero only when that last
+recorded pass itself failed. `asl verify-install` carries the same information as
+an advisory `maintenance-job` check, so an install with no job at all still
+verifies clean.
 
 `migrate-state` repairs the state orphaning that a plan-directory move causes:
 because operational state is keyed by the SHA-256 of the plan's canonical path,
@@ -6861,6 +6939,87 @@ action: `ok`, `active-incompatible-runs` (stop the named runs),
 `state-root-error` (the root exists but cannot be scanned). Every outcome
 presents the same keys, so a consumer branches on `reason` alone and
 never on which fields are present.
+
+## Diagnostics Export
+
+`asl diagnostics export --agent-mux [--state-dir DIR] [--run-id ID]
+[--plan-dir DIR] [--output PATH] [--json]` is the **only supported way for
+another program to read ASL's internal state**. `state.json`,
+`events.jsonl` and `mailbox.jsonl` are private formats: they carry
+question bodies, reply text, control messages and whatever a harness wrote
+into a reason string, and their shapes change whenever the loop changes.
+`amx debug bundle --include-asl` invokes this command instead of parsing
+any of them.
+
+Three properties make the document safe to put in a shareable bundle.
+
+**Bounded.** Every collection has a cap, every cap is published in the
+document's own `limits` block, and every cap that bites is counted in
+`omissions`. A run with a hundred thousand events contributes counts, not
+records. The scan itself is bounded too, at `max_log_lines`, so an
+unrotated log cannot turn a debug capture into a full-file read. The
+serialized document never exceeds `max_export_bytes`; runs are dropped
+from the end until it fits, and each drop is recorded.
+
+**Deterministic.** The document carries no wall clock, no host entropy and
+no iteration-order dependence — runs are ordered by the projection's
+`updated_at` with the plan digest as tie-break. Over frozen inputs the
+same bytes come out every time, which is what lets a bundle assert byte
+equality across two captures. The `digest` field is a SHA-256 over the
+rest of the document, so a consumer can prove it re-read the same
+evidence.
+
+**Control-plane only.** Field allowlists, not denylists, decide what is
+copied, and a value that arrives as a container on an allowlisted key is
+dropped rather than copied. Mailbox `text` and `note`, run-control
+`message`, per-attempt delivery detail, prompts, model output, bridge
+stderr and verification output have no path into the document at all.
+What was withheld is still *counted*: a mailbox record reports
+`text_chars` and `note_chars`, so a reader can tell "no reply" from "a
+reply this export will not show you". The standing policy ships inside
+the document as `redaction_policy`.
+
+The export is read-only in the strict sense — no file under the state root
+is opened for writing, no lock is taken, and no stale lock is reclaimed —
+so a bundle can be captured while a run is live, and while it is wedged.
+
+### What one run record correlates
+
+| Field | Joins to |
+| --- | --- |
+| `plan_digest` | `sha256(plan_dir)`, the correlation key that survives a share-mode bundle's path aliasing |
+| `projection` | the nested `agent_mux` block, copied through the projection contract's own field list |
+| `projection_generation`, `lifecycle_source_sequence` | Agent Mux's monotonic acceptance gate |
+| `delivery.records[].source_event_id`, `.request_id` | the daemon journal's `request_id` for the same lifecycle notification |
+| `control.operation_ids` | bridge operation IDs, durable because a control command persists its operation ID as `command_id` |
+| `receipts.closure_ids` | the closure IDs reply and resolve produce |
+| `assurance` | the shared assurance ledger, by issue ID, without any finding body |
+| `build.binary_sha256` | which bytes ran, next to the version string that says which release they claim to be |
+
+Counted breakdowns — `delivery.by_status`, `control.by_action`,
+`receipts.by_kind`, `events.by_name` — are **lists of labelled records**
+(`{"status": "accepted", "count": 1}`), not maps keyed by the tallied
+value. A consumer that redacts by key allowlist, as Agent Mux's bundle
+redactor does, can vet two fixed keys once; a value-keyed map would
+present every distinct status as an unknown key and lose the whole
+breakdown. Each list is sorted by its label.
+
+`--run-id` and `--plan-dir` narrow the document to one run. A projection
+whose contract set this build does not implement is reported as
+`foreign-contract-set` and **not** copied: this build cannot vouch for the
+field meanings of a contract it does not implement.
+
+Every unavailable input degrades to a named reason rather than to a
+failure. A missing state root exports an empty but complete document, an
+unreadable `state.json` still exports that plan's logs, and a state root
+that cannot be scanned at all exits nonzero with
+`reason: state-root-error` — still a well-formed, digested document.
+
+Without `--output`, the command writes the document itself to stdout, byte
+for byte, because that is what a consuming bundle stores; `--json` wraps
+it in the standard response envelope instead. `--agent-mux` names the
+consumer profile and is required: a caller that forgets to name one is
+refused rather than silently handed Agent Mux's.
 
 ## Verification
 

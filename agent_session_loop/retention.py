@@ -57,8 +57,11 @@ __all__ = [
     "GCReport",
     "live_run_keys",
     "pinned_run_ids",
+    "lock_blocker",
     "plan_retention",
     "corpus_retention",
+    "remove_run_directory",
+    "format_bytes",
     "run_gc",
     "gc_from_args",
 ]
@@ -193,7 +196,7 @@ def _dir_size_bytes(path: Path) -> int:
     return total
 
 
-def _lock_blocker(lock_info: state.LockInfo | None) -> str:
+def lock_blocker(lock_info: state.LockInfo | None) -> str:
     """Return why a lock forbids reclaiming, or ``""`` when the plan has none.
 
     Any lock at all blocks. An active one owns the plan outright; a stale one
@@ -298,7 +301,7 @@ def _plan_report(
     pinned: assurance_report.OpenIssueRuns,
 ) -> PlanRetention:
     cutoff = now - timedelta(days=max_age_days)
-    locked = _lock_blocker(lock_info)
+    locked = lock_blocker(lock_info)
     entries: list[tuple[Path, datetime | None, tuple[str, str]]] = []
     for run_dir in session_overview._iter_run_dirs(plan_state):
         finished, problem = _run_finished_at(run_dir)
@@ -561,16 +564,18 @@ class GCReport:
         }
 
 
-def _remove_run(candidate: RunCandidate) -> str:
+def remove_run_directory(path: Path) -> str:
     """Delete one run directory, returning ``""`` or the failure message.
 
     The parent check is a last stop before an unrecoverable delete: only a
     ``runs/<run-id>/`` directory is ever removed, whatever a caller passes.
+    Public because ``asl maintenance`` deletes on the same terms as ``asl gc``
+    and must go through this check rather than around it.
     """
-    if candidate.path.parent.name != state.RUNS_DIR_NAME:
-        return f"{candidate.path} is not a runs/<run-id> directory"
+    if path.parent.name != state.RUNS_DIR_NAME:
+        return f"{path} is not a runs/<run-id> directory"
     try:
-        shutil.rmtree(candidate.path)
+        shutil.rmtree(path)
     except OSError as error:
         return str(error)
     return ""
@@ -588,7 +593,7 @@ def _sweep_plan(report: PlanRetention, *, apply: bool) -> PlanGC:
     failures: list[tuple[str, str]] = []
     reclaimed = 0
     for candidate in report.reclaimable_runs:
-        error = _remove_run(candidate)
+        error = remove_run_directory(candidate.path)
         if error:
             failures.append((candidate.run_id, error))
             continue
@@ -698,7 +703,7 @@ def run_gc(
     )
 
 
-def _format_bytes(count: int) -> str:
+def format_bytes(count: int) -> str:
     """Render a byte count the way ``asl metrics`` renders its corpus totals."""
     value = float(count)
     for unit in ("B", "KiB", "MiB", "GiB"):
@@ -723,15 +728,15 @@ def _print_report(report: GCReport) -> None:
     print(plan_line)
     print(f"Runs: {report.reclaimable_run_count} reclaimable of {report.run_count}")
     print(
-        f"Reclaimable: {_format_bytes(report.reclaimable_bytes)} of "
-        f"{_format_bytes(report.total_bytes)} measured"
+        f"Reclaimable: {format_bytes(report.reclaimable_bytes)} of "
+        f"{format_bytes(report.total_bytes)} measured"
     )
 
     if report.scope == "plan":
         for run in report.plans[0].retention.runs:
             marker = "reclaim" if run.reclaimable else run.reason
             detail = f": {run.detail}" if run.detail else ""
-            print(f"  {run.run_id}  {_format_bytes(run.size_bytes)}  {marker}{detail}")
+            print(f"  {run.run_id}  {format_bytes(run.size_bytes)}  {marker}{detail}")
     else:
         reclaiming = sorted(
             (entry for entry in report.plans if entry.retention.reclaimable_runs),
@@ -742,7 +747,7 @@ def _print_report(report: GCReport) -> None:
             print("Reclaimable by plan:")
             for entry in reclaiming:
                 print(
-                    f"  {_format_bytes(entry.retention.reclaimable_bytes)}  "
+                    f"  {format_bytes(entry.retention.reclaimable_bytes)}  "
                     f"{len(entry.retention.reclaimable_runs)} run(s)  "
                     f"{entry.retention.plan_dir}"
                 )
@@ -753,7 +758,7 @@ def _print_report(report: GCReport) -> None:
         for reason, totals in retained.items():
             print(
                 f"  {reason}: {totals['run_count']} run(s), "
-                f"{_format_bytes(totals['bytes'])}"
+                f"{format_bytes(totals['bytes'])}"
             )
     locked = report.locked_plans()
     if locked:
@@ -786,7 +791,7 @@ def _print_report(report: GCReport) -> None:
     if report.applied:
         print(
             f"Removed: {report.removed_run_count} run(s), "
-            f"{_format_bytes(report.reclaimed_bytes)} reclaimed"
+            f"{format_bytes(report.reclaimed_bytes)} reclaimed"
         )
         for entry in report.plans:
             for run_id, error in entry.failures:

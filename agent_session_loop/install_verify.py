@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -13,7 +14,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from . import cli_trace, startup_context
+from . import agent_mux_projection, cli_trace, startup_context
+
+#: Bound on the paired-cockpit probe. `amx doctor` talks to a local daemon over
+#: a unix socket, so it is fast or it is broken; an advisory check must never be
+#: what makes install verification hang.
+AGENT_MUX_DOCTOR_TIMEOUT_SECONDS = 20
 
 SKILL_INSTALL_DIRS = (
     ".claude/skills",
@@ -48,11 +54,23 @@ def _readable_path(path: Path) -> str:
 
 
 def _success(name: str, detail: str) -> dict[str, Any]:
-    return {"name": name, "ok": True, "detail": detail}
+    return {"name": name, "ok": True, "detail": detail, "advisory": False}
 
 
 def _failure(name: str, detail: str) -> dict[str, Any]:
-    return {"name": name, "ok": False, "detail": detail}
+    return {"name": name, "ok": False, "detail": detail, "advisory": False}
+
+
+def _advisory(name: str, detail: str, *, ok: bool = False) -> dict[str, Any]:
+    """A check whose failure is reported but does not fail the verification.
+
+    ASL is the sole run authority and must install, verify, and run with no
+    cockpit present at all. Reporting paired health is useful; making it a
+    precondition would invert that. ``--require-agent-mux`` is the deliberate
+    opt-in for an operator who has decided the pairing is load-bearing on their
+    machine.
+    """
+    return {"name": name, "ok": ok, "detail": detail, "advisory": True}
 
 
 def _write_synthetic_plan(plan_dir: Path) -> None:
@@ -356,11 +374,228 @@ def _check_status_smoke(
     )
 
 
+def _amx_doctor(path_env: str | None, home: Path) -> tuple[str | None, Any]:
+    """Return the resolved ``amx`` and its parsed ``doctor --json`` report.
+
+    The report is returned even when the command exits nonzero: `amx doctor`
+    reserves a nonzero status for an unhealthy daemon, and an unhealthy daemon
+    is precisely what this check wants to describe.
+    """
+    active_amx = shutil.which("amx", path=path_env)
+    if active_amx is None:
+        return None, None
+    env = os.environ.copy()
+    env["HOME"] = _readable_path(home)
+    if path_env is not None:
+        env["PATH"] = path_env
+    try:
+        completed = subprocess.run(
+            [active_amx, "doctor", "--json"],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+            timeout=AGENT_MUX_DOCTOR_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return active_amx, error
+    try:
+        return active_amx, json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        return active_amx, error
+
+
+def _check_agent_mux(
+    *, path_env: str | None, home: Path, active_asl: str | None
+) -> list[dict[str, Any]]:
+    """Report the health of a paired Agent Mux cockpit, advisory by default.
+
+    Every finding here is advisory because Agent Mux is an optional consumer of
+    ASL's projection, never a dependency of it. The one thing this check must
+    not do is stay silent about a pairing that has quietly broken — a daemon
+    resolving a *different* `asl` than the one just verified is the failure mode
+    an operator cannot see from either side alone.
+    """
+    active_amx, report = _amx_doctor(path_env, home)
+    if active_amx is None:
+        return [
+            _advisory(
+                "agent-mux",
+                "amx was not found on PATH; the cockpit integration is not "
+                "installed, which ASL does not require",
+                ok=True,
+            )
+        ]
+    if isinstance(report, Exception):
+        return [
+            _advisory(
+                "agent-mux",
+                f"{active_amx} doctor --json could not be read: {report}",
+            )
+        ]
+    if not isinstance(report, dict):
+        return [
+            _advisory(
+                "agent-mux",
+                f"{active_amx} doctor --json did not emit a report object",
+            )
+        ]
+
+    checks = [
+        _advisory(
+            "agent-mux",
+            f"{active_amx} reports doctor schema "
+            f"{report.get('schema_version')} and healthy="
+            f"{report.get('healthy')}",
+            ok=bool(report.get("healthy")),
+        )
+    ]
+
+    daemon_block = report.get("daemon")
+    asl_block = daemon_block.get("asl") if isinstance(daemon_block, dict) else None
+    if not isinstance(asl_block, dict):
+        checks.append(
+            _advisory(
+                "agent-mux-bridge",
+                "the daemon reports no ASL integration block; run "
+                "`amx config asl-sync` to pair this installation",
+            )
+        )
+        return checks
+
+    mode = asl_block.get("mode")
+    if mode == "disabled":
+        checks.append(
+            _advisory(
+                "agent-mux-bridge",
+                "the cockpit integration is disabled in Agent Mux's config",
+                ok=True,
+            )
+        )
+        return checks
+
+    if not asl_block.get("available"):
+        reason = asl_block.get("reason") or "no reason reported"
+        checks.append(
+            _advisory(
+                "agent-mux-bridge",
+                f"the daemon cannot reach ASL in {mode} mode: {reason}",
+            )
+        )
+    else:
+        checks.append(
+            _advisory(
+                "agent-mux-bridge",
+                f"the daemon has a live bridge in {mode} mode "
+                f"(mutations_enabled={asl_block.get('mutations_enabled')})",
+                ok=True,
+            )
+        )
+
+    contract_set_id = asl_block.get("contract_set_id")
+    if contract_set_id and contract_set_id != agent_mux_projection.CONTRACT_SET_ID:
+        checks.append(
+            _advisory(
+                "agent-mux-contract",
+                f"the daemon paired with contract set {contract_set_id}; this "
+                f"build implements {agent_mux_projection.CONTRACT_SET_ID}",
+            )
+        )
+
+    # The check this whole block exists for: a daemon that resolved some other
+    # `asl` than the one just verified will keep working and keep being wrong,
+    # and neither `amx doctor` nor the rest of this command can see it alone.
+    executable = asl_block.get("executable")
+    if executable and active_asl and not _same_file(executable, active_asl):
+        checks.append(
+            _advisory(
+                "agent-mux-executable",
+                f"the daemon resolved {executable}, but the active asl on PATH "
+                f"is {active_asl}; re-run `amx config asl-sync` to repair the "
+                f"pairing",
+            )
+        )
+    return checks
+
+
+def _job_state_dir(plist: Path) -> str | None:
+    """Return the state root an installed maintenance job was pinned to.
+
+    ``None`` when the job carries no ``--state-dir``, which is the ordinary
+    install and means it maintains this installation's default state root.
+    """
+    try:
+        payload = plistlib.loads(plist.read_bytes())
+    except OSError, ValueError, plistlib.InvalidFileException:
+        return None
+    argv = payload.get("ProgramArguments") if isinstance(payload, dict) else None
+    if not isinstance(argv, list) or "--state-dir" not in argv:
+        return None
+    index = argv.index("--state-dir") + 1
+    return str(argv[index]) if index < len(argv) else None
+
+
+def _check_maintenance_job(home: Path) -> dict[str, Any]:
+    """Report the scheduled storage-maintenance job, advisory either way.
+
+    Installing the job is an operator decision, not a precondition of a working
+    install: ASL runs correctly on a machine that never reclaims a byte. What
+    this reports instead is the thing an operator cannot see without asking —
+    whether a job they believe is installed last ran, and whether that run
+    failed. A stale definition or a failed last pass surfaces here rather than
+    waiting for the volume to fill.
+    """
+    from . import maintenance
+
+    target = maintenance.plist_path(home)
+    if not target.is_file():
+        return _advisory(
+            "maintenance-job",
+            f"no scheduled maintenance job at {_readable_path(target)}; run "
+            "`asl maintenance install` to reclaim state-corpus disk on a "
+            "schedule, which ASL does not require",
+            ok=True,
+        )
+    # Report on the corpus the *installed* job maintains, not whichever one
+    # this process would default to, so a job pinned to an explicit state root
+    # is never judged against somebody else's manifest.
+    manifest = maintenance.read_manifest(_job_state_dir(target))
+    last_run = manifest.get("last_run")
+    if not isinstance(last_run, dict):
+        return _advisory(
+            "maintenance-job",
+            f"{maintenance.JOB_LABEL} is installed but has not recorded a run "
+            "yet; `asl maintenance status` reports it once the job has fired",
+            ok=True,
+        )
+    if not last_run.get("ok", True):
+        return _advisory(
+            "maintenance-job",
+            f"{maintenance.JOB_LABEL} last ran at {last_run.get('finished_at')} "
+            f"and failed: {last_run.get('failure_count')} failure(s), "
+            f"health {last_run.get('health_codes') or last_run.get('outcome')}",
+        )
+    return _success(
+        "maintenance-job",
+        f"{maintenance.JOB_LABEL} last ran at {last_run.get('finished_at')} "
+        f"({last_run.get('outcome')}), reclaiming "
+        f"{last_run.get('reclaimed_bytes')} bytes with no failures",
+    )
+
+
+def _same_file(left: str, right: str) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.realpath(left) == os.path.realpath(right)
+
+
 def verify_install(
     *,
     repo_root: str | Path | None = None,
     home: str | Path | None = None,
     path_env: str | None = None,
+    require_agent_mux: bool = False,
 ) -> dict[str, Any]:
     """Return a structured active-install verification payload."""
 
@@ -380,15 +615,29 @@ def verify_install(
             home=resolved_home,
             path_env=path_env,
         ),
+        _check_maintenance_job(resolved_home),
+        *_check_agent_mux(
+            path_env=path_env,
+            home=resolved_home,
+            active_asl=active_asl,
+        ),
     ]
-    failures = [check for check in checks if not check["ok"]]
+    if require_agent_mux:
+        checks = [
+            {**check, "advisory": False} if check["advisory"] else check
+            for check in checks
+        ]
+    failures = [check for check in checks if not check["ok"] and not check["advisory"]]
+    advisories = [check for check in checks if not check["ok"] and check["advisory"]]
     return {
         "ok": not failures,
         "repo_root": _readable_path(resolved_repo),
         "home": _readable_path(resolved_home),
         "active_asl": active_asl,
+        "require_agent_mux": require_agent_mux,
         "checks": checks,
         "failures": failures,
+        "advisories": advisories,
     }
 
 
@@ -399,7 +648,12 @@ def _print_text(payload: dict[str, Any]) -> None:
     print(f"Home: {payload['home']}")
     print(f"Active asl: {payload['active_asl'] or 'not found'}")
     for check in payload["checks"]:
-        prefix = "ok" if check["ok"] else "FAIL"
+        if check["ok"]:
+            prefix = "ok"
+        elif check["advisory"]:
+            prefix = "warn"
+        else:
+            prefix = "FAIL"
         print(f"{prefix} {check['name']}: {check['detail']}")
 
 
@@ -422,6 +676,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="PATH to search for asl (default: current process PATH)",
     )
     parser.add_argument(
+        "--require-agent-mux",
+        action="store_true",
+        help=(
+            "Fail when the paired Agent Mux cockpit is missing or unhealthy "
+            "(advisory by default; ASL never requires it)"
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable JSON output",
@@ -435,6 +697,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         repo_root=args.repo_root,
         home=args.home,
         path_env=args.path_env,
+        require_agent_mux=args.require_agent_mux,
     )
     if args.json:
         print(json.dumps(payload, sort_keys=True))

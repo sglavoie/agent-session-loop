@@ -24,6 +24,11 @@ _WORKBENCH_DEFAULT_HOST = "127.0.0.1"  # workbench_server.DEFAULT_HOST
 _WORKBENCH_DEFAULT_PORT = 8765  # workbench_server.DEFAULT_PORT
 _METRICS_DEFAULT_SINCE_DAYS = 7  # metrics.DEFAULT_SINCE_DAYS
 _RETENTION_DEFAULT_MAX_AGE_DAYS = 30.0  # retention.DEFAULT_MAX_AGE_DAYS
+_MAINTENANCE_DEFAULT_HOUR = 3  # maintenance.DEFAULT_HOUR
+_MAINTENANCE_DEFAULT_MINUTE = 30  # maintenance.DEFAULT_MINUTE
+_MAINTENANCE_DEFAULT_MAX_RUNTIME_SECONDS = (
+    900.0  # maintenance.DEFAULT_MAX_RUNTIME_SECONDS
+)
 _PREPARE_DEFAULT_VALIDATOR_JOBS = 2  # prepare.DEFAULT_VALIDATOR_JOBS
 _PREPARE_DEFAULT_VALIDATOR_TIMEOUT_SECONDS = (
     900  # prepare.DEFAULT_VALIDATOR_TIMEOUT_SECONDS
@@ -39,7 +44,7 @@ _COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS = (
     900  # commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS
 )
 _INTERRUPTED_EXIT = 130  # runner.INTERRUPTED_EXIT
-_BRIDGE_PROTOCOL_VERSION = 1  # bridge.PROTOCOL_VERSION
+_BRIDGE_PROTOCOL_VERSION = 2  # bridge.PROTOCOL_VERSION
 
 
 _WORKBENCH_SERVE_CHILD_DESTS = {
@@ -1061,6 +1066,199 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     gc_parser.set_defaults(handler_ref="retention:gc_from_args")
 
+    maintenance_parser = subparsers.add_parser(
+        "maintenance",
+        help=(
+            "Own the scheduled storage maintenance job that keeps the state "
+            "corpus inside its budget without touching protected evidence."
+        ),
+        epilog=_group_epilogue("maintenance", "asl maintenance run --help"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    maintenance_sub = maintenance_parser.add_subparsers(
+        dest="maintenance_command", required=True
+    )
+
+    maintenance_install_parser = maintenance_sub.add_parser(
+        "install",
+        help="Install and load the daily ASL-owned maintenance job.",
+        description=(
+            "Write the launchd job definition ASL owns and bootstrap it into "
+            "this user's GUI domain. The job runs `asl maintenance run --apply` "
+            "once a day under a bounded runtime; it does nothing unless the "
+            "corpus is over budget or the volume is low on free space. "
+            "Installing never starts a pass."
+        ),
+    )
+    maintenance_install_parser.add_argument(
+        "--executable",
+        metavar="PATH",
+        help=(
+            "Absolute path to the asl executable launchd should run "
+            "(default: resolved from PATH at install time)"
+        ),
+    )
+    maintenance_install_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    maintenance_install_parser.add_argument(
+        "--hour",
+        type=int,
+        default=_MAINTENANCE_DEFAULT_HOUR,
+        metavar="HOUR",
+        help=f"Local hour to run at (default: {_MAINTENANCE_DEFAULT_HOUR})",
+    )
+    maintenance_install_parser.add_argument(
+        "--minute",
+        type=int,
+        default=_MAINTENANCE_DEFAULT_MINUTE,
+        metavar="MINUTE",
+        help=f"Local minute to run at (default: {_MAINTENANCE_DEFAULT_MINUTE})",
+    )
+    maintenance_install_parser.add_argument(
+        "--max-runtime-seconds",
+        type=float,
+        default=_MAINTENANCE_DEFAULT_MAX_RUNTIME_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "Wall-clock bound on each scheduled pass "
+            f"(default: {_MAINTENANCE_DEFAULT_MAX_RUNTIME_SECONDS:g})"
+        ),
+    )
+    maintenance_install_parser.add_argument(
+        "--no-bootstrap",
+        action="store_true",
+        help="Write the job definition without loading it into launchd",
+    )
+    maintenance_install_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    maintenance_install_parser.set_defaults(handler_ref="maintenance:install_from_args")
+
+    maintenance_run_parser = maintenance_sub.add_parser(
+        "run",
+        help="Run one maintenance pass over the state corpus (default: dry-run).",
+        description=(
+            "Measure the corpus against its budget and the volume's free space, "
+            "and when either threshold is crossed reclaim what retention policy "
+            "permits: expired run directories, then compressed and budgeted log "
+            "bodies of terminal newest runs older than the compaction age. Live, "
+            "locked, unfinished, pinned, and recent evidence is never touched, "
+            "and liveness is re-read under the maintenance lock immediately "
+            "before any mutation."
+        ),
+    )
+    maintenance_run_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    maintenance_run_mode = maintenance_run_parser.add_mutually_exclusive_group()
+    maintenance_run_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Perform the planned maintenance (default: dry-run, no writes)",
+    )
+    maintenance_run_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Project the maintenance without mutating anything (the default)",
+    )
+    maintenance_run_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Plan and apply even when both thresholds are satisfied; policy is "
+            "unchanged, so protected evidence is still never removed"
+        ),
+    )
+    maintenance_run_parser.add_argument(
+        "--max-age-days",
+        type=float,
+        default=_RETENTION_DEFAULT_MAX_AGE_DAYS,
+        metavar="DAYS",
+        help=(
+            "Reclaim runs that finished at least this many days ago "
+            f"(default: {_RETENTION_DEFAULT_MAX_AGE_DAYS:g})"
+        ),
+    )
+    maintenance_run_parser.add_argument(
+        "--max-runtime-seconds",
+        type=float,
+        default=_MAINTENANCE_DEFAULT_MAX_RUNTIME_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "Stop cleanly after this much wall clock and report the remainder "
+            f"(default: {_MAINTENANCE_DEFAULT_MAX_RUNTIME_SECONDS:g})"
+        ),
+    )
+    maintenance_run_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    maintenance_run_parser.set_defaults(handler_ref="maintenance:run_from_args")
+
+    maintenance_status_parser = maintenance_sub.add_parser(
+        "status",
+        help="Report job presence, last run, reclaimed bytes, and failures.",
+        description=(
+            "Verify the installed job: whether its definition is present and "
+            "current, whether launchd has it loaded, and what the last recorded "
+            "pass reclaimed or failed to reclaim. Exits non-zero only when the "
+            "last recorded pass itself failed."
+        ),
+    )
+    maintenance_status_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    maintenance_status_parser.add_argument(
+        "--executable",
+        metavar="PATH",
+        help="Executable to compare the installed definition against",
+    )
+    maintenance_status_parser.add_argument(
+        "--no-probe",
+        action="store_true",
+        help="Skip the launchctl query and report the definition only",
+    )
+    maintenance_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    maintenance_status_parser.set_defaults(handler_ref="maintenance:status_from_args")
+
+    maintenance_uninstall_parser = maintenance_sub.add_parser(
+        "uninstall",
+        help="Unload and remove the maintenance job, keeping every artifact.",
+        description=(
+            "Boot the job out of launchd and delete its definition. Nothing in "
+            "the state corpus is removed: the maintenance manifest and job log "
+            "outlive the decision to stop maintaining automatically."
+        ),
+    )
+    maintenance_uninstall_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    maintenance_uninstall_parser.add_argument(
+        "--no-bootstrap",
+        action="store_true",
+        help="Remove the job definition without asking launchd to unload it",
+    )
+    maintenance_uninstall_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    maintenance_uninstall_parser.set_defaults(
+        handler_ref="maintenance:uninstall_from_args"
+    )
+
     migrate_state_parser = subparsers.add_parser(
         "migrate-state",
         help=(
@@ -1378,6 +1576,105 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Extra plan root directory to scan for plans (may be repeated)",
     )
     bridge_serve_parser.set_defaults(handler_ref="bridge:bridge_serve_from_args")
+
+    agent_mux_parser = subparsers.add_parser(
+        "agent-mux",
+        help="Report and prepare this installation for the Agent Mux cockpit.",
+        epilog=_group_epilogue("agent-mux", "asl agent-mux pairing --help"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    agent_mux_sub = agent_mux_parser.add_subparsers(
+        dest="agent_mux_command", required=True
+    )
+    pairing_parser = agent_mux_sub.add_parser(
+        "pairing",
+        help="Survey this executable, contract set, and whole state root.",
+        description=(
+            "Report the facts `amx config asl-sync` needs before it may rewrite "
+            "Agent Mux's configuration: the absolute executable speaking, the "
+            "contract set it implements, the canonical state root, any active "
+            "run whose state predates the projection schema, and how much of "
+            "the inactive remainder can be migrated. Exits nonzero when an "
+            "active incompatible run is present; such a run is named and never "
+            "stopped or migrated."
+        ),
+    )
+    pairing_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    pairing_parser.add_argument(
+        "--migrate",
+        action="store_true",
+        help=(
+            "Upgrade every migratable inactive plan to the current state schema "
+            "(refused outright while any active incompatible run exists)"
+        ),
+    )
+    pairing_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    pairing_parser.set_defaults(handler_ref="agent_mux_pairing:pairing_from_args")
+
+    diagnostics_parser = subparsers.add_parser(
+        "diagnostics",
+        help="Publish this installation's sanitized diagnostics for other tools.",
+        epilog=_group_epilogue("diagnostics", "asl diagnostics export --help"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    diagnostics_sub = diagnostics_parser.add_subparsers(
+        dest="diagnostics_command", required=True
+    )
+    diagnostics_export_parser = diagnostics_sub.add_parser(
+        "export",
+        help="Write the bounded, deterministic, sanitized diagnostics export.",
+        description=(
+            "Write the only supported view of ASL's internal state for another "
+            "program to read. The document correlates run IDs, lifecycle source "
+            "events, request IDs, bridge operation IDs, projection generations "
+            "and the contract set, and carries this build's identity and binary "
+            "hash. It is bounded (every cap is published in `limits` and every "
+            "cap that bites is counted in `omissions`), deterministic (no wall "
+            "clock, so repeated capture over frozen inputs is byte-identical), "
+            "and control-plane only: question and reply bodies, control "
+            "messages, prompts, model output, bridge stderr and verification "
+            "output are never read. Consumers must read this instead of "
+            "state.json, events.jsonl or mailbox.jsonl, which are private "
+            "formats."
+        ),
+    )
+    diagnostics_export_parser.add_argument(
+        "--agent-mux",
+        action="store_true",
+        help="Export the Agent Mux correlation profile (currently the only one)",
+    )
+    diagnostics_export_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    diagnostics_export_parser.add_argument(
+        "--run-id",
+        help="Limit the export to one run ID",
+    )
+    diagnostics_export_parser.add_argument(
+        "--plan-dir",
+        help="Limit the export to one plan directory",
+    )
+    diagnostics_export_parser.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Write the export to PATH instead of standard output",
+    )
+    diagnostics_export_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Wrap the export in the standard JSON response envelope",
+    )
+    diagnostics_export_parser.set_defaults(
+        handler_ref="diagnostics_export:export_from_args"
+    )
 
     workbench_parser = subparsers.add_parser(
         "workbench",

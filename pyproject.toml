@@ -66,6 +66,7 @@ module = [
     "agent_session_loop.agent_mux_projection",
     "agent_session_loop.clock",
     "agent_session_loop.durability",
+    "agent_session_loop.maintenance",
     "agent_session_loop.review_transitions",
     "agent_session_loop.run_coordination",
     "agent_session_loop.transitions",
