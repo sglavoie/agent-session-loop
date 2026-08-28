@@ -58,6 +58,7 @@ __all__ = [
     "ClaudeGuidanceSpool",
     "ClaudeStreamSession",
     "hook_script_path",
+    "normalized_echo_body",
     "remove_overlay",
     "user_message",
     "write_settings_overlay",
@@ -221,14 +222,45 @@ def user_message(text: str) -> dict[str, Any]:
     }
 
 
-class _Offer:
-    """One guidance record this turn has taken responsibility for."""
+def normalized_echo_body(text: str) -> str:
+    """The comparable form of a user message body.
 
-    def __init__(self, guidance_id: str, text: str) -> None:
+    An echo is compared to what was written by body equality, not containment:
+    containment lets any message whose text happens to span a short guidance
+    phrase -- the turn's own prompt, most of all -- stand in as an
+    acknowledgement for guidance the model has not seen. Whitespace is the only
+    thing collapsed, because a re-rendered echo may rewrap lines but does not
+    rewrite words.
+    """
+    return " ".join(text.split())
+
+
+class _Offer:
+    """One guidance record this turn has taken responsibility for.
+
+    It carries no copy of the body: an echo is matched against the write that
+    put the body on the pipe (see :class:`_EchoExpectation`), so an offer that
+    was never written has nothing an echo could confirm.
+    """
+
+    def __init__(self, guidance_id: str) -> None:
         self.guidance_id = guidance_id
-        self.text = text
         self.confirmed_by: str | None = None
         self.write_failed = False
+
+
+class _EchoExpectation:
+    """One message written to stdin, awaiting the CLI echoing it back.
+
+    ``guidance_id`` is ``None`` for the turn's prompt, which is expected and
+    consumed like any other message precisely so that a late prompt echo is
+    accounted for as the prompt rather than offered to a guidance record.
+    """
+
+    def __init__(self, body: str, guidance_id: str | None) -> None:
+        self.body = normalized_echo_body(body)
+        self.guidance_id = guidance_id
+        self.consumed = False
 
 
 class ClaudeStreamSession:
@@ -255,6 +287,7 @@ class ClaudeStreamSession:
         self._write_lock = threading.Lock()
 
         self._offers: dict[str, _Offer] = {}
+        self._echo_expectations: list[_EchoExpectation] = []
         self._messages_written = 0
         self._results_seen = 0
         self._stdin_closed = False
@@ -288,7 +321,7 @@ class ClaudeStreamSession:
         and reported like any other failed turn.
         """
         try:
-            self._write(user_message(self._prompt))
+            self._write(user_message(self._prompt), echo_body=self._prompt)
         except OSError as error:
             with self._state_lock:
                 self._prompt_error = f"{type(error).__name__}: {error}"
@@ -321,15 +354,29 @@ class ClaudeStreamSession:
 
         This is the protocol acknowledgement: the CLI emits the echo when it
         starts processing the message, so an echo carrying a guidance body is
-        that body reaching the model. Matching is by containment because the
-        CLI may wrap or re-render what it echoes.
+        that body reaching the model. An echo is matched against the messages
+        this session wrote, by body equality and in write order, and each echo
+        is spent on at most one of them. That is what makes the
+        acknowledgement specific: the turn's prompt claims its own echo however
+        late it arrives, and an unrelated message that merely happens to
+        contain a guidance phrase matches nothing at all.
         """
         if not text:
             return
+        body = normalized_echo_body(text)
+        if not body:
+            return
         with self._state_lock:
-            for offer in self._offers.values():
-                if offer.confirmed_by is None and offer.text and offer.text in text:
+            for expectation in self._echo_expectations:
+                if expectation.consumed or expectation.body != body:
+                    continue
+                expectation.consumed = True
+                if expectation.guidance_id is None:
+                    return
+                offer = self._offers.get(expectation.guidance_id)
+                if offer is not None and offer.confirmed_by is None:
                     offer.confirmed_by = "protocol-echo"
+                return
 
     # -- steering -----------------------------------------------------------
 
@@ -348,7 +395,7 @@ class ClaudeStreamSession:
             offer = self._offers.get(request.guidance_id)
             first_attempt = offer is None
             if offer is None:
-                offer = _Offer(request.guidance_id, request.text)
+                offer = _Offer(request.guidance_id)
                 self._offers[request.guidance_id] = offer
             confirmed_by = offer.confirmed_by
             stdin_closed = self._stdin_closed
@@ -358,14 +405,18 @@ class ClaudeStreamSession:
             return guidance_delivery.DELIVERED
 
         if first_attempt:
-            self._arm_hook(offer, request)
+            self._arm_hook(request)
             if stdin_closed:
                 # The turn's own result already closed the conversation; the
                 # hook is the only route left, and it can still fire while the
                 # process winds down.
                 return self._confirmation_outcome(offer, detail="stdin-closed")
             try:
-                self._write(user_message(request.text))
+                self._write(
+                    user_message(request.text),
+                    echo_body=request.text,
+                    guidance_id=request.guidance_id,
+                )
             except OSError as error:
                 with self._state_lock:
                     offer.write_failed = True
@@ -378,11 +429,7 @@ class ClaudeStreamSession:
 
         return self._confirmation_outcome(offer, failed=write_failed)
 
-    def _arm_hook(
-        self,
-        offer: _Offer,
-        request: guidance_delivery.GuidanceRequest,
-    ) -> None:
+    def _arm_hook(self, request: guidance_delivery.GuidanceRequest) -> None:
         spool = self._spool
         if spool is None:
             return
@@ -392,7 +439,6 @@ class ClaudeStreamSession:
                 seq=request.seq,
                 text=request.text,
             )
-            offer.text = request.text
 
     def _confirmation_outcome(
         self,
@@ -430,7 +476,13 @@ class ClaudeStreamSession:
 
     # -- transport primitives ----------------------------------------------
 
-    def _write(self, payload: dict[str, Any]) -> None:
+    def _write(
+        self,
+        payload: dict[str, Any],
+        *,
+        echo_body: str | None = None,
+        guidance_id: str | None = None,
+    ) -> None:
         stdin = self._process.stdin
         if stdin is None:
             raise OSError("claude was spawned without a stdin pipe")
@@ -446,6 +498,13 @@ class ClaudeStreamSession:
                 raise OSError(str(error) or type(error).__name__) from error
             with self._state_lock:
                 self._messages_written += 1
+                # Only a message that actually reached the pipe may be echoed
+                # back, so the expectation is recorded with the write and never
+                # ahead of it.
+                if echo_body is not None:
+                    self._echo_expectations.append(
+                        _EchoExpectation(echo_body, guidance_id)
+                    )
 
     def close_stdin(self) -> None:
         """End the conversation, which is how the CLI is asked to finish."""

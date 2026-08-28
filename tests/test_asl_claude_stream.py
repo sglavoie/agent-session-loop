@@ -288,6 +288,58 @@ class StreamSessionSteerTests(TempDirTestCase):
         outcome = session.steer(request_for(text="rebase before you push"))
         self.assertFalse(outcome.delivered)
 
+    def test_an_overlapping_but_unrelated_echo_confirms_nothing(self) -> None:
+        # The prompt spans the guidance phrase, so a containment match would
+        # hand the guidance a receipt for a message written before the
+        # supervisor ever said it.
+        session, _ = session_with(
+            prompt="do the work, and rebase before you push when you are done"
+        )
+        session.send_prompt()
+        session.steer(request_for(text="rebase before you push"))
+
+        # A late prompt echo is still the prompt's own.
+        session.note_user_echo(
+            "do the work, and rebase before you push when you are done"
+        )
+        # So is any other message that merely quotes the guidance.
+        session.note_user_echo("the operator asked me to rebase before you push?")
+
+        outcome = session.steer(request_for(text="rebase before you push"))
+        self.assertFalse(outcome.delivered)
+        self.assertEqual(guidance_delivery.REASON_AWAITING_CONFIRMATION, outcome.reason)
+
+        # The guidance's own echo, whenever it comes, still confirms it.
+        session.note_user_echo("rebase before you push")
+        self.assertTrue(
+            session.steer(request_for(text="rebase before you push")).delivered
+        )
+
+    def test_one_echo_confirms_only_the_guidance_that_carried_that_body(self) -> None:
+        other_id = "22222222-2222-4222-8222-222222222222"
+        session, _ = session_with()
+        session.send_prompt()
+        session.steer(request_for(text="rebase before you push"))
+        session.steer(request_for(guidance_id=other_id, seq=2, text="rebase"))
+
+        session.note_user_echo("rebase")
+
+        self.assertFalse(
+            session.steer(request_for(text="rebase before you push")).delivered
+        )
+        other = session.steer(request_for(guidance_id=other_id, seq=2, text="rebase"))
+        self.assertTrue(other.delivered)
+
+    def test_a_rewrapped_echo_of_the_same_words_still_confirms(self) -> None:
+        session, _ = session_with()
+        session.send_prompt()
+        session.steer(request_for(text="rebase before\nyou push"))
+
+        session.note_user_echo("  rebase before you push  ")
+
+        outcome = session.steer(request_for(text="rebase before\nyou push"))
+        self.assertTrue(outcome.delivered)
+
     def test_a_hook_receipt_confirms_the_delivery(self) -> None:
         spool = self.spool()
         session, _ = session_with(spool=spool)
@@ -381,7 +433,7 @@ class StreamOutputProcessorTests(unittest.TestCase):
                     "type": "user",
                     "message": {
                         "role": "user",
-                        "content": "context: rebase before you push",
+                        "content": "rebase before you push",
                     },
                 }
             )

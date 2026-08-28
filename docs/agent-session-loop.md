@@ -812,7 +812,13 @@ The three harnesses reach different channels, and the ledger says which:
   attempt records `deferred` with reason `awaiting-confirmation` and stays
   open. It becomes `delivered-live` only on evidence — the CLI echoing the
   message back on its output stream as a protocol acknowledgement, or the hook
-  leaving a receipt saying it injected the guidance. If the turn ends first,
+  leaving a receipt saying it injected the guidance. The echo has to be *that*
+  message: echoes are matched against the messages ASL wrote to this turn's
+  stdin, by whitespace-normalized body equality and in write order, and each
+  echo is spent on at most one of them. So the turn's own prompt claims its own
+  echo however late it arrives, and neither a prompt nor any other message that
+  merely happens to contain a short guidance phrase can acknowledge guidance
+  the model has not been given. If the turn ends first,
   the process exits, or stdin is refused, the guidance stays deliverable and
   the next turn carries it.
 - **Copilot** runs one prompt per process and its protocol has no same-turn
