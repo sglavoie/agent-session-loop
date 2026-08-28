@@ -2510,6 +2510,15 @@ GENERIC_RECOVERY_PAUSE_REASONS: tuple[str, ...] = (
     # the review come back all-clear first, and no reply substitutes for either.
     "required-checks-incomplete",
     "review-not-clear",
+    # A protected-path guard convicted the turn and the run deliberately kept
+    # the retained changes. Only a human diffing the recorded before/after
+    # evidence can decide whether to restore the path or keep the change, so
+    # this is inspect-then-relaunch; no reply restores a file.
+    "guard-protected-path-changed",
+    # The turn-start snapshot the protected-path guard compares against was
+    # unreadable, so the repair is to the evidence capture — a readable
+    # worktree, a working git probe — not to anything an operator can say.
+    "guard-protected-path-unavailable",
 )
 
 

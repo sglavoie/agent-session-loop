@@ -1198,6 +1198,51 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
         ),
         fix_category="env-state",
     ),
+    "guard-protected-path-changed": RepairHint(
+        category="guard-protected-path-changed",
+        check_id="runtime.guard-protected-path-changed",
+        severity_hint="red",
+        message=(
+            "A protected-path guard froze a path at its turn-start state and "
+            "the workspace no longer matches. The run kept every filesystem "
+            "change on purpose and returned the session to pending. Read the "
+            "matched guard IDs under `details.protected_path_guard."
+            "matched_paths` and the qualified before/after content under "
+            "`.evidence`, diff each named path in "
+            "<repo-root>, then either restore it to its turn-start content or "
+            "keep the change deliberately. Re-run once the workspace matches "
+            "that decision; guards are run-scoped, so the guard is not carried "
+            "into the next run unless it is added again. No reply clears this: "
+            "a mailbox answer cannot restore a file."
+        ),
+        question_template=(
+            "Runner paused: a protected path changed ({message}). "
+            "Should I walk through the before/after evidence?"
+        ),
+        fix_category="env-state",
+    ),
+    "guard-protected-path-unavailable": RepairHint(
+        category="guard-protected-path-unavailable",
+        check_id="runtime.guard-protected-path-unavailable",
+        severity_hint="red",
+        message=(
+            "A protected-path guard was active but the turn-start workspace "
+            "snapshot it compares against is missing or unreadable, so the "
+            "guard failed closed rather than claim a protection it could not "
+            "check. The pause explains what was missing under "
+            "`details.protected_path_guard.detail`. Repair the evidence "
+            "capture itself — "
+            "confirm each repository under <repo-root> is a readable git "
+            "worktree with no interrupted merge/rebase or index lock, and that "
+            "`git -C <repo-root> status --short` succeeds — then re-run. No "
+            "reply clears this: the snapshot has to become readable."
+        ),
+        question_template=(
+            "Runner paused: the protected-path snapshot was unreadable "
+            "({message}). Should I diagnose the repository evidence?"
+        ),
+        fix_category="env-state",
+    ),
 }
 
 
