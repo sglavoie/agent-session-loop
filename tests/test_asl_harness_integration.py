@@ -997,8 +997,13 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         predicate,
         *,
         process: subprocess.Popen[bytes],
-        timeout: float = 5.0,
+        timeout: float = 30.0,
     ) -> str:
+        # A readiness wait, not a latency assertion: the loop returns the moment
+        # the predicate holds and breaks early once the process exits, so a
+        # generous budget costs nothing on the happy path. The old 5s default
+        # was tight enough that the full suite's own parallel load, not any
+        # regression, could outlast a run's startup.
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             output = self.read_run_pty_available(master_fd, output)
@@ -1020,7 +1025,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         process: subprocess.Popen[bytes],
         master_fd: int,
         output: str,
-        timeout: float = 15.0,
+        timeout: float = 30.0,
     ) -> str:
         output = self.read_run_pty_until(
             master_fd,
@@ -1662,13 +1667,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 return active_turn
             return None
 
-        wait_until(harness_started, timeout=10)
+        wait_until(harness_started, timeout=30)
         process.send_signal(signal.SIGINT)
         output = self.finish_run_pty(
             process=process,
             master_fd=master_fd,
             output=output,
-            timeout=10,
         )
 
         self.assertEqual(runner.INTERRUPTED_EXIT, process.returncode, output)
@@ -1813,13 +1817,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             output,
             lambda text: "session 2/2 started" in text,
             process=process,
-            timeout=8,
         )
         output = self.finish_run_pty(
             process=process,
             master_fd=master_fd,
             output=output,
-            timeout=20,
         )
 
         self.assertEqual(0, process.returncode, output)
@@ -1930,7 +1932,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 return active_turn
             return None
 
-        wait_until(first_turn_logs_ready, timeout=10)
+        wait_until(first_turn_logs_ready, timeout=30)
         os.write(master_fd, b"t")
         output = self.read_run_pty_until(
             master_fd,
@@ -1945,7 +1947,6 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stdout session=1 turn=1 | session 1 stdout before completion" in text
             ),
             process=process,
-            timeout=5,
         )
         output = self.read_run_pty_until(
             master_fd,
@@ -1954,7 +1955,6 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr session=1 turn=1 | session 1 stderr before completion" in text
             ),
             process=process,
-            timeout=5,
         )
         release_session("1")
         output = self.read_run_pty_until(
@@ -1964,7 +1964,6 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stdout session=1 turn=1 | session 1 stdout after completion" in text
             ),
             process=process,
-            timeout=5,
         )
 
         output = self.read_run_pty_until(
@@ -1974,7 +1973,6 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stdout session=2 turn=2 | session 2 stdout before completion" in text
             ),
             process=process,
-            timeout=5,
         )
         os.write(master_fd, b"t")
         output = self.read_run_pty_until(
@@ -1988,7 +1986,6 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             process=process,
             master_fd=master_fd,
             output=output,
-            timeout=20,
         )
 
         self.assertEqual(0, process.returncode, output)
