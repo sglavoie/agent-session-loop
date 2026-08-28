@@ -58,6 +58,9 @@ class _Stdin(io.StringIO):
         super().__init__()
         self.broken = False
         self.closed_by_asl = False
+        #: Stands in for the output-processing thread reaching the session
+        #: while a write is still in flight.
+        self.on_flush: Any = None
 
     def write(self, text: str) -> int:  # type: ignore[override]
         if self.broken:
@@ -68,6 +71,8 @@ class _Stdin(io.StringIO):
         if self.broken:
             raise BrokenPipeError("the harness is gone")
         super().flush()
+        if self.on_flush is not None:
+            self.on_flush()
 
     def close(self) -> None:
         self.closed_by_asl = True
@@ -339,6 +344,38 @@ class StreamSessionSteerTests(TempDirTestCase):
 
         outcome = session.steer(request_for(text="rebase before\nyou push"))
         self.assertTrue(outcome.delivered)
+
+    def test_an_echo_observed_during_flush_confirms_its_guidance(self) -> None:
+        # The output processor runs on its own thread and can see the CLI take
+        # the message up before ``flush`` has even returned. That echo has to
+        # find the expectation already published, or the guidance stays
+        # unacknowledged forever even though the model read it.
+        session, stdin = session_with()
+        session.send_prompt()
+        stdin.on_flush = lambda: session.note_user_echo("rebase before you push")
+
+        outcome = session.steer(request_for(text="rebase before you push"))
+
+        self.assertTrue(outcome.delivered)
+        self.assertEqual(guidance_delivery.REASON_DELIVERED, outcome.reason)
+
+    def test_an_echo_during_a_failed_write_is_not_left_for_a_later_message(
+        self,
+    ) -> None:
+        # The mirror of the case above: bytes that never reached the pipe leave
+        # no expectation behind, so a later unrelated echo of the same words
+        # cannot be spent on the guidance the CLI never received.
+        session, stdin = session_with()
+        session.send_prompt()
+        stdin.broken = True
+
+        first = session.steer(request_for(text="rebase before you push"))
+        self.assertFalse(first.delivered)
+
+        session.note_user_echo("rebase before you push")
+
+        outcome = session.steer(request_for(text="rebase before you push"))
+        self.assertFalse(outcome.delivered)
 
     def test_a_hook_receipt_confirms_the_delivery(self) -> None:
         spool = self.spool()

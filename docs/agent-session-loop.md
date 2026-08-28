@@ -818,7 +818,11 @@ The three harnesses reach different channels, and the ledger says which:
   echo is spent on at most one of them. So the turn's own prompt claims its own
   echo however late it arrives, and neither a prompt nor any other message that
   merely happens to contain a short guidance phrase can acknowledge guidance
-  the model has not been given. If the turn ends first,
+  the model has not been given. The expectation is published before the bytes
+  move and withdrawn if the write or flush fails, because the output-processing
+  thread can observe the echo while the write is still returning: recorded
+  afterwards, that echo would match nothing and the guidance would stay
+  unacknowledged for the rest of the turn. If the turn ends first,
   the process exits, or stdin is refused, the guidance stays deliverable and
   the next turn carries it.
 - **Copilot** runs one prompt per process and its protocol has no same-turn
