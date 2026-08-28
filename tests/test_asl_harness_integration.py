@@ -8045,7 +8045,11 @@ class AuditAccessProfileTests(unittest.TestCase):
             argv[index + 1] for index, token in enumerate(argv) if token == "--add-dir"
         ]
 
-    def test_worker_argv_is_byte_for_byte_what_it_always_was(self) -> None:
+    def test_worker_argv_grants_exactly_the_access_it_always_did(self) -> None:
+        # Claude's argv gained ``--input-format stream-json`` and lost its
+        # prompt when the turn became a conversation, so this is no longer a
+        # byte-for-byte identity test for that harness. Every access-bearing
+        # token is unchanged, which is what the assertion is actually for.
         expected = {
             "claude": [
                 "claude",
@@ -8054,11 +8058,12 @@ class AuditAccessProfileTests(unittest.TestCase):
                 "--output-format",
                 "stream-json",
                 "--include-partial-messages",
+                "--input-format",
+                "stream-json",
                 "--add-dir",
                 "/plan",
                 "--permission-mode",
                 "dontAsk",
-                "prompt",
             ],
             "copilot": [
                 "copilot",
@@ -8084,6 +8089,20 @@ class AuditAccessProfileTests(unittest.TestCase):
                         last_message_path=Path("/work/last.txt"),
                     ),
                 )
+
+    def test_claude_worker_prompt_never_reaches_argv(self) -> None:
+        adapter = harnesses.get_adapter("claude")
+        invocation = adapter.build_invocation(
+            cwd=Path("/work"),
+            plan_dir=Path("/plan"),
+            prompt="prompt",
+            last_message_path=Path("/work/last.txt"),
+        )
+
+        # Under streaming input the prompt is the conversation's first stdin
+        # message, so it must not appear in a process listing at all.
+        self.assertNotIn("prompt", invocation.argv)
+        self.assertEqual(harnesses.TRANSPORT_STREAM_JSON, invocation.transport)
 
     def test_audit_argv_never_carries_a_bypass_flag(self) -> None:
         for name in harnesses.HARNESS_NAMES:
@@ -8189,10 +8208,11 @@ class AuditAccessProfileTests(unittest.TestCase):
     def test_claude_audits_expose_only_read_and_search_tools(self) -> None:
         argv = self._audit_argv("claude", (Path("/evidence"), Path("/skills")))
 
-        self.assertEqual(["--permission-mode", "plan"], argv[10:12])
+        mode = argv.index("--permission-mode")
+        self.assertEqual(["--permission-mode", "plan"], argv[mode : mode + 2])
         self.assertEqual(
             ["--tools", "Read,Glob,Grep", "--allowed-tools", "Read,Glob,Grep"],
-            argv[12:16],
+            argv[mode + 2 : mode + 6],
         )
         self.assertEqual(
             [

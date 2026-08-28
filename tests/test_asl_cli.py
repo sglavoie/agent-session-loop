@@ -225,7 +225,9 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual("medium", claude[claude.index("--effort") + 1])
         self.assertLess(claude.index("--model"), len(claude) - 1)
         self.assertLess(claude.index("--effort"), len(claude) - 1)
-        self.assertEqual("/session-run /tmp/plan/", claude[-1])
+        # The prompt is a stdin message under streaming input, so it is not the
+        # trailing argument any more -- and is nowhere on argv at all.
+        self.assertNotIn("/session-run /tmp/plan/", claude)
 
         copilot = harnesses.CopilotAdapter(executable="copilot").build_argv(
             cwd=cwd,
@@ -946,6 +948,32 @@ class CommandAndConfigTests(unittest.TestCase):
         for command in commands:
             with self.subTest(command=command):
                 self.assertIn(command, text)
+
+    def test_supervisor_guide_guidance_route_waits_for_a_delivery_verdict(
+        self,
+    ) -> None:
+        """The generated command has to be the one that reports reality.
+
+        A supervisor who follows the guide verbatim must end up asking whether
+        the guidance was delivered, not just whether it was appended -- and the
+        description must not promise that guidance can enforce anything.
+        """
+        payload = supervisor_guide.guide_payload(harness="codex")
+        [guidance] = [
+            operation
+            for operation in payload["operations"]
+            if operation["name"] == "guidance"
+        ]
+
+        self.assertEqual(
+            "asl inbox guidance PLAN_DIR --text GUIDANCE_TEXT --wait-delivered --json",
+            guidance["command"],
+        )
+        self.assertIn("delivered live", guidance["description"])
+        self.assertIn("queued but not delivered", guidance["description"])
+        self.assertIn("only a guard enforces", guidance["description"])
+        self.assertNotIn("sent", guidance["description"])
+        self.assertIn(guidance["command"], supervisor_guide.render_text(payload))
 
     def test_supervisor_guide_selects_or_offers_every_harness_candidate(self) -> None:
         detected = supervisor_guide.guide_payload(env={"CLAUDECODE": "1"})

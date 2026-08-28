@@ -555,11 +555,12 @@ class HarnessLiveDeliverySeamTests(unittest.TestCase):
 class ProductionAdapterDeferralTests(unittest.TestCase):
     """Without an open protocol conversation, no adapter claims live delivery.
 
-    Codex gained one over the app-server; claude and copilot are still one-shot
-    processes. What all three share is this floor: an adapter handed no
-    transport has no live channel and must say so, so a turn whose conversation
-    never opened defers instead of reporting a delivery it did not make. The
-    codex transport itself is covered in tests/test_asl_codex_app_server.py.
+    All three harnesses now answer a steer through a transport: codex over the
+    app-server, claude over stream JSON, copilot by declining. What they share
+    is this floor -- an adapter handed no transport has no live channel and
+    must say so, so a turn whose conversation never opened defers instead of
+    reporting a delivery it did not make. The transports themselves are covered
+    in tests/test_asl_codex_app_server.py and tests/test_asl_claude_stream.py.
     """
 
     def test_every_adapter_reports_no_live_transport(self) -> None:
@@ -741,6 +742,124 @@ class MailboxPollDeliveryTests(unittest.TestCase):
 
         self.assertEqual(1, len(submissions))
         self.assertEqual(1, len(self.deliveries()))
+
+    def unconfirmed_until(
+        self, confirmations: int
+    ) -> tuple[guidance_delivery.LiveDeliveryEndpoint, list[str]]:
+        """An endpoint whose transport confirms only on the Nth attempt.
+
+        This is what a real stream transport looks like from the poller's side:
+        it wrote the guidance out immediately and learns the model took it up
+        some ticks later.
+        """
+        attempts: list[str] = []
+
+        def transport(
+            request: guidance_delivery.GuidanceRequest,
+        ) -> guidance_delivery.GuidanceOutcome:
+            attempts.append(request.text)
+            if len(attempts) >= confirmations:
+                return guidance_delivery.DELIVERED
+            return guidance_delivery.awaiting_confirmation()
+
+        endpoint = guidance_delivery.LiveDeliveryEndpoint(self.turn)
+        endpoint.open(transport)
+        return endpoint, attempts
+
+    def test_an_unconfirmed_attempt_is_asked_again_until_it_confirms(self) -> None:
+        guidance = self.add_guidance("rebase before you push")
+        endpoint, attempts = self.unconfirmed_until(3)
+        self.poll.set_live_delivery(endpoint)
+
+        self.poll()
+        self.assertEqual(
+            mailbox.GUIDANCE_STATE_DEFERRED,
+            self.view().guidance_delivery_state(guidance.id),
+        )
+        self.poll()
+        self.poll()
+
+        self.assertEqual(3, len(attempts))
+        self.assertEqual(
+            mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+            self.view().guidance_delivery_state(guidance.id),
+        )
+
+    def test_retrying_survives_an_unchanged_mailbox(self) -> None:
+        """The evidence arrives without anything writing the mailbox.
+
+        The first tick's own ledger append moves the change token; nothing
+        after it does. If the unchanged-token short circuit applied to an open
+        attempt, the retries would stop right there and the confirmation would
+        never be read.
+        """
+        self.add_guidance()
+        endpoint, attempts = self.unconfirmed_until(5)
+        self.poll.set_live_delivery(endpoint)
+
+        for _ in range(5):
+            self.poll()
+
+        self.assertEqual(5, len(attempts))
+
+    def test_a_confirmed_delivery_ends_the_retries(self) -> None:
+        self.add_guidance()
+        endpoint, attempts = self.unconfirmed_until(2)
+        self.poll.set_live_delivery(endpoint)
+
+        for _ in range(6):
+            self.poll()
+
+        self.assertEqual(2, len(attempts))
+
+    def test_retrying_records_one_attempt_per_distinct_verdict(self) -> None:
+        """A retried attempt says the same thing; the ledger says it once."""
+        guidance = self.add_guidance()
+        endpoint, _ = self.unconfirmed_until(4)
+        self.poll.set_live_delivery(endpoint)
+
+        for _ in range(4):
+            self.poll()
+
+        records = self.deliveries()
+        self.assertEqual(
+            [
+                (
+                    mailbox.GUIDANCE_STATE_DEFERRED,
+                    mailbox.GUIDANCE_REASON_AWAITING_CONFIRMATION,
+                ),
+                (
+                    mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+                    mailbox.GUIDANCE_REASON_DELIVERED,
+                ),
+            ],
+            [(record.delivery_state, record.delivery_reason) for record in records],
+        )
+        self.assertEqual([guidance.id] * 2, [record.to for record in records])
+
+    def test_an_attempt_that_never_confirms_stays_deliverable(self) -> None:
+        guidance = self.add_guidance("read the handoff first")
+        endpoint, attempts = self.unconfirmed_until(1000)
+        self.poll.set_live_delivery(endpoint)
+
+        self.poll()
+        self.poll()
+        # The turn ends without the transport ever proving anything.
+        endpoint.close()
+        self.poll()
+
+        self.assertEqual(
+            [
+                mailbox.GUIDANCE_REASON_AWAITING_CONFIRMATION,
+                mailbox.GUIDANCE_REASON_STALE_TURN,
+            ],
+            [record.delivery_reason for record in self.deliveries()],
+        )
+        self.assertEqual(
+            [guidance.id],
+            [message.id for message in self.view().deliverable_guidance],
+        )
+        self.assertGreaterEqual(len(attempts), 2)
 
     def test_a_deferral_leaves_the_guidance_deliverable_for_the_next_turn(
         self,

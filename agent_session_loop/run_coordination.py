@@ -2169,7 +2169,9 @@ class MailboxPoll:
         self._finalization = False
         self._evented_guidance_ids: set[str] = set()
         self._live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None
-        self._attempted_guidance_ids: set[str] = set()
+        self._settled_guidance_ids: set[str] = set()
+        self._recorded_guidance_attempts: set[tuple[str, str, str]] = set()
+        self._unconfirmed_guidance_ids: set[str] = set()
         self._mailbox_path = mailbox.mailbox_path_for_plan(
             plan_dir,
             state_dir_arg,
@@ -2204,9 +2206,9 @@ class MailboxPoll:
 
         Set before the turn starts and cleared after the poll thread has been
         joined, exactly like :meth:`set_abort`, so no tick can deliver into a
-        turn that has finished. The per-turn attempt ledger is reset with the
-        endpoint: one attempt per guidance per turn is the spine's whole bound
-        on retries, and a new turn is a new chance to deliver.
+        turn that has finished. Both per-turn ledgers are reset with the
+        endpoint: what a turn settled and what it recorded are facts about that
+        turn, and a new turn is a new chance to deliver.
 
         Attaching also drops the change token so the first tick of the new turn
         parses the mailbox again. Without that, guidance deferred in the
@@ -2215,7 +2217,9 @@ class MailboxPoll:
         returning before the delivery pass ever ran.
         """
         self._live_delivery = endpoint
-        self._attempted_guidance_ids = set()
+        self._settled_guidance_ids = set()
+        self._recorded_guidance_attempts = set()
+        self._unconfirmed_guidance_ids = set()
         if endpoint is not None:
             self._last_read_token = MAILBOX_TOKEN_UNSEEN
 
@@ -2243,7 +2247,13 @@ class MailboxPoll:
 
         current_token = mailbox.mailbox_change_token(self._mailbox_path)
         if (
-            self._last_read_token is not MAILBOX_TOKEN_UNSEEN
+            # An attempt that is written but unconfirmed has to be asked again,
+            # and its evidence arrives on the harness's schedule rather than by
+            # anything writing the mailbox. Short circuiting on an unchanged
+            # token here would stop the retries after the one tick whose own
+            # ledger append happened to move the token.
+            not self._unconfirmed_guidance_ids
+            and self._last_read_token is not MAILBOX_TOKEN_UNSEEN
             and current_token is not mailbox.MAILBOX_CHANGE_TOKEN_UNAVAILABLE
             and current_token == self._last_read_token
         ):
@@ -2299,16 +2309,25 @@ class MailboxPoll:
         Nothing happens between turns: with no endpoint there is no live
         process to deliver into, and recording a deferral per tick would fill
         the ledger with history about a turn that does not exist.
+
+        One attempt per guidance per turn, with one exception: an attempt that
+        is still open. A transport that has written guidance out but cannot yet
+        prove a model received it answers ``awaiting-confirmation``, and the
+        only way that ever becomes a delivery is by asking again — the evidence
+        arrives on the harness's own schedule, not on the poller's. Such an
+        attempt is retried for the rest of the turn and needs no separate cap:
+        each retry is a cheap local check, the ledger deduplicates below, and
+        the endpoint's own close turns the last retry into ``stale-turn``.
         """
         endpoint = self._live_delivery
         if endpoint is None:
             return
         for message in view.deliverable_guidance:
-            if message.id in self._attempted_guidance_ids:
+            if message.id in self._settled_guidance_ids:
                 continue
-            # Marked before the submit, not after: one attempt per guidance per
-            # turn holds even if recording the outcome fails below.
-            self._attempted_guidance_ids.add(message.id)
+            # Marked before the submit, not after: an attempt that settles stays
+            # settled even if recording the outcome fails below.
+            self._settled_guidance_ids.add(message.id)
             outcome = endpoint.submit(
                 guidance_delivery.GuidanceRequest(
                     guidance_id=message.id,
@@ -2317,6 +2336,11 @@ class MailboxPoll:
                     turn=endpoint.turn,
                 )
             )
+            if outcome.retriable_in_turn:
+                self._settled_guidance_ids.discard(message.id)
+                self._unconfirmed_guidance_ids.add(message.id)
+            else:
+                self._unconfirmed_guidance_ids.discard(message.id)
             self._record_delivery(message, outcome, endpoint.turn)
 
     def _record_delivery(
@@ -2334,7 +2358,17 @@ class MailboxPoll:
         time. At-least-once is the honest guarantee, and a duplicate is a far
         smaller harm than a durable record claiming a delivery the ledger could
         not actually witness.
+
+        At most one record per (guidance, state, reason) per turn. A retried
+        attempt reports the same thing until something changes, and a ledger
+        that appended every poll tick would say a hundred times over what it
+        only knows once. The moment the answer does change — confirmed, or
+        broken — the new pair is unrecorded and is written.
         """
+        signature = (message.id, outcome.delivery_state, outcome.reason)
+        if signature in self._recorded_guidance_attempts:
+            return
+        self._recorded_guidance_attempts.add(signature)
         try:
             record = mailbox.append_guidance_delivery(
                 self._plan_dir,
@@ -2350,7 +2384,10 @@ class MailboxPoll:
             )
         except OSError, mailbox.MailboxError:
             # Same fail-open discipline as the read above: a mailbox that
-            # cannot record a delivery must not end the harness turn.
+            # cannot record a delivery must not end the harness turn. The
+            # signature is released so a retried attempt can still record what
+            # this one failed to; dedup is for repetition, not for suppression.
+            self._recorded_guidance_attempts.discard(signature)
             return
         event_payload = {
             "action": (

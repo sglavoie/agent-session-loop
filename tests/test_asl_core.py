@@ -3368,6 +3368,137 @@ class ParserAndStateTests(unittest.TestCase):
             self.assertIn("0 open questions (1 unanswered historical)", output)
             self.assertIn("Mailbox lease: fresh", output)
 
+    def test_status_projects_untouched_guidance_as_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            guidance = mailbox.append_guidance(
+                plan_dir, "keep the API small", state_dir=state_dir
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            [entry] = payload["mailbox"]["guidance"]
+            self.assertEqual(guidance.id, entry["id"])
+            self.assertEqual(guidance.seq, entry["seq"])
+            self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, entry["state"])
+            # Nothing has ever attempted it, which is exactly what queued means.
+            self.assertIsNone(entry["latest_attempt"])
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+            self.assertIn(
+                f"Latest guidance: {guidance.id} (seq {guidance.seq}) "
+                "queued but not delivered",
+                buffer.getvalue(),
+            )
+
+    def test_status_projects_the_latest_attempt_behind_each_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            deferred_guidance = mailbox.append_guidance(
+                plan_dir, "steer me", state_dir=state_dir
+            )
+            delivered_guidance = mailbox.append_guidance(
+                plan_dir, "and me", state_dir=state_dir
+            )
+            mailbox.append_guidance_delivery(
+                plan_dir,
+                deferred_guidance.id,
+                delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+                delivery_reason=mailbox.GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER,
+                channel=mailbox.GUIDANCE_CHANNEL_LIVE,
+                run_id="run-1",
+                session_id="5",
+                turn_index=2,
+                harness="copilot",
+                state_dir=state_dir,
+            )
+            delivery = mailbox.append_guidance_delivery(
+                plan_dir,
+                delivered_guidance.id,
+                delivery_state=mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
+                delivery_reason=mailbox.GUIDANCE_REASON_DELIVERED,
+                channel=mailbox.GUIDANCE_CHANNEL_LIVE,
+                run_id="run-1",
+                session_id="5",
+                turn_index=3,
+                harness="claude",
+                state_dir=state_dir,
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            first, second = payload["mailbox"]["guidance"]
+            self.assertEqual(mailbox.GUIDANCE_STATE_DEFERRED, first["state"])
+            self.assertEqual(
+                {
+                    "delivery_state": mailbox.GUIDANCE_STATE_DEFERRED,
+                    "reason": mailbox.GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER,
+                    "channel": mailbox.GUIDANCE_CHANNEL_LIVE,
+                    "harness": "copilot",
+                    "run_id": "run-1",
+                    "session_id": "5",
+                    "turn_index": 2,
+                },
+                {
+                    key: first["latest_attempt"][key]
+                    for key in (
+                        "delivery_state",
+                        "reason",
+                        "channel",
+                        "harness",
+                        "run_id",
+                        "session_id",
+                        "turn_index",
+                    )
+                },
+            )
+            self.assertEqual(mailbox.GUIDANCE_STATE_DELIVERED_LIVE, second["state"])
+            self.assertEqual(delivery.id, second["latest_attempt"]["delivery_id"])
+            self.assertEqual(
+                delivery.created_at, second["latest_attempt"]["recorded_at"]
+            )
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                state._print_text_status(payload)
+            self.assertIn("delivered live to claude", buffer.getvalue())
+
+    def test_status_guidance_projection_never_carries_a_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            mailbox.append_guidance(
+                plan_dir, "a body nobody else may read", state_dir=state_dir
+            )
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            self.assertNotIn(
+                "a body nobody else may read", json.dumps(payload["mailbox"])
+            )
+
+    def test_status_guidance_projection_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir = Path(tmp) / "plan"
+            state_dir = Path(tmp) / "state"
+            write_plan(plan_dir, ("pending",))
+            appended = [
+                mailbox.append_guidance(plan_dir, f"note {index}", state_dir=state_dir)
+                for index in range(state.MAILBOX_STATUS_GUIDANCE_CAP + 4)
+            ]
+
+            payload = state.status_payload(plans.inspect_plan(plan_dir), state_dir)
+
+            entries = payload["mailbox"]["guidance"]
+            self.assertEqual(state.MAILBOX_STATUS_GUIDANCE_CAP, len(entries))
+            # The recent end is kept: "did what I just said get through?".
+            self.assertEqual(appended[-1].id, entries[-1]["id"])
+
     def test_status_payload_counts_open_questions_only_for_the_live_run(
         self,
     ) -> None:

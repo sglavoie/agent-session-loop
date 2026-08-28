@@ -1158,6 +1158,74 @@ def _runner_state_payload(
     }
 
 
+#: How many guidance records the status projection describes. Status is a
+#: bounded snapshot, not a mailbox reader: a long run's ledger can hold
+#: hundreds of records and the operator question this answers -- "did what I
+#: just said get through?" -- is always about the recent end.
+MAILBOX_STATUS_GUIDANCE_CAP = 20
+
+
+def _guidance_delivery_projection(view: Any) -> list[dict[str, Any]]:
+    """Describe what became of the most recent guidance, one entry each.
+
+    The projection exists so an operator does not have to infer delivery from
+    counts. ``state`` is the record's current standing, and ``latest_attempt``
+    is the evidence behind it: which turn, which harness, which channel, and
+    what the transport said. A record nothing has ever attempted has no latest
+    attempt at all, which is exactly the shape of ``queued``.
+
+    Bodies never appear here. ``asl status`` is read by anyone who can see the
+    run, while guidance is addressed to its worker; the record's id and seq are
+    enough to look it up through ``asl inbox``.
+    """
+    from . import mailbox
+
+    entries: list[dict[str, Any]] = []
+    guidance = [
+        message for message in view.messages if message.kind == mailbox.KIND_GUIDANCE
+    ]
+    for message in guidance[-MAILBOX_STATUS_GUIDANCE_CAP:]:
+        latest = view.latest_guidance_delivery(message.id)
+        entries.append(
+            {
+                "id": message.id,
+                "seq": message.seq,
+                "created_at": message.created_at,
+                "state": view.guidance_delivery_state(message.id),
+                "latest_attempt": (
+                    None
+                    if latest is None
+                    else {
+                        "delivery_id": latest.id,
+                        "seq": latest.seq,
+                        "delivery_state": latest.delivery_state,
+                        "reason": latest.delivery_reason,
+                        "channel": latest.channel,
+                        "harness": latest.harness,
+                        "run_id": latest.run_id,
+                        "session_id": latest.session_id,
+                        "turn_index": latest.turn_index,
+                        "recorded_at": latest.created_at,
+                    }
+                ),
+            }
+        )
+    return entries
+
+
+def _guidance_state_summary(entry: Mapping[str, Any]) -> str:
+    """Render one projection entry the way the mailbox vocabulary defines it."""
+    from . import mailbox
+
+    attempt = entry.get("latest_attempt")
+    attempt = attempt if isinstance(attempt, dict) else {}
+    return mailbox.describe_guidance_delivery(
+        str(entry.get("state")),
+        delivery_reason=attempt.get("reason"),
+        harness=attempt.get("harness"),
+    )
+
+
 def _mailbox_status_payload(
     plan_dir: Path,
     state_dir: str | Path | None,
@@ -1186,6 +1254,7 @@ def _mailbox_status_payload(
         "accepts_resolutions": True,
         "last_seq": 0,
         "pending_guidance": 0,
+        "guidance": [],
         "unanswered_questions": 0,
         "open_questions": 0,
         "resolutions": 0,
@@ -1212,6 +1281,7 @@ def _mailbox_status_payload(
         payload["accepts_resolutions"] = None
         payload["last_seq"] = None
         payload["pending_guidance"] = None
+        payload["guidance"] = None
         payload["unanswered_questions"] = None
         payload["open_questions"] = None
         payload["resolutions"] = None
@@ -1233,6 +1303,7 @@ def _mailbox_status_payload(
                 "accepts_resolutions": view.accepts_resolutions,
                 "last_seq": view.last_seq,
                 "pending_guidance": counts.pending_guidance,
+                "guidance": _guidance_delivery_projection(view),
                 "unanswered_questions": counts.unanswered_questions,
                 "open_questions": len(view.open_questions(active_run_id)),
                 "resolutions": counts.resolutions,
@@ -2068,6 +2139,16 @@ def _print_text_status(payload: dict[str, Any]) -> None:
                 f"{mailbox_status.get('size_bytes')}/"
                 f"{mailbox_status.get('max_bytes')} bytes"
             )
+            latest_guidance = mailbox_status.get("guidance")
+            if isinstance(latest_guidance, list) and latest_guidance:
+                # Only the last record, and only when there is one: the whole
+                # projection is in `--json`, and the line an operator wants at
+                # a glance is what became of the thing they just said.
+                entry = latest_guidance[-1]
+                print(
+                    f"Latest guidance: {entry.get('id')} (seq {entry.get('seq')}) "
+                    f"{_guidance_state_summary(entry)}"
+                )
         elif mailbox_status.get("lease_present"):
             print("Mailbox: inactive (supervisor lease is not fresh)")
         else:

@@ -532,7 +532,7 @@ asl tail PLAN_DIR [--state-dir DIR] [--lines N] [--no-follow]
 asl sessions [--running] [--recent] [--limit N] [--state-dir DIR] [--verbose] [--json]
 asl doctor --harness codex|claude|copilot [--harness-model MODEL] [--effort EFFORT] [--cwd ROOT] --plan-dir PLAN_DIR [--unsafe-bypass|--no-unsafe-bypass] [--json]
 asl supervisor-guide [--harness auto|codex|claude|copilot] [--json]
-asl inbox guidance PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--state-dir DIR] [--json]
+asl inbox guidance PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--wait-delivered] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl inbox reply PLAN_DIR_OR_ID --to QUESTION_ID (--text TEXT | --text-stdin) [--wait-consumed] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl inbox resolve PLAN_DIR_OR_ID --to QUESTION_ID --action continue|pause [--note TEXT|--note-stdin] [--wait-consumed] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl inbox read PLAN_DIR_OR_ID [--peek] [--state-dir DIR] [--json]
@@ -788,13 +788,70 @@ concurrently after the immutable read also remains pending. The `--json`
 payload is not rendering-truncated and continues to return the complete
 snapshot.
 
+### Guidance delivery
+
+Appending guidance and delivering it are different events, and the mailbox
+records them separately. A `guidance` record that no delivery record speaks
+about is `queued`: durable, and nothing has reported acting on it. Every
+delivery attempt appends a `guidance-delivery` record naming the guidance, the
+channel, the turn, the harness, and a stable reason — never the body.
+
+The three harnesses reach different channels, and the ledger says which:
+
+- **Codex** is steered in-turn over the app-server's `turn/steer`, which is
+  accepted or rejected by the protocol itself. A success records
+  `delivered-live`.
+- **Claude** is steered over two routes at once. The guidance is written to the
+  turn's stdin message stream, where the CLI queues it as a follow-up turn, and
+  it is placed in a turn-scoped spool that an ASL-owned `PreToolUse` hook
+  injects as `additionalContext` before the model's next tool call. A
+  successful stdin write is *not* a delivery and is never recorded as one: the
+  attempt records `deferred` with reason `awaiting-confirmation` and stays
+  open. It becomes `delivered-live` only on evidence — the CLI echoing the
+  message back on its output stream as a protocol acknowledgement, or the hook
+  leaving a receipt saying it injected the guidance. If the turn ends first,
+  the process exits, or stdin is refused, the guidance stays deliverable and
+  the next turn carries it.
+- **Copilot** runs one prompt per process and its protocol has no same-turn
+  steer. The only in-turn control it offers is cancellation, which is never
+  used for steering: cancelling a turn would destroy the work the guidance was
+  meant to redirect. An attempt during an active turn records `deferred` with
+  reason `unsupported-active-steer`. The guidance then rides the next turn's
+  prompt, and `delivered-next-turn` is recorded only once that prompt has been
+  accepted — that is, once the process carrying it has started.
+
+A worker's own `asl inbox read` records `delivered-by-read` on the `read`
+channel for each guidance in the snapshot it was shown.
+
+`awaiting-confirmation` is the one deferral reason that is not a verdict: it
+means the attempt is still running, so the delivery spine retries the same
+attempt for the rest of the turn and the ledger records at most one entry per
+(guidance, state, reason) per turn. Every other reason ends that turn's
+attempt. Guidance is advisory throughout: a deferral never stops a turn, and
+enforcement remains the job of guards, not guidance.
+
+`asl status --json` projects the newest 20 guidance records under
+`mailbox.guidance`, each with its `state` and its `latest_attempt`
+(delivery id, state, reason, channel, harness, run/session/turn identity, and
+the receipt timestamp). Bodies never appear there.
+
 ### Mailbox commands
 
 The eight mailbox commands share normal plan-reference, `--state-dir`, and
 `--json` behavior:
 
 - `asl inbox guidance` appends supervisor guidance from exactly one of `--text`
-  or `--text-stdin` and renews the supervisor lease first.
+  or `--text-stdin` and renews the supervisor lease first. The append and the
+  delivery are separate facts: the exit code follows the append alone, and
+  `delivery_state` reports what became of the guidance. Without
+  `--wait-delivered` nothing is observed and the text form says "Guidance
+  queued (delivery not observed)". With it, the command waits up to
+  `--wait-timeout` seconds (30 by default; `--wait-timeout` requires
+  `--wait-delivered`) for a delivery record naming the turn that was live when
+  the wait started, and reports either "Guidance delivered live …" or
+  "Guidance queued but not delivered …" with the reason. An
+  `awaiting-confirmation` record never ends the wait: it says the attempt is
+  still running, not that it failed.
 - `asl inbox reply` atomically appends the first reply to `--to QUESTION_ID`.
   Concurrent later replies fail with `question-already-answered`; a missing
   target fails with `question-not-found`. `--wait-consumed` optionally waits
@@ -815,7 +872,13 @@ The eight mailbox commands share normal plan-reference, `--state-dir`, and
   count or byte budget. If that acknowledgement cannot be appended because the
   mailbox is full or unwritable, the read still succeeds and returns the
   guidance with `acknowledged: false` plus an `acknowledgement_error`; the
-  guidance remains pending for later runs.
+  guidance remains pending for later runs. A non-`--peek` read also appends one
+  `delivered-by-read` delivery record per guidance in the snapshot, on the
+  `read` channel and attributed to the active worker turn, and returns them as
+  `delivery_receipts`. That is what distinguishes an explicit read from the
+  legacy cumulative acknowledgement, which remains honoured as read evidence
+  but names no turn. With no authoritative active turn no receipts are written
+  and `delivery_receipts` is empty; the acknowledgement still stands.
 - `asl ask` appends a worker question, or resumes an existing one with
   `--question-id`. `--wait` polls for the first reply or resolution for
   90 seconds by default;
@@ -3794,11 +3857,23 @@ which of the two ran: `app-server` or `exec`. Under `app-server` the invocation
 also carries a prompt-free `turn_plan`, which `--dry-run` prints below argv so
 an operator can still read the access profile off a planned turn.
 
-Claude:
+Claude runs over bidirectional stream JSON, so its prompt is not on argv either:
 
 ```text
-claude --print --verbose --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions [--model <model>] [--effort <effort>] <prompt>
+claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --add-dir <plan-dir> --permission-mode bypassPermissions [--model <model>] [--effort <effort>] --settings <overlay>
 ```
+
+`--input-format stream-json` makes stdin a message stream. The prompt is
+written to it as the conversation's first user message, and supervisor guidance
+can be written to it while the turn runs. `invocation.transport` says
+`stream-json` for such a turn.
+
+`--settings <overlay>` names an ephemeral per-turn settings file created under a
+temporary directory, holding exactly one `PreToolUse` hook entry and nothing
+else. It is deleted when the turn ends, and the operator's own Claude
+configuration is never read, written, or modified. Audit turns get no overlay:
+an audit observes, and a hook that injected operator guidance into one would
+make it something else.
 
 Copilot:
 
@@ -5241,18 +5316,23 @@ resumes by streaming the reply on stdin:
 printf '%s' '<reply text>' | skills/asl/scripts/asl-autopilot.py --command '<same exact command>' --json --reply-stdin
 ```
 
-For live steering that should affect a future turn, use a separate shell while
-the helper owns the foreground:
+For live steering, use a separate shell while the helper owns the foreground:
 
 ```text
-asl inbox guidance <plan-dir> --text '<scoped guidance>' [--state-dir DIR] --json
+asl inbox guidance <plan-dir> --text '<scoped guidance>' --wait-delivered [--state-dir DIR] --json
 asl control set-model <plan-dir> [--harness codex|claude|copilot] --harness-model MODEL [--effort EFFORT] [--state-dir DIR] --json
 ```
 
-Guidance is delivered at the next turn start and remains pending until the
-worker acknowledges it. Model/effort controls are polled during active turns
-but affect only the next implementation invocation in the current runner
-process; they do not alter the active subprocess or generated review turns.
+`--wait-delivered` is what turns the command from a report of what it wrote
+into a report of what happened: it prints "Guidance delivered live to
+<harness>" once the delivery ledger confirms the running turn received it, or
+"Guidance queued but not delivered" with the reason when it did not — a
+copilot turn declining a mid-turn steer, no turn in flight, or an attempt still
+awaiting confirmation. Undelivered guidance stays pending for the next turn's
+initial prompt or for the worker's next `asl inbox read`. Model/effort controls
+are polled during active turns but affect only the next implementation
+invocation in the current runner process; they do not alter the active
+subprocess or generated review turns.
 
 ### Review-fix loop behavior
 

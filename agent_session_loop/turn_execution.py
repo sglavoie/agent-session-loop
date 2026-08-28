@@ -29,6 +29,7 @@ Two ordering rules survive the move and are load-bearing:
 
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import threading
@@ -1868,6 +1869,11 @@ class TurnLaunch:
     live_delivery: guidance_delivery.LiveDeliveryEndpoint | None
     stream_callback: harnesses.StreamCallback | None
     build_invocation: Callable[[], harnesses.HarnessInvocation]
+    #: Called once the harness process exists, which for a harness that takes
+    #: its prompt up front is the moment the prompt was accepted. It is the
+    #: earliest point at which guidance carried in that prompt can honestly be
+    #: called delivered, and the latest at which it is still this turn's news.
+    on_prompt_accepted: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -1936,6 +1942,16 @@ class TurnExecutor:
         self.persistence.append_event(self.event_path, "turn_started", active_turn)
         live_turn.start()
         notify_turn_started(payload, active_turn, self.persistence)
+
+        def on_spawn(pid: int) -> None:
+            live_turn.note_harness_pid(pid)
+            if launch.on_prompt_accepted is not None:
+                # Suppressed rather than propagated: recording a delivery is
+                # bookkeeping about a turn that has already started, and a
+                # ledger failure must not become a spawn failure.
+                with contextlib.suppress(Exception):
+                    launch.on_prompt_accepted()
+
         try:
             result = harnesses.run_harness(
                 launch.harness,
@@ -1948,7 +1964,7 @@ class TurnExecutor:
                 stream_callback=launch.stream_callback,
                 model=launch.model,
                 effort=launch.effort,
-                on_spawn=live_turn.note_harness_pid,
+                on_spawn=on_spawn,
                 on_final_result=live_turn.note_final_result,
                 on_observed_model=live_turn.note_observed_model,
                 abort=launch.abort,

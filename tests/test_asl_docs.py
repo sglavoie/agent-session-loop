@@ -1524,6 +1524,69 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             normalized,
         )
 
+    def test_docs_separate_appending_guidance_from_delivering_it(self) -> None:
+        """The prose has to carry the distinction the ledger enforces.
+
+        Every operator surface used to say guidance was "sent" and left the
+        reader to assume it arrived. What the docs owe a reader now is the
+        per-harness truth: which route confirms a delivery, and what an
+        unconfirmed one is called instead.
+        """
+        docs = self._read("docs/agent-session-loop.md")
+        mailbox_docs = docs.split("## Live Mailbox and Future-Turn Model Control", 1)[
+            1
+        ].split("\n## ", 1)[0]
+        normalized = " ".join(mailbox_docs.split())
+
+        for marker in (
+            "Appending guidance and delivering it are different events",
+            "unsupported-active-steer",
+            "delivered-by-read",
+            "Guidance delivered live",
+            "Guidance queued but not delivered",
+            "enforcement remains the job of guards, not guidance",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"docs omit guidance-delivery marker: {marker!r}",
+            )
+
+    def test_operator_surfaces_never_call_an_append_a_delivery(self) -> None:
+        """ "Guidance sent" is the exact claim the ledger cannot support."""
+        for path in (
+            "README.md",
+            "agent_session_loop/README.md",
+            "docs/agent-session-loop.md",
+            "skills/asl/SKILL.md",
+        ):
+            normalized = " ".join(self._read(path).split())
+            self.assertNotIn(
+                "Guidance sent",
+                normalized,
+                msg=f"{path} still reports an append as a delivery",
+            )
+
+    def test_asl_skill_steer_route_waits_for_a_delivery_verdict(self) -> None:
+        normalized = " ".join(self._read("skills/asl/SKILL.md").split())
+
+        self.assertIn(
+            "asl inbox guidance PLAN_DIR --text GUIDANCE_TEXT --wait-delivered --json",
+            normalized,
+        )
+        for marker in (
+            "Always pass `--wait-delivered`",
+            "Guidance delivered live to <harness>",
+            "Guidance queued but not delivered (<reason>)",
+            "Delivery is never inferred from a successful write to a pipe",
+            "never cancels or restarts a turn to deliver guidance",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"skill omits guidance-delivery marker: {marker!r}",
+            )
+
     def test_docs_describe_mailbox_and_reply_text_framing(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         mailbox_docs = docs.split("## Live Mailbox and Future-Turn Model Control", 1)[

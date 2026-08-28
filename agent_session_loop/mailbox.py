@@ -135,6 +135,8 @@ GuidanceDeliveryReason = Literal[
     "no-active-turn",
     "stale-turn",
     "transport-unavailable",
+    "unsupported-active-steer",
+    "awaiting-confirmation",
 ]
 DeliveryMode = Literal["async", "wait"]
 WaitEndReason = Literal["timeout", "closure", "error"]
@@ -291,6 +293,15 @@ GUIDANCE_REASON_HARNESS_UNSUPPORTED: GuidanceDeliveryReason = "harness-unsupport
 GUIDANCE_REASON_NO_ACTIVE_TURN: GuidanceDeliveryReason = "no-active-turn"
 GUIDANCE_REASON_STALE_TURN: GuidanceDeliveryReason = "stale-turn"
 GUIDANCE_REASON_TRANSPORT_UNAVAILABLE: GuidanceDeliveryReason = "transport-unavailable"
+# A harness that has a live channel and no same-turn steer in its protocol.
+# Kept apart from ``harness-unsupported`` so a supervisor can tell "nothing was
+# listening" from "the harness was asked and cannot do this at all".
+GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER: GuidanceDeliveryReason = (
+    "unsupported-active-steer"
+)
+# The guidance reached the transport but no confirmable boundary has reported
+# the model receiving it. The one deferral that is not a verdict.
+GUIDANCE_REASON_AWAITING_CONFIRMATION: GuidanceDeliveryReason = "awaiting-confirmation"
 GUIDANCE_DELIVERED_REASONS: tuple[GuidanceDeliveryReason, ...] = (
     GUIDANCE_REASON_DELIVERED,
 )
@@ -299,11 +310,66 @@ GUIDANCE_DEFERRAL_REASONS: tuple[GuidanceDeliveryReason, ...] = (
     GUIDANCE_REASON_NO_ACTIVE_TURN,
     GUIDANCE_REASON_STALE_TURN,
     GUIDANCE_REASON_TRANSPORT_UNAVAILABLE,
+    GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER,
+    GUIDANCE_REASON_AWAITING_CONFIRMATION,
 )
 GUIDANCE_DELIVERY_REASONS: tuple[GuidanceDeliveryReason, ...] = (
     *GUIDANCE_DELIVERED_REASONS,
     *GUIDANCE_DEFERRAL_REASONS,
 )
+
+#: How each state reads to an operator. One phrase per state, defined once
+#: here so every surface -- ``inbox guidance``, ``status``, the supervisor
+#: guide -- says the same thing about the same fact. "Sent" appears nowhere:
+#: the whole point of the ledger is that appending guidance and delivering it
+#: are different events, and one word for both is what hid the difference.
+GUIDANCE_STATE_PHRASES: dict[GuidanceDeliveryState, str] = {
+    GUIDANCE_STATE_QUEUED: "queued but not delivered",
+    GUIDANCE_STATE_DELIVERED_LIVE: "delivered live",
+    GUIDANCE_STATE_DELIVERED_NEXT_TURN: "delivered with the next turn's prompt",
+    GUIDANCE_STATE_DELIVERED_BY_READ: "delivered by an explicit inbox read",
+    GUIDANCE_STATE_DEFERRED: "queued but not delivered",
+}
+
+#: Why a deferral happened, in the operator's terms rather than the ledger's.
+#: Absent reasons fall back to the bare constant, which is still honest.
+GUIDANCE_REASON_PHRASES: dict[GuidanceDeliveryReason, str] = {
+    GUIDANCE_REASON_HARNESS_UNSUPPORTED: ("this harness has no live guidance channel"),
+    GUIDANCE_REASON_NO_ACTIVE_TURN: "no turn was running",
+    GUIDANCE_REASON_STALE_TURN: "the turn ended first",
+    GUIDANCE_REASON_TRANSPORT_UNAVAILABLE: "the live channel failed",
+    GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER: (
+        "this harness cannot be steered mid-turn"
+    ),
+    GUIDANCE_REASON_AWAITING_CONFIRMATION: (
+        "the harness has not confirmed receipt yet"
+    ),
+}
+
+
+def describe_guidance_delivery(
+    delivery_state: GuidanceDeliveryState | str,
+    *,
+    delivery_reason: GuidanceDeliveryReason | str | None = None,
+    harness: str | None = None,
+) -> str:
+    """Render one guidance record's standing as an operator-facing phrase.
+
+    Deliberately a phrase and not a sentence, so callers can prefix it with
+    whatever names the record ("Guidance g-1 …", "Latest guidance: …") without
+    duplicating the vocabulary. A delivered state names the harness that
+    received it when one is known, because "delivered" is a claim about a
+    specific worker; a deferral names why, because "not delivered" is only
+    actionable with the reason attached.
+    """
+    phrase = GUIDANCE_STATE_PHRASES.get(delivery_state, str(delivery_state))
+    if delivery_state in GUIDANCE_DELIVERED_STATES:
+        return f"{phrase} to {harness}" if harness else phrase
+    if delivery_reason and delivery_reason != GUIDANCE_REASON_DELIVERED:
+        detail = GUIDANCE_REASON_PHRASES.get(delivery_reason, str(delivery_reason))
+        return f"{phrase} ({detail})"
+    return phrase
+
 
 # Stable record-rejection reasons. These are intentionally data, not prose:
 # later CLI and status surfaces can branch on them without parsing exceptions.

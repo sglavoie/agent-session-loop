@@ -1014,6 +1014,68 @@ def _active_turn_ownership(
     return run_id, session_id, turn_index
 
 
+def _active_turn_harness(
+    context: cli_common.PlanCommandContext,
+) -> str | None:
+    """Return the harness running the active worker turn, if it is named."""
+    runner_state = context.status.get("runner_state")
+    if not isinstance(runner_state, dict):
+        return None
+    active_turn = runner_state.get("active_turn")
+    if not isinstance(active_turn, dict):
+        return None
+    harness = active_turn.get("harness")
+    return harness if isinstance(harness, str) and harness else None
+
+
+def _record_guidance_read_deliveries(
+    context: cli_common.PlanCommandContext,
+    args: argparse.Namespace,
+    guidance: Sequence[mailbox.MailboxMessage],
+) -> list[dict[str, Any]]:
+    """Record each guidance in this snapshot as delivered by an explicit read.
+
+    The cumulative acknowledgement has always implied this, but only in
+    aggregate: it names a sequence number, so guidance the worker read for an
+    unrelated reason became "read" alongside guidance it acted on, and nothing
+    said which turn did the reading. A per-guidance record on the ``read``
+    channel says exactly what happened — this worker, in this turn, was shown
+    this record — which is what makes ``delivered-by-read`` evidence rather
+    than an inference.
+
+    Best effort by construction. The read already succeeded and the
+    acknowledgement is what makes the guidance non-pending; a ledger that
+    cannot take these records must not fail the command that delivered them.
+    """
+    ownership = _active_turn_ownership(context)
+    if ownership is None:
+        # Nothing durable can be said about which turn read this. The
+        # acknowledgement still stands, and ``guidance_delivery_state`` still
+        # reports ``delivered-by-read`` from it.
+        return []
+    run_id, session_id, turn_index = ownership
+    harness = _active_turn_harness(context)
+    receipts: list[dict[str, Any]] = []
+    for message in guidance:
+        try:
+            record = mailbox.append_guidance_delivery(
+                context.snapshot.plan_dir,
+                message.id,
+                delivery_state=mailbox.GUIDANCE_STATE_DELIVERED_BY_READ,
+                delivery_reason=mailbox.GUIDANCE_REASON_DELIVERED,
+                channel=mailbox.GUIDANCE_CHANNEL_READ,
+                run_id=run_id,
+                session_id=session_id,
+                turn_index=turn_index,
+                harness=harness,
+                state_dir=args.state_dir,
+            )
+        except OSError, mailbox.MailboxError:
+            break
+        receipts.append(_message_payload(record))
+    return receipts
+
+
 def _mailbox_reply_projection(
     context: cli_common.PlanCommandContext,
     args: argparse.Namespace,
@@ -1462,6 +1524,11 @@ def _wait_for_guidance_delivery(
     deferral from an earlier turn says nothing about whether the run is about
     to deliver this guidance now. With no authoritative active turn, any
     deferral is the most current statement available and ends the wait.
+
+    One deferral never ends it: ``awaiting-confirmation``. That record says the
+    attempt is still running, so returning it would report "not delivered"
+    about guidance that is very likely about to be. The wait keeps going until
+    the same attempt resolves or the timeout does.
     """
     deadline = time.monotonic() + timeout
     mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir)
@@ -1479,6 +1546,10 @@ def _wait_for_guidance_delivery(
             if delivered is not None:
                 return delivered
             for deferred in reversed(view.deferred_guidance_deliveries(guidance_id)):
+                if deferred.delivery_reason == (
+                    mailbox.GUIDANCE_REASON_AWAITING_CONFIRMATION
+                ):
+                    continue
                 if (
                     active_turn is None
                     or (deferred.run_id, deferred.session_id, deferred.turn_index)
@@ -1573,15 +1644,25 @@ def inbox_guidance_from_args(args: argparse.Namespace) -> int:
     if args.json:
         responses.print_json(payload)
     elif wait_delivered:
+        # The state, not the append, leads the line. Without `--wait-delivered`
+        # nothing was observed and the honest report is that the record is
+        # durable; with it, this says which of the two actually happened.
+        summary = mailbox.describe_guidance_delivery(
+            delivery_state,
+            delivery_reason=None if delivery is None else delivery.delivery_reason,
+            harness=None if delivery is None else delivery.harness,
+        )
         print(
-            f"Queued guidance {message.id} for {context.snapshot.plan_dir} "
+            f"Guidance {summary}: {message.id} for {context.snapshot.plan_dir} "
             f"(seq {message.seq}, mailbox {mailbox_path}, "
-            f"delivery {delivery_state})"
+            f"state {delivery_state})"
         )
     else:
+        queued = mailbox.describe_guidance_delivery(mailbox.GUIDANCE_STATE_QUEUED)
         print(
-            f"Queued guidance {message.id} for {context.snapshot.plan_dir} "
-            f"(seq {message.seq}, mailbox {mailbox_path})"
+            f"Guidance {queued} (no delivery wait requested): {message.id} for "
+            f"{context.snapshot.plan_dir} (seq {message.seq}, "
+            f"mailbox {mailbox_path})"
         )
     return 0
 
@@ -1858,7 +1939,13 @@ def inbox_read_from_args(args: argparse.Namespace) -> int:
     guidance = view.pending_guidance
     acknowledgement = None
     acknowledgement_error = None
+    read_receipts: list[dict[str, Any]] = []
     if guidance and not args.peek:
+        # Receipts first, and they cannot starve the acknowledgement: delivery
+        # records draw on their own reserve. Ordering this way keeps the
+        # receipts describing the read that just happened even when the
+        # acknowledgement below fails and the guidance stays pending.
+        read_receipts = _record_guidance_read_deliveries(context, args, guidance)
         try:
             acknowledgement = mailbox.append_acknowledgement(
                 context.snapshot.plan_dir,
@@ -1885,6 +1972,7 @@ def inbox_read_from_args(args: argparse.Namespace) -> int:
             None if acknowledgement is None else _message_payload(acknowledgement)
         ),
         acknowledgement_error=acknowledgement_error,
+        delivery_receipts=read_receipts,
     )
     if args.json:
         responses.print_json(payload)

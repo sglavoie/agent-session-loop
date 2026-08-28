@@ -42,12 +42,27 @@ REASON_HARNESS_UNSUPPORTED = "harness-unsupported"
 REASON_NO_ACTIVE_TURN = "no-active-turn"
 REASON_STALE_TURN = "stale-turn"
 REASON_TRANSPORT_UNAVAILABLE = "transport-unavailable"
+#: The harness has a live process and a channel into it, but its protocol has
+#: no same-turn steer at all. Distinct from ``harness-unsupported``, which says
+#: nothing was attached: this is a harness that answered, and answered "no".
+REASON_UNSUPPORTED_ACTIVE_STEER = "unsupported-active-steer"
+#: The guidance was handed to the transport and the transport cannot yet prove
+#: the model received it. The only reason that is *not* a verdict: the attempt
+#: is still open, and the spine is expected to ask the same transport again.
+REASON_AWAITING_CONFIRMATION = "awaiting-confirmation"
 DEFERRAL_REASONS: tuple[str, ...] = (
     REASON_HARNESS_UNSUPPORTED,
     REASON_NO_ACTIVE_TURN,
     REASON_STALE_TURN,
     REASON_TRANSPORT_UNAVAILABLE,
+    REASON_UNSUPPORTED_ACTIVE_STEER,
+    REASON_AWAITING_CONFIRMATION,
 )
+
+#: Deferral reasons that describe an attempt still in progress rather than one
+#: that finished. A transport that returns one of these is asking to be called
+#: again inside the same turn; every other reason ends the turn's attempt.
+RETRIABLE_IN_TURN_REASONS: tuple[str, ...] = (REASON_AWAITING_CONFIRMATION,)
 
 
 @dataclass(frozen=True)
@@ -110,6 +125,16 @@ class GuidanceOutcome:
     def channel(self) -> str:
         return CHANNEL_LIVE
 
+    @property
+    def retriable_in_turn(self) -> bool:
+        """Whether the same transport should be asked again this turn.
+
+        True only while an attempt is genuinely still open. Everything else —
+        delivered, unsupported, stale, broken — is this turn's last word, and
+        the spine must not spin on it.
+        """
+        return not self.delivered and self.reason in RETRIABLE_IN_TURN_REASONS
+
 
 #: A successful same-turn delivery. Immutable, so one value serves every caller.
 DELIVERED = GuidanceOutcome(delivered=True, reason=REASON_DELIVERED)
@@ -122,6 +147,16 @@ def deferred(reason: str, *, detail: str | None = None) -> GuidanceOutcome:
     caller is expected to treat it as a terminal answer.
     """
     return GuidanceOutcome(delivered=False, reason=reason, detail=detail)
+
+
+def awaiting_confirmation(*, detail: str | None = None) -> GuidanceOutcome:
+    """Return the outcome of an attempt that is written but not yet confirmed.
+
+    The distinction this exists for: a transport that wrote to a pipe has done
+    everything it can do, and still knows nothing about whether a model read
+    it. Saying so is the whole point — a write is not a delivery.
+    """
+    return deferred(REASON_AWAITING_CONFIRMATION, detail=detail)
 
 
 #: What an adapter supplies to inject guidance into the process it owns. It is

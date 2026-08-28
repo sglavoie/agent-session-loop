@@ -10,7 +10,7 @@ allowed-tools: Bash, Read
 
 - Supervise: `asl outbox supervise PLAN_DIR --supervision-id SUPERVISION_ID`
 - Answer: `asl inbox reply PLAN_DIR --to QUESTION_ID --text REPLY_TEXT --wait-consumed --wait-timeout 300 --json`
-- Steer: `asl inbox guidance PLAN_DIR --text GUIDANCE_TEXT --json`
+- Steer: `asl inbox guidance PLAN_DIR --text GUIDANCE_TEXT --wait-delivered --json`
 - Recover: `asl status PLAN_DIR --json`
 - Every supervision command in one place: `asl supervisor-guide [--json]`
 
@@ -316,21 +316,41 @@ The helper owns the foreground, so send live commands from a separate shell (or
 start it in the background):
 
 ```text
-asl inbox guidance <plan-dir> --text '<guidance>' [--state-dir DIR] --json
+asl inbox guidance <plan-dir> --text '<guidance>' [--wait-delivered] [--wait-timeout SECONDS] [--state-dir DIR] --json
 asl control set-model <plan-dir> [--harness codex|claude|copilot] --harness-model MODEL [--effort EFFORT] [--state-dir DIR] --json
 ```
 
 Guidance may steer implementation decisions inside the selected session, but
 cannot override its fixed scope, completion contract, safety requirements, or
-runner-owned mutation rules. It remains pending until the worker runs
-`asl inbox read`. Model/effort controls are observed on the five-second control
-cadence but affect only the next implementation invocation in the current
-runner process; they never modify the active subprocess or a review turn.
+runner-owned mutation rules. Model/effort controls are observed on the
+five-second control cadence but affect only the next implementation invocation
+in the current runner process; they never modify the active subprocess or a
+review turn.
+
+Always pass `--wait-delivered`. Without it the command reports only what it
+wrote, and prints `Guidance queued but not delivered (no delivery wait
+requested)`. With it, ASL waits for the delivery ledger to reach a verdict and
+tells you which one it reached:
+
+- `Guidance delivered live to <harness>` — the running turn received it. Codex
+  is steered over its app-server, claude over a bidirectional stream-JSON
+  conversation. Delivery is never inferred from a successful write to a pipe:
+  claude's is confirmed only by a protocol acknowledgement or by an ASL-owned
+  `PreToolUse` hook that injects the text as additional context.
+- `Guidance queued but not delivered (<reason>)` — nothing received it yet. A
+  copilot turn cannot be steered mid-flight (`unsupported-active-steer`); ASL
+  never cancels or restarts a turn to deliver guidance. Between turns the
+  reason is `no-active-turn`. Either way the guidance stays pending and is
+  folded into the next turn's initial prompt (`delivered-next-turn`), or is
+  picked up when the worker runs `asl inbox read` (`delivered-by-read`).
+
+`asl status --json` projects the same verdicts under `mailbox.guidance`: state,
+harness, turn, reason, and receipt timestamp — never the guidance body.
 
 Guidance is advice, never enforcement. Telling a worker to make no further
-changes and exit does **not** stop the session: the record sits unread until the
-worker chooses to run `asl inbox read`, and a worker that ignores it keeps
-working. Only `asl control` stops a run — `stop-after-current` at the next
+changes and exit does **not** stop the session: even guidance the ledger
+confirms as `delivered-live` only reaches the worker's context, and a worker
+that ignores it keeps working. Only `asl control` stops a run — `stop-after-current` at the next
 session boundary, `abort` inside the turn now in flight. Never report a run as
 stopped because guidance asking it to stop was sent.
 

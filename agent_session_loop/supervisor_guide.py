@@ -156,10 +156,16 @@ def _operations_payload() -> list[dict[str, str]]:
             "name": "guidance",
             "description": (
                 "Steer implementation choices inside the selected session. "
-                "Guidance is advice: it cannot stop a run, and it stays pending "
-                "until the worker reads it."
+                "Guidance is advice, not a guard: it cannot stop a run or "
+                "change the session's scope or contract. The reply reports "
+                "either 'delivered live' to the running turn or 'queued but "
+                "not delivered', in which case it rides the next turn's "
+                "prompt; only a guard enforces."
             ),
-            "command": (f"asl inbox guidance {PLAN_DIR} --text GUIDANCE_TEXT --json"),
+            "command": (
+                f"asl inbox guidance {PLAN_DIR} --text GUIDANCE_TEXT "
+                "--wait-delivered --json"
+            ),
         },
         {
             "name": "status",

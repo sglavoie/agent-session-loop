@@ -7437,7 +7437,15 @@ class MailboxCliTests(unittest.TestCase):
         run_id: str = "run-live",
         session_id: str = "5",
         turn_index: int = 2,
+        harness: str | None = None,
     ) -> None:
+        active_turn: dict[str, Any] = {
+            "run_id": run_id,
+            "session_id": session_id,
+            "turn_index": turn_index,
+        }
+        if harness is not None:
+            active_turn["harness"] = harness
         _write_state_payload(
             self.plan_dir,
             self.state_dir,
@@ -7445,11 +7453,7 @@ class MailboxCliTests(unittest.TestCase):
                 "run_id": run_id,
                 "ok": True,
                 "paused": False,
-                "active_turn": {
-                    "run_id": run_id,
-                    "session_id": session_id,
-                    "turn_index": turn_index,
-                },
+                "active_turn": active_turn,
             },
         )
         _write_lock_file(
@@ -7500,7 +7504,13 @@ class MailboxCliTests(unittest.TestCase):
         )
         self.assertEqual(reply_payload["supervisor_id"], second_lease.supervisor_id)
 
-    def test_guidance_without_wait_stays_byte_identical(self) -> None:
+    def test_guidance_without_wait_reports_what_it_did_not_observe(self) -> None:
+        """The old line said "Queued guidance"; it now says why that is all.
+
+        Without ``--wait-delivered`` nothing looked for a delivery, so the only
+        truthful report is that the record is durable and undelivered so far --
+        never that it was sent.
+        """
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             code = mailbox_cli.inbox_guidance_from_args(
@@ -7509,8 +7519,9 @@ class MailboxCliTests(unittest.TestCase):
 
         self.assertEqual(0, code)
         output = stdout.getvalue()
-        self.assertIn("Queued guidance ", output)
-        self.assertNotIn("delivery", output)
+        self.assertIn("Guidance queued but not delivered", output)
+        self.assertIn("no delivery wait requested", output)
+        self.assertNotIn("sent", output)
 
         code, payload = self.payload_from(
             mailbox_cli.inbox_guidance_from_args,
@@ -7624,6 +7635,85 @@ class MailboxCliTests(unittest.TestCase):
         self.assertFalse(payload["delivered"])
         self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, payload["delivery_state"])
         self.assertIsNone(payload["delivery"])
+
+    def test_guidance_wait_ignores_an_unconfirmed_attempt(self) -> None:
+        """``awaiting-confirmation`` is not an answer, so it never ends a wait.
+
+        The attempt is still running: reporting it would tell a supervisor the
+        guidance was not delivered about guidance that is very likely about to
+        be.
+        """
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        with self._deliver_on_first_poll(
+            delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+            delivery_reason=mailbox.GUIDANCE_REASON_AWAITING_CONFIRMATION,
+            run_id="run-live",
+            session_id="5",
+            turn_index=2,
+            harness="claude",
+        ):
+            code, payload = self.payload_from(
+                mailbox_cli.inbox_guidance_from_args,
+                self.args(text="Still working.", wait_delivered=True, wait_timeout=0.0),
+            )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["appended"])
+        self.assertFalse(payload["delivered"])
+        self.assertEqual(mailbox.GUIDANCE_STATE_QUEUED, payload["delivery_state"])
+        self.assertIsNone(payload["delivery"])
+
+    def test_guidance_wait_text_says_delivered_live_and_to_whom(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        stdout = io.StringIO()
+        with (
+            self._deliver_on_first_poll(
+                run_id="run-live", session_id="5", turn_index=2, harness="codex"
+            ),
+            redirect_stdout(stdout),
+        ):
+            code = mailbox_cli.inbox_guidance_from_args(
+                self.args(
+                    text="Deliver me.",
+                    json=False,
+                    wait_delivered=True,
+                    wait_timeout=5.0,
+                )
+            )
+
+        self.assertEqual(0, code)
+        output = stdout.getvalue()
+        self.assertIn("Guidance delivered live to codex", output)
+        self.assertNotIn("Guidance sent", output)
+
+    def test_guidance_wait_text_says_queued_and_why(self) -> None:
+        self.write_active_turn(run_id="run-live", session_id="5", turn_index=2)
+        stdout = io.StringIO()
+        with (
+            self._deliver_on_first_poll(
+                delivery_state=mailbox.GUIDANCE_STATE_DEFERRED,
+                delivery_reason=mailbox.GUIDANCE_REASON_UNSUPPORTED_ACTIVE_STEER,
+                run_id="run-live",
+                session_id="5",
+                turn_index=2,
+                harness="copilot",
+            ),
+            redirect_stdout(stdout),
+        ):
+            code = mailbox_cli.inbox_guidance_from_args(
+                self.args(
+                    text="Maybe later.",
+                    json=False,
+                    wait_delivered=True,
+                    wait_timeout=5.0,
+                )
+            )
+
+        self.assertEqual(0, code)
+        output = stdout.getvalue()
+        self.assertIn("Guidance queued but not delivered", output)
+        self.assertIn("this harness cannot be steered mid-turn", output)
+        self.assertNotIn("Guidance sent", output)
 
     def test_guidance_wait_timeout_keeps_the_append_successful(self) -> None:
         code, payload = self.payload_from(
@@ -9288,6 +9378,83 @@ class MailboxCliTests(unittest.TestCase):
             state_dir=self.state_dir,
         )
         self.assertEqual(1, view.counts.acknowledgements)
+
+    def test_inbox_read_records_delivered_by_read_for_the_reading_turn(
+        self,
+    ) -> None:
+        """An explicit read is a delivery, and it names the turn that made it.
+
+        The cumulative acknowledgement always implied this in aggregate. The
+        per-guidance record says which worker, in which turn, was actually
+        shown the record, which is what makes it evidence.
+        """
+        self.write_active_turn(
+            run_id="run-live", session_id="5", turn_index=2, harness="copilot"
+        )
+        first = mailbox.append_guidance(self.plan_dir, "one", state_dir=self.state_dir)
+        second = mailbox.append_guidance(self.plan_dir, "two", state_dir=self.state_dir)
+
+        code, payload = self.payload_from(mailbox_cli.inbox_read_from_args, self.args())
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [first.id, second.id],
+            [receipt["to"] for receipt in payload["delivery_receipts"]],
+        )
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        for guidance in (first, second):
+            record = view.successful_guidance_delivery(guidance.id)
+            self.assertIsNotNone(record)
+            self.assertEqual(
+                mailbox.GUIDANCE_STATE_DELIVERED_BY_READ, record.delivery_state
+            )
+            self.assertEqual(mailbox.GUIDANCE_CHANNEL_READ, record.channel)
+            self.assertEqual("run-live", record.run_id)
+            self.assertEqual("5", record.session_id)
+            self.assertEqual(2, record.turn_index)
+            self.assertEqual("copilot", record.harness)
+
+    def test_inbox_read_without_an_attributable_turn_records_nothing(self) -> None:
+        """No authoritative active turn, no durable claim about who read it.
+
+        The acknowledgement still stands and the projection still reports
+        ``delivered-by-read`` from it; what is withheld is a record naming a
+        turn nothing can vouch for.
+        """
+        guidance = mailbox.append_guidance(
+            self.plan_dir, "one", state_dir=self.state_dir
+        )
+
+        code, payload = self.payload_from(mailbox_cli.inbox_read_from_args, self.args())
+
+        self.assertEqual(0, code)
+        self.assertEqual([], payload["delivery_receipts"])
+        self.assertTrue(payload["acknowledged"])
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(
+            mailbox.GUIDANCE_STATE_DELIVERED_BY_READ,
+            view.guidance_delivery_state(guidance.id),
+        )
+
+    def test_inbox_peek_delivers_nothing_and_records_nothing(self) -> None:
+        self.write_active_turn(
+            run_id="run-live", session_id="5", turn_index=2, harness="claude"
+        )
+        guidance = mailbox.append_guidance(
+            self.plan_dir, "one", state_dir=self.state_dir
+        )
+
+        code, payload = self.payload_from(
+            mailbox_cli.inbox_read_from_args, self.args(peek=True)
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual([], payload["delivery_receipts"])
+        view = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
+        self.assertEqual(
+            [guidance.id],
+            [message.id for message in view.deliverable_guidance],
+        )
 
     def test_inbox_read_returns_guidance_when_acknowledgement_cannot_fit(
         self,

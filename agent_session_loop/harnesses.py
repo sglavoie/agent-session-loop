@@ -12,6 +12,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -19,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Literal
 
-from . import codex_app_server, config, guidance_delivery
+from . import claude_stream, codex_app_server, config, guidance_delivery
 from .process_tree import (
     clear_process_tree,
     descendant_pids,
@@ -296,6 +297,7 @@ def audit_read_only_unavailable_reason(name: str) -> str | None:
 #: invocation and every result now says which of the two it was.
 TRANSPORT_EXEC = codex_app_server.TRANSPORT_EXEC
 TRANSPORT_APP_SERVER = codex_app_server.TRANSPORT_APP_SERVER
+TRANSPORT_STREAM_JSON = claude_stream.TRANSPORT_STREAM_JSON
 
 
 @dataclass(frozen=True)
@@ -316,6 +318,11 @@ class HarnessInvocation:
     effort: str | None = None
     transport: str = TRANSPORT_EXEC
     turn_plan: codex_app_server.TurnPlan | None = None
+    #: The turn's ephemeral harness-configuration directory, when it has one.
+    #: It holds settings a turn needs and must not outlive — a hook overlay and
+    #: its guidance spool — and is created by ``run`` and deleted by it, so a
+    #: turn's private channel cannot be reached from the next turn.
+    overlay_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -376,9 +383,18 @@ class _OutputProcessor:
 
 
 class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
-    """Render Claude stream-json records as readable line-oriented progress."""
+    """Render Claude stream-json records as readable line-oriented progress.
 
-    def __init__(self) -> None:
+    Also the turn's only reader of the CLI's protocol acknowledgements: when a
+    session is attached, the terminal ``result`` records and the ``user`` echoes
+    are reported to it. Rendering and acknowledgement share this one parse
+    because there is only ever one reader of the stream.
+    """
+
+    def __init__(
+        self, session: claude_stream.ClaudeStreamSession | None = None
+    ) -> None:
+        self._session = session
         self._text_buffer = ""
         self._emitted_text = False
         self._assistant_messages: list[str] = []
@@ -452,8 +468,20 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
                 if not self._emitted_text:
                     return self._format_text_lines(text)
             return []
+        if record_type == "user":
+            # The CLI echoes a user message back when it takes it up, which is
+            # the protocol acknowledgement a stdin write on its own is not.
+            # Never rendered: an echo carries the prompt or a guidance body,
+            # and neither belongs in a turn log.
+            if self._session is not None:
+                self._session.note_user_echo(
+                    self._assistant_text(record.get("message"))
+                )
+            return []
         if record_type == "result":
             self._final_result_seen = True
+            if self._session is not None:
+                self._session.note_result()
             result = record.get("result")
             if isinstance(result, str):
                 self._final_result = result
@@ -535,6 +563,10 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
         if not isinstance(raw_message, dict):
             return ""
         content = raw_message.get("content")
+        if isinstance(content, str):
+            # User echoes may carry bare text where an assistant message
+            # always carries blocks.
+            return content.strip()
         if not isinstance(content, list):
             return ""
         chunks: list[str] = []
@@ -598,6 +630,14 @@ class HarnessAdapter:
     #: alone. An adapter that cannot must leave this false so callers declare
     #: the audit unavailable instead of running it with worker access.
     enforces_audit_read_only: bool = False
+
+    #: Whether guidance reaches this harness by riding the next turn's prompt
+    #: instead of by a same-turn steer. True only for a harness whose protocol
+    #: has no in-turn channel at all, so the prompt genuinely is the delivery
+    #: and can be recorded as one. A harness that *can* be steered must leave
+    #: this false even when a particular attempt defers: there, the prompt is
+    #: a fallback and the ledger already has the live attempt's own verdict.
+    delivers_guidance_next_turn: bool = False
 
     def __init__(self, executable: str | None = None) -> None:
         try:
@@ -1595,6 +1635,23 @@ class CodexAdapter(HarnessAdapter):
         )
 
 
+class _ClaudeStreamTransport(HarnessTransport):
+    """The adapter's handle on one live claude stream-JSON conversation."""
+
+    def __init__(self, session: claude_stream.ClaudeStreamSession) -> None:
+        self.session = session
+        self._processor = _ClaudeStreamJsonOutputProcessor(session)
+
+    def output_processor(self) -> _OutputProcessor:
+        return self._processor
+
+    def guidance_transport(self) -> guidance_delivery.GuidanceTransport | None:
+        return self.session.steer
+
+    def shutdown(self) -> None:
+        self.session.shutdown()
+
+
 class ClaudeAdapter(HarnessAdapter):
     name = "claude"
     skill_prefix = "/"
@@ -1623,6 +1680,11 @@ class ClaudeAdapter(HarnessAdapter):
             "--output-format",
             "stream-json",
             "--include-partial-messages",
+            # Input is a stream too, which is what makes a turn a conversation
+            # rather than a one-shot: the prompt below is written to stdin as
+            # the first message, and guidance can follow it while the turn runs.
+            "--input-format",
+            "stream-json",
         ]
         if access.is_audit:
             for root in access.read_roots:
@@ -1655,14 +1717,193 @@ class ClaudeAdapter(HarnessAdapter):
             argv.extend(["--model", model])
         if effort is not None:
             argv.extend(["--effort", effort])
-        argv.append(prompt)
+        # The prompt is deliberately absent from argv: under streaming input it
+        # is the conversation's first stdin message, so it never reaches a
+        # process listing, a crash report, or a printed invocation.
+        del prompt
         return argv
+
+    def build_invocation(
+        self,
+        *,
+        cwd: Path,
+        plan_dir: Path | None,
+        prompt: str,
+        unsafe_bypass: bool = False,
+        last_message_path: Path | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        access: AccessProfile = WORKER_ACCESS,
+    ) -> HarnessInvocation:
+        invocation = super().build_invocation(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            prompt=prompt,
+            unsafe_bypass=unsafe_bypass,
+            last_message_path=last_message_path,
+            model=model,
+            effort=effort,
+            access=access,
+        )
+        return dataclasses.replace(invocation, transport=TRANSPORT_STREAM_JSON)
+
+    def open_transport(
+        self,
+        *,
+        process: subprocess.Popen,
+        invocation: HarnessInvocation,
+        prompt: str,
+    ) -> HarnessTransport | None:
+        if invocation.transport != TRANSPORT_STREAM_JSON:
+            return None
+        spool = None
+        if invocation.overlay_dir is not None:
+            spool = claude_stream.ClaudeGuidanceSpool(invocation.overlay_dir / "spool")
+        session = claude_stream.ClaudeStreamSession(
+            process=process,
+            prompt=prompt,
+            spool=spool,
+        )
+        # The prompt goes out before the readers start, so the CLI has work to
+        # do from its first byte. A write failure here is not raised: the
+        # process exists and has to be collected like any other failed turn,
+        # with ``prompt_error`` explaining the empty output.
+        session.send_prompt()
+        return _ClaudeStreamTransport(session)
+
+    def run(
+        self,
+        *,
+        cwd: Path,
+        plan_dir: Path | None,
+        prompt: str,
+        unsafe_bypass: bool = False,
+        last_message_path: Path | None = None,
+        timeout: int | None = None,
+        stream_callback: StreamCallback | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        on_spawn: Callable[[int], None] | None = None,
+        on_final_result: Callable[[], None] | None = None,
+        on_observed_model: Callable[[str], None] | None = None,
+        access: AccessProfile = WORKER_ACCESS,
+        abort: AbortSignal | None = None,
+        live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
+        invocation: HarnessInvocation | None = None,
+        on_transport: Callable[[HarnessTransport | None], None] | None = None,
+    ) -> HarnessResult:
+        """Run the turn, arming its guidance hook for the turn's lifetime only.
+
+        The overlay is the one piece of a claude turn that exists on disk and
+        must not survive it. It is created here, named on argv with
+        ``--settings``, and deleted in the ``finally`` — so the hook the CLI was
+        told to run has nothing left to inject the moment the turn is over, and
+        the operator's own configuration is never touched at any point.
+        """
+        if invocation is None:
+            invocation = self.build_invocation(
+                cwd=cwd,
+                plan_dir=plan_dir,
+                prompt=prompt,
+                unsafe_bypass=unsafe_bypass,
+                last_message_path=last_message_path,
+                model=model,
+                effort=effort,
+                access=access,
+            )
+        overlay_dir: Path | None = None
+        if invocation.transport == TRANSPORT_STREAM_JSON and not access.is_audit:
+            # Audit turns get no overlay: an audit observes, and a hook that
+            # injects operator guidance into one would make it something else.
+            overlay_dir = Path(tempfile.mkdtemp(prefix="asl-claude-turn-"))
+            spool = claude_stream.ClaudeGuidanceSpool(overlay_dir / "spool")
+            settings_path = claude_stream.write_settings_overlay(overlay_dir, spool)
+            invocation = dataclasses.replace(
+                invocation,
+                argv=[*invocation.argv, "--settings", str(settings_path)],
+                overlay_dir=overlay_dir,
+            )
+
+        opened: list[HarnessTransport | None] = []
+
+        def capture(transport: HarnessTransport | None) -> None:
+            opened.append(transport)
+            if on_transport is not None:
+                on_transport(transport)
+
+        try:
+            result = super().run(
+                cwd=cwd,
+                plan_dir=plan_dir,
+                prompt=prompt,
+                unsafe_bypass=unsafe_bypass,
+                last_message_path=last_message_path,
+                timeout=timeout,
+                stream_callback=stream_callback,
+                model=model,
+                effort=effort,
+                on_spawn=on_spawn,
+                on_final_result=on_final_result,
+                on_observed_model=on_observed_model,
+                access=access,
+                abort=abort,
+                live_delivery=live_delivery,
+                invocation=invocation,
+                on_transport=capture,
+            )
+        finally:
+            claude_stream.remove_overlay(overlay_dir)
+
+        # A prompt that never reached the CLI produces a turn with no output
+        # and no explanation. Saying so on stderr is the difference between a
+        # diagnosable failure and a mysteriously empty one.
+        transport = opened[0] if opened else None
+        if isinstance(transport, _ClaudeStreamTransport):
+            prompt_error = transport.session.prompt_error
+            if prompt_error:
+                return dataclasses.replace(
+                    result,
+                    stderr=(
+                        f"{result.stderr}claude prompt was not delivered: "
+                        f"{prompt_error}\n"
+                    ),
+                )
+        return result
+
+
+class _CopilotOneShotTransport(HarnessTransport):
+    """Copilot's answer to a live steer, which is a considered "no".
+
+    Copilot's CLI runs one prompt per process and exposes no same-turn steer:
+    the only in-turn control its protocol offers is cancellation, and cancelling
+    a turn to say something to it would destroy the work the guidance was meant
+    to redirect. So this transport exists precisely to decline — attaching it
+    turns a silent ``harness-unsupported`` into ``unsupported-active-steer``,
+    which says the harness was asked and the answer is next turn.
+
+    The guidance stays deliverable, and the next turn's prompt carries it.
+    """
+
+    def output_processor(self) -> _OutputProcessor:
+        return _OutputProcessor()
+
+    def guidance_transport(self) -> guidance_delivery.GuidanceTransport | None:
+        return self._decline
+
+    def _decline(
+        self, request: guidance_delivery.GuidanceRequest
+    ) -> guidance_delivery.GuidanceOutcome:
+        del request
+        return guidance_delivery.deferred(
+            guidance_delivery.REASON_UNSUPPORTED_ACTIVE_STEER
+        )
 
 
 class CopilotAdapter(HarnessAdapter):
     name = "copilot"
     skill_prefix = "/"
     enforces_audit_read_only = True
+    delivers_guidance_next_turn = True
 
     def build_argv(
         self,
@@ -1712,6 +1953,16 @@ class CopilotAdapter(HarnessAdapter):
         argv.extend(["-p", prompt])
         return argv
 
+    def open_transport(
+        self,
+        *,
+        process: subprocess.Popen,
+        invocation: HarnessInvocation,
+        prompt: str,
+    ) -> HarnessTransport | None:
+        del process, invocation, prompt
+        return _CopilotOneShotTransport()
+
 
 def _read_last_message(path: Path | None) -> str:
     if path is None or not path.exists():
@@ -1731,6 +1982,18 @@ def get_adapter(name: str) -> HarnessAdapter:
     if name == "copilot":
         return CopilotAdapter()
     raise HarnessError(f"unsupported harness: {name}")
+
+
+def delivers_guidance_next_turn(name: str) -> bool:
+    """Whether ``name``'s guidance arrives with the next turn's prompt.
+
+    Asked by the delivery spine rather than answered there, so the fact lives
+    with the adapter that knows its harness's protocol.
+    """
+    try:
+        return get_adapter(name).delivers_guidance_next_turn
+    except HarnessError:
+        return False
 
 
 def run_harness(

@@ -3002,6 +3002,59 @@ def _pending_guidance_snapshot(
         return ()
 
 
+def _record_next_turn_guidance_delivery(
+    *,
+    plan_dir: str | Path,
+    state_dir_arg: str | Path | None,
+    event_path: Path,
+    persistence: _RunPersistence,
+    pending_guidance: Sequence[mailbox.MailboxMessage],
+    harness: str,
+    run_id: str,
+    session_id: str,
+    turn_index: int,
+) -> None:
+    """Record guidance carried into a turn whose prompt has just been accepted.
+
+    Only for a harness with no same-turn channel at all. There, the prompt is
+    not a fallback for a failed steer — it is the delivery mechanism, and the
+    process starting with that prompt in hand is the strongest evidence such a
+    harness can produce. Recording it is what turns an indefinitely queued
+    record into a receipt naming the turn that received it.
+
+    For every other harness this is never called: their ledger already carries
+    the live attempt's own verdict, and adding a next-turn receipt beside it
+    would claim two deliveries of one record.
+
+    Best effort throughout. A ledger that cannot take these records leaves the
+    guidance deliverable, which the next turn's prompt will carry again.
+    """
+    for message in pending_guidance:
+        try:
+            record = mailbox.append_guidance_delivery(
+                plan_dir,
+                message.id,
+                delivery_state=mailbox.GUIDANCE_STATE_DELIVERED_NEXT_TURN,
+                delivery_reason=mailbox.GUIDANCE_REASON_DELIVERED,
+                channel=mailbox.GUIDANCE_CHANNEL_NEXT_TURN,
+                run_id=run_id,
+                session_id=session_id,
+                turn_index=turn_index,
+                harness=harness,
+                state_dir=state_dir_arg,
+            )
+        except OSError, mailbox.MailboxError:
+            return
+        persistence.append_event(
+            event_path,
+            events.MAILBOX_EVENT,
+            {
+                "action": events.MAILBOX_ACTION_GUIDANCE_DELIVERED,
+                **mailbox.guidance_delivery_event_payload(record),
+            },
+        )
+
+
 def _approval_mode(args: argparse.Namespace) -> str:
     return "unsafe-bypass" if _unsafe_bypass(args) else "harness-default"
 
@@ -14874,6 +14927,25 @@ def _run_locked(
                     abort=abort_signal,
                     live_delivery=delivery_endpoint,
                     stream_callback=stream_callback,
+                    on_prompt_accepted=(
+                        functools.partial(
+                            _record_next_turn_guidance_delivery,
+                            plan_dir=before.plan_dir,
+                            state_dir_arg=args.state_dir,
+                            event_path=event_path,
+                            persistence=persistence,
+                            pending_guidance=pending_guidance,
+                            harness=turn_harness,
+                            run_id=run_id,
+                            session_id=session_id,
+                            turn_index=turn_index,
+                        )
+                        if (
+                            pending_guidance
+                            and harnesses.delivers_guidance_next_turn(turn_harness)
+                        )
+                        else None
+                    ),
                     build_invocation=functools.partial(
                         build_harness_invocation,
                         turn_harness,

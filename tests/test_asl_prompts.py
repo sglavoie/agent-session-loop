@@ -4,6 +4,7 @@ Split from tests/test_agent_session_loop.py."""
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shlex
@@ -12,8 +13,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from agent_session_loop import (
+    claude_stream,
     harnesses,
     mailbox,
     plans,
@@ -1283,6 +1286,16 @@ class HarnessInvocationPromptOverrideTests(unittest.TestCase):
         adapter = harnesses.get_adapter("codex")
         return adapter.build_exec_invocation(**kwargs).argv  # type: ignore[attr-defined]
 
+    def _claude_stdin_prompt(self, prompt: str) -> str:
+        """Return the prompt text a claude session actually writes to stdin."""
+        stdin = io.StringIO()
+        process = SimpleNamespace(stdin=stdin)
+        session = claude_stream.ClaudeStreamSession(process=process, prompt=prompt)
+        self.assertTrue(session.send_prompt())
+        record = json.loads(stdin.getvalue().splitlines()[0])
+        self.assertEqual("user", record["type"])
+        return record["message"]["content"][0]["text"]
+
     def _assert_prompt_free(
         self, invocation: harnesses.HarnessInvocation, prompt: str
     ) -> None:
@@ -1380,6 +1393,21 @@ class HarnessInvocationPromptOverrideTests(unittest.TestCase):
                                 prompt=override_prompt,
                                 last_message_path=last_message,
                             ),
+                        )
+                        continue
+                    if harness == "claude":
+                        # Claude's prompt is the stream-JSON conversation's
+                        # first stdin message, so argv carries it nowhere. The
+                        # override still has to arrive verbatim, so this
+                        # asserts against the channel that actually carries it.
+                        self.assertEqual(
+                            harnesses.TRANSPORT_STREAM_JSON,
+                            invocation.transport,
+                        )
+                        self.assertNotIn(override_prompt, invocation.argv)
+                        self.assertEqual(
+                            override_prompt,
+                            self._claude_stdin_prompt(override_prompt),
                         )
                         continue
                     self.assertIn(override_prompt, invocation.argv)
