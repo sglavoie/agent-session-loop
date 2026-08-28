@@ -11164,19 +11164,28 @@ def _enforce_legacy_implementation_write_guard(
 
 def _protected_path_changed_paths(
     evidence: Mapping[str, Any] | None,
-) -> tuple[str, ...]:
+) -> tuple[str, ...] | None:
     """Every qualified path the turn changed, as the write guard recorded it.
 
     Read from the guard's own evidence rather than recaptured: a second
     snapshot would be taken at a different instant, so a path that moved
     between the two comparisons could be convicted by one and cleared by the
     other. One capture, two questions.
+
+    ``None`` means the comparison cannot answer the protected-path question at
+    all. That includes a write guard that failed to inventory a repository:
+    its ``changed`` map is then a partial view, and reading an empty one as
+    "nothing moved" would clear a frozen path the run never actually looked
+    at. This only arises on a composed finalization, because an incomplete
+    inventory already fails the write guard.
     """
     if not isinstance(evidence, Mapping):
-        return ()
+        return None
+    if evidence.get("unavailable"):
+        return None
     changed = evidence.get("changed")
     if not isinstance(changed, Mapping):
-        return ()
+        return None
     qualified: list[str] = []
     for entry in changed.values():
         if not isinstance(entry, Mapping):
@@ -11202,6 +11211,7 @@ def _enforce_protected_path_guard(
     paths: dict[str, Path],
     plan_cache: plans.PlanSnapshotCache,
     changed_paths: tuple[str, ...] | None,
+    adjudicate_only: bool = False,
 ) -> bool:
     """Refuse to publish a turn that moved a path an operator declared frozen.
 
@@ -11226,6 +11236,15 @@ def _enforce_protected_path_guard(
     ``changed_paths`` of ``None`` means the turn produced no comparison this
     guard can read, which is refused rather than waved through: a guard that
     cannot see is not a guard that saw nothing.
+
+    ``adjudicate_only`` is for a turn that is already ending for another
+    reason -- another finalization guard paused it, or the harness raised.
+    The verdict is still reached and still recorded, but the outcome that was
+    already decided is left standing: no second revert, and no pause that
+    would overwrite the first one's reason and remediation with this one's.
+    An operator reading the primary pause still finds the protected-path
+    verdict beside it, because a combined failure that reports only half of
+    itself is the one an operator repairs twice.
     """
     active = () if guard_controller is None else guard_controller.active_paths()
     if not active:
@@ -11295,7 +11314,17 @@ def _enforce_protected_path_guard(
         {
             repository: dict(entry)
             for repository, entry in raw_changed.items()
-            if isinstance(entry, Mapping) and repository in matched_repositories
+            if isinstance(entry, Mapping)
+            # A qualified path names a repository by its registered alias when
+            # it has one, while the write guard keys its comparison by
+            # repository path. Either name identifies the same repository, so
+            # either one keeps the evidence attached; matching only the key
+            # silently drops the before/after vectors for every aliased
+            # workspace repository.
+            and (
+                repository in matched_repositories
+                or entry.get("alias") in matched_repositories
+            )
         }
         if isinstance(raw_changed, Mapping)
         else {}
@@ -11318,6 +11347,44 @@ def _enforce_protected_path_guard(
         "retained": True,
         "detail": unavailable_detail,
     }
+
+    if adjudicate_only:
+        guard_record["adjudicated_only"] = True
+        # The turn is already ending, and whichever outcome got here first
+        # already withdrew the session if it needed withdrawing. Reverting
+        # again would append a second failure note for one turn.
+        guard_record["reverted_to_pending"] = False
+        primary_reason = payload.get("pause_reason")
+        if payload.get("paused") and isinstance(primary_reason, str):
+            guard_record["deferred_to_pause_reason"] = primary_reason
+        with persistence.lock:
+            turn_payload["protected_path_guard"] = guard_record
+            _write_json_file(paths["result"], turn_payload)
+            # The primary pause was published before this verdict existed, so
+            # its live details are amended in place -- ``payload["details"]``
+            # is the same object -- rather than republished under a reason
+            # that would displace the one an operator has to act on.
+            pause_details = payload.get("pause_details")
+            if payload.get("paused") and isinstance(pause_details, dict):
+                pause_details["protected_path_guard"] = guard_record
+        _record_turn_rejected(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            turn_payload=turn_payload,
+            session_id=session_id,
+            guard="protected-path-guard",
+            reason=reason,
+            reopened=False,
+            detail={
+                "adjudicated_only": True,
+                "guard_ids": list(matched),
+                "matched_paths": {
+                    guard_id: list(hits) for guard_id, hits in matched.items()
+                },
+            },
+        )
+        return False
 
     revert_target = after if after is not None else before
     reverted = _revert_session_status_to_pending(
@@ -15315,6 +15382,14 @@ def _run_locked(
             # Ahead of every result branch: a retryable pause (timeout,
             # transport failure) would otherwise relaunch against the turn's
             # own mutation and adopt it as the new baseline.
+            #
+            # A finalization guard that pauses no longer leaves immediately:
+            # it records that it is ending the turn and falls through to the
+            # protected-path step below, because the operator's standing
+            # instruction is answered against the same comparison the write
+            # guard already captured, and a turn that breached both has to
+            # report both. The break moves to after that step.
+            finalization_paused = False
             if workspace is not None:
                 assert session_scope is not None
                 assert workspace_snapshot_before is not None
@@ -15341,8 +15416,8 @@ def _run_locked(
                     external_digests_before=external_digests_before,
                     turn_started_ns=turn_started_ns,
                 ):
-                    break
-                if is_review_session:
+                    finalization_paused = True
+                elif is_review_session:
                     try:
                         review_bases = _workspace_review_bases(
                             workspace, workspace_snapshot_before
@@ -15362,10 +15437,11 @@ def _run_locked(
                             details={**session_details, "error": str(error)},
                             persistence=persistence,
                         )
-                        break
-                    with persistence.lock:
-                        turn_payload["review_repository_bases"] = review_bases
-                        _write_json_file(paths["result"], turn_payload)
+                        finalization_paused = True
+                    else:
+                        with persistence.lock:
+                            turn_payload["review_repository_bases"] = review_bases
+                            _write_json_file(paths["result"], turn_payload)
             elif legacy_snapshot_before is not None:
                 pending_exception_guard = None
                 if _enforce_legacy_implementation_write_guard(
@@ -15389,9 +15465,10 @@ def _run_locked(
                     external_digests_before=external_digests_before,
                     turn_started_ns=turn_started_ns,
                 ):
-                    break
+                    finalization_paused = True
             if (
-                is_review_session
+                not finalization_paused
+                and is_review_session
                 and review_fingerprint_before is not None
                 and _enforce_review_mutation_guard(
                     event_path=event_path,
@@ -15411,7 +15488,7 @@ def _run_locked(
                     plan_cache=plan_cache,
                 )
             ):
-                break
+                finalization_paused = True
 
             # After the general write guard and before every result branch, for
             # the same reason the write guard sits there: a retryable pause
@@ -15439,14 +15516,18 @@ def _run_locked(
                     )
                     if isinstance(turn_payload.get("workspace_write_guard"), Mapping)
                     # A legacy review turn captures no write-guard comparison,
-                    # but reaching here means its mutation guard passed, which
-                    # proves the worktree is unchanged — a stronger clearance
-                    # than an empty change list, not a missing one.
+                    # but a mutation guard that passed proves the worktree is
+                    # unchanged — a stronger clearance than an empty change
+                    # list, not a missing one. One that paused proves the
+                    # opposite, and names no paths, so it clears nothing.
                     else ()
-                    if review_fingerprint_before is not None
+                    if review_fingerprint_before is not None and not finalization_paused
                     else None
                 ),
+                adjudicate_only=finalization_paused,
             ):
+                break
+            if finalization_paused:
                 break
 
             # Every branch below can end the turn — by pausing, by recording a
@@ -16502,6 +16583,39 @@ def _run_locked(
             except Exception as guard_error:
                 error.add_note(
                     "post-turn workspace write guard failed while handling "
+                    f"the exception: {guard_error}"
+                )
+            # The run's guards are expired a few lines below, so this is the
+            # last moment an operator's standing instruction can be answered
+            # at all. It is answered in adjudicate-only mode because the
+            # exception, not the guard, is what ended this turn: the verdict
+            # is recorded and the failure it belongs to is re-raised intact.
+            try:
+                _enforce_protected_path_guard(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    guard_controller=guard_controller,
+                    before=guard_context["before"],
+                    after=after,
+                    session_id=str(guard_context["session_id"]),
+                    session_label=str(guard_context["session_label"]),
+                    session_details=guard_context["session_details"],
+                    turn_payload=turn_payload,
+                    paths=guard_context["paths"],
+                    plan_cache=plan_cache,
+                    # A write guard that never recorded its comparison — it
+                    # raised, or the inventory failed — leaves this guard
+                    # blind, and blind is recorded as unavailable rather than
+                    # read as clean.
+                    changed_paths=_protected_path_changed_paths(
+                        turn_payload.get("workspace_write_guard")
+                    ),
+                    adjudicate_only=True,
+                )
+            except Exception as guard_error:
+                error.add_note(
+                    "post-turn protected-path guard failed while handling "
                     f"the exception: {guard_error}"
                 )
         if isinstance(error, KeyboardInterrupt):

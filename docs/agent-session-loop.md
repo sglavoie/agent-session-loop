@@ -2818,6 +2818,24 @@ pauses rather than mailbox-reply pauses: there is no answer a worker could give
 that would resolve them, so resume after restoring the path or removing the
 guard.
 
+A turn can breach more than one guard at once, and it then reports more than
+one. When another finalization guard has already paused the turn — a write
+scope violation, an unavailable write guard, a review mutation — the
+protected-path step still runs, against the same turn-start comparison the
+earlier guard captured, and still records its verdict. The earlier pause is the
+one left standing: its reason and remediation are what the operator acts on,
+and the session is not withdrawn twice. The protected-path verdict rides beside
+it, marked `adjudicated_only: true` with `deferred_to_pause_reason` naming the
+pause that won, in `result.json`, in the pause details, and in its own
+turn-rejected event. An operator who repairs only the scope violation therefore
+still learns the frozen path moved, instead of discovering it on the rerun.
+
+The same holds when the harness raises. The exception, not a guard, ends that
+turn, and it is re-raised unchanged — but the adjudication runs during cleanup,
+while the run's guards are still alive, so a crash is not a way for a protected
+path to move unremarked. A cleanup that cannot read a comparison at all records
+the `guard-protected-path-unavailable` verdict rather than a clearance.
+
 **Filesystem changes are always retained.** A violation rejects the turn's
 *result*; it never rolls back, reverts, aborts, or restarts anything. The run
 cannot know whether the change was the valuable part of the turn, and destroying
@@ -2940,8 +2958,10 @@ the `session_id`, the active `guards`, the `observed_paths` the turn changed, an
 the per-guard `coverage`. A conviction adds `reason`, `guard_ids`,
 `matched_paths`, the before/after `evidence`, `retained: true`,
 `reverted_to_pending`, and a `detail` naming why the evidence was unusable when
-that is the reason. A turn that passed a guard is therefore evidenced, not
-merely unremarked.
+that is the reason. A conviction reached beside an outcome that had already
+ended the turn adds `adjudicated_only: true`, and `deferred_to_pause_reason`
+when that outcome was a pause. A turn that passed a guard is therefore
+evidenced, not merely unremarked.
 
 The guarantee is **operational, not adversarial** — a safeguard against a
 worker that would otherwise run the command or change the file, not a sandbox

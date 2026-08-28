@@ -2468,11 +2468,12 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             },
         )
         self.context = verification.VerificationContext.legacy(self.repo_root)
+        self.cwd = self.repo_root
 
     def _args(self) -> argparse.Namespace:
         return argparse.Namespace(
             plan_dir=str(self.plan_dir),
-            cwd=str(self.repo_root),
+            cwd=str(self.cwd),
             harness="codex",
             state_dir=str(self.state_dir),
             json=True,
@@ -2486,6 +2487,84 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             note=None,
             allow_not_loop_ready=True,
         )
+
+    def _use_workspace_fixture(self) -> None:
+        """Re-point this fixture at a registered two-repository workspace.
+
+        The class default is a legacy single repository, which declares no
+        write aliases and therefore has no way to reach a write-scope
+        violation. Only the composition tests need one, so the workspace is
+        built on demand rather than in ``setUp``.
+        """
+        self.workspace_root = self.tmp_path / "workspace"
+        self.repositories = init_multi_repo_workspace(
+            self.workspace_root,
+            DEFAULT_MULTI_REPO_SPECS[:2],
+        )
+        self.plan_dir = self.tmp_path / "workspace-plan"
+        write_multi_repo_plan(
+            self.plan_dir,
+            ("pending",),
+            specs=DEFAULT_MULTI_REPO_SPECS[:2],
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "repo": "SVC", '
+                    '"path": "README.md", "name": "svc-readme"}',
+                    session="1",
+                )
+            },
+        )
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            session_path.read_text(encoding="utf-8").replace(
+                "**Reads repositories**: SVC, OAK\n**Writes repositories**: SVC, OAK",
+                "**Reads repositories**: SVC\n**Writes repositories**: SVC",
+            ),
+            encoding="utf-8",
+        )
+        registry = plans.read_repository_registry(self.plan_dir)
+        assert registry is not None
+        plans.save_workspace_plan_metadata(
+            self.plan_dir,
+            self.workspace_root,
+            registry.digest,
+        )
+        self.context = verification.VerificationContext.from_plan(
+            self.plan_dir,
+            self.workspace_root,
+        )
+        self.cwd = self.workspace_root
+        # The frozen file lives in the alias the session *may* write, so the
+        # scope violation and the protected-path violation are independent
+        # breaches rather than two names for one write.
+        self.protected = self.repositories["SVC"] / "notes.md"
+        self.protected.write_text("turn-start contents\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "notes.md"],
+            cwd=self.repositories["SVC"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "notes"],
+            cwd=self.repositories["SVC"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    def _turn_rejections(self, guard: str) -> list[dict[str, Any]]:
+        event_path = (
+            state.plan_state_dir(self.plan_dir, self.state_dir)
+            / events.EVENTS_FILE_NAME
+        )
+        return [
+            record["payload"]
+            for record in read_jsonl(event_path)
+            if record["name"] == events.TURN_REJECTED_EVENT
+            and record["payload"].get("guard") == guard
+        ]
 
     def _enqueue_guard(self, run_id: str, *protect_paths: str) -> None:
         dispatch = intervention.dispatch_control_command(
@@ -2509,7 +2588,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
         try:
             return runner._run_locked(
                 args=self._args(),
-                cwd=self.repo_root,
+                cwd=self.cwd,
                 timeout=None,
                 max_sessions=None,
                 commit_mode=None,
@@ -2623,6 +2702,116 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
         guard = payload["turns"][0]["protected_path_guard"]
         self.assertTrue(guard["passed"])
         self.assertIn(".:notes.md", guard["observed_paths"])
+
+    def test_scope_violation_still_adjudicates_protected_paths(self) -> None:
+        """Two breaches in one turn are both reported, not just the first.
+
+        The write guard pauses first, so its reason is the one the operator
+        acts on. But a turn that also moved a frozen path has to say so: an
+        operator who repairs only the scope and reruns would otherwise never
+        learn the guard was breached at all.
+        """
+        self._use_workspace_fixture()
+        run_id = "guard-protected-with-scope-violation"
+        self._enqueue_guard(run_id, "SVC:notes.md")
+        out_of_scope = self.repositories["OAK"] / "README.md"
+
+        def breach_both(*_args: object, **_kwargs: object) -> Any:
+            out_of_scope.write_text("outside the write scope\n", encoding="utf-8")
+            self.protected.write_text("worker rewrote this\n", encoding="utf-8")
+            return self._mark_complete()
+
+        exit_code, payload = self._run_with(run_id, breach_both)
+
+        self.assertEqual(1, exit_code)
+        # The primary pause is untouched: same reason, same remediation.
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            payload["pause_reason"],
+        )
+        self.assertEqual(
+            ["OAK:README.md"],
+            payload["turns"][0]["workspace_write_guard"]["violations"][0][
+                "qualified_paths"
+            ],
+        )
+
+        guard = payload["turns"][0]["protected_path_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertTrue(guard["adjudicated_only"])
+        self.assertEqual(
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED, guard["reason"]
+        )
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            guard["deferred_to_pause_reason"],
+        )
+        self.assertEqual(guard["guard_ids"], list(guard["matched_paths"]))
+        self.assertEqual(["SVC:notes.md"], sorted(guard["matched_paths"].values())[0])
+        # The matched repository's before/after vectors survive the
+        # composition, which is what "restore or accept" needs.
+        self.assertTrue(guard["evidence"])
+        self.assertTrue(guard["retained"])
+        # The write guard already withdrew the session; this guard does not
+        # withdraw it a second time.
+        self.assertFalse(guard["reverted_to_pending"])
+        self.assertIn(
+            "- **Status**: pending",
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+
+        # The pause an operator reads carries both halves.
+        self.assertEqual(guard, payload["pause_details"]["protected_path_guard"])
+        rejections = self._turn_rejections("protected-path-guard")
+        self.assertEqual(1, len(rejections))
+        self.assertFalse(rejections[0]["reopened"])
+        self.assertEqual(guard["guard_ids"], rejections[0]["detail"]["guard_ids"])
+        self.assertEqual(
+            "worker rewrote this\n", self.protected.read_text(encoding="utf-8")
+        )
+
+    def test_harness_exception_still_adjudicates_protected_paths(self) -> None:
+        """A crashing turn still answers the operator's standing instruction.
+
+        The exception cleanup is the last place the run's guards are still
+        alive, so the verdict is reached there or never. The exception stays
+        the outcome -- it is re-raised unchanged -- and the verdict rides
+        beside it in the event stream.
+        """
+        run_id = "guard-protected-exception"
+        self._enqueue_guard(run_id, ".:notes.md")
+
+        def edit_then_raise(*_args: object, **_kwargs: object) -> Any:
+            self.protected.write_text("worker rewrote this\n", encoding="utf-8")
+            raise RuntimeError("synthetic harness crash")
+
+        with (
+            mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=edit_then_raise
+            ),
+            self.assertRaisesRegex(RuntimeError, "synthetic harness crash"),
+        ):
+            self._invoke(run_id)
+
+        rejections = self._turn_rejections("protected-path-guard")
+        self.assertEqual(1, len(rejections))
+        rejection = rejections[0]
+        self.assertEqual(
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED, rejection["reason"]
+        )
+        self.assertFalse(rejection["reopened"])
+        self.assertTrue(rejection["detail"]["adjudicated_only"])
+        self.assertEqual(
+            [".:notes.md"],
+            sorted(rejection["detail"]["matched_paths"].values())[0],
+        )
+        self.assertEqual(
+            rejection["detail"]["guard_ids"],
+            list(rejection["detail"]["matched_paths"]),
+        )
+        self.assertEqual(
+            "worker rewrote this\n", self.protected.read_text(encoding="utf-8")
+        )
 
 
 class WorkspaceGuardExceptionTests(unittest.TestCase):
