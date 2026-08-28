@@ -168,6 +168,20 @@ def _operations_payload() -> list[dict[str, str]]:
             ),
         },
         {
+            "name": "guard",
+            "description": (
+                "Enforce, rather than advise. --deny-command blocks an action "
+                "such as 'git push'; --protect-path freezes a file at its "
+                "turn-start state and rejects the turn that changed it, "
+                "retaining the change. Neither cancels the running turn -- "
+                "only asl control abort does that."
+            ),
+            "command": (
+                f"asl control guard add {PLAN_DIR} --deny-command 'CMD ARG ...' "
+                "--protect-path ALIAS:PATH --reason TEXT --wait --json"
+            ),
+        },
+        {
             "name": "status",
             "description": (
                 "Recover run state after DONE outcome=error or LOST, and "

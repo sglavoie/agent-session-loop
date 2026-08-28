@@ -22,6 +22,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    claude_stream,
     command_guard,
     control_cli,
     control_queue,
@@ -121,6 +122,259 @@ class CommandRuleParsingTests(unittest.TestCase):
                 self.assertIsNotNone(command_guard.matched_guard(policy, "git", argv))
 
 
+class ProtectedPathRuleParsingTests(unittest.TestCase):
+    """A path rule is ``Alias:glob``, and every refusal names its own defect."""
+
+    ALIASES = ("App", "Docs", ".")
+
+    def parse(self, raw: str) -> guards.ProtectedPath:
+        return guards.parse_protected_path_rule(raw, aliases=self.ALIASES)
+
+    def test_qualifier_and_pattern_are_kept_verbatim(self) -> None:
+        rule = self.parse("App:docs/guide.md")
+        self.assertEqual("App", rule.qualifier)
+        self.assertEqual("docs/guide.md", rule.pattern)
+        self.assertEqual("App:docs/guide.md", rule.rendered)
+
+    def test_leading_dot_slash_is_the_one_dot_segment_accepted(self) -> None:
+        """``./x`` is how people type "in this repository", not a mistake."""
+        self.assertEqual("docs/guide.md", self.parse("App:./docs/guide.md").pattern)
+
+    def test_legacy_plans_qualify_with_a_bare_dot(self) -> None:
+        rule = guards.parse_protected_path_rule(
+            ".:README.md", aliases=(guards.LEGACY_PATH_QUALIFIER,)
+        )
+        self.assertEqual(guards.LEGACY_PATH_QUALIFIER, rule.qualifier)
+
+    def test_rejects_every_unsupported_form_with_a_stable_reason(self) -> None:
+        cases = {
+            "": guards.REJECT_EMPTY_PATH_RULE,
+            "   ": guards.REJECT_EMPTY_PATH_RULE,
+            "docs/guide.md": guards.REJECT_PATH_MISSING_QUALIFIER,
+            "App:": guards.REJECT_EMPTY_PATH_RULE,
+            ":docs": guards.REJECT_EMPTY_PATH_RULE,
+            "App:/etc/passwd": guards.REJECT_PATH_ABSOLUTE,
+            "App:docs\\guide.md": guards.REJECT_PATH_BACKSLASH,
+            "App:../other/file": guards.REJECT_PATH_TRAVERSAL,
+            "App:docs/../secrets": guards.REJECT_PATH_TRAVERSAL,
+            "App:docs//guide.md": guards.REJECT_PATH_EMPTY_SEGMENT,
+            "App:docs/": guards.REJECT_PATH_EMPTY_SEGMENT,
+            "App:docs/[abc].md": guards.REJECT_PATH_PATTERN,
+            "App:docs/{a,b}.md": guards.REJECT_PATH_PATTERN,
+            "App:docs/**x/guide.md": guards.REJECT_PATH_PATTERN,
+            "Other:docs/guide.md": guards.REJECT_PATH_UNKNOWN_ALIAS,
+        }
+        for rule, reason in cases.items():
+            with self.subTest(rule=rule):
+                with self.assertRaises(guards.GuardRuleError) as caught:
+                    self.parse(rule)
+                self.assertEqual(reason, caught.exception.reason)
+
+    def test_syntax_is_checked_without_a_plan_and_the_alias_is_deferred(self) -> None:
+        """No plan context validates the shape and leaves the alias alone.
+
+        The queue is written by producers that do not hold the run's registry,
+        so refusing an unknown alias there would refuse rules the run itself
+        would have accepted.
+        """
+        rule = guards.parse_protected_path_rule("Unknown:docs/guide.md")
+        self.assertEqual("Unknown", rule.qualifier)
+        with self.assertRaises(guards.GuardRuleError):
+            guards.parse_protected_path_rule("no-qualifier")
+
+    def test_star_matches_within_one_segment_only(self) -> None:
+        rule = self.parse("App:docs/*.md")
+        self.assertTrue(rule.matches("App", "docs/guide.md"))
+        self.assertFalse(rule.matches("App", "docs/nested/guide.md"))
+        self.assertFalse(rule.matches("App", "guide.md"))
+
+    def test_double_star_spans_segments(self) -> None:
+        """``**/`` spans *zero* or more segments, as every other globstar does.
+
+        Requiring at least one would make ``docs/**/*.md`` silently skip the
+        file at the top of ``docs/``, which is the opposite of what an operator
+        freezing a directory tree asks for.
+        """
+        rule = self.parse("App:docs/**/*.md")
+        self.assertTrue(rule.matches("App", "docs/a/guide.md"))
+        self.assertTrue(rule.matches("App", "docs/a/b/guide.md"))
+        self.assertTrue(rule.matches("App", "docs/guide.md"))
+        self.assertFalse(rule.matches("App", "docs/guide.txt"))
+        self.assertFalse(rule.matches("App", "src/guide.md"))
+        trailing = self.parse("App:docs/**")
+        self.assertTrue(trailing.matches("App", "docs/a/guide.md"))
+        self.assertTrue(trailing.matches("App", "docs/guide.md"))
+        self.assertFalse(trailing.matches("App", "docs"))
+
+    def test_question_mark_matches_one_non_separator_character(self) -> None:
+        rule = self.parse("App:docs/v?.md")
+        self.assertTrue(rule.matches("App", "docs/v1.md"))
+        self.assertFalse(rule.matches("App", "docs/v10.md"))
+        self.assertFalse(rule.matches("App", "docs/v/.md"))
+
+    def test_matching_is_case_sensitive_and_repository_scoped(self) -> None:
+        rule = self.parse("App:docs/Guide.md")
+        self.assertTrue(rule.matches("App", "docs/Guide.md"))
+        self.assertFalse(rule.matches("App", "docs/guide.md"))
+        self.assertFalse(rule.matches("Docs", "docs/Guide.md"))
+
+    def test_qualified_matching_reads_the_evidence_form(self) -> None:
+        rule = self.parse("App:docs/*.md")
+        self.assertTrue(rule.matches_qualified("App:docs/guide.md"))
+        self.assertFalse(rule.matches_qualified("Docs:docs/guide.md"))
+        self.assertFalse(rule.matches_qualified("docs/guide.md"))
+
+    def test_match_reports_every_guard_and_the_paths_it_caught(self) -> None:
+        stamp = "2026-01-01T00:00:00+00:00"
+        docs = guards.GuardRule(
+            id="g-docs", reason=None, created_at=stamp, path=self.parse("App:docs/**")
+        )
+        readme = guards.GuardRule(
+            id="g-readme",
+            reason=None,
+            created_at=stamp,
+            path=self.parse("Docs:README.md"),
+        )
+        matched = guards.match_protected_paths(
+            (docs, readme),
+            (
+                "App:docs/a/guide.md",
+                "App:src/main.py",
+                "Docs:README.md",
+                "App:README.md",
+            ),
+        )
+        self.assertEqual(
+            {
+                "g-docs": ("App:docs/a/guide.md",),
+                "g-readme": ("Docs:README.md",),
+            },
+            dict(matched),
+        )
+
+    def test_no_match_is_an_empty_result_rather_than_a_guess(self) -> None:
+        stamp = "2026-01-01T00:00:00+00:00"
+        rule = guards.GuardRule(
+            id="g-1", reason=None, created_at=stamp, path=self.parse("App:docs/**")
+        )
+        self.assertEqual({}, dict(guards.match_protected_paths((rule,), ())))
+        self.assertEqual(
+            {}, dict(guards.match_protected_paths((rule,), ("App:src/main.py",)))
+        )
+
+
+class GuardCoverageTests(unittest.TestCase):
+    """Per-lane coverage says what is armed, and names what is not."""
+
+    def rule(self, *, command: tuple[str, ...] = (), path: str | None = None):
+        return guards.GuardRule(
+            id="g-1",
+            reason=None,
+            created_at="2026-01-01T00:00:00+00:00",
+            command=command,
+            path=(guards.parse_protected_path_rule(path) if path is not None else None),
+        )
+
+    def test_claude_denies_both_kinds_before_execution(self) -> None:
+        for guard in (self.rule(command=("git", "push")), self.rule(path="App:a.md")):
+            with self.subTest(kind=guard.kind):
+                lanes = guards.guard_coverage(
+                    guard, harness="claude", pretool_armed=True
+                )
+                self.assertEqual(guards.COVERAGE_ACTIVE, lanes["pretool"]["status"])
+                self.assertEqual(
+                    guards.COVERAGE_REASON_HOOK_DENIES, lanes["pretool"]["reason"]
+                )
+
+    def test_codex_reports_the_hook_trust_it_will_not_take(self) -> None:
+        lanes = guards.guard_coverage(
+            self.rule(command=("git", "push")), harness="codex"
+        )
+        self.assertEqual(guards.COVERAGE_UNSUPPORTED, lanes["pretool"]["status"])
+        self.assertEqual(
+            guards.COVERAGE_REASON_CODEX_HOOK_TRUST, lanes["pretool"]["reason"]
+        )
+
+    def test_copilot_path_rules_are_postflight_only(self) -> None:
+        lanes = guards.guard_coverage(
+            self.rule(path="App:docs/**"), harness="copilot", process_start=True
+        )
+        self.assertEqual(guards.COVERAGE_UNSUPPORTED, lanes["pretool"]["status"])
+        self.assertEqual(
+            guards.COVERAGE_REASON_COPILOT_NO_PATH_RULE, lanes["pretool"]["reason"]
+        )
+        self.assertEqual(guards.COVERAGE_ACTIVE, lanes["postflight"]["status"])
+
+    def test_copilot_command_rules_cover_only_the_process_start_cohort(self) -> None:
+        guard = self.rule(command=("git", "push"))
+        armed = guards.guard_coverage(guard, harness="copilot", process_start=True)
+        self.assertEqual(guards.COVERAGE_DEGRADED, armed["pretool"]["status"])
+        self.assertEqual(
+            guards.COVERAGE_REASON_COPILOT_PROCESS_START, armed["pretool"]["reason"]
+        )
+        late = guards.guard_coverage(guard, harness="copilot", process_start=False)
+        self.assertEqual(guards.COVERAGE_UNSUPPORTED, late["pretool"]["status"])
+        self.assertEqual(
+            guards.COVERAGE_REASON_ADDED_AFTER_PROCESS_START,
+            late["pretool"]["reason"],
+        )
+        # The command gate is unaffected either way: the shim is what actually
+        # holds a command rule, and it is armed for the whole run.
+        self.assertEqual(guards.COVERAGE_ACTIVE, late["command-gate"]["status"])
+
+    def test_a_rule_copilot_cannot_state_says_so_rather_than_claiming_it(self) -> None:
+        guard = self.rule(command=("git", "commit", "-m", "two words"))
+        lanes = guards.guard_coverage(guard, harness="copilot", process_start=True)
+        self.assertEqual(guards.COVERAGE_UNSUPPORTED, lanes["pretool"]["status"])
+        self.assertEqual(
+            guards.COVERAGE_REASON_COPILOT_UNEXPRESSIBLE, lanes["pretool"]["reason"]
+        )
+        self.assertEqual((), guards.copilot_deny_tool_rules((guard,)))
+
+    def test_kinds_never_claim_the_other_kind_s_lane(self) -> None:
+        command = guards.guard_coverage(
+            self.rule(command=("git", "push")), harness="claude", pretool_armed=True
+        )
+        self.assertEqual(guards.COVERAGE_UNSUPPORTED, command["postflight"]["status"])
+        path = guards.guard_coverage(
+            self.rule(path="App:a.md"), harness="claude", pretool_armed=True
+        )
+        self.assertEqual(guards.COVERAGE_UNSUPPORTED, path["command-gate"]["status"])
+        self.assertEqual(
+            guards.COVERAGE_REASON_NOT_A_COMMAND_RULE, path["command-gate"]["reason"]
+        )
+
+    def test_deny_tool_compilation_is_ordered_and_deduplicated(self) -> None:
+        rules = guards.copilot_deny_tool_rules(
+            (
+                self.rule(command=("git", "push")),
+                self.rule(path="App:docs/**"),
+                self.rule(command=("git", "push")),
+                self.rule(command=("rm",)),
+            )
+        )
+        self.assertEqual(("shell(git push)", "shell(rm)"), rules)
+
+    def test_policy_compilation_matches_the_object_compilation(self) -> None:
+        """Argv is built from the policy file, so the two must not drift."""
+        objects = (
+            self.rule(command=("git", "push")),
+            self.rule(path="App:docs/**"),
+        )
+        document = {"guards": [guard.to_payload() for guard in objects]}
+        self.assertEqual(
+            guards.copilot_deny_tool_rules(objects),
+            guards.copilot_deny_tool_rules_from_policy(document),
+        )
+
+    def test_a_policy_that_cannot_be_read_compiles_to_nothing(self) -> None:
+        for document in (None, {}, {"guards": "not-a-list"}, {"guards": [1, "x"]}):
+            with self.subTest(document=document):
+                self.assertEqual(
+                    (), guards.copilot_deny_tool_rules_from_policy(document)
+                )
+
+
 class GuardControllerTests(unittest.TestCase):
     """Activation order, atomic materialization, and the active-set contract."""
 
@@ -172,9 +426,15 @@ class GuardControllerTests(unittest.TestCase):
         self.assertFalse(self.controller.policy_file.exists())
 
     def test_add_rejects_an_empty_rule_set(self) -> None:
+        """No command rules *and* no path rules is the one empty ``add``.
+
+        The reason names the whole mutation rather than the command half: an
+        operator who passed only ``--protect-path`` and had every path
+        rejected must not be told the command list was the problem.
+        """
         outcome = self.controller.add([])
         self.assertEqual(guards.ACTION_REJECTED, outcome.action)
-        self.assertEqual(guards.REJECT_EMPTY_COMMAND_RULE, outcome.reason)
+        self.assertEqual(guards.REJECT_EMPTY_GUARD_RULE, outcome.reason)
 
     def test_remove_updates_policy_before_reporting_success(self) -> None:
         applied = self.controller.add([("git", "push")])
@@ -242,6 +502,125 @@ class GuardControllerTests(unittest.TestCase):
         self.assertEqual("git push origin main", payload["rendered_command"])
         self.assertEqual("git", payload["executable"])
         self.assertEqual("why", payload["reason"])
+
+
+class ProtectedPathControllerTests(unittest.TestCase):
+    """A path guard joins the same active set without needing a shim."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.bin_dir = self.root / "bin"
+        install_fake_git(self.bin_dir)
+        self.controller = guards.GuardController(
+            run_id="run-1",
+            run_dir=self.root / "runs" / "run-1",
+            path_value=str(self.bin_dir),
+            workspace_aliases={"App": str(self.root / "app")},
+        )
+
+    def path(self, raw: str) -> guards.ProtectedPath:
+        return guards.parse_protected_path_rule(raw)
+
+    def read_policy(self) -> dict[str, Any]:
+        return json.loads(self.controller.policy_file.read_text(encoding="utf-8"))
+
+    def test_add_arms_a_path_guard_and_installs_no_shim(self) -> None:
+        outcome = self.controller.add(paths=[self.path("App:docs/**")], reason="frozen")
+        self.assertEqual(guards.ACTION_APPLIED, outcome.action)
+        self.assertEqual(1, len(self.controller.active_paths()))
+        # A path rule shadows no executable, so no shim overlay is built at all.
+        self.assertFalse(self.controller.guard_bin.exists())
+        entry = self.read_policy()["guards"][0]
+        self.assertEqual(guards.GUARD_KIND_PROTECTED_PATH, entry["kind"])
+        self.assertEqual(
+            {"qualifier": "App", "pattern": "docs/**"}, entry["protected_path"]
+        )
+
+    def test_the_policy_carries_the_repository_binding_for_the_hook(self) -> None:
+        """The hook resolves an absolute tool-call path, so it needs the roots."""
+        self.controller.add(paths=[self.path("App:docs/**")])
+        self.assertEqual(
+            {"App": str(self.root / "app")},
+            self.read_policy()["workspace"]["aliases"],
+        )
+
+    def test_both_kinds_activate_together_or_not_at_all(self) -> None:
+        outcome = self.controller.add(
+            [("git", "push")], paths=[self.path("App:docs/**")], reason="one intent"
+        )
+        self.assertEqual(guards.ACTION_APPLIED, outcome.action)
+        self.assertEqual(2, len(outcome.guard_ids))
+        self.assertEqual(1, len(self.controller.active_paths()))
+
+    def test_an_add_with_neither_kind_is_refused(self) -> None:
+        outcome = self.controller.add([], paths=[])
+        self.assertEqual(guards.ACTION_REJECTED, outcome.action)
+        self.assertEqual(guards.REJECT_EMPTY_GUARD_RULE, outcome.reason)
+
+    def test_a_turn_without_a_baseline_refuses_a_new_path_guard(self) -> None:
+        """Fail closed: a guard that could never be compared is not armed.
+
+        Refusing tells the operator now, while they can still act. Accepting
+        would arm something that silently convicts or clears nothing.
+        """
+        self.controller.mark_turn_snapshot(False)
+        outcome = self.controller.add(paths=[self.path("App:docs/**")])
+        self.assertEqual(guards.ACTION_REJECTED, outcome.action)
+        self.assertEqual(guards.REJECT_PROTECTED_PATH_EVIDENCE, outcome.reason)
+        self.assertEqual((), self.controller.active_paths())
+        # A command rule is unaffected: it needs no snapshot at all.
+        self.assertEqual(
+            guards.ACTION_APPLIED, self.controller.add([("git", "push")]).action
+        )
+
+    def test_a_turn_with_a_baseline_accepts_a_mid_turn_path_guard(self) -> None:
+        self.controller.mark_turn_snapshot(True)
+        self.assertEqual(
+            guards.ACTION_APPLIED,
+            self.controller.add(paths=[self.path("App:docs/**")]).action,
+        )
+
+    def test_between_turns_a_path_guard_is_accepted_for_the_next_baseline(self) -> None:
+        self.controller.mark_turn_snapshot(None)
+        self.assertEqual(
+            guards.ACTION_APPLIED,
+            self.controller.add(paths=[self.path("App:docs/**")]).action,
+        )
+
+    def test_removing_a_path_guard_drops_it_from_the_active_set(self) -> None:
+        applied = self.controller.add(paths=[self.path("App:docs/**")])
+        removed = self.controller.remove(applied.guard_ids[0])
+        self.assertEqual(guards.ACTION_REMOVED, removed.action)
+        self.assertEqual((), self.controller.active_paths())
+        self.assertEqual([], self.read_policy()["guards"])
+
+    def test_prepare_turn_exports_the_policy_path_for_the_hook(self) -> None:
+        self.controller.add(paths=[self.path("App:docs/**")])
+        env = self.controller.prepare_turn({"PATH": str(self.bin_dir)})
+        self.assertEqual(
+            str(self.controller.policy_file), env[guards.GUARD_POLICY_ENV_VAR]
+        )
+
+    def test_the_process_start_cohort_is_the_set_prepare_turn_saw(self) -> None:
+        first = self.controller.add([("git", "push")])
+        self.controller.prepare_turn(
+            {"PATH": str(self.bin_dir)}, harness="copilot", pretool_armed=False
+        )
+        second = self.controller.add([("git", "fetch")])
+        coverage = {
+            entry["id"]: entry["coverage"]["pretool"]["reason"]
+            for entry in self.controller.to_payload()
+        }
+        self.assertEqual(
+            guards.COVERAGE_REASON_COPILOT_PROCESS_START,
+            coverage[first.guard_ids[0]],
+        )
+        self.assertEqual(
+            guards.COVERAGE_REASON_ADDED_AFTER_PROCESS_START,
+            coverage[second.guard_ids[0]],
+        )
 
 
 class CommandGateEnforcementTests(unittest.TestCase):
@@ -796,6 +1175,7 @@ class GuardCliTests(unittest.TestCase):
             "wait": False,
             "wait_timeout": None,
             "deny_command": None,
+            "protect_path": None,
             "reason": None,
             "id": None,
         }
@@ -865,6 +1245,81 @@ class GuardCliTests(unittest.TestCase):
         self.assertEqual([["git", "push", "origin", "main"]], payload["deny_commands"])
         drained = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual("run-1", drained.accepted[0].expected_run_id)
+
+    def test_add_enqueues_protected_paths_alongside_command_rules(self) -> None:
+        self.activate_run()
+        code, payload = self.capture(
+            control_cli.control_guard_add_from_args,
+            self.args(
+                deny_command=["git push"],
+                protect_path=[".:docs/**/*.md", ".:README.md"],
+                reason="frozen",
+            ),
+        )
+        self.assertEqual(0, code, payload)
+        self.assertEqual([["git", "push"]], payload["deny_commands"])
+        self.assertEqual([".:docs/**/*.md", ".:README.md"], payload["protect_paths"])
+        drained = control_queue.drain_queue(self.plan_dir, state_dir=self.state_dir)
+        queued = drained.accepted[0]
+        self.assertEqual(
+            [".:docs/**/*.md", ".:README.md"],
+            [path.rendered for path in queued.protect_paths],
+        )
+
+    def test_add_with_only_a_protected_path_is_accepted(self) -> None:
+        self.activate_run()
+        code, payload = self.capture(
+            control_cli.control_guard_add_from_args,
+            self.args(protect_path=[".:README.md"]),
+        )
+        self.assertEqual(0, code, payload)
+        self.assertEqual([], payload["deny_commands"])
+
+    def test_add_names_the_protected_path_that_is_malformed(self) -> None:
+        cases = {
+            ".:/etc/passwd": guards.REJECT_PATH_ABSOLUTE,
+            # No qualifier at all is the more specific complaint, even when the
+            # path is also absolute: the operator has to name a repository
+            # before the path can mean anything.
+            "/etc/passwd": guards.REJECT_PATH_MISSING_QUALIFIER,
+            "docs/api.md": guards.REJECT_PATH_MISSING_QUALIFIER,
+            ".:../escape": guards.REJECT_PATH_TRAVERSAL,
+            ".:docs\\api.md": guards.REJECT_PATH_BACKSLASH,
+        }
+        for rule, reason in cases.items():
+            with self.subTest(rule=rule):
+                code, payload = self.capture(
+                    control_cli.control_guard_add_from_args,
+                    self.args(protect_path=[rule]),
+                )
+                self.assertEqual(1, code)
+                self.assertEqual(reason, payload["reason"])
+                self.assertEqual(rule, payload["details"]["protect_path"])
+
+    def test_a_legacy_plan_refuses_an_alias_it_does_not_have(self) -> None:
+        """The alias half is checked against the plan the operator named."""
+        self.activate_run()
+        code, payload = self.capture(
+            control_cli.control_guard_add_from_args,
+            self.args(protect_path=["App:docs/api.md"]),
+        )
+        self.assertEqual(1, code)
+        self.assertEqual(guards.REJECT_PATH_UNKNOWN_ALIAS, payload["reason"])
+        self.assertEqual(["."], payload["details"]["known_qualifiers"])
+        queue_path = control_queue.queue_path_for_plan(self.plan_dir, self.state_dir)
+        self.assertFalse(queue_path.exists())
+
+    def test_a_registered_plan_takes_its_declared_aliases(self) -> None:
+        self.assertEqual(
+            ("App", "Docs"),
+            control_cli.plan_path_qualifiers(
+                {"repositories": [{"alias": "App"}, {"alias": "Docs"}]}
+            ),
+        )
+        self.assertEqual(
+            (guards.LEGACY_PATH_QUALIFIER,),
+            control_cli.plan_path_qualifiers({"repositories": []}),
+        )
 
     def test_list_reports_the_active_set_and_the_coverage_statement(self) -> None:
         self.activate_run()
@@ -1081,6 +1536,218 @@ class GuardStatusTests(unittest.TestCase):
         self.assertEqual([], payload["command_guards"]["active"])
 
 
+class GuardPreToolHookTests(unittest.TestCase):
+    """The early lane: a denial the worker is told about, before it runs.
+
+    Exercised as a real subprocess, the way the harness invokes it, because
+    what is being proved is the contract at the process boundary — the JSON in,
+    the decision out, and an exit status that never stalls a turn.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.app = self.root / "app"
+        (self.app / "docs").mkdir(parents=True)
+        self.bin_dir = self.root / "bin"
+        install_fake_git(self.bin_dir)
+        self.controller = guards.GuardController(
+            run_id="run-1",
+            run_dir=self.root / "runs" / "run-1",
+            path_value=str(self.bin_dir),
+            workspace_aliases={"App": str(self.app)},
+        )
+        self.controller.add(
+            [("git", "push")],
+            paths=[guards.parse_protected_path_rule("App:docs/**/*.md")],
+            reason="operator instruction",
+        )
+        self.hook = claude_stream.guard_hook_script_path()
+        self.policy = str(self.controller.policy_file)
+
+    def call(self, event: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
+        completed = subprocess.run(
+            [sys.executable, str(self.hook), self.policy],
+            input=json.dumps(event),
+            capture_output=True,
+            text=True,
+        )
+        output = completed.stdout.strip()
+        return completed.returncode, json.loads(output) if output else None
+
+    def assertDenied(self, event: dict[str, Any]) -> str:
+        code, decision = self.call(event)
+        self.assertEqual(0, code)
+        self.assertIsNotNone(decision, f"expected a denial for {event}")
+        hook_output = decision["hookSpecificOutput"]
+        self.assertEqual("PreToolUse", hook_output["hookEventName"])
+        self.assertEqual("deny", hook_output["permissionDecision"])
+        return hook_output["permissionDecisionReason"]
+
+    def assertAllowed(self, event: dict[str, Any]) -> None:
+        code, decision = self.call(event)
+        self.assertEqual(0, code)
+        self.assertIsNone(decision, f"expected {event} to pass through")
+
+    def test_a_write_to_a_protected_path_is_denied_with_the_reason(self) -> None:
+        message = self.assertDenied(
+            {
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(self.app / "docs" / "guide.md")},
+            }
+        )
+        self.assertIn("App:docs/**/*.md", message)
+        self.assertIn("operator instruction", message)
+
+    def test_reading_a_protected_path_is_not_a_change(self) -> None:
+        """A guard freezes content, not attention."""
+        self.assertAllowed(
+            {
+                "tool_name": "Read",
+                "tool_input": {"file_path": str(self.app / "docs" / "guide.md")},
+            }
+        )
+
+    def test_a_write_outside_the_rule_passes_through(self) -> None:
+        for path in ("docs/guide.txt", "src/main.py"):
+            with self.subTest(path=path):
+                self.assertAllowed(
+                    {
+                        "tool_name": "Write",
+                        "tool_input": {"file_path": str(self.app / path)},
+                    }
+                )
+
+    def test_a_path_outside_every_repository_is_not_this_guard_s_business(self) -> None:
+        self.assertAllowed(
+            {
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(self.root / "elsewhere" / "guide.md")},
+            }
+        )
+
+    def test_a_denied_command_is_refused_before_it_runs(self) -> None:
+        message = self.assertDenied(
+            {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}}
+        )
+        self.assertIn("git push", message)
+
+    def test_an_absolute_path_bypass_is_caught_by_basename(self) -> None:
+        """``/usr/bin/git push`` never resolves through PATH, so the shim
+        cannot see it — but the basename is right there in the tool call."""
+        self.assertDenied(
+            {"tool_name": "Bash", "tool_input": {"command": "/usr/bin/git push"}}
+        )
+
+    def test_an_unguarded_command_passes_through(self) -> None:
+        self.assertAllowed(
+            {"tool_name": "Bash", "tool_input": {"command": "git status"}}
+        )
+
+    def test_a_shell_script_is_declined_rather_than_guessed_at(self) -> None:
+        """Predicting a compound command's effects would produce confident
+        wrong answers; the PATH shim is what catches these."""
+        for command in (
+            "echo hi | git push",
+            "true && git push",
+            "sh -c 'git push'",
+            "$(echo git) push",
+        ):
+            with self.subTest(command=command):
+                self.assertAllowed(
+                    {"tool_name": "Bash", "tool_input": {"command": command}}
+                )
+
+    def test_every_failure_allows_the_call_rather_than_stalling_the_turn(self) -> None:
+        """The guarantees live in the shim and the snapshot comparison, so a
+        hook that cannot answer must not become a wedged run."""
+        cases: list[tuple[str, str]] = [
+            ("missing policy", str(self.root / "absent.json")),
+            ("unreadable policy", str(self.root)),
+        ]
+        broken = self.root / "broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+        cases.append(("malformed policy", str(broken)))
+        event = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(self.app / "docs" / "guide.md")},
+        }
+        for label, policy in cases:
+            with self.subTest(case=label):
+                completed = subprocess.run(
+                    [sys.executable, str(self.hook), policy],
+                    input=json.dumps(event),
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(0, completed.returncode)
+                self.assertEqual("", completed.stdout.strip())
+        for label, payload in (
+            ("not json", "{"),
+            ("not an object", "[]"),
+            ("no tool input", '{"tool_name": "Write"}'),
+        ):
+            with self.subTest(case=label):
+                completed = subprocess.run(
+                    [sys.executable, str(self.hook), self.policy],
+                    input=payload,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(0, completed.returncode)
+                self.assertEqual("", completed.stdout.strip())
+
+    def test_the_policy_path_can_arrive_through_the_environment(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(self.hook)],
+            input=json.dumps(
+                {
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": str(self.app / "docs" / "guide.md")},
+                }
+            ),
+            capture_output=True,
+            text=True,
+            env={**os.environ, guards.GUARD_POLICY_ENV_VAR: self.policy},
+        )
+        self.assertEqual(0, completed.returncode)
+        self.assertIn("deny", completed.stdout)
+
+    def test_the_claude_overlay_arms_the_hook_ahead_of_guidance(self) -> None:
+        overlay = self.root / "overlay"
+        overlay.mkdir()
+        spool = claude_stream.ClaudeGuidanceSpool(overlay / "spool")
+        settings = json.loads(
+            claude_stream.write_settings_overlay(
+                overlay, spool, guard_policy_path=self.policy
+            ).read_text(encoding="utf-8")
+        )
+        commands = [
+            entry["command"]
+            for entry in settings["hooks"][claude_stream.HOOK_EVENT][0]["hooks"]
+        ]
+        self.assertEqual(2, len(commands))
+        self.assertIn(str(self.hook), commands[0])
+        self.assertIn(self.policy, commands[0])
+
+    def test_a_run_without_guards_arms_no_guard_hook(self) -> None:
+        overlay = self.root / "overlay-plain"
+        overlay.mkdir()
+        spool = claude_stream.ClaudeGuidanceSpool(overlay / "spool")
+        settings = json.loads(
+            claude_stream.write_settings_overlay(overlay, spool).read_text(
+                encoding="utf-8"
+            )
+        )
+        commands = [
+            entry["command"]
+            for entry in settings["hooks"][claude_stream.HOOK_EVENT][0]["hooks"]
+        ]
+        self.assertEqual(1, len(commands))
+        self.assertNotIn(str(self.hook), commands[0])
+
+
 class GuardDocumentationTests(unittest.TestCase):
     """Every stable reason a guard can produce is documented."""
 
@@ -1098,6 +1765,16 @@ class GuardDocumentationTests(unittest.TestCase):
             guards.REJECT_SHELL_OPERATOR,
             guards.REJECT_GLOB,
             guards.REJECT_ENVIRONMENT_ASSIGNMENT,
+            guards.REJECT_EMPTY_GUARD_RULE,
+            guards.REJECT_EMPTY_PATH_RULE,
+            guards.REJECT_PATH_MISSING_QUALIFIER,
+            guards.REJECT_PATH_UNKNOWN_ALIAS,
+            guards.REJECT_PATH_ABSOLUTE,
+            guards.REJECT_PATH_BACKSLASH,
+            guards.REJECT_PATH_TRAVERSAL,
+            guards.REJECT_PATH_EMPTY_SEGMENT,
+            guards.REJECT_PATH_PATTERN,
+            guards.REJECT_PROTECTED_PATH_EVIDENCE,
             control_queue.REJECT_MISSING_EXPECTED_RUN_ID,
             control_queue.REJECT_MISSING_GUARD_RULE,
             control_queue.REJECT_MISSING_GUARD_ID,
@@ -1105,6 +1782,50 @@ class GuardDocumentationTests(unittest.TestCase):
         for reason in reasons:
             with self.subTest(reason=reason):
                 self.assertIn(f"`{reason}`", text)
+
+    def test_every_coverage_reason_is_documented(self) -> None:
+        """A lane verdict an operator can read has to be one they can look up.
+
+        The coverage block is the honest part of this feature -- it is where a
+        harness says it cannot enforce something. A reason with no
+        documentation turns that honesty back into a mystery string.
+        """
+        text = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
+            encoding="utf-8"
+        )
+        reasons = [
+            value
+            for name, value in vars(guards).items()
+            if name.startswith("COVERAGE_REASON_") and isinstance(value, str)
+        ]
+        self.assertTrue(reasons)
+        for reason in reasons:
+            with self.subTest(reason=reason):
+                self.assertIn(f"`{reason}`", text)
+
+    def test_the_pause_reasons_a_path_guard_raises_are_documented(self) -> None:
+        text = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
+            encoding="utf-8"
+        )
+        for reason in (
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED,
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE,
+        ):
+            with self.subTest(reason=reason):
+                self.assertIn(f"`{reason}`", text)
+
+    def test_protected_path_coverage_is_documented(self) -> None:
+        text = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("asl control guard add", text)
+        self.assertIn("--protect-path", text)
+        for claim in (
+            *guards.PROTECTED_PATH_COVERAGE["covers"],
+            *guards.PROTECTED_PATH_COVERAGE["does_not_cover"],
+        ):
+            with self.subTest(claim=claim):
+                self.assertIn(claim, text)
 
     def test_bypasses_are_documented(self) -> None:
         text = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(

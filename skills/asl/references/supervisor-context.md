@@ -57,6 +57,8 @@ Supervise and answer
     asl inbox resolve PLAN_DIR --to QUESTION_ID --action pause --wait-consumed --wait-timeout 300 --json
   guidance: Steer implementation choices inside the selected session. Guidance is advice, not a guard: it cannot stop a run or change the session's scope or contract. The reply reports either 'delivered live' to the running turn or 'queued but not delivered', in which case it rides the next turn's prompt; only a guard enforces.
     asl inbox guidance PLAN_DIR --text GUIDANCE_TEXT --wait-delivered --json
+  guard: Enforce, rather than advise. --deny-command blocks an action such as 'git push'; --protect-path freezes a file at its turn-start state and rejects the turn that changed it, retaining the change. Neither cancels the running turn -- only asl control abort does that.
+    asl control guard add PLAN_DIR --deny-command 'CMD ARG ...' --protect-path ALIAS:PATH --reason TEXT --wait --json
   status: Recover run state after DONE outcome=error or LOST, and before treating a plan as idle.
     asl status PLAN_DIR --json
   read-result: Read the detached helper's verdict from the handshake's result_path once DONE ends the loop; fall back to asl status when the outcome was error.

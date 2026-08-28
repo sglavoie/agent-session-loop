@@ -1908,6 +1908,7 @@ def _command_guard_payload(
         "active": active,
         "count": len(active),
         "coverage": dict(guards.COMMAND_GATE_COVERAGE),
+        "protected_path_coverage": dict(guards.PROTECTED_PATH_COVERAGE),
     }
 
 
@@ -2113,16 +2114,37 @@ def _print_text_status(payload: dict[str, Any]) -> None:
                 f"still holds the lock){hint}"
             )
 
+    from . import guards
+
     command_guards = payload.get("command_guards")
     if isinstance(command_guards, dict) and command_guards.get("active"):
         coverage = command_guards.get("coverage")
         mechanism = (
             coverage.get("mechanism") if isinstance(coverage, dict) else "command gate"
         )
-        print(f"Command guards: {command_guards['count']} active ({mechanism})")
+        print(f"Run guards: {command_guards['count']} active ({mechanism})")
         for entry in command_guards["active"]:
-            rendered = " ".join(str(token) for token in entry.get("command", ()))
-            print(f"  {entry.get('id')}: deny {rendered}")
+            protected = entry.get("protected_path")
+            if isinstance(protected, dict):
+                rendered = (
+                    f"protect {protected.get('qualifier')}:{protected.get('pattern')}"
+                )
+            else:
+                tokens = " ".join(str(token) for token in entry.get("command", ()))
+                rendered = f"deny {tokens}"
+            lanes = entry.get("coverage")
+            if isinstance(lanes, dict):
+                # The armed lanes, named. A guard with no armed lane is not a
+                # guard, and an operator reading "1 active" has to be able to
+                # tell that case from an enforced one without opening the state.
+                armed = ", ".join(
+                    lane
+                    for lane, verdict in sorted(lanes.items())
+                    if isinstance(verdict, dict)
+                    and verdict.get("status") != guards.COVERAGE_UNSUPPORTED
+                )
+                rendered += f" [{armed or 'no armed lane'}]"
+            print(f"  {entry.get('id')}: {rendered}")
 
     # Reported, never produced: this prints what the last run's audit already
     # recorded and what the shared inbox already holds.

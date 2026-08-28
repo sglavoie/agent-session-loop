@@ -554,7 +554,7 @@ asl control stop-after-current PLAN_DIR_OR_ID [--wait] [--timeout SECONDS] [--st
 asl control abort PLAN_DIR_OR_ID [--grace SECONDS] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness-model MODEL|--clear-harness-model] [--effort EFFORT|--clear-effort] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
-asl control guard add PLAN_DIR_OR_ID --deny-command "CMD ARG ..." [--deny-command ...] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control guard add PLAN_DIR_OR_ID [--deny-command "CMD ARG ..."] [--protect-path ALIAS:PATH] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control guard remove PLAN_DIR_OR_ID --id GUARD_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control guard list PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
@@ -2534,9 +2534,11 @@ mutated — the runner alone owns `state.json`.
   `reason: missing-model-control-operation` before anything is enqueued. An
   unknown target harness fails with `reason: invalid-harness`.
 - `asl control guard add PLAN_DIR_OR_ID --deny-command "git push origin main"`
-  queues a run-scoped command guard; `asl control guard remove --id GUARD_ID`
+  queues a run-scoped command guard, and `--protect-path api:config.toml`
+  queues a path that must end each turn unchanged;
+  `asl control guard remove --id GUARD_ID`
   ends one; `asl control guard list` prints the active set without touching the
-  queue. See [Run-scoped command guards](#run-scoped-command-guards).
+  queue. See [Run-scoped guards](#run-scoped-guards).
 
 Enqueueing succeeds for a readable plan even with no runner attached; the
 command simply waits in the queue for the next drain. All four subcommands
@@ -2551,7 +2553,7 @@ traceback. Any other command rejected by the durable queue fails with
 `invalid-harness`, `invalid-reason`, `invalid-timeout`,
 `missing-model-control-operation`, `no-runner`, `os-error`, and
 `receipt-timeout`, plus the guard reasons listed under
-[Run-scoped command guards](#run-scoped-command-guards).
+[Run-scoped guards](#run-scoped-guards).
 
 Every producer that appends to the queue — the `asl control` subcommands and
 the Workbench control endpoints alike — then sends a best-effort wakeup so the
@@ -2687,21 +2689,52 @@ seconds. Cancelling the audit costs the audit and nothing else: assurance is
 recorded as `unavailable` with `reason: interrupted`, and the run's own outcome,
 reason, and exit code are whatever the stop already made them.
 
-### Run-scoped command guards
+### Run-scoped guards
 
 A supervisor who decides mid-run that a worker must not run a particular
-command has, without this, only one lever: telling it so. That works when the
-worker cooperates and fails silently when it does not, and it has to be
-restated for every harness. `asl control guard` is the durable version of the
-same intention, and it does not depend on the model reading anything.
+command, or must not touch a particular file, has without this only one lever:
+telling it so. That works when the worker cooperates and fails silently when it
+does not, and it has to be restated for every harness. `asl control guard` is
+the durable version of the same intention, and it does not depend on the model
+reading anything.
 
 ```
-asl control guard add PLAN_DIR_OR_ID --deny-command "CMD ARG ..." [--deny-command ...] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control guard add PLAN_DIR_OR_ID [--deny-command "CMD ARG ..."] [--protect-path ALIAS:PATH] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control guard remove PLAN_DIR_OR_ID --id GUARD_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control guard list PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 ```
 
-A guard is a **command rule**: an argv prefix, tokenized with POSIX `shlex`
+Both flags are repeatable and may be combined in one `add`; each rule becomes
+its own guard with its own ID, so they are removed independently. An `add`
+carrying neither is refused with `empty-guard-rule`. `asl control guard` is the
+**only** supported mutation surface for guards: the Workbench and the bridge
+expose no guard-mutation endpoint, deliberately, because a guard is an operator
+instruction and the CLI is where an operator already proves which run they mean.
+
+#### Choosing a lever
+
+The four instruments overlap enough to be confused for one another, and
+choosing wrong is how a run either drifts or stalls:
+
+- **Guidance** (`asl inbox guidance`) for the *direction* of the work — what to
+  implement, what approach to take, what to prioritize. It is delivered to the
+  model and its effect depends entirely on the model acting on it. Nothing
+  enforces it; see [Guidance delivery](#guidance-delivery) for what delivery
+  does and does not promise.
+- **A command guard** (`--deny-command`) for an *action* that must not happen —
+  `git push`, a deploy script, a destructive migration. Use it when naming the
+  command is the whole instruction.
+- **A protected-path guard** (`--protect-path`) for *files that must end the
+  turn as they started* — a config the worker keeps "fixing", a lockfile, a
+  neighbouring session's plan file. Use it when what matters is the file's final
+  state rather than the route taken to it.
+- **Abort** (`asl control abort`) only when the *active turn itself* must be
+  terminated. It is the loudest instrument and it discards work in flight;
+  neither guard kind cancels a running turn, by design.
+
+#### Command rules
+
+A **command rule** is an argv prefix, tokenized with POSIX `shlex`
 rules and matched **case-sensitively and exactly** against the front of an
 invocation's argv. `git push origin main` denies `git push origin main` and
 `git push origin main --force`; it does not deny `git push`, `git Push origin
@@ -2711,7 +2744,9 @@ of it.
 Rules describe a command, never a shell fragment, and every other construct is
 refused before anything is enqueued:
 
-- `missing-guard-rule` — `add` was given no `--deny-command`.
+- `missing-guard-rule` — `add` was given no rule at all.
+- `empty-guard-rule` — the same refusal seen from the parser: neither a
+  `--deny-command` nor a `--protect-path` was supplied.
 - `empty-command-rule` — a rule that tokenizes to nothing.
 - `unparsable-command-rule` — a rule `shlex` cannot tokenize (unbalanced quote).
 - `empty-token` — a rule containing an empty argument.
@@ -2723,6 +2758,64 @@ refused before anything is enqueued:
 - `glob-in-rule` — the rule contains `*`, `?`, or `[`/`]`. Matching is exact; a
   pattern that looks like it would match more would deny less than it reads.
 - `environment-assignment-in-rule` — a leading `NAME=VALUE` token.
+
+#### Protected-path rules
+
+A **protected-path rule** is written `Alias:glob` and names paths that must end
+each turn byte-identical to how that turn found them. The qualifier is a
+repository alias the *active plan* declares: a registered plan requires one of
+its own aliases (`api:config/settings.toml`), and a legacy single-repository
+plan requires the literal `.` (`.:notes.md`). Patterns are relative POSIX paths
+matched **case-sensitively** against normalized paths, and support literal
+segments, `*` and `?` within one path segment, and `**` across segments —
+`docs/**/*.md` matches `docs/guide.md` and `docs/deep/nested/guide.md` alike.
+
+Path rules are validated against the plan before anything is enqueued:
+
+- `empty-path-rule` — a rule with no pattern.
+- `path-missing-qualifier` — no `Alias:` prefix. A bare path would be ambiguous
+  in a registered workspace and silently wrong in exactly the case that matters.
+- `path-unknown-alias` — a qualifier the active plan does not declare.
+- `absolute-path-in-rule` — an absolute pattern. Guards are workspace-relative;
+  an absolute path would name something the snapshot may not even cover.
+- `backslash-in-path-rule` — a `\` separator or escape.
+- `parent-traversal-in-path-rule` — a `..` segment.
+- `empty-segment-in-path-rule` — a `//` or a leading/trailing separator.
+- `unsupported-path-pattern` — syntax beyond `*`, `?`, and `**`, including a
+  `**` sharing a segment with other characters.
+- `protected-path-evidence-unavailable` — the run has an active turn but no
+  turn-start snapshot to compare against, so the guard is refused rather than
+  armed blind. Between turns the guard is accepted and binds the *next* turn's
+  baseline.
+
+Enforcement is a **comparison against the turn-start workspace snapshot** the
+runner already captures — there is deliberately no activation-time baseline. The
+consequence is the intended reading of "this file must not change": a guard
+added mid-turn convicts a change the turn had already made before the guard
+existed, because an operator who sees a file they care about and freezes it is
+asking about its state now, not about the moment their command was drained. The
+symmetric consequence is that a path changed and then restored to its exact
+turn-start content passes, because the comparison is of state, not of activity.
+Changes an operator made before the turn began are part of the baseline and are
+never convicted.
+
+The check runs at finalization, after the general workspace write guard and
+before every result and commit branch, so no violating turn is ever published or
+committed. On a violation the run records the guard IDs, the matched qualified
+paths, the write guard's own before/after evidence for the repositories holding
+them, and each guard's enforcement coverage; emits a turn-rejected event;
+returns the session to `pending`; and pauses with
+`guard-protected-path-changed`. When the turn produced no comparison the guard
+can read, it pauses with `guard-protected-path-unavailable` instead — a guard
+that cannot see is not a guard that saw nothing. Both are inspect-and-repair
+pauses rather than mailbox-reply pauses: there is no answer a worker could give
+that would resolve them, so resume after restoring the path or removing the
+guard.
+
+**Filesystem changes are always retained.** A violation rejects the turn's
+*result*; it never rolls back, reverts, aborts, or restarts anything. The run
+cannot know whether the change was the valuable part of the turn, and destroying
+an agent's work to satisfy a guard would cost more than it protects.
 
 Guards belong to one run and never outlive it. `add` and `remove` require an
 active run and fail with `reason: no-active-run` otherwise, before appending
@@ -2739,7 +2832,9 @@ is rejected by the queue itself with `missing-expected-run-id`,
 `missing-guard-rule`, or `missing-guard-id`; `invalid-guard-id` and
 `invalid-reason` cover the wrong types.
 
-Enforcement is a **per-run `PATH` shim**. Before every worker turn the runner
+#### The command gate
+
+A command rule is enforced by a **per-run `PATH` shim**. Before every worker turn the runner
 creates an empty `guard-bin` directory under the run's state directory and
 prepends it to the turn's `PATH`, whichever harness the turn uses. Applying a
 guard resolves the real executable *outside* `guard-bin` once, writes the
@@ -2766,17 +2861,85 @@ be cleaned up correctly for the next turn to work.
 says the runner read the command and nothing about whether the command is being
 enforced. A `guard-rejected` outcome exits 1 and reports the runner's reason.
 
+#### Enforcement lanes and coverage
+
+Guards are enforced in up to three lanes, and every guard reports its own status
+in each so an operator can tell an enforced instruction from a hopeful one:
+
+- `command-gate` — the `PATH` shim above. Applies to command rules only; a path
+  rule reports `unsupported` with `not-a-command-rule`.
+- `pretool` — the harness's own pre-tool hook, which denies the call *before* it
+  runs and returns the guard's reason to the model, so the worker can do
+  something else instead of finishing a turn that is then thrown away.
+- `postflight` — the turn-start snapshot comparison above. Applies to path rules
+  only; a command rule reports `unsupported` with
+  `command-execution-leaves-no-postflight-evidence`, because running a command
+  leaves no trace a workspace comparison could convict.
+
+Each lane reports `active`, `degraded`, or `unsupported` with a stable reason:
+
+- `path-shim-armed` / `path-shim-not-armed` — whether the command gate
+  materialized for this guard.
+- `hook-denies-before-execution` — the pretool hook is armed and covers this
+  rule.
+- `harness-exposes-no-pre-tool-hook` — the harness has no such lane at all.
+- `codex-hook-trust-requires-user-config-mutation` — Codex hooks require a
+  trusted `CODEX_HOME` configuration that `codex app-server` will not accept
+  from an ephemeral overlay, and ASL does not mutate an operator's own config to
+  obtain it. Codex therefore has no `pretool` lane.
+- `copilot-deny-tool-fixed-at-process-start` — Copilot's only pre-execution lane
+  is its command line, so the rules are compiled once into `--deny-tool` when
+  the process starts. `degraded`, not `active`: a guard added later in the same
+  turn cannot reach it.
+- `guard-added-after-process-start` — exactly that case: the guard did not exist
+  when Copilot was launched, so it is `postflight`-only for this turn.
+- `copilot-deny-tool-cannot-express-paths` — Copilot's `--deny-tool` states shell
+  commands, not paths, so a path rule has no Copilot pretool lane.
+- `copilot-deny-tool-cannot-express-rule` — a command rule containing whitespace
+  or parentheses that `--deny-tool` has no syntax for. It compiles to nothing
+  rather than to something narrower than it reads.
+- `turn-start-snapshot-comparison` — the postflight lane for a path rule.
+- `not-a-command-rule` / `not-a-path-rule` — the lane does not apply to this kind
+  of guard.
+
+The pretool hook is armed through the ASL-owned hook overlay for the turn, and
+is a *narrowing* of enforcement rather than a replacement for it. It denies a
+write tool call naming a protected path, and a shell tool call whose command is
+one unambiguous simple invocation matching a command rule — including
+`/usr/bin/git push`, the absolute-path bypass the `PATH` shim cannot see,
+because the basename is right there in the tool call. It deliberately does **not**
+claim to predict what an arbitrary shell script will do: anything containing a
+shell operator is passed through untouched and left to the shim and the snapshot
+comparison. Reads of a protected path are never denied — a guard freezes
+content, not attention. Every failure inside the hook allows the call, because
+the guarantees live in the other two lanes and a hook that blocked the worker
+whenever it failed to read a file would convert its own bugs into stalled runs.
+
 `asl control guard list` and `asl status` both report the active set and the
-gate's coverage; status prints a `Command guards:` block and its JSON carries
-`command_guards` with `active`, `count`, and `coverage`. A run that has
-finished reports no guards, because it is enforcing none.
+per-guard lanes; status prints a `Run guards:` block naming each rule and its
+armed lanes, and its JSON carries `command_guards` with `active`, `count`,
+`coverage`, and `protected_path_coverage`. A run that has finished reports no
+guards, because it is enforcing none.
+
+Every turn a path guard was active for records a `protected_path_guard` block in
+its `result.json`, on the clearing path as well as the convicting one: `passed`,
+the `session_id`, the active `guards`, the `observed_paths` the turn changed, and
+the per-guard `coverage`. A conviction adds `reason`, `guard_ids`,
+`matched_paths`, the before/after `evidence`, `retained: true`,
+`reverted_to_pending`, and a `detail` naming why the evidence was unusable when
+that is the reason. A turn that passed a guard is therefore evidenced, not
+merely unremarked.
 
 The guarantee is **operational, not adversarial** — a safeguard against a
-worker that would otherwise run the command, not a sandbox against one
-determined to evade it. Both halves of that boundary are stated here in the
-same words `status` and `guard list` report them.
+worker that would otherwise run the command or change the file, not a sandbox
+against one determined to evade it, and not a security boundary against hostile
+code. Denying a command does not prevent an equivalent operation performed by
+another executable, by a library call, or by a raw network request. Nor does a
+guard cancel anything: a turn that cannot have a guard activated is not aborted,
+it is reported. Both halves of that boundary are stated here in the same words
+`status` and `guard list` report them.
 
-Covered:
+Covered by the command gate:
 
 - a bare executable name run directly by the harness
 - a bare name run through `env NAME=VALUE cmd ...`
@@ -2789,6 +2952,22 @@ Not covered — these are bypasses, by construction:
 - an equivalent library or network call that never spawns the command
 - a process that clears or rewrites PATH before spawning
 - a command that was already executing when the guard was applied
+
+The first of those is additionally caught by the `pretool` lane on a harness
+that has one, for a tool call the hook can read unambiguously. That narrows the
+bypass on one harness; it does not close it, so it stays listed here.
+
+Covered by a protected-path guard:
+
+- any change to a matched path present at finalization, however it was made
+- a change made earlier in the turn than the guard itself
+- a change made by a process the harness never saw
+
+Not covered:
+
+- a matched path changed and restored to its exact turn-start content
+- a change made after the run terminates
+- predicting what an arbitrary shell script will write before it runs
 
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, lock state, and any active harness turn.
@@ -4479,7 +4658,11 @@ read-only mapping and is never rewritten afterwards.
 `turn_rejected` is the terminal statement about a turn a post-execution guard
 refused; such a turn never receives `turn_finished`. Its payload names the
 `guard`, the `reason` (the same token the run pauses with), whether the session
-was `reopened`, and any guard-specific `detail`. When the guard also returned a
+was `reopened`, and any guard-specific `detail`. The `guard` names which
+post-execution gate refused: `workspace-write-guard`,
+`legacy-implementation-write-guard`, `protected-path-guard`,
+`review-mutation-guard`, `mailbox-completion-guard`, `plan-artifact-guard`,
+`review-verdict`, `session-verification`, or `plan-inspection`. When the guard also returned a
 session the worker had marked complete back to `pending`, a `session_reopened`
 event follows it with `from_status` / `to_status`, so the reverse transition is
 replayable from the event stream instead of being visible only by comparing the
@@ -5161,6 +5344,20 @@ Common pause reasons:
   the `control_plane_mutated` list — so a permitted control-plane mutation is
   evidenced rather than assumed, and an audit-store write can no longer pass as
   workspace-clean silence.
+- `guard-protected-path-changed`: an implementation turn finished with a path
+  an operator froze through `asl control guard add --protect-path` differing
+  from its turn-start state. Checked after `workspace-write-scope-violation`
+  and before every result and commit branch, so no violating turn is published.
+  The pause retains all content, returns the session to pending, and carries a
+  `protected_path_guard` block with the matched guard IDs, the matched qualified
+  paths, the write guard's before/after evidence for their repositories, and the
+  per-lane coverage each guard had. Repair by restoring the path or removing the
+  guard, then resume; there is no mailbox reply that resolves it.
+- `guard-protected-path-unavailable`: a protected-path guard was active but the
+  turn produced no turn-start comparison it could read, so it could neither
+  clear nor convict the turn. Fail-closed for the same reason as
+  `workspace-write-guard-unavailable`: repair the evidence rather than dropping
+  the guard. Also an inspect-and-repair pause.
 - `review-mutated-worktree`: the review harness changed repo content outside
   the plan directory. The pre/post fingerprint covers the working tree's
   `HEAD`, tracked diff, the separate `--cached` (index) diff — so staging a
@@ -5398,7 +5595,8 @@ failures that carry no question context (`quota-exhausted`, `auth-failed`,
 `invalid-model`), and the pauses blocked on a workspace or environment
 precondition (`commit-preflight`, `commit-failed`,
 `repository-registry-required`, `workspace-repository-contention`,
-`not-loop-ready`, `required-checks-incomplete`, `review-not-clear`). The
+`not-loop-ready`, `required-checks-incomplete`, `review-not-clear`,
+`guard-protected-path-changed`, `guard-protected-path-unavailable`). The
 dividing principle is whether a mailbox answer can make
 the run proceed: a dirty worktree stays dirty however the operator answers, so
 waiting for a reply would only burn the mailbox lease before escalating anyway.

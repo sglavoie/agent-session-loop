@@ -354,6 +354,52 @@ that ignores it keeps working. Only `asl control` stops a run — `stop-after-cu
 session boundary, `abort` inside the turn now in flight. Never report a run as
 stopped because guidance asking it to stop was sent.
 
+#### Deny a command or freeze a file mid-run
+
+When the instruction is enforceable rather than advisory, use a guard instead of
+guidance:
+
+```text
+asl control guard add <plan-dir> [--deny-command "CMD ARG ..."] [--protect-path ALIAS:PATH] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] --json
+asl control guard remove <plan-dir> --id GUARD_ID [--wait] [--timeout SECONDS] [--state-dir DIR] --json
+asl control guard list <plan-dir> [--state-dir DIR] --json
+```
+
+Pick by what you actually mean:
+
+- **guidance** for the *direction* of the work — what to build, what approach to
+  take. It is advice and nothing enforces it.
+- **`--deny-command`** for an *action that must not happen*, such as
+  `git push origin main`. Matched as an exact argv prefix after POSIX
+  tokenization; a denied invocation exits `126` with a stable message.
+- **`--protect-path`** for *files that must end the turn exactly as they
+  started*, written `Alias:glob` (`.` is the alias for a single-repository
+  plan). Compared against the turn-start snapshot at finalization, so a change
+  made before you added the guard still counts and a change that was undone
+  exactly does not.
+- **`abort`** only when the *turn running right now* must be terminated. Neither
+  guard kind cancels a running turn.
+
+Guards last for the current run only, and both `add` and `remove` fail with
+`no-active-run` when there is none. Use `--wait` when it matters: without it the
+command proves only that the request was queued, while `--wait` waits for
+`guard-applied`, `guard-removed`, or `guard-rejected`.
+
+A protected path that differs at finalization does **not** roll anything back.
+The run keeps every filesystem change, rejects the turn's result, returns the
+session to `pending`, and pauses with `guard-protected-path-changed` (or
+`guard-protected-path-unavailable` when it had no comparison to read). Both are
+inspect-and-repair pauses: restore the path or remove the guard, then resume.
+No mailbox reply resolves them.
+
+`asl control guard list` and `asl status` report each guard's coverage per lane
+(`command-gate`, `pretool`, `postflight`) as `active`, `degraded`, or
+`unsupported` with a reason — read it rather than assuming, since a lane a
+harness cannot offer is reported honestly instead of silently missing. Guards
+are an operational safeguard, not a sandbox: they do not stop an equivalent
+operation performed by another executable, a library call, or a raw network
+request.
+
 #### Request a graceful stop mid-run
 
 To stop a supervised run early without waiting for it to finish, request the
@@ -483,7 +529,7 @@ back to the existing terminal pause flow below; there is no mailbox-only
 terminal status.
 
 Retry mechanics are helper-owned — see the result payload's `pause_policy`.
-The helper auto-retries recoverable same-session pauses (`verify-failed`, `transport-failed`, `timeout`, `no-status-change`) up to twice per session and reason. Only `transport-failed` backs off before relaunching (5 seconds, then 30 seconds); the other recoverable pauses retry immediately. An unclassified `nonzero-exit` pause is never retried. Escalation follows the block's `user_action`: `reply` means an operator answer can clear the pause, so it goes through the mailbox wait; `inspect` means no answer can and the environment has to change instead, so it escalates immediately; `null` is a recoverable pause that needs no human. Two kinds of pause are `inspect` — the non-retryable harness failures that carry no question context (`quota-exhausted`, `auth-failed`, `invalid-model`), and the pauses blocked on a workspace or environment precondition (`commit-preflight`, `commit-failed`, `repository-registry-required`, `workspace-repository-contention`, `not-loop-ready`, `required-checks-incomplete`, `review-not-clear`). The dividing principle is whether a mailbox answer can make the run proceed: a dirty worktree stays dirty however the operator answers. An `inspect` pause carries its own `remediation` entry naming the workspace change that clears it, so read `action_required.remediation` before escalating. `requires_user` covers every pause a machine cannot retry, and `policy_version` distinguishes a schema change from a real contradiction when a persisted block is compared against a fresh classification; `policy_version: 3` is the revision that moved the blocked-precondition reasons off `reply`. When a pause genuinely needs an answer, the result carries `reason: needs_agent_reply` with a `questions` block holding the resolver prompt, the paused agent's last message, the pause metadata, and artifact paths.
+The helper auto-retries recoverable same-session pauses (`verify-failed`, `transport-failed`, `timeout`, `no-status-change`) up to twice per session and reason. Only `transport-failed` backs off before relaunching (5 seconds, then 30 seconds); the other recoverable pauses retry immediately. An unclassified `nonzero-exit` pause is never retried. Escalation follows the block's `user_action`: `reply` means an operator answer can clear the pause, so it goes through the mailbox wait; `inspect` means no answer can and the environment has to change instead, so it escalates immediately; `null` is a recoverable pause that needs no human. Two kinds of pause are `inspect` — the non-retryable harness failures that carry no question context (`quota-exhausted`, `auth-failed`, `invalid-model`), and the pauses blocked on a workspace or environment precondition (`commit-preflight`, `commit-failed`, `repository-registry-required`, `workspace-repository-contention`, `not-loop-ready`, `required-checks-incomplete`, `review-not-clear`, `guard-protected-path-changed`, `guard-protected-path-unavailable`). The dividing principle is whether a mailbox answer can make the run proceed: a dirty worktree stays dirty however the operator answers. An `inspect` pause carries its own `remediation` entry naming the workspace change that clears it, so read `action_required.remediation` before escalating. `requires_user` covers every pause a machine cannot retry, and `policy_version` distinguishes a schema change from a real contradiction when a persisted block is compared against a fresh classification; `policy_version: 3` is the revision that moved the blocked-precondition reasons off `reply`. When a pause genuinely needs an answer, the result carries `reason: needs_agent_reply` with a `questions` block holding the resolver prompt, the paused agent's last message, the pause metadata, and artifact paths.
 
 Choose the closure conservatively, on two axes rather than one:
 

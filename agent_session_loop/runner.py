@@ -11162,6 +11162,198 @@ def _enforce_legacy_implementation_write_guard(
     return True
 
 
+def _protected_path_changed_paths(
+    evidence: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Every qualified path the turn changed, as the write guard recorded it.
+
+    Read from the guard's own evidence rather than recaptured: a second
+    snapshot would be taken at a different instant, so a path that moved
+    between the two comparisons could be convicted by one and cleared by the
+    other. One capture, two questions.
+    """
+    if not isinstance(evidence, Mapping):
+        return ()
+    changed = evidence.get("changed")
+    if not isinstance(changed, Mapping):
+        return ()
+    qualified: list[str] = []
+    for entry in changed.values():
+        if not isinstance(entry, Mapping):
+            continue
+        paths = entry.get("qualified_paths")
+        if isinstance(paths, list):
+            qualified.extend(str(path) for path in paths)
+    return tuple(dict.fromkeys(qualified))
+
+
+def _enforce_protected_path_guard(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    persistence: _RunPersistence,
+    guard_controller: guards.GuardController | None,
+    before: plans.PlanSnapshot,
+    after: plans.PlanSnapshot | None,
+    session_id: str,
+    session_label: str,
+    session_details: dict[str, Any],
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+    plan_cache: plans.PlanSnapshotCache,
+    changed_paths: tuple[str, ...] | None,
+) -> bool:
+    """Refuse to publish a turn that moved a path an operator declared frozen.
+
+    This runs after the general workspace write guard and before every result
+    branch, and it is deliberately a *separate* step: the write guard asks
+    whether the session stayed inside its declared scope, which is a question
+    about the plan, while this asks whether the run honoured a standing
+    instruction an operator gave mid-flight, which is a question about the
+    operator. A path can be perfectly in scope and still be one the operator
+    said not to touch.
+
+    The baseline is the turn-start snapshot, so a guard added mid-turn convicts
+    a change the turn had already made. That is the intended reading of "this
+    file must not change": an operator who sees a file they care about and
+    freezes it is asking about its state now, not about the moment their
+    command was drained.
+
+    Filesystem changes are always retained. The run has no way to know whether
+    the change was the valuable part of the turn, and silently reverting an
+    agent's work to satisfy a guard would destroy more than it protects.
+
+    ``changed_paths`` of ``None`` means the turn produced no comparison this
+    guard can read, which is refused rather than waved through: a guard that
+    cannot see is not a guard that saw nothing.
+    """
+    active = () if guard_controller is None else guard_controller.active_paths()
+    if not active:
+        return False
+
+    evidence = turn_payload.get("workspace_write_guard")
+    unavailable_detail: str | None = None
+    if changed_paths is None:
+        changed_paths = ()
+        unavailable_detail = (
+            "no turn-start comparison was available for this turn, so the "
+            "workspace could not be compared against its baseline"
+        )
+
+    coverage_by_id = {
+        entry.get("id"): entry.get("coverage")
+        for entry in (
+            guard_controller.to_payload() if guard_controller is not None else []
+        )
+    }
+    matched = (
+        guards.match_protected_paths(active, changed_paths)
+        if unavailable_detail is None
+        else {}
+    )
+    if unavailable_detail is None and not matched:
+        with persistence.lock:
+            turn_payload["protected_path_guard"] = {
+                "passed": True,
+                "session_id": session_id,
+                "guards": [rule.to_payload() for rule in active],
+                "observed_paths": list(changed_paths),
+                "coverage": {rule.id: coverage_by_id.get(rule.id) for rule in active},
+            }
+            _write_json_file(paths["result"], turn_payload)
+        return False
+
+    if unavailable_detail is not None:
+        reason = events.PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE
+        failure_note = (
+            "protected-path guard evidence unavailable; "
+            f"{unavailable_detail}, so the guard could neither clear nor "
+            "convict the turn"
+        )
+        message = (
+            f"protected-path guard unavailable after {session_label}; "
+            f"{unavailable_detail}"
+        )
+    else:
+        reason = events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED
+        named = ", ".join(
+            f"{guard_id} ({', '.join(hits)})" for guard_id, hits in matched.items()
+        )
+        failure_note = (
+            f"protected-path guard violation retained: {named}; restore the "
+            "path to its turn-start state or remove the guard before rerunning"
+        )
+        message = (
+            f"{session_label} changed protected paths: {named}; changes were retained"
+        )
+
+    matched_repositories = {
+        qualified.partition(":")[0] for hits in matched.values() for qualified in hits
+    }
+    raw_changed = evidence.get("changed") if isinstance(evidence, Mapping) else None
+    before_after = (
+        {
+            repository: dict(entry)
+            for repository, entry in raw_changed.items()
+            if isinstance(entry, Mapping) and repository in matched_repositories
+        }
+        if isinstance(raw_changed, Mapping)
+        else {}
+    )
+    guard_record: dict[str, Any] = {
+        "passed": False,
+        "session_id": session_id,
+        "reason": reason,
+        "phase": "after",
+        "guard_ids": list(matched),
+        "matched_paths": {guard_id: list(hits) for guard_id, hits in matched.items()},
+        "guards": [rule.to_payload() for rule in active],
+        "observed_paths": list(changed_paths),
+        # The write guard's own before/after vectors for exactly the
+        # repositories that hold a matched path: the operator's next decision
+        # is "restore or accept", and that needs the content evidence, not just
+        # the names.
+        "evidence": before_after,
+        "coverage": {rule.id: coverage_by_id.get(rule.id) for rule in active},
+        "retained": True,
+        "detail": unavailable_detail,
+    }
+
+    revert_target = after if after is not None else before
+    reverted = _revert_session_status_to_pending(
+        revert_target,
+        session_id,
+        failure_note=failure_note,
+    )
+    inspected = _reinspect_after_revert(
+        before.plan_dir, revert_target, reverted, plan_cache
+    )
+    guard_record["reverted_to_pending"] = reverted is not None
+    with persistence.lock:
+        payload["final_snapshot"] = _snapshot_payload(inspected)
+        turn_payload["protected_path_guard"] = guard_record
+        _write_json_file(paths["result"], turn_payload)
+    _record_turn_rejected(
+        event_path=event_path,
+        payload=payload,
+        persistence=persistence,
+        turn_payload=turn_payload,
+        session_id=session_id,
+        guard="protected-path-guard",
+        reason=reason,
+        reopened=reverted is not None,
+    )
+    _pause_run(
+        event_path,
+        payload,
+        reason=reason,
+        message=message,
+        details={**session_details, "protected_path_guard": guard_record},
+        persistence=persistence,
+    )
+    return True
+
+
 def _enforce_review_verdict(
     *,
     event_path: Path,
@@ -12475,7 +12667,23 @@ def _run_locked(
     # The run's command gate. Constructed for every run and left empty until a
     # guard is added, so the drain always has somewhere to apply one and never
     # has to decide whether this run is guardable.
-    guard_controller = guards.GuardController(run_id=run_id, run_dir=run_dir)
+    #
+    # The repository binding is supplied here rather than at the first turn
+    # because the queue is drained before any turn starts: a protected-path
+    # rule naming a declared alias would otherwise be refused as unknown
+    # simply for having been queued before the run began.
+    guard_controller = guards.GuardController(
+        run_id=run_id,
+        run_dir=run_dir,
+        workspace_aliases=(
+            {
+                repository.alias: str(repository.root)
+                for repository in verification_context.workspace.repositories
+            }
+            if verification_context.workspace is not None
+            else {guards.LEGACY_PATH_QUALIFIER: str(cwd)}
+        ),
+    )
     event_path = state_dir / events.EVENTS_FILE_NAME
     state_path = state_dir / events.STATE_FILE_NAME
     try:
@@ -14845,6 +15053,16 @@ def _run_locked(
                 if is_review_session and workspace is None
                 else None
             )
+            # Whether this turn has something a protected-path guard can be
+            # compared against. The review fingerprint counts: a legacy review
+            # turn captures no write-guard snapshot, but its mutation guard
+            # proves the whole worktree is unchanged, which clears every path
+            # rule at once rather than leaving them unproven.
+            protected_path_baseline = (
+                workspace_snapshot_before is not None
+                or legacy_snapshot_before is not None
+                or review_fingerprint_before is not None
+            )
             if review_fingerprint_before is not None:
                 unavailable = _review_guard_unavailable_detail(
                     review_fingerprint_before
@@ -14936,9 +15154,26 @@ def _run_locked(
 
             # Materialized per turn, not once per run: the guard-bin directory
             # must exist before the child's PATH names it, and a guard added
-            # during the previous turn has to be armed for this one.
+            # during the previous turn has to be armed for this one. The
+            # workspace binding is refreshed here too, because it is what turns
+            # the absolute path a tool call carries into the `alias:path` a
+            # rule is written in, and a run can change harness mid-flight.
             with run_control_lock:
-                turn_env = guard_controller.prepare_turn()
+                guard_controller.set_workspace_aliases(
+                    {
+                        repository.alias: str(repository.root)
+                        for repository in workspace.repositories
+                    }
+                    if workspace is not None
+                    else {guards.LEGACY_PATH_QUALIFIER: str(cwd)}
+                )
+                guard_controller.mark_turn_snapshot(protected_path_baseline)
+                turn_env = guard_controller.prepare_turn(
+                    harness=turn_harness,
+                    pretool_armed=harnesses.get_adapter(
+                        turn_harness
+                    ).enforces_guard_pretool,
+                )
 
             execution = turn_executor.launch(
                 turn_execution.TurnLaunch(
@@ -15175,6 +15410,42 @@ def _run_locked(
                     paths=paths,
                     plan_cache=plan_cache,
                 )
+            ):
+                break
+
+            # After the general write guard and before every result branch, for
+            # the same reason the write guard sits there: a retryable pause
+            # would otherwise relaunch against a workspace in which the
+            # protected path has already moved, and adopt that as the baseline.
+            # It is a distinct step because it answers a distinct question —
+            # not "did the session stay in scope" but "did the run honour the
+            # standing instruction an operator gave it".
+            if _enforce_protected_path_guard(
+                event_path=event_path,
+                payload=payload,
+                persistence=persistence,
+                guard_controller=guard_controller,
+                before=before,
+                after=after,
+                session_id=session_id,
+                session_label=session_label,
+                session_details=session_details,
+                turn_payload=turn_payload,
+                paths=paths,
+                plan_cache=plan_cache,
+                changed_paths=(
+                    _protected_path_changed_paths(
+                        turn_payload.get("workspace_write_guard")
+                    )
+                    if isinstance(turn_payload.get("workspace_write_guard"), Mapping)
+                    # A legacy review turn captures no write-guard comparison,
+                    # but reaching here means its mutation guard passed, which
+                    # proves the worktree is unchanged — a stronger clearance
+                    # than an empty change list, not a missing one.
+                    else ()
+                    if review_fingerprint_before is not None
+                    else None
+                ),
             ):
                 break
 

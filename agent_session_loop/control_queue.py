@@ -105,6 +105,16 @@ GUARD_RULE_REJECT_REASONS: tuple[str, ...] = (
     guards.REJECT_SHELL_OPERATOR,
     guards.REJECT_GLOB,
     guards.REJECT_ENVIRONMENT_ASSIGNMENT,
+    guards.REJECT_EMPTY_GUARD_RULE,
+    guards.REJECT_EMPTY_PATH_RULE,
+    guards.REJECT_PATH_MISSING_QUALIFIER,
+    guards.REJECT_PATH_UNKNOWN_ALIAS,
+    guards.REJECT_PATH_ABSOLUTE,
+    guards.REJECT_PATH_BACKSLASH,
+    guards.REJECT_PATH_TRAVERSAL,
+    guards.REJECT_PATH_EMPTY_SEGMENT,
+    guards.REJECT_PATH_PATTERN,
+    guards.REJECT_PROTECTED_PATH_EVIDENCE,
 )
 
 
@@ -133,6 +143,10 @@ class ControlCommand:
     #: append time and again at drain, because the queue file is a durable
     #: interface an external producer may write directly.
     deny_commands: tuple[tuple[str, ...], ...] = ()
+    #: Parsed ``Alias:glob`` protections for an ``add-guard`` command. Kept
+    #: beside ``deny_commands`` rather than folded into it because the two are
+    #: enforced by different machinery and one command may carry both.
+    protect_paths: tuple[guards.ProtectedPath, ...] = ()
     guard_id: str | None = None
     #: The run the operator saw when they queued a guard mutation. A command
     #: that outlives that run is refused rather than applied to its successor.
@@ -150,6 +164,7 @@ class ControlCommand:
             "grace_seconds": self.grace_seconds,
             "reason": self.reason,
             "deny_commands": [list(rule) for rule in self.deny_commands],
+            "protect_paths": [path.rendered for path in self.protect_paths],
             "guard_id": self.guard_id,
             "expected_run_id": self.expected_run_id,
         }
@@ -286,6 +301,7 @@ class _GuardFields:
     """The validated guard-specific slice of one queue line."""
 
     deny_commands: tuple[tuple[str, ...], ...] = ()
+    protect_paths: tuple[guards.ProtectedPath, ...] = ()
     guard_id: str | None = None
     expected_run_id: str | None = None
     reason: str | None = None
@@ -320,7 +336,14 @@ def _guard_fields(command: str, payload: dict[str, Any]) -> _GuardFields:
         )
 
     raw_rules = payload.get("deny_commands")
-    if not isinstance(raw_rules, list) or not raw_rules:
+    raw_paths = payload.get("protect_paths")
+    if raw_rules is None:
+        raw_rules = []
+    if raw_paths is None:
+        raw_paths = []
+    if not isinstance(raw_rules, list) or not isinstance(raw_paths, list):
+        raise ValueError(REJECT_MISSING_GUARD_RULE)
+    if not raw_rules and not raw_paths:
         raise ValueError(REJECT_MISSING_GUARD_RULE)
     parsed: list[tuple[str, ...]] = []
     for raw_rule in raw_rules:
@@ -330,8 +353,21 @@ def _guard_fields(command: str, payload: dict[str, Any]) -> _GuardFields:
             parsed.append(guards.parse_command_rule(raw_rule))
         except guards.GuardRuleError as error:
             raise ValueError(error.reason) from error
+    # Syntax is validated here; the alias check is deliberately left to the
+    # consumer, which is the only side that knows the plan's registry. A queue
+    # line is read by the run it names, and re-deriving that registry from a
+    # queue writer's cwd would validate against the wrong plan.
+    parsed_paths: list[guards.ProtectedPath] = []
+    for raw_path in raw_paths:
+        if not isinstance(raw_path, str):
+            raise ValueError(guards.REJECT_EMPTY_PATH_RULE)
+        try:
+            parsed_paths.append(guards.parse_protected_path_rule(raw_path))
+        except guards.GuardRuleError as error:
+            raise ValueError(error.reason) from error
     return _GuardFields(
         deny_commands=tuple(parsed),
+        protect_paths=tuple(parsed_paths),
         expected_run_id=expected_run_id,
         reason=raw_reason,
     )
@@ -350,6 +386,7 @@ def append_command(
     grace_seconds: int | None = None,
     reason: str | None = None,
     deny_commands: Sequence[str] | None = None,
+    protect_paths: Sequence[str] | None = None,
     guard_id: str | None = None,
     expected_run_id: str | None = None,
     command_id: str | None = None,
@@ -422,6 +459,8 @@ def append_command(
         harness = None
         if deny_commands is not None:
             guard_record["deny_commands"] = list(deny_commands)
+        if protect_paths is not None:
+            guard_record["protect_paths"] = list(protect_paths)
         if guard_id is not None:
             guard_record["guard_id"] = guard_id
         if expected_run_id is not None:
@@ -470,6 +509,7 @@ def append_command(
         grace_seconds=resolved_grace,
         reason=resolved_reason,
         deny_commands=guard_parsed.deny_commands,
+        protect_paths=guard_parsed.protect_paths,
         guard_id=guard_parsed.guard_id,
         expected_run_id=guard_parsed.expected_run_id,
     )
@@ -682,6 +722,7 @@ def drain_queue(
                 grace_seconds=grace_value,
                 reason=reason_value,
                 deny_commands=guard_parsed.deny_commands,
+                protect_paths=guard_parsed.protect_paths,
                 guard_id=guard_parsed.guard_id,
                 expected_run_id=guard_parsed.expected_run_id,
             )

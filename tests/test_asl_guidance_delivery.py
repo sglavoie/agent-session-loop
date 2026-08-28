@@ -383,14 +383,14 @@ class _RecordingAdapter(harnesses.HarnessAdapter):
                 process=process, invocation=invocation, transport=transport
             )
 
-        def transport(
+        def deliver(
             request: guidance_delivery.GuidanceRequest,
         ) -> guidance_delivery.GuidanceOutcome:
             self.delivered_while_running.append(process.poll() is None)
             process.receive(request.text)
             return guidance_delivery.DELIVERED
 
-        return transport
+        return deliver
 
 
 class HarnessLiveDeliverySeamTests(unittest.TestCase):

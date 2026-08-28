@@ -1,12 +1,24 @@
-"""Run-scoped command guards: rules, active state, and the command gate.
+"""Run-scoped guards: rules, active state, the command gate, and path guards.
 
 A guard is an operator's standing refusal, attached to one live run: "while
-this run lasts, do not let the worker run ``git push``". It is enforced by the
-process boundary rather than by the worker's cooperation, which is the whole
-point — guidance a worker never reads changes nothing, and a guard has to hold
-anyway.
+this run lasts, do not let the worker run ``git push``", or "while this run
+lasts, ``docs/api.md`` must end the turn exactly as it started". It is enforced
+by the process boundary rather than by the worker's cooperation, which is the
+whole point — guidance a worker never reads changes nothing, and a guard has to
+hold anyway.
 
-The mechanism has four moving parts and they are deliberately small:
+There are two rule kinds and they are enforced by different machinery, which is
+why :data:`GUARD_KINDS` is a first-class distinction rather than an
+implementation detail:
+
+- A **command rule** is denied *before* it runs, by a ``PATH`` shim.
+- A **protected-path rule** is convicted *after* the turn, by comparing the
+  workspace against the snapshot captured before the turn started. A pre-tool
+  hook denies the direct writes it can see, but the postflight comparison is
+  the part that actually holds, because no hook can predict what an arbitrary
+  shell script will touch.
+
+The command mechanism has four moving parts and they are deliberately small:
 
 - **A rule** is a POSIX-tokenized argv prefix (:func:`parse_command_rule`).
   The first token names a bare executable; the rest must match the leading
@@ -30,21 +42,26 @@ directory and no later worker ever has it on ``PATH``.
 
 The guarantee is operational, not adversarial. :data:`COMMAND_GATE_COVERAGE`
 states what the gate does and does not reach, in the same words status
-reports it, so nobody has to infer the boundary from the implementation.
+reports it, so nobody has to infer the boundary from the implementation, and
+:func:`guard_coverage` says the same thing per guard and per enforcement lane
+so an operator can see which half of a guard is actually armed.
 """
 
 from __future__ import annotations
 
 import contextlib
 import errno
+import functools
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
 import sys
 import threading
 import uuid
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +74,11 @@ GUARD_BIN_DIR_NAME = "guard-bin"
 
 #: The derived policy every shim reads, beside the guard-bin it shadows with.
 GUARD_POLICY_FILE_NAME = "guard-policy.json"
+
+#: How a pre-tool hook finds the policy. The shims have the path baked in at
+#: install time; a hook is a single script shared by every run, so it is told
+#: through the turn environment instead of guessing from a working directory.
+GUARD_POLICY_ENV_VAR = "ASL_GUARD_POLICY"
 
 #: Schema version of the policy file. Shared with the dispatcher so the two
 #: cannot drift: a shim that does not recognize the version enforces nothing.
@@ -85,6 +107,20 @@ REJECT_RUN_CHANGED = "run-changed"
 REJECT_UNKNOWN_GUARD = "unknown-guard"
 REJECT_EXECUTABLE_NOT_FOUND = "executable-not-found"
 REJECT_ACTIVATION_FAILED = "activation-failed"
+REJECT_EMPTY_GUARD_RULE = "empty-guard-rule"
+
+# Protected-path rejections. A path rule that cannot be matched against the
+# workspace comparison output is refused at parse time rather than accepted as
+# protection that silently never fires.
+REJECT_EMPTY_PATH_RULE = "empty-path-rule"
+REJECT_PATH_MISSING_QUALIFIER = "path-missing-qualifier"
+REJECT_PATH_UNKNOWN_ALIAS = "path-unknown-alias"
+REJECT_PATH_ABSOLUTE = "absolute-path-in-rule"
+REJECT_PATH_BACKSLASH = "backslash-in-path-rule"
+REJECT_PATH_TRAVERSAL = "parent-traversal-in-path-rule"
+REJECT_PATH_EMPTY_SEGMENT = "empty-segment-in-path-rule"
+REJECT_PATH_PATTERN = "unsupported-path-pattern"
+REJECT_PROTECTED_PATH_EVIDENCE = "protected-path-evidence-unavailable"
 
 #: Characters that only mean something to a shell. A rule is an argv prefix,
 #: never a shell fragment, so one of these inside a token means the operator
@@ -119,8 +155,73 @@ COMMAND_GATE_COVERAGE: dict[str, Any] = {
 }
 
 
+#: What a protected-path guard reaches, and what it does not — the path-rule
+#: counterpart to :data:`COMMAND_GATE_COVERAGE`, reported verbatim by status.
+PROTECTED_PATH_COVERAGE: dict[str, Any] = {
+    "mechanism": "turn-start workspace snapshot compared at finalization",
+    "matching": (
+        "case-sensitive POSIX qualified paths; `*` and `?` within one segment, "
+        "`**` across segments"
+    ),
+    "baseline": "the snapshot captured before the turn started, not before the "
+    "guard was added",
+    "covers": (
+        "any change to a matched path present at finalization, however it was made",
+        "a change made earlier in the turn than the guard itself",
+        "a change made by a process the harness never saw",
+    ),
+    "does_not_cover": (
+        "a matched path changed and restored to its exact turn-start content",
+        "a change made after the run terminates",
+        "predicting what an arbitrary shell script will write before it runs",
+    ),
+    "on_violation": "the turn is rejected, its filesystem changes are retained, "
+    "and the session returns to pending",
+    "guarantee": "operational safeguard, not a sandbox against hostile code",
+}
+
+#: The two rule kinds. A guard is exactly one of them.
+GUARD_KIND_COMMAND = "command"
+GUARD_KIND_PROTECTED_PATH = "protected-path"
+GUARD_KINDS: tuple[str, ...] = (GUARD_KIND_COMMAND, GUARD_KIND_PROTECTED_PATH)
+
+#: The qualifier a legacy (single-repository) plan must use. Registered plans
+#: use their declared aliases instead; there is no wildcard qualifier, because
+#: "every repository" written by hand is indistinguishable from a typo.
+LEGACY_PATH_QUALIFIER = "."
+
+#: Enforcement lanes reported per guard. They are separate because a guard can
+#: be armed in one and blind in another, and collapsing them into a single
+#: "protected: yes" would be the most misleading thing status could say.
+LANE_COMMAND_GATE = "command-gate"
+LANE_PRETOOL = "pretool"
+LANE_POSTFLIGHT = "postflight"
+COVERAGE_LANES: tuple[str, ...] = (LANE_COMMAND_GATE, LANE_PRETOOL, LANE_POSTFLIGHT)
+
+#: Per-lane verdicts. ``degraded`` is not a hedge: it means the lane enforces
+#: something strictly narrower than the rule, and the narrowing is named.
+COVERAGE_ACTIVE = "active"
+COVERAGE_DEGRADED = "degraded"
+COVERAGE_UNSUPPORTED = "unsupported"
+
+#: Stable per-lane reasons. Clients branch on these, so they are spelled once.
+COVERAGE_REASON_SHIM_ARMED = "path-shim-armed"
+COVERAGE_REASON_SHIM_UNAVAILABLE = "path-shim-not-armed"
+COVERAGE_REASON_NOT_A_COMMAND_RULE = "not-a-command-rule"
+COVERAGE_REASON_NOT_A_PATH_RULE = "not-a-path-rule"
+COVERAGE_REASON_HOOK_DENIES = "hook-denies-before-execution"
+COVERAGE_REASON_HOOK_UNAVAILABLE = "harness-exposes-no-pre-tool-hook"
+COVERAGE_REASON_CODEX_HOOK_TRUST = "codex-hook-trust-requires-user-config-mutation"
+COVERAGE_REASON_COPILOT_PROCESS_START = "copilot-deny-tool-fixed-at-process-start"
+COVERAGE_REASON_COPILOT_NO_PATH_RULE = "copilot-deny-tool-cannot-express-paths"
+COVERAGE_REASON_COPILOT_UNEXPRESSIBLE = "copilot-deny-tool-cannot-express-rule"
+COVERAGE_REASON_ADDED_AFTER_PROCESS_START = "guard-added-after-process-start"
+COVERAGE_REASON_SNAPSHOT_COMPARISON = "turn-start-snapshot-comparison"
+COVERAGE_REASON_NOT_OBSERVABLE = "command-execution-leaves-no-postflight-evidence"
+
+
 class GuardRuleError(ValueError):
-    """A command rule that cannot be turned into an argv prefix."""
+    """A rule that cannot be turned into an argv prefix or a path matcher."""
 
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
@@ -129,28 +230,82 @@ class GuardRuleError(ValueError):
 
 
 @dataclass(frozen=True)
+class ProtectedPath:
+    """One qualified path pattern: which repository, and which paths in it.
+
+    The qualifier is an alias from the plan's ``## Repositories`` registry (or
+    ``.`` for a legacy single-repository plan) and matches the ``alias:path``
+    vocabulary the workspace write guard already produces, so a rule is
+    compared against evidence that was built independently of it.
+    """
+
+    qualifier: str
+    pattern: str
+
+    @property
+    def rendered(self) -> str:
+        return f"{self.qualifier}:{self.pattern}"
+
+    def matches(self, qualifier: str, path: str) -> bool:
+        return qualifier == self.qualifier and bool(
+            _compile_path_pattern(self.pattern).match(path)
+        )
+
+    def matches_qualified(self, qualified: str) -> bool:
+        qualifier, separator, path = qualified.partition(":")
+        if not separator:
+            return False
+        return self.matches(qualifier, path)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"qualifier": self.qualifier, "pattern": self.pattern}
+
+
+@dataclass(frozen=True)
 class GuardRule:
-    """One active guard: an argv prefix, its identity, and why it exists."""
+    """One active guard: what it forbids, its identity, and why it exists.
+
+    Exactly one of ``command`` and ``path`` is populated. They are separate
+    fields rather than a tagged union because every consumer branches on the
+    kind anyway, and an empty tuple is a less ambiguous "not this kind" than a
+    sentinel would be.
+    """
 
     id: str
-    command: tuple[str, ...]
     reason: str | None
     created_at: str
+    command: tuple[str, ...] = ()
+    path: ProtectedPath | None = None
 
     @property
-    def executable(self) -> str:
-        return self.command[0]
+    def kind(self) -> str:
+        return GUARD_KIND_COMMAND if self.command else GUARD_KIND_PROTECTED_PATH
 
     @property
-    def rendered_command(self) -> str:
-        return " ".join(self.command)
+    def executable(self) -> str | None:
+        return self.command[0] if self.command else None
+
+    @property
+    def rendered_command(self) -> str | None:
+        return " ".join(self.command) if self.command else None
+
+    @property
+    def rendered(self) -> str:
+        """One line naming what this guard forbids, whichever kind it is."""
+        if self.command:
+            return " ".join(self.command)
+        assert self.path is not None
+        return self.path.rendered
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "kind": self.kind,
             "command": list(self.command),
             "rendered_command": self.rendered_command,
             "executable": self.executable,
+            "protected_path": self.path.to_payload() if self.path else None,
+            "rendered": self.rendered,
             "reason": self.reason,
             "created_at": self.created_at,
         }
@@ -263,6 +418,328 @@ def parse_command_rule(raw: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
+#: Pattern metacharacters this matcher implements. Anything else that a glob
+#: dialect might mean — character classes, brace expansion, negation — is
+#: refused, because a rule that quietly matched nothing would read as
+#: protection right up until it failed to fire.
+_PATH_WILDCARD_CHARS = frozenset("*?")
+_UNSUPPORTED_PATTERN_CHARS = frozenset("[]{}!\0")
+
+
+@functools.lru_cache(maxsize=512)
+def _compile_path_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile a validated path pattern into a whole-string, case-sensitive regex.
+
+    ``**`` is a whole segment and spans zero or more segments; ``*`` and ``?``
+    never cross a separator. Matching is case-sensitive even on a
+    case-insensitive filesystem, because the qualified paths this is compared
+    against come from Git, which is case-sensitive about what it records.
+    """
+    segments = pattern.split("/")
+    parts: list[str] = []
+    for index, segment in enumerate(segments):
+        last = index == len(segments) - 1
+        if segment == "**":
+            # Trailing ``**`` must still require something below it: ``a/**``
+            # protects the contents of ``a``, and ``a`` itself is the literal
+            # rule ``a``.
+            parts.append("[^/]+(?:/[^/]+)*" if last else "(?:[^/]+/)*")
+            continue
+        for character in segment:
+            if character == "*":
+                parts.append("[^/]*")
+            elif character == "?":
+                parts.append("[^/]")
+            else:
+                parts.append(re.escape(character))
+        if not last:
+            parts.append("/")
+    return re.compile("".join(parts) + r"\Z")
+
+
+def parse_protected_path_rule(
+    raw: str,
+    *,
+    aliases: Sequence[str] | None = None,
+) -> ProtectedPath:
+    """Turn one operator-written ``Alias:glob`` rule into a path matcher.
+
+    The qualifier is mandatory and is validated against the plan's own
+    vocabulary: a registered plan's declared aliases, or ``.`` alone for a
+    legacy plan. Guessing a default repository would be the one failure mode
+    with no recovery — the operator would be told the guard is armed while it
+    watched a repository they did not name.
+
+    ``aliases`` of ``None`` means "no plan context available", which validates
+    the syntax and defers the alias check to the caller that has one.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise GuardRuleError(
+            REJECT_EMPTY_PATH_RULE,
+            "a protected-path rule must name a repository and a path",
+        )
+    candidate = raw.strip()
+    if "\\" in candidate:
+        raise GuardRuleError(
+            REJECT_PATH_BACKSLASH,
+            f"protected-path rule {candidate!r} contains a backslash; paths are "
+            "compared as POSIX paths, so `/` is the only separator",
+        )
+    qualifier, separator, pattern = candidate.partition(":")
+    if not separator:
+        raise GuardRuleError(
+            REJECT_PATH_MISSING_QUALIFIER,
+            f"protected-path rule {candidate!r} names no repository; write "
+            "`Alias:path` (or `.:path` for a single-repository plan)",
+        )
+    if not qualifier or not pattern:
+        raise GuardRuleError(
+            REJECT_EMPTY_PATH_RULE,
+            f"protected-path rule {candidate!r} has an empty repository or path",
+        )
+    if pattern.startswith("/"):
+        raise GuardRuleError(
+            REJECT_PATH_ABSOLUTE,
+            f"protected-path rule {candidate!r} is absolute; a path is relative "
+            "to the repository its qualifier names, so an absolute path could "
+            "never match the evidence the guard compares against",
+        )
+    if _UNSUPPORTED_PATTERN_CHARS & set(pattern):
+        raise GuardRuleError(
+            REJECT_PATH_PATTERN,
+            f"protected-path rule {candidate!r} uses pattern syntax this "
+            "matcher does not implement; only literals, `*`, `**`, and `?` are "
+            "supported",
+        )
+    segments = pattern.split("/")
+    if segments[0] == ".":
+        # A leading `./` is how people type "in this repository"; it is the one
+        # `.` segment that carries an intention rather than a mistake.
+        segments = segments[1:]
+    for segment in segments:
+        if not segment:
+            raise GuardRuleError(
+                REJECT_PATH_EMPTY_SEGMENT,
+                f"protected-path rule {candidate!r} has an empty path segment; "
+                "a trailing or doubled `/` is almost never what was meant",
+            )
+        if segment == os.pardir:
+            raise GuardRuleError(
+                REJECT_PATH_TRAVERSAL,
+                f"protected-path rule {candidate!r} escapes its repository with "
+                "`..`; name the repository that owns the path instead",
+            )
+        if segment == os.curdir:
+            raise GuardRuleError(
+                REJECT_PATH_PATTERN,
+                f"protected-path rule {candidate!r} contains a `.` segment; "
+                "write the path as it appears in the repository",
+            )
+        if "**" in segment and segment != "**":
+            raise GuardRuleError(
+                REJECT_PATH_PATTERN,
+                f"protected-path rule {candidate!r} mixes `**` with other "
+                "characters in one segment; `**` spans whole segments, so it "
+                "must stand alone between separators",
+            )
+    if not segments:
+        raise GuardRuleError(
+            REJECT_EMPTY_PATH_RULE,
+            f"protected-path rule {candidate!r} names no path inside the repository",
+        )
+    normalized = "/".join(segments)
+    if aliases is not None and qualifier not in tuple(aliases):
+        known = ", ".join(sorted(aliases)) or "none"
+        raise GuardRuleError(
+            REJECT_PATH_UNKNOWN_ALIAS,
+            f"protected-path rule {candidate!r} names repository {qualifier!r}, "
+            f"which this plan does not declare; known qualifiers: {known}",
+        )
+    return ProtectedPath(qualifier=qualifier, pattern=normalized)
+
+
+def match_protected_paths(
+    guards: Sequence[GuardRule],
+    qualified_paths: Iterable[str],
+) -> OrderedDict[str, tuple[str, ...]]:
+    """Map each violated guard id to the qualified paths that violated it.
+
+    Guards with no match are absent rather than present-and-empty, so a caller
+    can treat a non-empty result as "the turn is convicted" without filtering.
+    """
+    observed = tuple(dict.fromkeys(qualified_paths))
+    matched: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+    for guard in guards:
+        if guard.path is None:
+            continue
+        hits = tuple(
+            qualified
+            for qualified in observed
+            if guard.path.matches_qualified(qualified)
+        )
+        if hits:
+            matched[guard.id] = hits
+    return matched
+
+
+def guard_coverage(
+    guard: GuardRule,
+    *,
+    harness: str | None,
+    gate_armed: bool = True,
+    pretool_armed: bool = False,
+    process_start: bool = False,
+) -> dict[str, dict[str, str]]:
+    """Say, per enforcement lane, how much of ``guard`` is actually armed.
+
+    The three lanes fail independently and an operator's next move differs by
+    which one is blind, so each carries its own verdict and its own stable
+    reason rather than being folded into one number.
+
+    ``pretool_armed`` reports whether the harness adapter installed this run's
+    hook overlay; ``process_start`` reports whether the guard already existed
+    when the worker process was spawned, which is the only thing a fixed
+    command-line deny rule can ever cover.
+    """
+    lanes: dict[str, dict[str, str]] = {}
+    if guard.kind == GUARD_KIND_COMMAND:
+        lanes[LANE_COMMAND_GATE] = _lane(
+            COVERAGE_ACTIVE if gate_armed else COVERAGE_UNSUPPORTED,
+            COVERAGE_REASON_SHIM_ARMED
+            if gate_armed
+            else COVERAGE_REASON_SHIM_UNAVAILABLE,
+        )
+        lanes[LANE_POSTFLIGHT] = _lane(
+            COVERAGE_UNSUPPORTED, COVERAGE_REASON_NOT_OBSERVABLE
+        )
+    else:
+        lanes[LANE_COMMAND_GATE] = _lane(
+            COVERAGE_UNSUPPORTED, COVERAGE_REASON_NOT_A_COMMAND_RULE
+        )
+        lanes[LANE_POSTFLIGHT] = _lane(
+            COVERAGE_ACTIVE, COVERAGE_REASON_SNAPSHOT_COMPARISON
+        )
+    lanes[LANE_PRETOOL] = _pretool_lane(
+        guard,
+        harness=harness,
+        pretool_armed=pretool_armed,
+        process_start=process_start,
+    )
+    return lanes
+
+
+def _lane(status: str, reason: str) -> dict[str, str]:
+    return {"status": status, "reason": reason}
+
+
+def _pretool_lane(
+    guard: GuardRule,
+    *,
+    harness: str | None,
+    pretool_armed: bool,
+    process_start: bool,
+) -> dict[str, str]:
+    """The pre-execution verdict, which is the lane harnesses differ on.
+
+    Claude accepts a per-turn hook overlay, so both rule kinds are refused
+    before the tool call runs. Codex reads hooks only from a trusted
+    ``CODEX_HOME`` file, and arming that trust means writing a hash into the
+    operator's own configuration, which ASL will not do. Copilot has no hook at
+    all: its ``--deny-tool`` rules are fixed when the process is spawned, so
+    they cover a command rule that already existed and nothing else.
+    """
+    if harness == "claude":
+        if not pretool_armed:
+            return _lane(COVERAGE_UNSUPPORTED, COVERAGE_REASON_HOOK_UNAVAILABLE)
+        return _lane(COVERAGE_ACTIVE, COVERAGE_REASON_HOOK_DENIES)
+    if harness == "codex":
+        return _lane(COVERAGE_UNSUPPORTED, COVERAGE_REASON_CODEX_HOOK_TRUST)
+    if harness == "copilot":
+        if guard.kind != GUARD_KIND_COMMAND:
+            return _lane(COVERAGE_UNSUPPORTED, COVERAGE_REASON_COPILOT_NO_PATH_RULE)
+        if copilot_deny_tool_rule(guard.command) is None:
+            return _lane(COVERAGE_UNSUPPORTED, COVERAGE_REASON_COPILOT_UNEXPRESSIBLE)
+        if not process_start:
+            return _lane(
+                COVERAGE_UNSUPPORTED, COVERAGE_REASON_ADDED_AFTER_PROCESS_START
+            )
+        return _lane(COVERAGE_DEGRADED, COVERAGE_REASON_COPILOT_PROCESS_START)
+    return _lane(COVERAGE_UNSUPPORTED, COVERAGE_REASON_HOOK_UNAVAILABLE)
+
+
+def copilot_deny_tool_rule(command: Sequence[str]) -> str | None:
+    """The ``--deny-tool`` value for one command rule, or ``None`` if there is none.
+
+    ``--deny-tool='shell(git push)'`` matches on the command *text*, so a rule
+    is only expressible when writing its tokens back out with single spaces
+    reproduces the invocation it was parsed from. A token carrying whitespace
+    or a parenthesis does not survive that round trip -- it would either split
+    into two tokens or close the ``shell(...)`` wrapper early -- so it compiles
+    to nothing here and its ``pretool`` lane says so rather than shipping a
+    rule that quietly matches something else.
+    """
+    tokens = [str(token) for token in command]
+    if not tokens:
+        return None
+    if any(not token or set(token) & _COPILOT_UNEXPRESSIBLE for token in tokens):
+        return None
+    return f"shell({' '.join(tokens)})"
+
+
+#: Characters that make a command rule impossible to state as a ``shell(...)``
+#: deny value: whitespace is the token separator on the other side, and the
+#: parentheses delimit the wrapper itself.
+_COPILOT_UNEXPRESSIBLE = frozenset(" \t\n()")
+
+
+def copilot_deny_tool_rules(guards: Sequence[GuardRule]) -> tuple[str, ...]:
+    """Compile the guards Copilot's ``--deny-tool`` can express, in order.
+
+    Only command rules compile: the CLI has no path-aware equivalent, so a
+    protected-path guard contributes nothing here and is reported as
+    postflight-only rather than silently dropped.
+    """
+    return _dedupe(copilot_deny_tool_rule(guard.command) for guard in guards)
+
+
+def copilot_deny_tool_rules_from_policy(
+    policy: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """The same compilation, driven by a policy document instead of objects.
+
+    Argv is built from the derived policy the turn environment points at, not
+    from the live controller: the two are the same set by construction, and
+    reading the file is what makes "guards present at process start" a fact
+    about the document the worker's other lanes also read. Anything malformed
+    is skipped rather than raised -- a policy this side cannot parse must
+    degrade to the lanes that do not depend on argv, never fail the turn.
+    """
+    if not policy:
+        return ()
+    entries = policy.get("guards")
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        return ()
+    commands = [
+        entry.get("command")
+        for entry in entries
+        if isinstance(entry, Mapping) and isinstance(entry.get("command"), Sequence)
+    ]
+    return _dedupe(
+        copilot_deny_tool_rule(command)
+        for command in commands
+        if not isinstance(command, (str, bytes))
+    )
+
+
+def _dedupe(values: Iterable[str | None]) -> tuple[str, ...]:
+    """First-wins deduplication that drops the ``None``s, preserving order."""
+    seen: list[str] = []
+    for value in values:
+        if value is not None and value not in seen:
+            seen.append(value)
+    return tuple(seen)
+
+
 def guard_bin_dir(run_dir: str | Path) -> Path:
     """The per-run directory prepended to a worker turn's ``PATH``."""
     return Path(run_dir) / GUARD_BIN_DIR_NAME
@@ -305,8 +782,17 @@ def policy_document(
     guard_bin: Path,
     guards: Sequence[GuardRule],
     executables: Mapping[str, str],
+    workspace_aliases: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """The exact JSON a shim reads, derived from the active set."""
+    """The exact JSON a shim or a pre-tool hook reads, derived from the active set.
+
+    Two readers, one file. The shim only looks at ``guards[].command`` and
+    ``executables``; the hook additionally needs ``protected_paths`` and
+    ``workspace.aliases`` to turn the absolute path a tool call carries back
+    into the ``alias:path`` vocabulary the rules are written in. Keeping them in
+    one atomically-replaced document is what stops the two enforcement lanes
+    from disagreeing about what is currently denied.
+    """
     return {
         "version": POLICY_VERSION,
         "run_id": run_id,
@@ -314,12 +800,17 @@ def policy_document(
         "guards": [
             {
                 "id": guard.id,
+                "kind": guard.kind,
                 "command": list(guard.command),
+                "protected_path": (
+                    guard.path.to_payload() if guard.path is not None else None
+                ),
                 "reason": guard.reason,
             }
             for guard in guards
         ],
         "executables": dict(executables),
+        "workspace": {"aliases": dict(workspace_aliases or {})},
     }
 
 
@@ -424,6 +915,7 @@ class GuardController:
         run_id: str,
         run_dir: str | Path,
         path_value: str | None = None,
+        workspace_aliases: Mapping[str, str] | None = None,
     ) -> None:
         self.run_id = run_id
         self.run_dir = Path(run_dir)
@@ -431,7 +923,21 @@ class GuardController:
         self._lock = threading.Lock()
         self._guards: dict[str, GuardRule] = {}
         self._executables: dict[str, str] = {}
+        self._workspace_aliases: dict[str, str] = dict(workspace_aliases or {})
         self._expired = False
+        # Coverage context for the turn now in flight. It is per-turn rather
+        # than per-run because the harness can be switched mid-run, and a guard
+        # that was pre-tool-enforced under Claude is not enforced the same way
+        # after `control select-harness` moves the run to Copilot.
+        self._harness: str | None = None
+        self._pretool_armed = False
+        self._process_start_ids: frozenset[str] = frozenset()
+        # Tri-state, and the third state is the point: ``None`` means no turn
+        # is in flight, ``True`` means one is and its baseline was captured,
+        # ``False`` means one is and it was not. Only the last refuses a path
+        # guard, because it is the only case where arming one would promise a
+        # comparison that can never be made.
+        self._turn_snapshot_available: bool | None = None
 
     # -- read-only projections ---------------------------------------------
 
@@ -447,33 +953,97 @@ class GuardController:
         with self._lock:
             return tuple(self._guards.values())
 
+    def active_paths(self) -> tuple[GuardRule, ...]:
+        """The protected-path subset, which is what finalization enforces."""
+        return tuple(
+            guard for guard in self.active() if guard.kind == GUARD_KIND_PROTECTED_PATH
+        )
+
+    def workspace_aliases(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._workspace_aliases)
+
+    def mark_turn_snapshot(self, available: bool | None) -> None:
+        """Record whether the turn in flight has a baseline to compare against.
+
+        Called with a boolean when a turn starts and with ``None`` when it
+        ends. A path guard added between turns is always accepted: the next
+        turn captures its own baseline, so there is nothing missing yet.
+        """
+        with self._lock:
+            self._turn_snapshot_available = available
+
+    def set_workspace_aliases(self, aliases: Mapping[str, str]) -> None:
+        """Bind alias names to absolute roots for the pre-tool hook.
+
+        Resolved once the run knows its workspace, which is after the
+        controller exists: the controller is created with the run directory, and
+        the repository registry is derived later. Rewriting the policy here
+        keeps the hook from having to re-derive a binding the runner already
+        made.
+        """
+        with self._lock:
+            self._workspace_aliases = dict(aliases)
+            if self._guards and not self._expired:
+                self._restore_locked()
+
     def to_payload(self) -> list[dict[str, Any]]:
-        """The active summaries carried by runner state and read by status."""
-        return [guard.to_payload() for guard in self.active()]
+        """The active summaries carried by runner state and read by status.
+
+        Each entry carries its own per-lane coverage, because two guards on the
+        same run can be enforced differently: one added before the worker
+        process started can reach a fixed command-line deny rule that one added
+        mid-turn never will.
+        """
+        with self._lock:
+            harness = self._harness
+            pretool_armed = self._pretool_armed
+            process_start_ids = self._process_start_ids
+            gate_armed = not self._expired
+            active = tuple(self._guards.values())
+        return [
+            {
+                **guard.to_payload(),
+                "coverage": guard_coverage(
+                    guard,
+                    harness=harness,
+                    gate_armed=gate_armed,
+                    pretool_armed=pretool_armed,
+                    process_start=guard.id in process_start_ids,
+                ),
+            }
+            for guard in active
+        ]
 
     # -- mutations ---------------------------------------------------------
 
     def add(
         self,
-        rules: Iterable[Sequence[str]],
+        rules: Iterable[Sequence[str]] = (),
         *,
+        paths: Iterable[ProtectedPath] = (),
         reason: str | None = None,
         created_at: str | None = None,
     ) -> GuardOutcome:
-        """Activate one or more command rules, all-or-nothing.
+        """Activate one or more rules of either kind, all-or-nothing.
 
-        A queued command carrying several ``--deny-command`` rules is one
-        operator intention, so a partial activation would be the worst
-        outcome: the operator would be told some subset is armed without
-        being told which. Every rule is staged, and the set only changes once
-        every shim is installed.
+        A queued command carrying several ``--deny-command`` and
+        ``--protect-path`` rules is one operator intention, so a partial
+        activation would be the worst outcome: the operator would be told some
+        subset is armed without being told which. Every rule is staged, and the
+        set only changes once every shim is installed.
+
+        A path rule needs no shim and cannot fail to resolve, so mixing the
+        kinds costs nothing: the all-or-nothing boundary is the shim
+        installation, and a path rule simply joins the set alongside it.
         """
         staged = [tuple(rule) for rule in rules]
-        if not staged:
+        staged_paths = list(paths)
+        if not staged and not staged_paths:
             return GuardOutcome(
                 action=ACTION_REJECTED,
-                reason=REJECT_EMPTY_COMMAND_RULE,
-                detail="guard add requires at least one command rule",
+                reason=REJECT_EMPTY_GUARD_RULE,
+                detail="guard add requires at least one command or path rule",
             )
         stamp = created_at or clock.utc_iso_now()
         with self._lock:
@@ -482,6 +1052,16 @@ class GuardController:
                     action=ACTION_REJECTED,
                     reason=REJECT_NO_ACTIVE_RUN,
                     detail="the run this guard names has already terminated",
+                )
+            if staged_paths and self._turn_snapshot_available is False:
+                return GuardOutcome(
+                    action=ACTION_REJECTED,
+                    reason=REJECT_PROTECTED_PATH_EVIDENCE,
+                    detail=(
+                        "the turn in flight has no captured baseline, so a "
+                        "protected-path guard could never be compared against "
+                        "one; re-add it once this turn ends"
+                    ),
                 )
             resolved: dict[str, str] = {}
             for command in staged:
@@ -513,6 +1093,14 @@ class GuardController:
                     created_at=stamp,
                 )
                 for command in staged
+            ] + [
+                GuardRule(
+                    id=new_guard_id(),
+                    path=protected,
+                    reason=reason,
+                    created_at=stamp,
+                )
+                for protected in staged_paths
             ]
             merged = dict(self._guards)
             for rule in new_rules:
@@ -580,7 +1168,13 @@ class GuardController:
                 guards=(existing,),
             )
 
-    def prepare_turn(self, env: Mapping[str, str] | None = None) -> dict[str, str]:
+    def prepare_turn(
+        self,
+        env: Mapping[str, str] | None = None,
+        *,
+        harness: str | None = None,
+        pretool_armed: bool = False,
+    ) -> dict[str, str]:
         """Arm the overlay for the turn about to start and return its environment.
 
         Called before every worker turn. The directory is created even when no
@@ -590,11 +1184,20 @@ class GuardController:
         earlier turn inert rather than stale.
 
         The returned mapping is the parent environment with ``PATH`` rewritten
-        and nothing else touched, so every harness keeps the environment it
-        was going to get.
+        and ``ASL_GUARD_POLICY`` added, so a pre-tool hook reads the same
+        derived policy the shims do instead of re-deriving it from the run
+        directory it would otherwise have to guess.
+
+        The guard set is snapshotted here as this turn's "existed at process
+        start" cohort: it is the only cohort a fixed command-line deny rule can
+        ever cover, and coverage that claimed otherwise for a mid-turn addition
+        would be the exact lie an operator would act on.
         """
         base = dict(os.environ if env is None else env)
         with self._lock:
+            self._harness = harness
+            self._pretool_armed = pretool_armed
+            self._process_start_ids = frozenset(self._guards)
             guard_bin = self.guard_bin
             try:
                 guard_bin.mkdir(parents=True, exist_ok=True)
@@ -609,6 +1212,7 @@ class GuardController:
                 # set either way rather than claiming a gate it does not have.
                 return base
         base["PATH"] = child_path(base.get("PATH"), guard_bin)
+        base[GUARD_POLICY_ENV_VAR] = str(self.policy_file)
         return base
 
     def expire(self) -> tuple[GuardRule, ...]:
@@ -652,9 +1256,12 @@ class GuardController:
                 guard_bin=self.guard_bin,
                 guards=list(guards.values()),
                 executables=executables,
+                workspace_aliases=self._workspace_aliases,
             ),
         )
-        for name in sorted({rule.executable for rule in guards.values()}):
+        for name in sorted(
+            {rule.executable for rule in guards.values() if rule.executable is not None}
+        ):
             install_shim(
                 guard_bin=self.guard_bin,
                 name=name,

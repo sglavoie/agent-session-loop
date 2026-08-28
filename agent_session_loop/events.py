@@ -208,6 +208,16 @@ PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE = "workspace-write-guard-unavaila
 # the session is returned to pending so an operator can repair the durable
 # scope and refresh expansion/preflight evidence.
 PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION = "workspace-write-scope-violation"
+# A run-scoped protected-path guard was active at finalization and the workspace
+# no longer matches the turn-start snapshot at a path the guard names. Like the
+# scope violation above, contents are retained and the session returns to
+# pending: the operator declared the path must not move, so the run must not
+# decide on its own how to put it back.
+PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED = "guard-protected-path-changed"
+# The turn-start snapshot a protected-path guard has to compare against is
+# missing or unreadable, so the guard can neither clear nor convict the turn.
+# Enforcement fails closed rather than publishing a turn it could not check.
+PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE = "guard-protected-path-unavailable"
 # A legacy run resolved declarations reaching more than one Git top-level. The
 # value matches ``repository_intent.REASON_REPOSITORY_REGISTRY_REQUIRED``; it is
 # spelled literally here so the low-level event vocabulary keeps no dependency
@@ -261,6 +271,8 @@ PAUSE_REASONS: tuple[str, ...] = (
     PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
     PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
     PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+    PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED,
+    PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE,
     PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
     PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION,
     PAUSE_REASON_PLAN_ARTIFACT_TAMPERED,

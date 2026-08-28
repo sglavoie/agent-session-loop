@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Literal
 
-from . import claude_stream, codex_app_server, config, guidance_delivery
+from . import claude_stream, codex_app_server, config, guards, guidance_delivery
 from .process_tree import (
     clear_process_tree,
     descendant_pids,
@@ -639,6 +639,13 @@ class HarnessAdapter:
     #: a fallback and the ledger already has the live attempt's own verdict.
     delivers_guidance_next_turn: bool = False
 
+    #: Whether this adapter arms an ASL-owned pre-tool hook that reads the
+    #: run's guard policy and can refuse a call before it executes. False is
+    #: the honest default: a harness that exposes no hook ASL can arm without
+    #: touching the operator's own configuration has no pre-tool lane, and
+    #: coverage must say so rather than imply the guard is enforced twice.
+    enforces_guard_pretool: bool = False
+
     def __init__(self, executable: str | None = None) -> None:
         try:
             self.executable = executable or config.configured_harness_executable(
@@ -704,8 +711,31 @@ class HarnessAdapter:
         model: str | None = None,
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
+        env: Mapping[str, str] | None = None,
     ) -> list[str]:
         raise NotImplementedError
+
+    def _guard_policy(self, env: Mapping[str, str] | None) -> dict[str, Any] | None:
+        """The run's derived guard policy, as the turn environment points at it.
+
+        The environment is the only place argv construction can learn about
+        guards: the controller writes the policy atomically and exports its
+        path, so an adapter that builds a command line reads the same document
+        the ``PATH`` shim and the pre-tool hook read. ``None`` means there is
+        nothing to compile — no guards, no policy, or a policy this process
+        cannot read — and callers must degrade to the postflight lane rather
+        than refuse the turn.
+        """
+        if not env:
+            return None
+        policy_path = env.get(guards.GUARD_POLICY_ENV_VAR)
+        if not policy_path:
+            return None
+        try:
+            document = json.loads(Path(policy_path).read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            return None
+        return document if isinstance(document, dict) else None
 
     def build_invocation(
         self,
@@ -718,6 +748,7 @@ class HarnessAdapter:
         model: str | None = None,
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
+        env: Mapping[str, str] | None = None,
     ) -> HarnessInvocation:
         self.check_access(access, plan_dir=plan_dir, unsafe_bypass=unsafe_bypass)
         return HarnessInvocation(
@@ -731,6 +762,7 @@ class HarnessAdapter:
                 model=model,
                 effort=effort,
                 access=access,
+                env=env,
             ),
             cwd=cwd,
             last_message_path=last_message_path,
@@ -807,6 +839,12 @@ class HarnessAdapter:
                 model=model,
                 effort=effort,
                 access=access,
+                # The turn environment is where argv learns about guards: an
+                # adapter whose only pre-execution lane is its command line
+                # reads the policy this env points at. Built here rather than
+                # by the caller so the argv that runs is the argv the guards
+                # were compiled into.
+                env=env,
             )
         if invocation.last_message_path is not None:
             invocation.last_message_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1229,6 +1267,7 @@ class CodexAdapter(HarnessAdapter):
         model: str | None = None,
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
+        env: Mapping[str, str] | None = None,
     ) -> list[str]:
         """The app-server argv, which deliberately says almost nothing.
 
@@ -1237,7 +1276,7 @@ class CodexAdapter(HarnessAdapter):
         protocol. The prompt in particular is no longer a command-line
         argument, so it no longer appears in any process listing.
         """
-        del cwd, plan_dir, prompt, unsafe_bypass, model, effort, access
+        del cwd, plan_dir, prompt, unsafe_bypass, model, effort, access, env
         if last_message_path is None:
             raise HarnessError("codex adapter requires a last_message_path")
         return [self.executable, "app-server"]
@@ -1362,6 +1401,7 @@ class CodexAdapter(HarnessAdapter):
         model: str | None = None,
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
+        env: Mapping[str, str] | None = None,
     ) -> HarnessInvocation:
         self.check_access(access, plan_dir=plan_dir, unsafe_bypass=unsafe_bypass)
         return HarnessInvocation(
@@ -1375,6 +1415,7 @@ class CodexAdapter(HarnessAdapter):
                 model=model,
                 effort=effort,
                 access=access,
+                env=env,
             ),
             cwd=cwd,
             last_message_path=last_message_path,
@@ -1668,6 +1709,7 @@ class ClaudeAdapter(HarnessAdapter):
     name = "claude"
     skill_prefix = "/"
     enforces_audit_read_only = True
+    enforces_guard_pretool = True
 
     def output_processor(self) -> _OutputProcessor:
         return _ClaudeStreamJsonOutputProcessor()
@@ -1683,8 +1725,12 @@ class ClaudeAdapter(HarnessAdapter):
         model: str | None = None,
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
+        env: Mapping[str, str] | None = None,
     ) -> list[str]:
-        del cwd, last_message_path
+        # Claude's guard lane is the settings overlay written at spawn time,
+        # not argv, so the turn environment says nothing this command line
+        # needs.
+        del cwd, last_message_path, env
         argv = [
             self.executable,
             "--print",
@@ -1746,6 +1792,7 @@ class ClaudeAdapter(HarnessAdapter):
         model: str | None = None,
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
+        env: Mapping[str, str] | None = None,
     ) -> HarnessInvocation:
         invocation = super().build_invocation(
             cwd=cwd,
@@ -1756,6 +1803,7 @@ class ClaudeAdapter(HarnessAdapter):
             model=model,
             effort=effort,
             access=access,
+            env=env,
         )
         return dataclasses.replace(invocation, transport=TRANSPORT_STREAM_JSON)
 
@@ -1830,7 +1878,16 @@ class ClaudeAdapter(HarnessAdapter):
             # injects operator guidance into one would make it something else.
             overlay_dir = Path(tempfile.mkdtemp(prefix="asl-claude-turn-"))
             spool = claude_stream.ClaudeGuidanceSpool(overlay_dir / "spool")
-            settings_path = claude_stream.write_settings_overlay(overlay_dir, spool)
+            # The policy path arrives in the turn environment the guard
+            # controller prepared, so the hook reads whatever is denied *now*
+            # rather than a copy taken when the overlay was written: a guard
+            # added mid-turn is enforced by the next tool call, not the next
+            # turn.
+            settings_path = claude_stream.write_settings_overlay(
+                overlay_dir,
+                spool,
+                guard_policy_path=(env or {}).get(guards.GUARD_POLICY_ENV_VAR),
+            )
             invocation = dataclasses.replace(
                 invocation,
                 argv=[*invocation.argv, "--settings", str(settings_path)],
@@ -1930,6 +1987,7 @@ class CopilotAdapter(HarnessAdapter):
         model: str | None = None,
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
+        env: Mapping[str, str] | None = None,
     ) -> list[str]:
         del last_message_path
         argv = [
@@ -1937,6 +1995,20 @@ class CopilotAdapter(HarnessAdapter):
             "-C",
             str(cwd),
         ]
+        # Copilot has no hook ASL can arm, so its only pre-execution lane is
+        # the command line it is spawned with. That fixes the rules at process
+        # start: a guard added mid-turn cannot reach this argv, and a
+        # protected-path rule has no `--deny-tool` form at all. Both gaps are
+        # reported as such by `guards.guard_coverage` rather than papered over
+        # -- this is a narrowing of the postflight guarantee, not a second one.
+        #
+        # The ``=`` form is load-bearing here for the same reason as in the
+        # audit profile below: ``--deny-tool`` takes a variadic value, so the
+        # space form swallows the next argument.
+        for denied in guards.copilot_deny_tool_rules_from_policy(
+            self._guard_policy(env)
+        ):
+            argv.append(f"--deny-tool={denied}")
         if access.is_audit:
             for root in access.read_roots:
                 argv.extend(["--add-dir", str(root)])

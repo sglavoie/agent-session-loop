@@ -85,6 +85,17 @@ def hook_script_path() -> Path:
     return Path(__file__).resolve().parent / "claude_guidance_hook.py"
 
 
+def guard_hook_script_path() -> Path:
+    """Absolute path to the standalone pre-tool guard hook.
+
+    Separate from the guidance hook, and invoked the same way, because the two
+    do opposite things: one adds context to a call that proceeds, the other
+    refuses the call. Folding them into one script would mean a bug in the
+    guidance path could swallow a denial.
+    """
+    return Path(__file__).resolve().parent / "guard_pretool_hook.py"
+
+
 class ClaudeGuidanceSpool:
     """The turn-scoped handoff between ASL and its ``PreToolUse`` hook.
 
@@ -133,33 +144,50 @@ class ClaudeGuidanceSpool:
         """Whether the hook has reported injecting this guidance."""
         return (self.root / _RECEIPTS / f"{guidance_id}.json").exists()
 
-    def settings_payload(self, *, executable: str) -> dict[str, Any]:
-        """Build the ephemeral settings overlay that arms the hook.
+    def settings_payload(
+        self,
+        *,
+        executable: str,
+        guard_policy_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Build the ephemeral settings overlay that arms this turn's hooks.
 
-        Deliberately minimal: one ``PreToolUse`` entry and nothing else. The
+        Deliberately minimal: one ``PreToolUse`` matcher and nothing else. The
         overlay is handed to the CLI with ``--settings`` for this turn only and
         is never written anywhere the user's own configuration lives.
+
+        The guard hook is listed first when the run has a policy for it. Order
+        is not what makes the denial hold — the CLI refuses the call if any
+        hook denies it — but a call that is about to be refused has no business
+        also being handed guidance meant for work it will not do.
         """
-        command = " ".join(
-            shlex.quote(part)
-            for part in (executable, str(hook_script_path()), str(self.root))
-        )
-        return {
-            "hooks": {
-                HOOK_EVENT: [
-                    {
-                        "matcher": "*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": command,
-                                "timeout": HOOK_TIMEOUT_SECONDS,
-                            }
-                        ],
-                    }
-                ]
+        hooks: list[dict[str, Any]] = []
+        if guard_policy_path:
+            hooks.append(
+                {
+                    "type": "command",
+                    "command": " ".join(
+                        shlex.quote(part)
+                        for part in (
+                            executable,
+                            str(guard_hook_script_path()),
+                            guard_policy_path,
+                        )
+                    ),
+                    "timeout": HOOK_TIMEOUT_SECONDS,
+                }
+            )
+        hooks.append(
+            {
+                "type": "command",
+                "command": " ".join(
+                    shlex.quote(part)
+                    for part in (executable, str(hook_script_path()), str(self.root))
+                ),
+                "timeout": HOOK_TIMEOUT_SECONDS,
             }
-        }
+        )
+        return {"hooks": {HOOK_EVENT: [{"matcher": "*", "hooks": hooks}]}}
 
 
 def write_settings_overlay(
@@ -167,12 +195,16 @@ def write_settings_overlay(
     spool: ClaudeGuidanceSpool,
     *,
     executable: str | None = None,
+    guard_policy_path: str | None = None,
 ) -> Path:
     """Materialize the overlay file and return the path ``--settings`` takes."""
     settings_path = overlay_dir / "settings.json"
     settings_path.write_text(
         json.dumps(
-            spool.settings_payload(executable=executable or sys.executable),
+            spool.settings_payload(
+                executable=executable or sys.executable,
+                guard_policy_path=guard_policy_path,
+            ),
             indent=2,
             sort_keys=True,
         ),

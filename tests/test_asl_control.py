@@ -819,10 +819,12 @@ class MailboxTests(unittest.TestCase):
             )
         self.assertEqual(mailbox.REJECT_QUESTION_NOT_WAITING, raised.exception.reason)
 
-    def guidance(self, text: str = "Prefer the existing parser.") -> object:
+    def guidance(
+        self, text: str = "Prefer the existing parser."
+    ) -> mailbox.MailboxMessage:
         return mailbox.append_guidance(self.plan_dir, text, state_dir=self.state_dir)
 
-    def deliver(self, guidance_id: str, **overrides) -> object:
+    def deliver(self, guidance_id: str, **overrides) -> mailbox.MailboxMessage:
         values = {
             "delivery_state": mailbox.GUIDANCE_STATE_DELIVERED_LIVE,
             "delivery_reason": mailbox.GUIDANCE_REASON_DELIVERED,

@@ -21,7 +21,7 @@ import textwrap
 import threading
 import time
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -123,6 +123,7 @@ class _PythonScriptCopilotAdapter(harnesses.CopilotAdapter):
         model: str | None = None,
         effort: str | None = None,
         access: harnesses.AccessProfile = harnesses.WORKER_ACCESS,
+        env: Mapping[str, str] | None = None,
     ) -> list[str]:
         argv = super().build_argv(
             cwd=cwd,
@@ -133,6 +134,7 @@ class _PythonScriptCopilotAdapter(harnesses.CopilotAdapter):
             model=model,
             effort=effort,
             access=access,
+            env=env,
         )
         return [argv[0], str(self.script), *argv[1:]]
 
@@ -8161,7 +8163,7 @@ class AuditAccessProfileTests(unittest.TestCase):
                 "/work/last.txt",
                 "prompt",
             ],
-            harnesses.get_adapter("codex").build_exec_argv(
+            harnesses.CodexAdapter().build_exec_argv(
                 cwd=Path("/work"),
                 plan_dir=Path("/plan"),
                 prompt="prompt",

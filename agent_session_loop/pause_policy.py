@@ -72,6 +72,15 @@ USER_REQUIRED_HARNESS_FAILURE_REASONS: tuple[str, ...] = (
 #   same arguments re-derives the same blocker from the same append-only
 #   evidence, so these are never machine-retryable; the gates have to pass or
 #   the review has to come back all-clear first.
+# - ``guard-protected-path-changed``: an operator declared a path must stay at
+#   its turn-start state and the workspace no longer matches. The run retains
+#   the changes deliberately, so nothing clears until a human inspects the
+#   recorded before/after evidence and decides whether to restore the path or
+#   drop the guard. A mailbox answer cannot restore a file.
+# - ``guard-protected-path-unavailable``: the turn-start snapshot the guard
+#   compares against is missing or unreadable. The repair is to the evidence
+#   capture — a readable worktree, a working git probe — not to anything an
+#   operator can say.
 ENVIRONMENT_BLOCKED_PAUSE_REASONS: tuple[str, ...] = (
     "commit-preflight",
     "commit-failed",
@@ -80,6 +89,8 @@ ENVIRONMENT_BLOCKED_PAUSE_REASONS: tuple[str, ...] = (
     "not-loop-ready",
     events.PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE,
     events.PAUSE_REASON_REVIEW_NOT_CLEAR,
+    events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED,
+    events.PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE,
 )
 
 # Every pause an operator must inspect rather than answer, from either source:

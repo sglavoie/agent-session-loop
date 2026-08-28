@@ -1960,6 +1960,37 @@ def record_guard_outcome(
         persistence.write_state(payload)
 
 
+def _apply_guard_add(
+    controller: guards.GuardController,
+    command: control_queue.ControlCommand,
+) -> guards.GuardOutcome:
+    """Activate one ``add-guard`` line against the run that owns the registry.
+
+    The queue parses a path rule's syntax; the alias half is checked here,
+    because this is the first point that holds the run's own repository
+    binding. An external producer writing the queue file directly cannot know
+    that binding, so accepting its rule unchecked would arm a guard watching a
+    repository the plan does not have.
+    """
+    aliases = tuple(controller.workspace_aliases()) or (guards.LEGACY_PATH_QUALIFIER,)
+    for protected in command.protect_paths:
+        if protected.qualifier not in aliases:
+            return guards.GuardOutcome(
+                action=guards.ACTION_REJECTED,
+                reason=guards.REJECT_PATH_UNKNOWN_ALIAS,
+                detail=(
+                    f"protected-path rule {protected.rendered!r} names a "
+                    f"repository this run does not hold; known qualifiers: "
+                    f"{', '.join(sorted(aliases))}"
+                ),
+            )
+    return controller.add(
+        command.deny_commands,
+        paths=command.protect_paths,
+        reason=command.reason,
+    )
+
+
 def apply_guard_command(
     command: control_queue.ControlCommand,
     *,
@@ -1993,7 +2024,7 @@ def apply_guard_command(
         outcome = controller.remove(command.guard_id or "")
         active = controller.to_payload()
     else:
-        outcome = controller.add(command.deny_commands, reason=command.reason)
+        outcome = _apply_guard_add(controller, command)
         active = controller.to_payload()
     record_guard_outcome(
         event_path=event_path,

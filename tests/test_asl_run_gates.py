@@ -26,8 +26,10 @@ from agent_session_loop import (
     baseline,
     cli,
     config,
+    control_queue,
     events,
     harnesses,
+    intervention,
     plans,
     preflight,
     review,
@@ -2418,6 +2420,209 @@ class LegacyImplementationGuardTests(unittest.TestCase):
         # empty turn directory reads downstream as a turn that ran and wrote no
         # result.json, which is a turn this run never spent.
         self.assertEqual([], sorted(self.state_dir.rglob("turn-*")))
+
+
+class ProtectedPathGuardRunTests(unittest.TestCase):
+    """End-to-end: a frozen path decides whether a finished turn is published.
+
+    The guard is enqueued before the run rather than mid-turn because the
+    external control queue is drained once before any turn starts, which makes
+    "the guard is active for this turn" deterministic here. The mid-turn
+    activation semantics -- a guard added late still compares against the
+    turn-start snapshot -- are pinned by the controller and enforcement unit
+    tests in tests/test_asl_guards.py.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.repo_root = self.tmp_path / "repo"
+        self.plan_dir = self.tmp_path / "plan"
+        self.state_dir = self.tmp_path / "state"
+        init_git_repo(self.repo_root)
+        self.protected = self.repo_root / "notes.md"
+        self.protected.write_text("turn-start contents\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "notes.md"],
+            cwd=self.repo_root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "notes"],
+            cwd=self.repo_root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        write_plan(
+            self.plan_dir,
+            ("pending",),
+            contracts_by_id={
+                "1": _contract_block(
+                    '{"type": "file_exists", "path": "README.md", "name": "readme"}',
+                    session="1",
+                )
+            },
+        )
+        self.context = verification.VerificationContext.legacy(self.repo_root)
+
+    def _args(self) -> argparse.Namespace:
+        return argparse.Namespace(
+            plan_dir=str(self.plan_dir),
+            cwd=str(self.repo_root),
+            harness="codex",
+            state_dir=str(self.state_dir),
+            json=True,
+            dry_run=False,
+            unsafe_bypass=True,
+            timeout=None,
+            max_sessions=None,
+            commit_mode=None,
+            model=None,
+            effort=None,
+            note=None,
+            allow_not_loop_ready=True,
+        )
+
+    def _enqueue_guard(self, run_id: str, *protect_paths: str) -> None:
+        dispatch = intervention.dispatch_control_command(
+            self.plan_dir,
+            control_queue.COMMAND_ADD_GUARD,
+            state_dir=self.state_dir,
+            protect_paths=list(protect_paths),
+            reason="operator froze this file",
+            expected_run_id=run_id,
+        )
+        self.assertEqual(
+            tuple(protect_paths),
+            tuple(
+                f"{path.qualifier}:{path.pattern}"
+                for path in dispatch.command.protect_paths
+            ),
+        )
+
+    def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
+        lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
+        try:
+            return runner._run_locked(
+                args=self._args(),
+                cwd=self.repo_root,
+                timeout=None,
+                max_sessions=None,
+                commit_mode=None,
+                lock_info=lock_info,
+                run_id=run_id,
+                verification_context=self.context,
+            )
+        finally:
+            state.release_lock(self.plan_dir, self.state_dir)
+
+    def _mark_complete(self) -> harnesses.HarnessResult:
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            session_path.read_text(encoding="utf-8").replace(
+                "- **Status**: pending", "- **Status**: complete", 1
+            ),
+            encoding="utf-8",
+        )
+        return harnesses.HarnessResult(
+            name="codex",
+            argv=["fake"],
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+
+    def _run_with(self, run_id: str, turn: Any) -> tuple[int, dict[str, Any]]:
+        with mock.patch.object(runner.harnesses, "run_harness", side_effect=turn):
+            return self._invoke(run_id)
+
+    def test_a_changed_protected_path_rejects_the_turn_and_keeps_the_change(
+        self,
+    ) -> None:
+        run_id = "guard-protected-changed"
+        self._enqueue_guard(run_id, ".:notes.md")
+
+        def edit_protected(*_args: object, **_kwargs: object) -> Any:
+            self.protected.write_text("worker rewrote this\n", encoding="utf-8")
+            return self._mark_complete()
+
+        exit_code, payload = self._run_with(run_id, edit_protected)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED,
+            payload["pause_reason"],
+        )
+        guard = payload["turns"][0]["protected_path_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual([".:notes.md"], sorted(guard["matched_paths"].values())[0])
+        self.assertEqual(guard["guard_ids"], list(guard["matched_paths"]))
+        self.assertTrue(guard["evidence"])
+        self.assertIn("command-gate", guard["coverage"][guard["guard_ids"][0]])
+        # The completion the turn claimed is withdrawn...
+        self.assertTrue(guard["reverted_to_pending"])
+        # ...but the worker's edit is left exactly where the worker put it. A
+        # guard decides what gets published, not what gets destroyed.
+        self.assertTrue(guard["retained"])
+        self.assertEqual(
+            "worker rewrote this\n", self.protected.read_text(encoding="utf-8")
+        )
+
+    def test_a_protected_path_restored_before_the_end_passes(self) -> None:
+        run_id = "guard-protected-restored"
+        self._enqueue_guard(run_id, ".:notes.md")
+        original = self.protected.read_text(encoding="utf-8")
+
+        def edit_then_restore(*_args: object, **_kwargs: object) -> Any:
+            self.protected.write_text("scratch\n", encoding="utf-8")
+            self.protected.write_text(original, encoding="utf-8")
+            return self._mark_complete()
+
+        exit_code, payload = self._run_with(run_id, edit_then_restore)
+
+        self.assertEqual(0, exit_code)
+        self.assertIsNone(payload.get("pause_reason"))
+        guard = payload["turns"][0]["protected_path_guard"]
+        self.assertTrue(guard["passed"])
+        self.assertNotIn(".:notes.md", guard["observed_paths"])
+
+    def test_a_dirty_protected_path_at_turn_start_is_the_accepted_baseline(
+        self,
+    ) -> None:
+        run_id = "guard-protected-dirty-baseline"
+        self._enqueue_guard(run_id, ".:notes.md")
+        # The operator's own uncommitted edit, made before the run. The guard
+        # freezes the file as the turn found it, not as HEAD has it.
+        self.protected.write_text("operator edit\n", encoding="utf-8")
+
+        def touch_something_else(*_args: object, **_kwargs: object) -> Any:
+            (self.repo_root / "README.md").write_text("worker\n", encoding="utf-8")
+            return self._mark_complete()
+
+        exit_code, payload = self._run_with(run_id, touch_something_else)
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["turns"][0]["protected_path_guard"]["passed"])
+        self.assertEqual("operator edit\n", self.protected.read_text(encoding="utf-8"))
+
+    def test_a_write_outside_the_pattern_does_not_trip_the_guard(self) -> None:
+        run_id = "guard-protected-unmatched"
+        self._enqueue_guard(run_id, ".:docs/**/*.md")
+
+        def edit_protected(*_args: object, **_kwargs: object) -> Any:
+            self.protected.write_text("not under docs/\n", encoding="utf-8")
+            return self._mark_complete()
+
+        exit_code, payload = self._run_with(run_id, edit_protected)
+
+        self.assertEqual(0, exit_code)
+        guard = payload["turns"][0]["protected_path_guard"]
+        self.assertTrue(guard["passed"])
+        self.assertIn(".:notes.md", guard["observed_paths"])
 
 
 class WorkspaceGuardExceptionTests(unittest.TestCase):

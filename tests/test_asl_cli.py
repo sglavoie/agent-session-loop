@@ -923,6 +923,7 @@ class CommandAndConfigTests(unittest.TestCase):
                 "resolve-continue",
                 "resolve-pause",
                 "guidance",
+                "guard",
                 "status",
                 "read-result",
             ],
@@ -974,6 +975,31 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertIn("only a guard enforces", guidance["description"])
         self.assertNotIn("sent", guidance["description"])
         self.assertIn(guidance["command"], supervisor_guide.render_text(payload))
+
+    def test_supervisor_guide_offers_the_enforcing_lever_next_to_the_advisory_one(
+        self,
+    ) -> None:
+        """Guidance and guards sit together, and say which one enforces.
+
+        A supervisor reading only this route has to be able to tell the two
+        apart without being told the third thing -- that a guard still does not
+        cancel the turn in flight.
+        """
+        payload = supervisor_guide.guide_payload(harness="codex")
+        names = [operation["name"] for operation in payload["operations"]]
+        self.assertEqual(names.index("guidance") + 1, names.index("guard"))
+        [guard] = [
+            operation
+            for operation in payload["operations"]
+            if operation["name"] == "guard"
+        ]
+
+        self.assertIn("--deny-command", guard["command"])
+        self.assertIn("--protect-path", guard["command"])
+        self.assertIn("--wait", guard["command"])
+        self.assertIn("turn-start", guard["description"])
+        self.assertIn("asl control abort", guard["description"])
+        self.assertIn(guard["command"], supervisor_guide.render_text(payload))
 
     def test_supervisor_guide_selects_or_offers_every_harness_candidate(self) -> None:
         detected = supervisor_guide.guide_payload(env={"CLAUDECODE": "1"})

@@ -596,6 +596,7 @@ def dispatch_control_command(
     grace_seconds: Any = None,
     reason: Any = None,
     deny_commands: Sequence[str] | None = None,
+    protect_paths: Sequence[str] | None = None,
     guard_id: str | None = None,
     expected_run_id: str | None = None,
 ) -> ControlDispatch:
@@ -617,6 +618,7 @@ def dispatch_control_command(
         grace_seconds=grace_seconds,
         reason=reason,
         deny_commands=deny_commands,
+        protect_paths=protect_paths,
         guard_id=guard_id,
         expected_run_id=expected_run_id,
         command_id=command_id,

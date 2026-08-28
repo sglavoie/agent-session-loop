@@ -1906,8 +1906,8 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     control_guard_parser = control_sub.add_parser(
         "guard",
         help=(
-            "Add, remove, or list run-scoped command guards enforced through "
-            "the worker's PATH."
+            "Add, remove, or list run-scoped guards: commands denied through "
+            "the worker's PATH, and paths that must end the turn unchanged."
         ),
     )
     control_guard_sub = control_guard_parser.add_subparsers(
@@ -1917,7 +1917,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
 
     control_guard_add_parser = control_guard_sub.add_parser(
         "add",
-        help="Deny a command for the remainder of the run holding this plan.",
+        help=(
+            "Deny a command, or protect a path, for the remainder of the run "
+            "holding this plan."
+        ),
     )
     _add_plan_reference_args(control_guard_add_parser)
     _add_control_wait_args(control_guard_add_parser)
@@ -1929,6 +1932,18 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help=(
             "Command line to deny, matched as an exact argument prefix after "
             "POSIX tokenization (repeatable; e.g. 'git push origin main')"
+        ),
+    )
+    control_guard_add_parser.add_argument(
+        "--protect-path",
+        action="append",
+        default=None,
+        metavar="ALIAS:PATH",
+        help=(
+            "Repository-qualified path that must end each turn exactly as it "
+            "started, compared against the turn-start snapshot (repeatable; "
+            "`*` and `?` match within one segment, `**` across segments; use "
+            "'.' as the alias for a single-repository plan)"
         ),
     )
     control_guard_add_parser.add_argument(
@@ -1960,7 +1975,7 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
 
     control_guard_list_parser = control_guard_sub.add_parser(
         "list",
-        help="Report the guards the active run is enforcing.",
+        help="Report the guards the active run is enforcing, and their coverage.",
     )
     _add_plan_reference_args(control_guard_list_parser)
     control_guard_list_parser.set_defaults(
