@@ -2469,6 +2469,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
         )
         self.context = verification.VerificationContext.legacy(self.repo_root)
         self.cwd = self.repo_root
+        self.review_harness: str | None = None
 
     def _args(self) -> argparse.Namespace:
         return argparse.Namespace(
@@ -2486,7 +2487,29 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             effort=None,
             note=None,
             allow_not_loop_ready=True,
+            # Non-None only for the legacy-review fixture: a run that names a
+            # review harness also requests a generated review of its own.
+            review_harness=self.review_harness,
         )
+
+    def _use_legacy_review_fixture(self) -> None:
+        """Turn the pending session into a generated review of this repository.
+
+        A legacy review turn is the one shape that captures neither write-guard
+        snapshot, so it is the only way to reach the crash path with the review
+        fingerprint as the turn's sole turn-start comparison.
+        """
+        self.review_harness = "claude"
+        session_path = self.plan_dir / "session-1.md"
+        session_path.write_text(
+            runner.build_generated_review_session_body(
+                plans.parse_session_id("1"),
+                review_harness="claude",
+                plan_dir=self.plan_dir,
+            ),
+            encoding="utf-8",
+        )
+        self.assertTrue(runner.is_generated_review_session_file(session_path))
 
     def _use_workspace_fixture(self) -> None:
         """Re-point this fixture at a registered two-repository workspace.
@@ -2811,6 +2834,107 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
         )
         self.assertEqual(
             "worker rewrote this\n", self.protected.read_text(encoding="utf-8")
+        )
+
+    def test_legacy_review_exception_still_adjudicates_protected_paths(self) -> None:
+        """A crashing legacy review is adjudicated like any other crashing turn.
+
+        It captures no write-guard snapshot, so before this it entered the
+        harness with no exception context at all and the crash path skipped the
+        protected-path guard entirely -- the guard then expired with the
+        operator's standing instruction never answered. Its turn-start review
+        fingerprint is the comparison that answers it.
+        """
+        self._use_legacy_review_fixture()
+        run_id = "guard-protected-legacy-review-exception"
+        self._enqueue_guard(run_id, ".:notes.md")
+
+        def edit_then_raise(*_args: object, **_kwargs: object) -> Any:
+            self.protected.write_text("review rewrote this\n", encoding="utf-8")
+            raise RuntimeError("synthetic review crash")
+
+        with (
+            mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=edit_then_raise
+            ),
+            self.assertRaisesRegex(RuntimeError, "synthetic review crash"),
+        ):
+            self._invoke(run_id)
+
+        rejections = self._turn_rejections("protected-path-guard")
+        self.assertEqual(1, len(rejections))
+        rejection = rejections[0]
+        self.assertEqual(
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED, rejection["reason"]
+        )
+        self.assertTrue(rejection["detail"]["adjudicated_only"])
+        self.assertFalse(rejection["reopened"])
+        self.assertEqual(
+            [".:notes.md"],
+            sorted(rejection["detail"]["matched_paths"].values())[0],
+        )
+        self.assertEqual(
+            rejection["detail"]["guard_ids"],
+            list(rejection["detail"]["matched_paths"]),
+        )
+        # The review's edit is retained, exactly as it is for an implementation
+        # turn: the guard decides what gets published, not what survives.
+        self.assertEqual(
+            "review rewrote this\n", self.protected.read_text(encoding="utf-8")
+        )
+
+    def test_legacy_review_exception_without_evidence_records_unavailable(
+        self,
+    ) -> None:
+        """Unreadable post-crash evidence is a verdict, not a silent clearance.
+
+        The recapture is what names the changed paths here, so a recapture that
+        cannot answer must leave the guard explicitly unavailable rather than
+        clear -- the failure mode the finding calls out is a frozen path with
+        neither a violation nor an unavailable verdict.
+        """
+        self._use_legacy_review_fixture()
+        run_id = "guard-protected-legacy-review-blind"
+        self._enqueue_guard(run_id, ".:notes.md")
+
+        def edit_then_raise(*_args: object, **_kwargs: object) -> Any:
+            self.protected.write_text("review rewrote this\n", encoding="utf-8")
+            raise RuntimeError("synthetic review crash")
+
+        real_capture = runner._capture_review_repo_fingerprint
+        captures: list[object] = []
+
+        def capture_then_fail(*args: object, **kwargs: object) -> Any:
+            # Only the post-crash recapture fails; the turn-start capture has
+            # to succeed or the turn never reaches the harness at all.
+            captures.append(args)
+            if len(captures) == 1:
+                return real_capture(*args, **kwargs)
+            raise runner.repository_evidence.RepositoryEvidenceError("git is gone")
+
+        with (
+            mock.patch.object(
+                runner.harnesses, "run_harness", side_effect=edit_then_raise
+            ),
+            mock.patch.object(
+                runner,
+                "_capture_review_repo_fingerprint",
+                side_effect=capture_then_fail,
+            ),
+            self.assertRaisesRegex(RuntimeError, "synthetic review crash"),
+        ):
+            self._invoke(run_id)
+
+        self.assertEqual(2, len(captures))
+
+        rejections = self._turn_rejections("protected-path-guard")
+        self.assertEqual(1, len(rejections))
+        self.assertEqual(
+            events.PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE,
+            rejections[0]["reason"],
+        )
+        self.assertEqual(
+            "review rewrote this\n", self.protected.read_text(encoding="utf-8")
         )
 
 

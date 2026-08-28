@@ -2840,6 +2840,15 @@ while the run's guards are still alive, so a crash is not a way for a protected
 path to move unremarked. A cleanup that cannot read a comparison at all records
 the `guard-protected-path-unavailable` verdict rather than a clearance.
 
+That holds for every turn shape, including a legacy generated review. A review
+turn on an unregistered plan captures no write-guard snapshot, so its turn-start
+comparison is the review fingerprint the mutation guard would have used. The
+crash path recaptures that fingerprint and adjudicates against it: an unchanged
+worktree clears every path rule at once, a changed one names the paths it moved,
+and a recapture that fails or returns unusable evidence records
+`guard-protected-path-unavailable`. The exception is still re-raised unchanged
+and the filesystem changes are still retained.
+
 **Filesystem changes are always retained.** A violation rejects the turn's
 *result*; it never rolls back, reverts, aborts, or restarts anything. The run
 cannot know whether the change was the valuable part of the turn, and destroying

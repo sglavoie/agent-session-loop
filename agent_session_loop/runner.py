@@ -11196,6 +11196,53 @@ def _protected_path_changed_paths(
     return tuple(dict.fromkeys(qualified))
 
 
+def _protected_path_review_changed_paths(
+    guard_context: Mapping[str, Any],
+    *,
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+) -> tuple[str, ...] | None:
+    """Every qualified path a crashing legacy review turn changed.
+
+    A legacy review turn captures no write-guard comparison, so the crash path
+    has nothing to read out of ``workspace_write_guard``. It recaptures the
+    review fingerprint instead and compares it against the one taken at turn
+    start -- the same comparison the mutation guard would have made had the
+    turn finished -- so the protected-path guard has a baseline to adjudicate
+    against.
+
+    ``None`` means the recapture cannot answer the question: it raised, or the
+    evidence came back unusable. That is reported as unavailable rather than
+    read as "nothing moved", because a guard that cannot see is not a guard
+    that saw nothing.
+    """
+    fingerprint_before = guard_context.get("review_fingerprint_before")
+    if not isinstance(fingerprint_before, Mapping):
+        return None
+    try:
+        fingerprint_after = _capture_review_repo_fingerprint(
+            guard_context["cwd"],
+            guard_context["before"].plan_dir,
+            exclude=exclude,
+            include_ignored=include_ignored,
+        )
+    except Exception:
+        return None
+    if _review_guard_unavailable_detail(fingerprint_after) is not None:
+        return None
+    if fingerprint_after == fingerprint_before:
+        # Equal fingerprints prove the whole worktree is unchanged, which
+        # clears every path rule at once -- a stronger clearance than an empty
+        # change list, and the same one the finished-turn path grants.
+        return ()
+    return tuple(
+        repository_evidence.qualified_repository_paths(
+            guards.LEGACY_PATH_QUALIFIER,
+            _review_guard_changed_paths(fingerprint_before, fingerprint_after),
+        )
+    )
+
+
 def _enforce_protected_path_guard(
     *,
     event_path: Path,
@@ -15073,6 +15120,48 @@ def _run_locked(
                         persistence=persistence,
                     )
                     break
+            # Captured before the exception-guard context below, because a
+            # legacy review turn has no write-guard snapshot and this
+            # fingerprint is the only turn-start comparison it will ever hold.
+            review_fingerprint_before: dict[str, Any] | None = (
+                _capture_review_repo_fingerprint(
+                    cwd,
+                    before.plan_dir,
+                    exclude=review_guard_excludes,
+                    include_ignored=review_guard_include_ignored,
+                )
+                if is_review_session and workspace is None
+                else None
+            )
+            if review_fingerprint_before is not None:
+                unavailable = _review_guard_unavailable_detail(
+                    review_fingerprint_before
+                )
+                if unavailable is not None:
+                    with persistence.lock:
+                        payload["final_snapshot"] = _snapshot_payload(before)
+                    _pause_run(
+                        event_path,
+                        payload,
+                        reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
+                        message=(
+                            "review mutation guard unavailable before "
+                            f"{session_label}: {unavailable['reason']}"
+                        ),
+                        details={
+                            **session_details,
+                            "review_mutation_guard": {
+                                "passed": False,
+                                "reason": events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
+                                "phase": "before",
+                                "unavailable": unavailable,
+                                "excluded": list(review_guard_excludes),
+                                "include_ignored": review_guard_include_ignored,
+                            },
+                        },
+                        persistence=persistence,
+                    )
+                    break
             if workspace is not None:
                 assert session_scope is not None
                 assert workspace_snapshot_before is not None
@@ -15110,16 +15199,29 @@ def _run_locked(
                     "external_digests_before": external_digests_before,
                     "turn_started_ns": turn_started_ns,
                 }
-            review_fingerprint_before: dict[str, Any] | None = (
-                _capture_review_repo_fingerprint(
-                    cwd,
-                    before.plan_dir,
-                    exclude=review_guard_excludes,
-                    include_ignored=review_guard_include_ignored,
-                )
-                if is_review_session and workspace is None
-                else None
-            )
+            elif review_fingerprint_before is not None:
+                # A legacy review turn captures no write-guard snapshot, so
+                # without this branch it enters the harness with no exception
+                # context at all and the outer handler skips protected-path
+                # adjudication entirely -- in the one moment the run's guards
+                # are still alive. The fingerprint is its turn-start
+                # comparison, so the crash path can still reach a verdict.
+                pending_exception_guard = {
+                    "mode": "review",
+                    "cwd": cwd,
+                    "before": before,
+                    "after": None,
+                    "review_fingerprint_before": review_fingerprint_before,
+                    "session_id": session_id,
+                    "session_label": session_label,
+                    "session_details": session_details,
+                    "turn_payload": None,
+                    "active_turn": active_turn,
+                    "live_turn": live_turn,
+                    "paths": paths,
+                    "external_digests_before": external_digests_before,
+                    "turn_started_ns": turn_started_ns,
+                }
             # Whether this turn has something a protected-path guard can be
             # compared against. The review fingerprint counts: a legacy review
             # turn captures no write-guard snapshot, but its mutation guard
@@ -15130,35 +15232,6 @@ def _run_locked(
                 or legacy_snapshot_before is not None
                 or review_fingerprint_before is not None
             )
-            if review_fingerprint_before is not None:
-                unavailable = _review_guard_unavailable_detail(
-                    review_fingerprint_before
-                )
-                if unavailable is not None:
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(before)
-                    _pause_run(
-                        event_path,
-                        payload,
-                        reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
-                        message=(
-                            "review mutation guard unavailable before "
-                            f"{session_label}: {unavailable['reason']}"
-                        ),
-                        details={
-                            **session_details,
-                            "review_mutation_guard": {
-                                "passed": False,
-                                "reason": events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
-                                "phase": "before",
-                                "unavailable": unavailable,
-                                "excluded": list(review_guard_excludes),
-                                "include_ignored": review_guard_include_ignored,
-                            },
-                        },
-                        persistence=persistence,
-                    )
-                    break
             plan_artifacts_before = plans.session_artifact_digests(
                 before.plan_dir, exclude_session_id=session_id
             )
@@ -15466,6 +15539,12 @@ def _run_locked(
                     turn_started_ns=turn_started_ns,
                 ):
                     finalization_paused = True
+            elif review_fingerprint_before is not None:
+                # The turn reached its own finalization guards, which adjudicate
+                # the protected paths in line below. Disarming the crash-path
+                # copy here mirrors the two branches above and keeps one turn
+                # from recording the same verdict twice.
+                pending_exception_guard = None
             if (
                 not finalization_paused
                 and is_review_session
@@ -16530,8 +16609,13 @@ def _run_locked(
                     "before": _snapshot_payload(guard_context["before"]),
                     "after": (_snapshot_payload(after) if after is not None else None),
                 }
+            guard_mode = guard_context.get("mode")
+            # ``review`` matches neither branch on purpose: a legacy review turn
+            # declares no write scope and captured no write-guard snapshot, so
+            # there is no write guard to enforce for it. Its comparison is the
+            # review fingerprint, which the protected-path step below reads.
             try:
-                if guard_context.get("mode") == "legacy":
+                if guard_mode == "legacy":
                     _enforce_legacy_implementation_write_guard(
                         event_path=event_path,
                         payload=payload,
@@ -16555,7 +16639,7 @@ def _run_locked(
                         ),
                         turn_started_ns=guard_context.get("turn_started_ns"),
                     )
-                else:
+                elif guard_mode == "workspace":
                     _enforce_workspace_write_guard(
                         event_path=event_path,
                         payload=payload,
@@ -16607,9 +16691,19 @@ def _run_locked(
                     # A write guard that never recorded its comparison — it
                     # raised, or the inventory failed — leaves this guard
                     # blind, and blind is recorded as unavailable rather than
-                    # read as clean.
-                    changed_paths=_protected_path_changed_paths(
-                        turn_payload.get("workspace_write_guard")
+                    # read as clean. A legacy review turn has no write-guard
+                    # comparison by construction, so it is answered from its
+                    # own turn-start fingerprint instead.
+                    changed_paths=(
+                        _protected_path_review_changed_paths(
+                            guard_context,
+                            exclude=review_guard_excludes,
+                            include_ignored=review_guard_include_ignored,
+                        )
+                        if guard_mode == "review"
+                        else _protected_path_changed_paths(
+                            turn_payload.get("workspace_write_guard")
+                        )
                     ),
                     adjudicate_only=True,
                 )

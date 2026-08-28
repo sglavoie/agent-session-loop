@@ -1347,6 +1347,19 @@ def classify_head_transition(
         _GIT_RUNNER.reset(token)
 
 
+def qualified_repository_paths(
+    repository: str,
+    changed_paths: Mapping[str, Any],
+) -> list[str]:
+    """Name one comparison's changed paths as ``repository:path`` strings.
+
+    The single-repository comparison and the workspace one describe the same
+    change keys, so both are named here rather than in two places that could
+    drift apart on the next key added to a comparison.
+    """
+    return _qualified_paths(repository, changed_paths)
+
+
 def format_repository_changes(changed_paths: Mapping[str, Any]) -> str:
     """Render the bounded historical changed-path suffix."""
     return _review_guard_changed_summary(changed_paths)
