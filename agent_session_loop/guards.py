@@ -207,6 +207,7 @@ COVERAGE_UNSUPPORTED = "unsupported"
 #: Stable per-lane reasons. Clients branch on these, so they are spelled once.
 COVERAGE_REASON_SHIM_ARMED = "path-shim-armed"
 COVERAGE_REASON_SHIM_UNAVAILABLE = "path-shim-not-armed"
+COVERAGE_REASON_OVERLAY_UNARMED = "guard-overlay-not-armed"
 COVERAGE_REASON_NOT_A_COMMAND_RULE = "not-a-command-rule"
 COVERAGE_REASON_NOT_A_PATH_RULE = "not-a-path-rule"
 COVERAGE_REASON_HOOK_DENIES = "hook-denies-before-execution"
@@ -587,6 +588,7 @@ def guard_coverage(
     *,
     harness: str | None,
     gate_armed: bool = True,
+    overlay_armed: bool = True,
     pretool_armed: bool = False,
     process_start: bool = False,
 ) -> dict[str, dict[str, str]]:
@@ -600,15 +602,31 @@ def guard_coverage(
     hook overlay; ``process_start`` reports whether the guard already existed
     when the worker process was spawned, which is the only thing a fixed
     command-line deny rule can ever cover.
+
+    ``overlay_armed`` reports whether the turn in flight actually received the
+    overlay: :meth:`GuardController.prepare_turn` fails open, so a worker can be
+    running with an untouched ``PATH`` and no policy path in its environment
+    while the guard is still perfectly present in the active set. That is the
+    one case where both pre-execution lanes are blind for a reason no rule and
+    no harness explains, so it is reported rather than inferred.
     """
     lanes: dict[str, dict[str, str]] = {}
     if guard.kind == GUARD_KIND_COMMAND:
-        lanes[LANE_COMMAND_GATE] = _lane(
-            COVERAGE_ACTIVE if gate_armed else COVERAGE_UNSUPPORTED,
-            COVERAGE_REASON_SHIM_ARMED
-            if gate_armed
-            else COVERAGE_REASON_SHIM_UNAVAILABLE,
-        )
+        if not gate_armed:
+            lanes[LANE_COMMAND_GATE] = _lane(
+                COVERAGE_UNSUPPORTED, COVERAGE_REASON_SHIM_UNAVAILABLE
+            )
+        elif not overlay_armed:
+            # The shim may well exist on disk; what is missing is the ``PATH``
+            # entry that would make the worker find it, so the gate is not a
+            # narrower enforcement but no enforcement at all.
+            lanes[LANE_COMMAND_GATE] = _lane(
+                COVERAGE_UNSUPPORTED, COVERAGE_REASON_OVERLAY_UNARMED
+            )
+        else:
+            lanes[LANE_COMMAND_GATE] = _lane(
+                COVERAGE_ACTIVE, COVERAGE_REASON_SHIM_ARMED
+            )
         lanes[LANE_POSTFLIGHT] = _lane(
             COVERAGE_UNSUPPORTED, COVERAGE_REASON_NOT_OBSERVABLE
         )
@@ -619,12 +637,21 @@ def guard_coverage(
         lanes[LANE_POSTFLIGHT] = _lane(
             COVERAGE_ACTIVE, COVERAGE_REASON_SNAPSHOT_COMPARISON
         )
-    lanes[LANE_PRETOOL] = _pretool_lane(
+    pretool = _pretool_lane(
         guard,
         harness=harness,
         pretool_armed=pretool_armed,
         process_start=process_start,
     )
+    if not overlay_armed and pretool["status"] != COVERAGE_UNSUPPORTED:
+        # Every pretool lane reads the policy through the turn environment: the
+        # Claude hook resolves `ASL_GUARD_POLICY`, and Copilot compiles
+        # `--deny-tool` from the same document. Without the injection there is
+        # nothing for either to read, so a lane that would otherwise be armed
+        # is downgraded. A lane that is already unsupported keeps its own
+        # reason, which is the more specific and more durable of the two.
+        pretool = _lane(COVERAGE_UNSUPPORTED, COVERAGE_REASON_OVERLAY_UNARMED)
+    lanes[LANE_PRETOOL] = pretool
     return lanes
 
 
@@ -938,8 +965,21 @@ class GuardController:
         # guard, because it is the only case where arming one would promise a
         # comparison that can never be made.
         self._turn_snapshot_available: bool | None = None
+        # Whether the last `prepare_turn` both materialized the overlay and
+        # injected it into the environment it handed back. It starts True
+        # because a controller that has prepared no turn yet has told nobody
+        # anything, and it is rewritten by every `prepare_turn` — so a failure
+        # is reported for exactly as long as it is the truth: until the next
+        # turn is prepared successfully.
+        self._overlay_armed = True
 
     # -- read-only projections ---------------------------------------------
+
+    @property
+    def overlay_armed(self) -> bool:
+        """Whether the environment the last prepared turn received is guarded."""
+        with self._lock:
+            return self._overlay_armed
 
     @property
     def guard_bin(self) -> Path:
@@ -1000,6 +1040,7 @@ class GuardController:
             pretool_armed = self._pretool_armed
             process_start_ids = self._process_start_ids
             gate_armed = not self._expired
+            overlay_armed = self._overlay_armed
             active = tuple(self._guards.values())
         return [
             {
@@ -1008,6 +1049,7 @@ class GuardController:
                     guard,
                     harness=harness,
                     gate_armed=gate_armed,
+                    overlay_armed=overlay_armed,
                     pretool_armed=pretool_armed,
                     process_start=guard.id in process_start_ids,
                 ),
@@ -1192,6 +1234,12 @@ class GuardController:
         start" cohort: it is the only cohort a fixed command-line deny rule can
         ever cover, and coverage that claimed otherwise for a mid-turn addition
         would be the exact lie an operator would act on.
+
+        Whether the overlay was actually armed is recorded before the
+        environment is returned, because this method fails open: a turn that
+        could not be guarded still runs, and the only thing that keeps that
+        from becoming a false claim of enforcement is that coverage reads the
+        same verdict this call wrote.
         """
         base = dict(os.environ if env is None else env)
         with self._lock:
@@ -1205,14 +1253,19 @@ class GuardController:
                     self._materialize_locked(self._guards, self._executables)
                 else:
                     self.policy_file.unlink(missing_ok=True)
+                overlay_path = child_path(base.get("PATH"), guard_bin)
+                policy_file = str(self.policy_file)
             except OSError:
                 # An overlay that cannot be armed must not cost the turn. The
                 # guards stay in the active set and the next turn tries again;
-                # what is lost is enforcement, and the run reports the active
-                # set either way rather than claiming a gate it does not have.
+                # what is lost is enforcement, and every lane that depended on
+                # this overlay now says so instead of reporting a gate the
+                # worker's environment does not contain.
+                self._overlay_armed = False
                 return base
-        base["PATH"] = child_path(base.get("PATH"), guard_bin)
-        base[GUARD_POLICY_ENV_VAR] = str(self.policy_file)
+            self._overlay_armed = True
+        base["PATH"] = overlay_path
+        base[GUARD_POLICY_ENV_VAR] = policy_file
         return base
 
     def expire(self) -> tuple[GuardRule, ...]:

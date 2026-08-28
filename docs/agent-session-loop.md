@@ -2886,6 +2886,13 @@ Each lane reports `active`, `degraded`, or `unsupported` with a stable reason:
 
 - `path-shim-armed` / `path-shim-not-armed` — whether the command gate
   materialized for this guard.
+- `guard-overlay-not-armed` — the overlay could not be armed for the turn in
+  flight, so the worker was spawned with an untouched `PATH` and no policy path
+  in its environment. Preparing the overlay fails open — an unwritable run
+  directory must not cost the turn — but every lane that reads it is blind
+  until a later turn is prepared successfully, so the `command-gate` lane and
+  any `pretool` lane that would otherwise be armed report this instead. The
+  guard stays in the active set and is re-armed by the next turn.
 - `hook-denies-before-execution` — the pretool hook is armed and covers this
   rule.
 - `harness-exposes-no-pre-tool-hook` — the harness has no such lane at all.

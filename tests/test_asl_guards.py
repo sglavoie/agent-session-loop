@@ -495,6 +495,113 @@ class GuardControllerTests(unittest.TestCase):
             second["PATH"].split(os.pathsep).count(str(self.controller.guard_bin)),
         )
 
+    def gate_lane(self) -> dict[str, str]:
+        return self.controller.to_payload()[0]["coverage"]["command-gate"]
+
+    def test_prepare_turn_failure_reports_command_gate_unarmed(self) -> None:
+        """A turn that never received the overlay is not reported as gated.
+
+        ``prepare_turn`` fails open on purpose — an overlay that cannot be
+        written must not cost the turn — but the environment it hands back is
+        then the untouched parent one: no ``guard-bin`` on ``PATH`` and no
+        policy path for a hook to read. Claiming ``path-shim-armed`` for that
+        turn would tell an operator the one thing they would act on and the one
+        thing that is false.
+        """
+        self.controller.add([("git", "push")])
+        self.assertEqual(guards.COVERAGE_ACTIVE, self.gate_lane()["status"])
+
+        base = {"PATH": str(self.bin_dir), "KEEP": "1"}
+        with mock.patch.object(
+            guards, "write_policy", side_effect=OSError("read-only run directory")
+        ):
+            env = self.controller.prepare_turn(
+                base, harness="claude", pretool_armed=True
+            )
+
+        # Fails open: the turn still runs, with the environment untouched.
+        self.assertEqual(base, env)
+        self.assertNotIn(guards.GUARD_POLICY_ENV_VAR, env)
+        self.assertNotIn(str(self.controller.guard_bin), env["PATH"].split(os.pathsep))
+        # The guard is still active, and still reported — as unenforced.
+        self.assertEqual(1, len(self.controller.active()))
+        self.assertFalse(self.controller.overlay_armed)
+        lane = self.gate_lane()
+        self.assertEqual(guards.COVERAGE_UNSUPPORTED, lane["status"])
+        self.assertEqual(guards.COVERAGE_REASON_OVERLAY_UNARMED, lane["reason"])
+        self.assertNotEqual(guards.COVERAGE_REASON_SHIM_ARMED, lane["reason"])
+        # The pretool lane reads the policy path out of the same environment,
+        # so it cannot be armed either, whatever the adapter can do in general.
+        pretool = self.controller.to_payload()[0]["coverage"]["pretool"]
+        self.assertEqual(guards.COVERAGE_UNSUPPORTED, pretool["status"])
+        self.assertEqual(guards.COVERAGE_REASON_OVERLAY_UNARMED, pretool["reason"])
+
+    def test_a_later_successful_prepare_returns_the_lane_to_active(self) -> None:
+        """The failure is the last turn's verdict, not a permanent state."""
+        self.controller.add([("git", "push")])
+        with mock.patch.object(guards, "write_policy", side_effect=OSError("boom")):
+            self.controller.prepare_turn({"PATH": str(self.bin_dir)})
+        self.assertEqual(
+            guards.COVERAGE_REASON_OVERLAY_UNARMED, self.gate_lane()["reason"]
+        )
+
+        env = self.controller.prepare_turn({"PATH": str(self.bin_dir)})
+        self.assertTrue(self.controller.overlay_armed)
+        self.assertEqual(
+            str(self.controller.guard_bin), env["PATH"].split(os.pathsep)[0]
+        )
+        self.assertEqual(
+            str(self.controller.policy_file), env[guards.GUARD_POLICY_ENV_VAR]
+        )
+        lane = self.gate_lane()
+        self.assertEqual(guards.COVERAGE_ACTIVE, lane["status"])
+        self.assertEqual(guards.COVERAGE_REASON_SHIM_ARMED, lane["reason"])
+
+    def test_a_guard_added_after_a_failed_prepare_is_reported_unarmed_too(self) -> None:
+        """The verdict belongs to the turn, not to the guard that survived it.
+
+        A guard added mid-turn normally installs into a ``PATH`` entry the
+        running worker already has. When that entry was never injected, the
+        mid-turn addition has nowhere to install into either, even though its
+        own ``add`` materialized cleanly.
+        """
+        self.controller.add([("git", "push")])
+        with mock.patch.object(guards, "write_policy", side_effect=OSError("boom")):
+            self.controller.prepare_turn({"PATH": str(self.bin_dir)})
+        self.controller.mark_turn_snapshot(True)
+        self.assertEqual(
+            guards.ACTION_APPLIED, self.controller.add([("git", "fetch")]).action
+        )
+        self.assertEqual(
+            {guards.COVERAGE_REASON_OVERLAY_UNARMED},
+            {
+                entry["coverage"]["command-gate"]["reason"]
+                for entry in self.controller.to_payload()
+            },
+        )
+
+    def test_an_expired_run_still_reports_the_shim_reason_not_the_overlay_one(
+        self,
+    ) -> None:
+        """Two different failures keep two different reasons.
+
+        Expiry is the ordinary end of every guard and the operator needs no
+        action; a failed overlay is an anomaly during a live turn. Collapsing
+        them would make the anomaly invisible.
+        """
+        guard = guards.GuardRule(
+            id="g-1",
+            reason=None,
+            created_at="2026-01-01T00:00:00+00:00",
+            command=("git", "push"),
+        )
+        lanes = guards.guard_coverage(
+            guard, harness="claude", gate_armed=False, overlay_armed=False
+        )
+        self.assertEqual(
+            guards.COVERAGE_REASON_SHIM_UNAVAILABLE, lanes["command-gate"]["reason"]
+        )
+
     def test_active_payload_describes_the_rule_for_status(self) -> None:
         self.controller.add([("git", "push", "origin", "main")], reason="why")
         payload = self.controller.to_payload()[0]
