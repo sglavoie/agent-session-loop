@@ -749,6 +749,17 @@ def _wait_for_stream_continue(session_label: str) -> bool:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["app-server"]:
+        # This fixture speaks the one-shot `codex exec` command line, not the
+        # app-server JSON-RPC protocol. Declining immediately -- before reading
+        # a byte of stdin, so before `turn/start` and before any work -- is
+        # exactly the state the adapter's pre-start fallback exists for, so
+        # every suite built on this fixture keeps exercising the legacy
+        # transport end to end. The app-server transport has its own fake in
+        # tests/test_asl_codex_app_server.py.
+        print("fake codex does not implement app-server", file=sys.stderr)
+        return 2
+
     validation_prompt = _validation_prompt()
     if validation_prompt is not None:
         validation_plan_dir = _validation_plan_dir(validation_prompt)

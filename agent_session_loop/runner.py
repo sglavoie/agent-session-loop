@@ -4070,6 +4070,16 @@ def _build_invocation_payload(
     return {
         "name": invocation.name,
         "argv": invocation.argv,
+        # Under a protocol transport ``argv`` names only the binary, so it is
+        # no longer a full account of the turn on its own. ``transport`` says
+        # which of the two this is, and ``turn_plan`` carries what argv used to:
+        # the access profile, the writable roots, the model, and the effort.
+        "transport": invocation.transport,
+        "turn_plan": (
+            invocation.turn_plan.to_payload()
+            if invocation.turn_plan is not None
+            else None
+        ),
         "cwd": str(invocation.cwd),
         "last_message_path": (
             str(invocation.last_message_path)
@@ -16425,9 +16435,19 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
             print("Resolver prompt:")
             print(resolver_prompt)
         print(f"Prompt: {planned['prompt']}")
+        invocation = planned["invocation"]
+        print(f"Transport: {invocation.get('transport', harnesses.TRANSPORT_EXEC)}")
         print("Argv:")
-        for arg in planned["invocation"]["argv"]:
+        for arg in invocation["argv"]:
             print(f"  {arg}")
+        turn_plan = invocation.get("turn_plan")
+        if turn_plan is not None:
+            # Argv no longer states the access profile under this transport, so
+            # a dry run that printed only argv would no longer show the
+            # operator what the turn is actually allowed to do.
+            print("Turn plan:")
+            for line in json.dumps(turn_plan, indent=2, sort_keys=True).splitlines():
+                print(f"  {line}")
         return
 
     audit_line = supervisor_audit.status_line(
@@ -17281,7 +17301,18 @@ def doctor_from_args(args: argparse.Namespace) -> int:
     else:
         print(f"Next pending: session {snapshot.next_pending.id}")
     print(f"Prompt: {prompt}")
+    print(f"Transport: {invocation.transport}")
     print("Argv:")
     for arg in invocation.argv:
         print(f"  {arg}")
+    if invocation.turn_plan is not None:
+        # Argv no longer states the access profile under this transport, so a
+        # doctor report that printed only argv would no longer show what the
+        # turn is allowed to do.
+        print("Turn plan:")
+        payload = json.dumps(
+            invocation.turn_plan.to_payload(), indent=2, sort_keys=True
+        )
+        for line in payload.splitlines():
+            print(f"  {line}")
     return 0

@@ -317,7 +317,11 @@ class AuditAccessProfileTests(unittest.TestCase):
 
     def _audit_argv(self, name: str, read_root: Path, cwd: Path) -> list[str]:
         adapter = harnesses.get_adapter(name)
-        return adapter.build_argv(
+        # Codex states its audit profile over the app-server protocol, so its
+        # *argv* boundary is the fallback transport's argv; the protocol side
+        # is asserted separately against the turn plan.
+        builder = getattr(adapter, "build_exec_argv", adapter.build_argv)
+        return builder(
             cwd=cwd,
             plan_dir=None,
             prompt="audit this run",
@@ -325,14 +329,40 @@ class AuditAccessProfileTests(unittest.TestCase):
             access=harnesses.audit_read_only_access((read_root,)),
         )
 
+    def _audit_access_text(self, name: str, read_root: Path, cwd: Path) -> str:
+        """Everything describing one audit turn's access, on either transport.
+
+        Argv alone would pass vacuously for a harness driven over a protocol,
+        so this renders argv *and* the turn plan, which is where the sandbox,
+        the approval policy, and the writable roots now live.
+        """
+        adapter = harnesses.get_adapter(name)
+        invocation = adapter.build_invocation(
+            cwd=cwd,
+            plan_dir=None,
+            prompt="audit this run",
+            last_message_path=cwd / "last-message.txt",
+            access=harnesses.audit_read_only_access((read_root,)),
+        )
+        rendered = "\n".join(invocation.argv)
+        if invocation.turn_plan is not None:
+            rendered += "\n" + json.dumps(
+                invocation.turn_plan.to_payload(), sort_keys=True
+            )
+        return rendered
+
     def test_no_audit_argv_carries_a_worker_write_grant(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in harnesses.HARNESS_NAMES:
                 argv = self._audit_argv(name, root / "evidence", root / "workdir")
+                described = self._audit_access_text(
+                    name, root / "evidence", root / "workdir"
+                )
                 for grant in self.WORKER_GRANTS:
                     with self.subTest(harness=name, grant=grant):
                         self.assertNotIn(grant, argv)
+                        self.assertNotIn(grant, described)
 
     def test_no_audit_argv_enables_a_mutating_tool(self) -> None:
         """Each adapter denies mutation in the vocabulary its own CLI enforces."""
@@ -341,6 +371,13 @@ class AuditAccessProfileTests(unittest.TestCase):
             codex = self._audit_argv("codex", root / "evidence", root / "workdir")
             self.assertNotIn("--add-dir", codex)
             self.assertEqual(["read-only"], codex[codex.index("-s") + 1 :][:1])
+            codex_plan = harnesses.get_adapter("codex").build_turn_plan(  # type: ignore[attr-defined]
+                cwd=root / "workdir",
+                plan_dir=None,
+                access=harnesses.audit_read_only_access((root / "evidence",)),
+            )
+            self.assertEqual("read-only", codex_plan.thread_params.get("sandbox"))
+            self.assertNotIn("config", codex_plan.thread_params)
 
             claude = self._audit_argv("claude", root / "evidence", root / "workdir")
             self.assertEqual(

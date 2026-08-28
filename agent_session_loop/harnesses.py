@@ -6,6 +6,7 @@ Adapters construct argv lists and run harnesses without shell interpolation.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import shutil
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Literal
 
-from . import config, guidance_delivery
+from . import codex_app_server, config, guidance_delivery
 from .process_tree import (
     clear_process_tree,
     descendant_pids,
@@ -290,9 +291,22 @@ def audit_read_only_unavailable_reason(name: str) -> str | None:
     return None
 
 
+#: Transport discriminators. ``argv`` alone stopped describing a turn once a
+#: harness could be driven over a protocol instead of a command line, so every
+#: invocation and every result now says which of the two it was.
+TRANSPORT_EXEC = codex_app_server.TRANSPORT_EXEC
+TRANSPORT_APP_SERVER = codex_app_server.TRANSPORT_APP_SERVER
+
+
 @dataclass(frozen=True)
 class HarnessInvocation:
-    """A concrete subprocess invocation for one harness turn."""
+    """A concrete subprocess invocation for one harness turn.
+
+    ``argv`` remains the invocation's identity for every caller that had one.
+    Under a protocol transport it says only which binary is spawned, and
+    ``turn_plan`` carries what argv used to: the access profile, the writable
+    roots, the model, and the effort. Neither ever carries the prompt.
+    """
 
     name: HarnessName
     argv: list[str]
@@ -300,6 +314,8 @@ class HarnessInvocation:
     last_message_path: Path | None = None
     model: str | None = None
     effort: str | None = None
+    transport: str = TRANSPORT_EXEC
+    turn_plan: codex_app_server.TurnPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -318,6 +334,7 @@ class HarnessResult:
     process_sweep: dict[str, Any] | None = None
     observed_model: str | None = None
     stream_io: dict[str, int | float] | None = None
+    transport: str = TRANSPORT_EXEC
 
 
 class _OutputProcessor:
@@ -546,6 +563,31 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
         return text if text.endswith("\n") else f"{text}\n"
 
 
+class HarnessTransport:
+    """The in-turn conversation an adapter has with the process it spawned.
+
+    A one-shot harness has none: argv said everything, and stdout is a report
+    rather than a dialogue. A protocol harness has exactly one, opened right
+    after the process exists and released once it is gone, and it is the only
+    thing in the turn that may write to that process's stdin.
+
+    The three methods are what the generic turn loop needs to know about a
+    conversation it otherwise ignores: how to read the process's output, how
+    (or whether) to inject guidance into it, and how to let go at the end.
+    """
+
+    def output_processor(self) -> _OutputProcessor:
+        """The processor that turns this transport's stdout into log text."""
+        raise NotImplementedError
+
+    def guidance_transport(self) -> guidance_delivery.GuidanceTransport | None:
+        """The live-delivery channel, or ``None`` when there is none."""
+        return None
+
+    def shutdown(self) -> None:
+        """Release the conversation. Called once, on every path out of a turn."""
+
+
 class HarnessAdapter:
     """Base class for harness-specific command construction."""
 
@@ -656,22 +698,42 @@ class HarnessAdapter:
             effort=effort,
         )
 
+    def open_transport(
+        self,
+        *,
+        process: subprocess.Popen,
+        invocation: HarnessInvocation,
+        prompt: str,
+    ) -> HarnessTransport | None:
+        """Open this turn's protocol conversation, if the transport has one.
+
+        ``None`` — the base implementation — is the one-shot case: argv said
+        everything, and the turn is a process to watch rather than a dialogue
+        to hold. Called once, immediately after the process exists and before
+        the output readers start, so a conversation can be underway by the
+        time the first byte arrives.
+        """
+        del process, invocation, prompt
+        return None
+
     def live_delivery_transport(
         self,
         *,
         process: subprocess.Popen,
         invocation: HarnessInvocation,
+        transport: HarnessTransport | None = None,
     ) -> guidance_delivery.GuidanceTransport | None:
         """Return the transport that injects guidance into this live turn.
 
-        ``None`` — the base implementation, and what every adapter returns
-        today — means this harness has no live channel at all, so every
-        attempt defers with ``harness-unsupported`` rather than claiming a
-        delivery it cannot make. An adapter overrides this only once it can
-        prove same-turn injection against the real CLI.
+        A protocol harness answers from its open conversation; a one-shot
+        harness has no live channel at all, so every attempt defers with
+        ``harness-unsupported`` rather than claiming a delivery it cannot
+        make.
         """
         del process, invocation
-        return None
+        if transport is None:
+            return None
+        return transport.guidance_transport()
 
     def run(
         self,
@@ -691,17 +753,20 @@ class HarnessAdapter:
         access: AccessProfile = WORKER_ACCESS,
         abort: AbortSignal | None = None,
         live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
+        invocation: HarnessInvocation | None = None,
+        on_transport: Callable[[HarnessTransport | None], None] | None = None,
     ) -> HarnessResult:
-        invocation = self.build_invocation(
-            cwd=cwd,
-            plan_dir=plan_dir,
-            prompt=prompt,
-            unsafe_bypass=unsafe_bypass,
-            last_message_path=last_message_path,
-            model=model,
-            effort=effort,
-            access=access,
-        )
+        if invocation is None:
+            invocation = self.build_invocation(
+                cwd=cwd,
+                plan_dir=plan_dir,
+                prompt=prompt,
+                unsafe_bypass=unsafe_bypass,
+                last_message_path=last_message_path,
+                model=model,
+                effort=effort,
+                access=access,
+            )
         if invocation.last_message_path is not None:
             invocation.last_message_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -709,6 +774,12 @@ class HarnessAdapter:
             process = subprocess.Popen(
                 invocation.argv,
                 cwd=invocation.cwd,
+                # A protocol transport talks back to the process it spawned, so
+                # it needs a pipe of its own. A one-shot turn leaves stdin
+                # inherited, exactly as it always was.
+                stdin=(
+                    subprocess.PIPE if invocation.transport != TRANSPORT_EXEC else None
+                ),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -728,14 +799,26 @@ class HarnessAdapter:
             with contextlib.suppress(Exception):
                 on_spawn(process.pid)
 
-        # Opened here, inside the boundary that owns the process, and closed in
-        # the ``finally`` below on every path out of the turn. A delivery can
+        # The conversation and the live-delivery endpoint are both opened here,
+        # inside the boundary that owns the process, and both are closed in the
+        # ``finally`` below on every path out of the turn. A delivery can
         # therefore only ever reach this exact live process: once the turn is
         # over the endpoint answers ``stale-turn`` instead of injecting into a
         # dead PID or into whatever turn started next.
+        transport = self.open_transport(
+            process=process,
+            invocation=invocation,
+            prompt=prompt,
+        )
+        if on_transport is not None:
+            on_transport(transport)
         if live_delivery is not None:
             live_delivery.open(
-                self.live_delivery_transport(process=process, invocation=invocation)
+                self.live_delivery_transport(
+                    process=process,
+                    invocation=invocation,
+                    transport=transport,
+                )
             )
         try:
             stdout_chunks: list[str] = []
@@ -748,7 +831,11 @@ class HarnessAdapter:
                 "callback_seconds": 0.0,
             }
             reader_errors: list[BaseException] = []
-            output_processor = self.output_processor()
+            output_processor = (
+                self.output_processor()
+                if transport is None
+                else transport.output_processor()
+            )
             final_result_fired = threading.Event()
             observed_model_fired = threading.Event()
             # Quiescence guard for abandoned readers: a reader that outlives the
@@ -882,6 +969,7 @@ class HarnessAdapter:
                 return HarnessResult(
                     name=self.name,
                     argv=invocation.argv,
+                    transport=invocation.transport,
                     returncode=130,
                     stdout="".join(stdout_chunks),
                     stderr="".join(stderr_chunks),
@@ -905,6 +993,7 @@ class HarnessAdapter:
                 return HarnessResult(
                     name=self.name,
                     argv=invocation.argv,
+                    transport=invocation.transport,
                     # 128 + SIGKILL, not the timeout path's 124: a caller reading
                     # only the returncode still has to tell the two apart.
                     returncode=137,
@@ -924,6 +1013,7 @@ class HarnessAdapter:
                 return HarnessResult(
                     name=self.name,
                     argv=invocation.argv,
+                    transport=invocation.transport,
                     returncode=124,
                     stdout=stdout,
                     stderr=stderr,
@@ -942,6 +1032,7 @@ class HarnessAdapter:
             return HarnessResult(
                 name=self.name,
                 argv=invocation.argv,
+                transport=invocation.transport,
                 returncode=130 if interrupted else process.returncode,
                 stdout=stdout,
                 stderr=stderr,
@@ -956,8 +1047,122 @@ class HarnessAdapter:
                 stream_io=dict(stream_io),
             )
         finally:
+            # Endpoint first: closing it waits out any delivery already in
+            # flight, so no steer can still be using the conversation the
+            # transport shutdown is about to tear down.
             if live_delivery is not None:
                 live_delivery.close()
+            if transport is not None:
+                transport.shutdown()
+
+
+class _CodexAppServerOutputProcessor(_OutputProcessor):
+    """Render one app-server conversation as the turn's readable stdout.
+
+    Thin by design: every decision about the protocol lives in the session, and
+    this only routes stdout into it and reports what it learned. stderr is left
+    alone, because the app-server writes its own diagnostics there in prose.
+    """
+
+    def __init__(self, session: codex_app_server.CodexAppServerSession) -> None:
+        self._session = session
+
+    @property
+    def final_result_seen(self) -> bool:
+        # ``turn/completed`` is the app-server's terminal record, and it is as
+        # authoritative as claude's ``result`` record: the turn is over even if
+        # the process has not exited yet.
+        return self._session.turn_status is not None
+
+    @property
+    def observed_model(self) -> str | None:
+        return self._session.observed_model
+
+    def process_chunk(self, stream_name: StreamName, text: str) -> str:
+        if stream_name != "stdout":
+            return text
+        return self._session.feed(text)
+
+    def last_message(
+        self,
+        *,
+        stdout: str,
+        stderr: str,
+        last_message_path: Path | None,
+    ) -> str:
+        # The protocol reports the final message directly, so it is preferred
+        # over the file the legacy transport had to be told to write.
+        final = self._session.final_message
+        if final:
+            return final if final.endswith("\n") else f"{final}\n"
+        del stderr
+        return _read_last_message(last_message_path) or stdout
+
+
+class _FallbackWindowStream:
+    """Hold an app-server turn's output back while a fallback is still possible.
+
+    Anything printed before ``turn/start`` is accepted is handshake noise, and
+    if the conversation fails there the legacy transport runs the same turn for
+    real. Streaming both would show an operator two turns' output for one turn
+    and would leave the discarded attempt's bytes in the persisted log, so the
+    early chunks are buffered until acceptance forecloses the fallback -- after
+    which every chunk passes straight through, live, as it always did.
+
+    Called only from the reader threads, which serialize on the harness's
+    side-effect lock, and released or discarded from the turn's own thread once
+    the readers are done with it.
+    """
+
+    def __init__(self, downstream: StreamCallback | None) -> None:
+        self._downstream = downstream
+        self._session: codex_app_server.CodexAppServerSession | None = None
+        self._buffer: list[tuple[StreamName, str]] = []
+        self._passing = False
+
+    def attach(self, session: codex_app_server.CodexAppServerSession) -> None:
+        self._session = session
+
+    def __call__(self, stream_name: StreamName, text: str) -> None:
+        if not self._passing:
+            session = self._session
+            if session is None or not (session.turn_accepted or session.work_observed):
+                self._buffer.append((stream_name, text))
+                return
+            self.release()
+        if self._downstream is not None:
+            self._downstream(stream_name, text)
+
+    def release(self) -> None:
+        """Emit what was withheld: this turn is the one that really ran."""
+        self._passing = True
+        buffered, self._buffer = self._buffer, []
+        if self._downstream is None:
+            return
+        for stream_name, text in buffered:
+            self._downstream(stream_name, text)
+
+    def discard(self) -> None:
+        """Drop what was withheld: another run of this turn will be streamed."""
+        self._passing = True
+        self._buffer.clear()
+
+
+class _CodexAppServerTransport(HarnessTransport):
+    """The adapter's handle on one live app-server conversation."""
+
+    def __init__(self, session: codex_app_server.CodexAppServerSession) -> None:
+        self.session = session
+        self._processor = _CodexAppServerOutputProcessor(session)
+
+    def output_processor(self) -> _OutputProcessor:
+        return self._processor
+
+    def guidance_transport(self) -> guidance_delivery.GuidanceTransport | None:
+        return self.session.steer
+
+    def shutdown(self) -> None:
+        self.session.shutdown()
 
 
 class CodexAdapter(HarnessAdapter):
@@ -977,6 +1182,36 @@ class CodexAdapter(HarnessAdapter):
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
     ) -> list[str]:
+        """The app-server argv, which deliberately says almost nothing.
+
+        Everything argv used to carry -- cwd, sandbox, writable roots, model,
+        effort, and the prompt itself -- moves into the turn plan and the
+        protocol. The prompt in particular is no longer a command-line
+        argument, so it no longer appears in any process listing.
+        """
+        del cwd, plan_dir, prompt, unsafe_bypass, model, effort, access
+        if last_message_path is None:
+            raise HarnessError("codex adapter requires a last_message_path")
+        return [self.executable, "app-server"]
+
+    def build_exec_argv(
+        self,
+        *,
+        cwd: Path,
+        plan_dir: Path | None,
+        prompt: str,
+        unsafe_bypass: bool = False,
+        last_message_path: Path | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        access: AccessProfile = WORKER_ACCESS,
+    ) -> list[str]:
+        """The legacy one-shot argv, kept for the pre-start fallback only.
+
+        This is the transport codex ran under before the app-server, unchanged.
+        It is reachable only when the app-server conversation failed before the
+        turn was accepted and before any work was emitted.
+        """
         if last_message_path is None:
             raise HarnessError("codex adapter requires a last_message_path")
 
@@ -1013,6 +1248,351 @@ class CodexAdapter(HarnessAdapter):
             argv.extend(["-c", f'model_reasoning_effort="{effort}"'])
         argv.extend(["-o", str(last_message_path), prompt])
         return argv
+
+    def build_turn_plan(
+        self,
+        *,
+        cwd: Path,
+        plan_dir: Path | None,
+        unsafe_bypass: bool = False,
+        model: str | None = None,
+        effort: str | None = None,
+        access: AccessProfile = WORKER_ACCESS,
+    ) -> codex_app_server.TurnPlan:
+        """Restate the access profile as app-server thread and turn parameters.
+
+        Each branch is the protocol spelling of the legacy flag it replaces:
+        ``-s read-only`` and ``-s workspace-write`` become the ``sandbox``
+        parameter, ``--dangerously-bypass-approvals-and-sandbox`` becomes
+        ``danger-full-access`` with approvals off, and ``--add-dir`` becomes the
+        one writable root under ``sandbox_workspace_write``. ``expected_sandbox``
+        is what the session then demands the app-server confirm it applied, so
+        the profile is verified rather than assumed.
+        """
+        thread_params: dict[str, Any] = {
+            "cwd": str(cwd),
+            # The turn is unattended on both transports; the legacy argv said
+            # the same thing by never offering an approval path at all.
+            "approvalPolicy": "never",
+        }
+        if access.is_audit:
+            # No writable root: the read-only sandbox already permits reading
+            # outside the cwd, which is what the audit's read roots need, and
+            # the app-server needs no equivalent of --skip-git-repo-check.
+            thread_params["sandbox"] = "read-only"
+            expected_sandbox = codex_app_server.SANDBOX_READ_ONLY
+        elif unsafe_bypass:
+            thread_params["sandbox"] = "danger-full-access"
+            expected_sandbox = codex_app_server.SANDBOX_DANGER_FULL_ACCESS
+        else:
+            thread_params["sandbox"] = "workspace-write"
+            thread_params["config"] = {
+                "sandbox_workspace_write": {
+                    "writable_roots": [self._worker_plan_dir(plan_dir)]
+                }
+            }
+            expected_sandbox = codex_app_server.SANDBOX_WORKSPACE_WRITE
+        if model is not None:
+            thread_params["model"] = model
+        turn_params: dict[str, Any] = {}
+        if effort is not None:
+            turn_params["effort"] = effort
+        return codex_app_server.TurnPlan(
+            thread_params=thread_params,
+            turn_params=turn_params,
+            expected_sandbox=expected_sandbox,
+        )
+
+    def build_invocation(
+        self,
+        *,
+        cwd: Path,
+        plan_dir: Path | None,
+        prompt: str,
+        unsafe_bypass: bool = False,
+        last_message_path: Path | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        access: AccessProfile = WORKER_ACCESS,
+    ) -> HarnessInvocation:
+        self.check_access(access, plan_dir=plan_dir, unsafe_bypass=unsafe_bypass)
+        return HarnessInvocation(
+            name=self.name,
+            argv=self.build_argv(
+                cwd=cwd,
+                plan_dir=plan_dir,
+                prompt=prompt,
+                unsafe_bypass=unsafe_bypass,
+                last_message_path=last_message_path,
+                model=model,
+                effort=effort,
+                access=access,
+            ),
+            cwd=cwd,
+            last_message_path=last_message_path,
+            model=model,
+            effort=effort,
+            transport=TRANSPORT_APP_SERVER,
+            turn_plan=self.build_turn_plan(
+                cwd=cwd,
+                plan_dir=plan_dir,
+                unsafe_bypass=unsafe_bypass,
+                model=model,
+                effort=effort,
+                access=access,
+            ),
+        )
+
+    def build_exec_invocation(
+        self,
+        *,
+        cwd: Path,
+        plan_dir: Path | None,
+        prompt: str,
+        unsafe_bypass: bool = False,
+        last_message_path: Path | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        access: AccessProfile = WORKER_ACCESS,
+    ) -> HarnessInvocation:
+        self.check_access(access, plan_dir=plan_dir, unsafe_bypass=unsafe_bypass)
+        return HarnessInvocation(
+            name=self.name,
+            argv=self.build_exec_argv(
+                cwd=cwd,
+                plan_dir=plan_dir,
+                prompt=prompt,
+                unsafe_bypass=unsafe_bypass,
+                last_message_path=last_message_path,
+                model=model,
+                effort=effort,
+                access=access,
+            ),
+            cwd=cwd,
+            last_message_path=last_message_path,
+            model=model,
+            effort=effort,
+            transport=TRANSPORT_EXEC,
+        )
+
+    def open_transport(
+        self,
+        *,
+        process: subprocess.Popen,
+        invocation: HarnessInvocation,
+        prompt: str,
+    ) -> HarnessTransport | None:
+        if invocation.transport != TRANSPORT_APP_SERVER:
+            return None
+        if invocation.turn_plan is None:
+            raise HarnessError("codex app-server turns require a turn plan")
+        session = codex_app_server.CodexAppServerSession(
+            process=process,
+            plan=invocation.turn_plan,
+            prompt=prompt,
+        )
+        session.start()
+        return _CodexAppServerTransport(session)
+
+    def run(
+        self,
+        *,
+        cwd: Path,
+        plan_dir: Path | None,
+        prompt: str,
+        unsafe_bypass: bool = False,
+        last_message_path: Path | None = None,
+        timeout: int | None = None,
+        stream_callback: StreamCallback | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        on_spawn: Callable[[int], None] | None = None,
+        on_final_result: Callable[[], None] | None = None,
+        on_observed_model: Callable[[str], None] | None = None,
+        access: AccessProfile = WORKER_ACCESS,
+        abort: AbortSignal | None = None,
+        live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
+        invocation: HarnessInvocation | None = None,
+        on_transport: Callable[[HarnessTransport | None], None] | None = None,
+    ) -> HarnessResult:
+        """Run the turn on the app-server, falling back only before it starts.
+
+        The fallback window is narrow on purpose. ``session.fallback_reason``
+        is non-``None`` only while the conversation failed before ``turn/start``
+        was accepted *and* before the app-server emitted anything the turn did,
+        which is the only state in which re-running the prompt cannot execute
+        it twice. Once the turn is accepted, a protocol failure is reported as
+        a failed turn -- never retried.
+        """
+        if invocation is not None and invocation.transport == TRANSPORT_EXEC:
+            # An explicitly legacy invocation (a fallback re-entry, or a caller
+            # that built one deliberately) is run as-is.
+            return super().run(
+                cwd=cwd,
+                plan_dir=plan_dir,
+                prompt=prompt,
+                unsafe_bypass=unsafe_bypass,
+                last_message_path=last_message_path,
+                timeout=timeout,
+                stream_callback=stream_callback,
+                model=model,
+                effort=effort,
+                on_spawn=on_spawn,
+                on_final_result=on_final_result,
+                on_observed_model=on_observed_model,
+                access=access,
+                abort=abort,
+                live_delivery=live_delivery,
+                invocation=invocation,
+                on_transport=on_transport,
+            )
+
+        if invocation is None:
+            invocation = self.build_invocation(
+                cwd=cwd,
+                plan_dir=plan_dir,
+                prompt=prompt,
+                unsafe_bypass=unsafe_bypass,
+                last_message_path=last_message_path,
+                model=model,
+                effort=effort,
+                access=access,
+            )
+
+        # Captured rather than stored on ``self``: one adapter instance serves
+        # every turn of a run, and the session belongs to exactly one of them.
+        opened: list[codex_app_server.CodexAppServerSession] = []
+        window = _FallbackWindowStream(stream_callback)
+
+        def capture(transport: HarnessTransport | None) -> None:
+            if isinstance(transport, _CodexAppServerTransport):
+                opened.append(transport.session)
+                window.attach(transport.session)
+            if on_transport is not None:
+                on_transport(transport)
+
+        result = super().run(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            prompt=prompt,
+            unsafe_bypass=unsafe_bypass,
+            last_message_path=last_message_path,
+            timeout=timeout,
+            stream_callback=window,
+            model=model,
+            effort=effort,
+            on_spawn=on_spawn,
+            on_final_result=on_final_result,
+            on_observed_model=on_observed_model,
+            access=access,
+            abort=abort,
+            live_delivery=live_delivery,
+            invocation=invocation,
+            on_transport=capture,
+        )
+        if not opened:
+            window.release()
+            return result
+        session = opened[0]
+
+        if result.timed_out or result.aborted or result.interrupted:
+            # The turn was stopped rather than failed. Re-running it would
+            # spend the same wall clock again, and the operator asked for it to
+            # stop, so these codes stand exactly as the base run reported them.
+            window.release()
+            return self._app_server_result(result, session)
+
+        fallback = session.fallback_reason
+        if fallback is None:
+            window.release()
+            return self._app_server_result(result, session)
+
+        window.discard()
+        legacy = self.build_exec_invocation(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            prompt=prompt,
+            unsafe_bypass=unsafe_bypass,
+            last_message_path=last_message_path,
+            model=model,
+            effort=effort,
+            access=access,
+        )
+        fallback_result = super().run(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            prompt=prompt,
+            unsafe_bypass=unsafe_bypass,
+            last_message_path=last_message_path,
+            timeout=timeout,
+            stream_callback=stream_callback,
+            model=model,
+            effort=effort,
+            on_spawn=on_spawn,
+            on_final_result=on_final_result,
+            on_observed_model=on_observed_model,
+            access=access,
+            abort=abort,
+            live_delivery=live_delivery,
+            invocation=legacy,
+            on_transport=on_transport,
+        )
+        return self._with_stderr_note(
+            fallback_result,
+            f"codex app-server unavailable, ran codex exec instead: {fallback}",
+        )
+
+    def _app_server_result(
+        self,
+        result: HarnessResult,
+        session: codex_app_server.CodexAppServerSession,
+    ) -> HarnessResult:
+        """Restate the turn's outcome from the protocol rather than the exit code.
+
+        An app-server exits 0 whether the turn it ran succeeded or failed, and
+        exits by our own ``terminate`` on the shutdown path, so its return code
+        carries no verdict. The turn's own terminal status does.
+        """
+        error = session.protocol_error
+        if error is not None:
+            result = self._with_stderr_note(result, f"codex app-server: {error}")
+        if result.timed_out or result.aborted or result.interrupted:
+            return result
+        if (
+            session.turn_status == codex_app_server.TURN_STATUS_COMPLETED
+            and error is None
+        ):
+            returncode = 0
+        elif result.returncode > 0:
+            returncode = result.returncode
+        else:
+            # 0 (a clean app-server exit after an unfinished turn) and any
+            # negative signal code from our own shutdown both mean "no verdict";
+            # neither may be reported as success.
+            returncode = 1
+        return dataclasses.replace(result, returncode=returncode)
+
+    @staticmethod
+    def _with_stderr_note(result: HarnessResult, note: str) -> HarnessResult:
+        """Append one adapter-authored line to the turn's stderr.
+
+        The stderr artifact is written from ``result.stderr`` while
+        ``stream_io`` counts what the readers saw, and the two are required to
+        agree byte for byte. A note added here is stderr the turn really has,
+        so it is accounted for as stderr rather than smuggled in beside it.
+        """
+        text = f"{note}\n"
+        stream_io = dict(result.stream_io or {})
+        if stream_io:
+            stream_io["stderr_chars"] = int(stream_io.get("stderr_chars", 0)) + len(
+                text
+            )
+            stream_io["stderr_chunks"] = int(stream_io.get("stderr_chunks", 0)) + 1
+        return dataclasses.replace(
+            result,
+            stderr=result.stderr + text,
+            stream_io=stream_io or result.stream_io,
+        )
 
 
 class ClaudeAdapter(HarnessAdapter):

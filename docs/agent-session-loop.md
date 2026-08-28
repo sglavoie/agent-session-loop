@@ -3766,11 +3766,33 @@ is additive.
 The built-in adapters construct argv lists directly and never use shell
 interpolation.
 
-Codex:
+Codex runs over the app-server transport, so its argv names only the binary and
+everything else travels the JSON-RPC conversation:
+
+```text
+codex app-server
+```
+
+The turn plan the client then sends carries what argv used to. `thread/start`
+takes the working directory, `approvalPolicy: never`, the sandbox policy, the
+writable roots, and the model; `turn/start` takes the reasoning effort and the
+prompt. The prompt is therefore not a command-line argument at all and does not
+appear in a process listing. `thread/start` echoes the sandbox it actually
+applied, and the client refuses to send the turn if that echo is not the profile
+that was asked for.
+
+The one-shot form is still built, and is used only when the app-server
+conversation fails *before* the turn is accepted and before any work is
+emitted — the one state in which running the turn again cannot run it twice:
 
 ```text
 codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sandbox [--model <model>] [-c model_reasoning_effort="<effort>"] -o <last-message-file> <prompt>
 ```
+
+`invocation.transport` in the turn's persisted result and in `--dry-run` says
+which of the two ran: `app-server` or `exec`. Under `app-server` the invocation
+also carries a prompt-free `turn_plan`, which `--dry-run` prints below argv so
+an operator can still read the access profile off a planned turn.
 
 Claude:
 
@@ -3879,7 +3901,7 @@ By default, `run` and `doctor` use harness-specific bypass modes for every
 harness. For Codex, Claude, and Copilot this means:
 
 ```text
-codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sandbox -o <last-message-file> <prompt>
+codex app-server  (thread/start sandbox: danger-full-access)
 claude --print --verbose --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions <prompt>
 copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-ask-user --silent -p <prompt>
 ```
@@ -3889,7 +3911,7 @@ copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-a
 where supported by that harness:
 
 ```text
-codex exec -C <cwd> --add-dir <plan-dir> -s workspace-write -o <last-message-file> <prompt>
+codex app-server  (thread/start sandbox: workspace-write, writable root <plan-dir>)
 claude --print --verbose --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode dontAsk <prompt>
 copilot -C <cwd> --add-dir <plan-dir> --no-ask-user --silent -p <prompt>
 ```

@@ -3947,15 +3947,19 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 state.release_lock(self.plan_dir, self.state_dir)
 
         self.assertEqual(0, exit_code, payload)
-        self.assertEqual(1, len(harness_pids))
+        # The fake codex declines `app-server` before reading a byte, so the
+        # turn spawns twice: the declined attempt, then the legacy fallback
+        # that actually runs the prompt and is the one abort has to kill.
+        self.assertEqual(2, len(harness_pids))
         self.assertEqual("stopped", payload["reason"])
         self.assertFalse(payload["paused"])
         self.assertEqual(137, payload["turns"][0]["returncode"])
         self.assertEqual("pending", self._session_status("1"))
-        with self.assertRaises(ProcessLookupError):
-            # The whole group is gone once the child is reaped, so nothing the
-            # turn spawned outlives the abort.
-            os.killpg(harness_pids[0], 0)
+        for pid in harness_pids:
+            with self.assertRaises(ProcessLookupError):
+                # The whole group is gone once the child is reaped, so nothing
+                # the turn spawned outlives the abort.
+                os.killpg(pid, 0)
         self.assertEqual(
             [
                 events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,

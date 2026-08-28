@@ -376,10 +376,11 @@ class _RecordingAdapter(harnesses.HarnessAdapter):
         *,
         process: Any,
         invocation: harnesses.HarnessInvocation,
+        transport: harnesses.HarnessTransport | None = None,
     ) -> guidance_delivery.GuidanceTransport | None:
         if not self.supports_live:
             return super().live_delivery_transport(
-                process=process, invocation=invocation
+                process=process, invocation=invocation, transport=transport
             )
 
         def transport(
@@ -552,7 +553,14 @@ class HarnessLiveDeliverySeamTests(unittest.TestCase):
 
 
 class ProductionAdapterDeferralTests(unittest.TestCase):
-    """No shipped harness may claim live delivery in this session."""
+    """Without an open protocol conversation, no adapter claims live delivery.
+
+    Codex gained one over the app-server; claude and copilot are still one-shot
+    processes. What all three share is this floor: an adapter handed no
+    transport has no live channel and must say so, so a turn whose conversation
+    never opened defers instead of reporting a delivery it did not make. The
+    codex transport itself is covered in tests/test_asl_codex_app_server.py.
+    """
 
     def test_every_adapter_reports_no_live_transport(self) -> None:
         for name in harnesses.HARNESS_NAMES:

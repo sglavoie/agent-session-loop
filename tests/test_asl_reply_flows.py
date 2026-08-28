@@ -236,14 +236,16 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 reply_source["last_message_path"],
             )
             self.assertEqual(len("use 1a"), reply_source["reply_length"])
-            invocation_argv = planned["invocation"]["argv"]
-            self.assertTrue(
-                any(
-                    runner.REPLY_CONTEXT_HEADING in str(token)
-                    for token in invocation_argv
-                ),
-                invocation_argv,
-            )
+            invocation = planned["invocation"]
+            # Codex runs over the app-server, so the resumed prompt travels the
+            # JSON-RPC turn rather than argv. What the planned invocation has
+            # to show is which transport will carry it, and that neither argv
+            # nor the turn plan leaks the reply body.
+            self.assertEqual(harnesses.TRANSPORT_APP_SERVER, invocation["transport"])
+            self.assertIsNotNone(invocation["turn_plan"])
+            described = json.dumps([invocation["argv"], invocation["turn_plan"]])
+            self.assertNotIn(runner.REPLY_CONTEXT_HEADING, described)
+            self.assertNotIn("use 1a", described)
             self.assertEqual(
                 paused_state,
                 state_path.read_text(encoding="utf-8"),

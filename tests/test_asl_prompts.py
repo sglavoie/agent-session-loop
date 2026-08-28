@@ -1271,6 +1271,27 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
 
 
 class HarnessInvocationPromptOverrideTests(unittest.TestCase):
+    """The prompt an invocation is built from reaches the harness.
+
+    Codex runs over the app-server, where the prompt travels the JSON-RPC
+    conversation instead of argv, so for that harness the assertion is made
+    against the legacy one-shot invocation built from the same prompt -- and
+    the app-server invocation is checked to carry the prompt nowhere at all.
+    """
+
+    def _codex_exec_argv(self, **kwargs: object) -> list[str]:
+        adapter = harnesses.get_adapter("codex")
+        return adapter.build_exec_invocation(**kwargs).argv  # type: ignore[attr-defined]
+
+    def _assert_prompt_free(
+        self, invocation: harnesses.HarnessInvocation, prompt: str
+    ) -> None:
+        self.assertEqual(harnesses.TRANSPORT_APP_SERVER, invocation.transport)
+        self.assertNotIn(prompt, invocation.argv)
+        self.assertIsNotNone(invocation.turn_plan)
+        assert invocation.turn_plan is not None
+        self.assertNotIn(prompt, json.dumps(invocation.turn_plan.to_payload()))
+
     def test_default_invocation_uses_build_session_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1286,8 +1307,19 @@ class HarnessInvocationPromptOverrideTests(unittest.TestCase):
                 plan_dir=plan_dir,
                 last_message_path=last_message,
             )
-            expected_prompt = runner.build_session_prompt("codex", plan_dir)
-            self.assertIn(expected_prompt, invocation.argv)
+            expected_prompt = runner.build_session_prompt(
+                "codex", plans.canonicalize_path(plan_dir)
+            )
+            self._assert_prompt_free(invocation, expected_prompt)
+            self.assertIn(
+                expected_prompt,
+                self._codex_exec_argv(
+                    cwd=plans.canonicalize_path(cwd),
+                    plan_dir=plans.canonicalize_path(plan_dir),
+                    prompt=expected_prompt,
+                    last_message_path=last_message,
+                ),
+            )
 
     def test_prompt_override_is_passed_to_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1306,10 +1338,17 @@ class HarnessInvocationPromptOverrideTests(unittest.TestCase):
                 last_message_path=last_message,
                 prompt=override_prompt,
             )
-            self.assertIn(override_prompt, invocation.argv)
+            self._assert_prompt_free(invocation, override_prompt)
+            argv = self._codex_exec_argv(
+                cwd=plans.canonicalize_path(cwd),
+                plan_dir=plans.canonicalize_path(plan_dir),
+                prompt=override_prompt,
+                last_message_path=last_message,
+            )
+            self.assertIn(override_prompt, argv)
             self.assertNotIn(
                 runner.build_session_prompt("codex", plan_dir),
-                invocation.argv,
+                argv,
             )
 
     def test_prompt_override_consistent_across_harnesses(self) -> None:
@@ -1331,6 +1370,18 @@ class HarnessInvocationPromptOverrideTests(unittest.TestCase):
                         last_message_path=last_message,
                         prompt=override_prompt,
                     )
+                    if harness == "codex":
+                        self._assert_prompt_free(invocation, override_prompt)
+                        self.assertIn(
+                            override_prompt,
+                            self._codex_exec_argv(
+                                cwd=plans.canonicalize_path(cwd),
+                                plan_dir=plans.canonicalize_path(plan_dir),
+                                prompt=override_prompt,
+                                last_message_path=last_message,
+                            ),
+                        )
+                        continue
                     self.assertIn(override_prompt, invocation.argv)
 
 

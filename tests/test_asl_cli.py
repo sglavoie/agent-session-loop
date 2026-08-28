@@ -68,13 +68,34 @@ from tests.support import (
 
 
 class CommandAndConfigTests(unittest.TestCase):
-    def test_codex_command_uses_workspace_write_or_unsafe_bypass(self) -> None:
+    def test_codex_turn_plan_uses_workspace_write_or_unsafe_bypass(self) -> None:
+        """The sandbox choice moved from argv into the app-server turn plan."""
+        adapter = harnesses.CodexAdapter(executable="codex")
+        cwd = Path("/tmp/repo")
+        plan_dir = Path("/tmp/plan")
+
+        safe = adapter.build_turn_plan(cwd=cwd, plan_dir=plan_dir)
+        self.assertEqual("workspace-write", safe.thread_params["sandbox"])
+        self.assertEqual("never", safe.thread_params["approvalPolicy"])
+        self.assertEqual(
+            [str(plan_dir)],
+            safe.thread_params["config"]["sandbox_workspace_write"]["writable_roots"],
+        )
+
+        unsafe = adapter.build_turn_plan(cwd=cwd, plan_dir=plan_dir, unsafe_bypass=True)
+        self.assertEqual("danger-full-access", unsafe.thread_params["sandbox"])
+        self.assertNotIn("config", unsafe.thread_params)
+
+    def test_codex_fallback_command_uses_workspace_write_or_unsafe_bypass(
+        self,
+    ) -> None:
+        """The one-shot argv kept for the pre-acceptance fallback is unchanged."""
         adapter = harnesses.CodexAdapter(executable="codex")
         cwd = Path("/tmp/repo")
         plan_dir = Path("/tmp/plan")
         last_message = Path("/tmp/state/last-message-1.txt")
 
-        safe = adapter.build_argv(
+        safe = adapter.build_exec_argv(
             cwd=cwd,
             plan_dir=plan_dir,
             prompt="$session-run /tmp/plan/",
@@ -85,7 +106,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", safe)
         self.assertNotIn("-a", safe)
 
-        unsafe = adapter.build_argv(
+        unsafe = adapter.build_exec_argv(
             cwd=cwd,
             plan_dir=plan_dir,
             prompt="$session-run /tmp/plan/",
@@ -102,7 +123,16 @@ class CommandAndConfigTests(unittest.TestCase):
         prompt = "$session-run /tmp/plan/"
         last_message = Path("/tmp/state/last-message-1.txt")
 
-        argv = adapter.build_argv(
+        plan = adapter.build_turn_plan(
+            cwd=cwd,
+            plan_dir=plan_dir,
+            model="gpt-5",
+            effort="high",
+        )
+        self.assertEqual("gpt-5", plan.thread_params["model"])
+        self.assertEqual("high", plan.turn_params["effort"])
+
+        argv = adapter.build_exec_argv(
             cwd=cwd,
             plan_dir=plan_dir,
             prompt=prompt,
@@ -2246,18 +2276,14 @@ class JsonCliTests(unittest.TestCase):
             self.assertEqual(config.MODEL_SOURCE_FLAG, invocation["model_source"])
             self.assertEqual("high", invocation["effort"])
             self.assertEqual(config.EFFORT_SOURCE_FLAG, invocation["effort_source"])
-            self.assertIn(
-                "--dangerously-bypass-approvals-and-sandbox",
-                invocation["argv"],
-            )
-            self.assertNotIn("workspace-write", invocation["argv"])
-            self.assertEqual(
-                "gpt-5", invocation["argv"][invocation["argv"].index("--model") + 1]
-            )
-            self.assertEqual(
-                'model_reasoning_effort="high"',
-                invocation["argv"][invocation["argv"].index("-c") + 1],
-            )
+            # Codex plans its turn over the app-server, so the access profile
+            # and the model selection are read off the turn plan, not argv.
+            self.assertEqual(harnesses.TRANSPORT_APP_SERVER, invocation["transport"])
+            thread_params = invocation["turn_plan"]["thread_params"]
+            self.assertEqual("danger-full-access", thread_params["sandbox"])
+            self.assertNotIn("config", thread_params)
+            self.assertEqual("gpt-5", thread_params["model"])
+            self.assertEqual("high", invocation["turn_plan"]["turn_params"]["effort"])
             self.assertTrue(run_payload["state_path"].endswith("/state.json"))
             self.assertTrue(run_payload["events_path"].endswith("/events.jsonl"))
 
@@ -3140,10 +3166,15 @@ class JsonCliTests(unittest.TestCase):
             )
 
             payload = json.loads(completed.stdout)
-            argv = payload["planned"]["invocation"]["argv"]
-            self.assertIn("-s", argv)
-            self.assertIn("workspace-write", argv)
-            self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+            invocation = payload["planned"]["invocation"]
+            self.assertEqual(harnesses.TRANSPORT_APP_SERVER, invocation["transport"])
+            thread_params = invocation["turn_plan"]["thread_params"]
+            self.assertEqual("workspace-write", thread_params["sandbox"])
+            self.assertEqual("never", thread_params["approvalPolicy"])
+            self.assertNotIn(
+                "--dangerously-bypass-approvals-and-sandbox",
+                json.dumps([invocation["argv"], invocation["turn_plan"]]),
+            )
 
             copilot_completed = subprocess.run(
                 [
@@ -3251,8 +3282,9 @@ class JsonCliTests(unittest.TestCase):
             invocation = payload["planned"]["invocation"]
             self.assertEqual(str(REPO_ROOT), payload["cwd"])
             self.assertEqual(str(REPO_ROOT), invocation["cwd"])
+            # The working directory reaches codex through `thread/start` now.
             self.assertEqual(
-                str(REPO_ROOT), invocation["argv"][invocation["argv"].index("-C") + 1]
+                str(REPO_ROOT), invocation["turn_plan"]["thread_params"]["cwd"]
             )
 
     def test_dry_run_json_reports_native_model_metadata_without_argv_flags(
@@ -3405,11 +3437,12 @@ class JsonCliTests(unittest.TestCase):
                 ["codex"], payload["harness_config"]["configured_harnesses"]
             )
             self.assertEqual(str(fake_codex), payload["invocation"]["argv"][0])
-            self.assertIn(
-                "--dangerously-bypass-approvals-and-sandbox",
-                payload["invocation"]["argv"],
+            self.assertEqual(
+                harnesses.TRANSPORT_APP_SERVER, payload["invocation"]["transport"]
             )
-            self.assertNotIn("workspace-write", payload["invocation"]["argv"])
+            thread_params = payload["invocation"]["turn_plan"]["thread_params"]
+            self.assertEqual("danger-full-access", thread_params["sandbox"])
+            self.assertNotIn("config", thread_params)
             self.assertEqual(payload["invocation"]["argv"], payload["invocation_argv"])
             self.assertEqual("gpt-5", payload["invocation"]["model"])
             self.assertEqual(
@@ -3419,15 +3452,9 @@ class JsonCliTests(unittest.TestCase):
             self.assertEqual(
                 config.EFFORT_SOURCE_FLAG, payload["invocation"]["effort_source"]
             )
+            self.assertEqual("gpt-5", thread_params["model"])
             self.assertEqual(
-                "gpt-5",
-                payload["invocation_argv"][
-                    payload["invocation_argv"].index("--model") + 1
-                ],
-            )
-            self.assertEqual(
-                'model_reasoning_effort="high"',
-                payload["invocation_argv"][payload["invocation_argv"].index("-c") + 1],
+                "high", payload["invocation"]["turn_plan"]["turn_params"]["effort"]
             )
 
     def test_doctor_json_uses_current_directory_when_cwd_is_omitted(self) -> None:
@@ -3470,8 +3497,9 @@ class JsonCliTests(unittest.TestCase):
             invocation = payload["invocation"]
             self.assertEqual(str(REPO_ROOT), payload["cwd"])
             self.assertEqual(str(REPO_ROOT), invocation["cwd"])
+            # The working directory reaches codex through `thread/start` now.
             self.assertEqual(
-                str(REPO_ROOT), invocation["argv"][invocation["argv"].index("-C") + 1]
+                str(REPO_ROOT), invocation["turn_plan"]["thread_params"]["cwd"]
             )
 
     def test_doctor_json_reports_ordered_registered_repositories(self) -> None:
@@ -3581,10 +3609,12 @@ class JsonCliTests(unittest.TestCase):
             self.assertIn("Model: gpt-5 (flag)", lines)
             self.assertIn("Effort: high (flag)", lines)
             self.assertIn("Argv:", lines)
-            model_index = lines.index("  --model")
-            effort_index = lines.index("  -c")
-            self.assertEqual("  gpt-5", lines[model_index + 1])
-            self.assertEqual('  model_reasoning_effort="high"', lines[effort_index + 1])
+            # Under the app-server transport the model and effort are stated in
+            # the turn plan the report prints below argv, not in argv itself.
+            self.assertIn(f"Transport: {harnesses.TRANSPORT_APP_SERVER}", lines)
+            self.assertIn("Turn plan:", lines)
+            self.assertIn('      "model": "gpt-5",', lines)
+            self.assertIn('      "effort": "high"', lines)
 
     def test_doctor_json_error_goes_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

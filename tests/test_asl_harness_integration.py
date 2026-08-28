@@ -8003,13 +8003,42 @@ class AuditAccessProfileTests(unittest.TestCase):
     )
 
     def _audit_argv(self, name: str, read_roots: tuple[Path, ...]) -> list[str]:
-        return harnesses.get_adapter(name).build_argv(
+        adapter = harnesses.get_adapter(name)
+        # Codex states the audit profile over the app-server protocol now, so
+        # its *argv* boundary is the fallback transport's argv; the protocol
+        # side is asserted separately against the turn plan.
+        builder = getattr(adapter, "build_exec_argv", adapter.build_argv)
+        return builder(
             cwd=Path("/audit"),
             plan_dir=None,
             prompt="audit",
             last_message_path=Path("/audit/last.txt"),
             access=harnesses.audit_read_only_access(read_roots),
         )
+
+    def _audit_access_text(self, name: str, read_roots: tuple[Path, ...]) -> str:
+        """Everything that describes one audit turn's access, on either transport.
+
+        Argv stopped being the whole story once a harness could be driven over
+        a protocol, so a bypass check that read argv alone would pass
+        vacuously for codex. This renders argv *and* the turn plan, which is
+        where the sandbox, the approval policy, and the writable roots now
+        live.
+        """
+        adapter = harnesses.get_adapter(name)
+        invocation = adapter.build_invocation(
+            cwd=Path("/audit"),
+            plan_dir=None,
+            prompt="audit",
+            last_message_path=Path("/audit/last.txt"),
+            access=harnesses.audit_read_only_access(read_roots),
+        )
+        rendered = "\n".join(invocation.argv)
+        if invocation.turn_plan is not None:
+            rendered += "\n" + json.dumps(
+                invocation.turn_plan.to_payload(), sort_keys=True
+            )
+        return rendered
 
     def _granted_dirs(self, argv: list[str]) -> list[str]:
         return [
@@ -8018,19 +8047,6 @@ class AuditAccessProfileTests(unittest.TestCase):
 
     def test_worker_argv_is_byte_for_byte_what_it_always_was(self) -> None:
         expected = {
-            "codex": [
-                "codex",
-                "exec",
-                "-C",
-                "/work",
-                "--add-dir",
-                "/plan",
-                "-s",
-                "workspace-write",
-                "-o",
-                "/work/last.txt",
-                "prompt",
-            ],
             "claude": [
                 "claude",
                 "--print",
@@ -8073,17 +8089,101 @@ class AuditAccessProfileTests(unittest.TestCase):
         for name in harnesses.HARNESS_NAMES:
             with self.subTest(harness=name):
                 argv = self._audit_argv(name, (Path("/evidence"),))
+                described = self._audit_access_text(name, (Path("/evidence"),))
 
                 for token in self.BYPASS_TOKENS:
                     self.assertNotIn(token, argv)
+                    self.assertNotIn(token, described)
+
+    def test_codex_worker_turns_run_over_the_app_server(self) -> None:
+        adapter = harnesses.get_adapter("codex")
+
+        invocation = adapter.build_invocation(
+            cwd=Path("/work"),
+            plan_dir=Path("/plan"),
+            prompt="prompt",
+            last_message_path=Path("/work/last.txt"),
+        )
+
+        # The prompt is no longer a command-line argument at all, so it no
+        # longer appears in any process listing.
+        self.assertEqual(["codex", "app-server"], invocation.argv)
+        self.assertEqual(harnesses.TRANSPORT_APP_SERVER, invocation.transport)
+        self.assertIsNotNone(invocation.turn_plan)
+        assert invocation.turn_plan is not None
+        plan = invocation.turn_plan.to_payload()
+        self.assertEqual(
+            {
+                "cwd": "/work",
+                "approvalPolicy": "never",
+                "sandbox": "workspace-write",
+                "config": {"sandbox_workspace_write": {"writable_roots": ["/plan"]}},
+            },
+            plan["thread_params"],
+        )
+        self.assertEqual("workspaceWrite", plan["expected_sandbox"])
+
+    def test_codex_worker_argv_still_carries_the_legacy_fallback_turn(self) -> None:
+        self.assertEqual(
+            [
+                "codex",
+                "exec",
+                "-C",
+                "/work",
+                "--add-dir",
+                "/plan",
+                "-s",
+                "workspace-write",
+                "-o",
+                "/work/last.txt",
+                "prompt",
+            ],
+            harnesses.get_adapter("codex").build_exec_argv(
+                cwd=Path("/work"),
+                plan_dir=Path("/plan"),
+                prompt="prompt",
+                last_message_path=Path("/work/last.txt"),
+            ),
+        )
+
+    def test_codex_unsafe_bypass_reaches_the_app_server_as_full_access(self) -> None:
+        invocation = harnesses.get_adapter("codex").build_invocation(
+            cwd=Path("/work"),
+            plan_dir=Path("/plan"),
+            prompt="prompt",
+            unsafe_bypass=True,
+            last_message_path=Path("/work/last.txt"),
+        )
+
+        assert invocation.turn_plan is not None
+        plan = invocation.turn_plan.to_payload()
+        self.assertEqual("danger-full-access", plan["thread_params"]["sandbox"])
+        self.assertEqual("dangerFullAccess", plan["expected_sandbox"])
 
     def test_codex_audits_run_in_its_read_only_sandbox(self) -> None:
         argv = self._audit_argv("codex", (Path("/evidence"), Path("/skills")))
+        invocation = harnesses.get_adapter("codex").build_invocation(
+            cwd=Path("/audit"),
+            plan_dir=None,
+            prompt="audit",
+            last_message_path=Path("/audit/last.txt"),
+            access=harnesses.audit_read_only_access(
+                (Path("/evidence"), Path("/skills"))
+            ),
+        )
 
+        assert invocation.turn_plan is not None
+        plan = invocation.turn_plan.to_payload()
+        self.assertEqual("read-only", plan["thread_params"]["sandbox"])
+        self.assertEqual("readOnly", plan["expected_sandbox"])
+        # No writable root of any kind: the read-only sandbox already reads
+        # anywhere, so the audit's read roots need no grant at all.
+        self.assertNotIn("config", plan["thread_params"])
+        # The fallback transport states the same profile the old way.
         self.assertEqual(["-s", "read-only"], argv[4:6])
         self.assertIn("--skip-git-repo-check", argv)
         # For codex ``--add-dir`` grants *write* access, so read roots must not
-        # be passed through it; its read-only sandbox already reads anywhere.
+        # be passed through it.
         self.assertNotIn("--add-dir", argv)
 
     def test_claude_audits_expose_only_read_and_search_tools(self) -> None:
