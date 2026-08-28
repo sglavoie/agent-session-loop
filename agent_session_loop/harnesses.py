@@ -795,6 +795,7 @@ class HarnessAdapter:
         live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
         invocation: HarnessInvocation | None = None,
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> HarnessResult:
         if invocation is None:
             invocation = self.build_invocation(
@@ -829,6 +830,13 @@ class HarnessAdapter:
                 # by the post-turn sweep. Descendants that start a session of
                 # their own are out of reach: see :func:`_kill_process_group`.
                 start_new_session=True,
+                # ``None`` inherits this process's environment, which is what
+                # every turn did before command guards existed and what every
+                # turn still does when none are active. A supplied mapping is
+                # the complete child environment, already derived from the
+                # parent's, so a guard's ``PATH`` prefix reaches the harness and
+                # everything it spawns.
+                env=None if env is None else dict(env),
             )
         except FileNotFoundError as error:
             raise HarnessError(
@@ -1454,6 +1462,7 @@ class CodexAdapter(HarnessAdapter):
         live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
         invocation: HarnessInvocation | None = None,
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> HarnessResult:
         """Run the turn on the app-server, falling back only before it starts.
 
@@ -1483,6 +1492,7 @@ class CodexAdapter(HarnessAdapter):
                 access=access,
                 abort=abort,
                 live_delivery=live_delivery,
+                env=env,
                 invocation=invocation,
                 on_transport=on_transport,
             )
@@ -1527,6 +1537,7 @@ class CodexAdapter(HarnessAdapter):
             access=access,
             abort=abort,
             live_delivery=live_delivery,
+            env=env,
             invocation=invocation,
             on_transport=capture,
         )
@@ -1574,6 +1585,7 @@ class CodexAdapter(HarnessAdapter):
             access=access,
             abort=abort,
             live_delivery=live_delivery,
+            env=env,
             invocation=legacy,
             on_transport=on_transport,
         )
@@ -1791,6 +1803,7 @@ class ClaudeAdapter(HarnessAdapter):
         live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
         invocation: HarnessInvocation | None = None,
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> HarnessResult:
         """Run the turn, arming its guidance hook for the turn's lifetime only.
 
@@ -1848,6 +1861,7 @@ class ClaudeAdapter(HarnessAdapter):
                 access=access,
                 abort=abort,
                 live_delivery=live_delivery,
+                env=env,
                 invocation=invocation,
                 on_transport=capture,
             )
@@ -2014,6 +2028,7 @@ def run_harness(
     access: AccessProfile = WORKER_ACCESS,
     abort: AbortSignal | None = None,
     live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> HarnessResult:
     """Run one harness turn through the selected adapter."""
     return get_adapter(name).run(
@@ -2032,6 +2047,7 @@ def run_harness(
         access=access,
         abort=abort,
         live_delivery=live_delivery,
+        env=env,
     )
 
 

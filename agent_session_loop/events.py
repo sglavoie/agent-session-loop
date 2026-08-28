@@ -116,6 +116,13 @@ RUN_CONTROL_ACTION_TAIL_ENABLED = "tail-enabled"
 RUN_CONTROL_ACTION_TAIL_DISABLED = "tail-disabled"
 RUN_CONTROL_ACTION_HARNESS_SELECTED = "harness-selected"
 RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED = "implementation-model-updated"
+#: Terminal outcomes of a guard mutation. ``guard add --wait`` resolves on one
+#: of these rather than on queue observation, because enforcement is only real
+#: once the policy and shims are installed.
+RUN_CONTROL_ACTION_GUARD_APPLIED = "guard-applied"
+RUN_CONTROL_ACTION_GUARD_REMOVED = "guard-removed"
+RUN_CONTROL_ACTION_GUARD_REJECTED = "guard-rejected"
+RUN_CONTROL_ACTION_GUARDS_EXPIRED = "guards-expired"
 RUN_CONTROL_ACTIONS: tuple[str, ...] = (
     RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED,
     RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_CANCELED,
@@ -129,6 +136,17 @@ RUN_CONTROL_ACTIONS: tuple[str, ...] = (
     RUN_CONTROL_ACTION_TAIL_DISABLED,
     RUN_CONTROL_ACTION_HARNESS_SELECTED,
     RUN_CONTROL_ACTION_IMPLEMENTATION_MODEL_UPDATED,
+    RUN_CONTROL_ACTION_GUARD_APPLIED,
+    RUN_CONTROL_ACTION_GUARD_REMOVED,
+    RUN_CONTROL_ACTION_GUARD_REJECTED,
+    RUN_CONTROL_ACTION_GUARDS_EXPIRED,
+)
+#: The subset a guard mutation can end in. A ``--wait`` receipt matches one of
+#: these carrying the same command ID.
+GUARD_TERMINAL_ACTIONS: tuple[str, ...] = (
+    RUN_CONTROL_ACTION_GUARD_APPLIED,
+    RUN_CONTROL_ACTION_GUARD_REMOVED,
+    RUN_CONTROL_ACTION_GUARD_REJECTED,
 )
 MAILBOX_ACTION_GUIDANCE_OBSERVED = "guidance-observed"
 MAILBOX_ACTION_NOTICE_PUBLISHED = "notice-published"

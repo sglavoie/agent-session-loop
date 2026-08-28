@@ -47,6 +47,7 @@ from . import (
     control_signal,
     durability,
     events,
+    guards,
     guidance_delivery,
     harness_failures,
     harnesses,
@@ -12471,6 +12472,10 @@ def _run_locked(
         _ensure_legacy_run_metadata(snapshot.plan_dir, verification_context)
     state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
     run_dir = state_dir / "runs" / run_id
+    # The run's command gate. Constructed for every run and left empty until a
+    # guard is added, so the drain always has somewhere to apply one and never
+    # has to decide whether this run is guardable.
+    guard_controller = guards.GuardController(run_id=run_id, run_dir=run_dir)
     event_path = state_dir / events.EVENTS_FILE_NAME
     state_path = state_dir / events.STATE_FILE_NAME
     try:
@@ -13249,6 +13254,17 @@ def _run_locked(
     review_appended = False
     last_session_details: dict[str, Any] = {}
     seen_external_command_ids: set[str] = set()
+
+    def _expire_run_guards() -> None:
+        """Disable this run's command gate on every exit path."""
+        run_coordination.expire_run_guards(
+            controller=guard_controller,
+            event_path=event_path,
+            payload=payload,
+            control_payload=control_payload,
+            persistence=persistence,
+        )
+
     mailbox_poll = _MailboxPoll(
         plan_dir=snapshot.plan_dir,
         state_dir_arg=args.state_dir,
@@ -13261,6 +13277,7 @@ def _run_locked(
         run_control_lock=run_control_lock,
         enabled=mailbox_enabled,
         wakeup=wakeup,
+        guard_controller=guard_controller,
     )
 
     # Drain any commands that were queued before the run started so the
@@ -13277,6 +13294,7 @@ def _run_locked(
         persistence=persistence,
         run_control_lock=run_control_lock,
         wakeup=wakeup,
+        guard_controller=guard_controller,
     )
     pending_exception_guard: dict[str, Any] | None = None
     try:
@@ -13378,6 +13396,7 @@ def _run_locked(
                         persistence=persistence,
                         run_control_lock=run_control_lock,
                         wakeup=wakeup,
+                        guard_controller=guard_controller,
                     )
                     with run_control_lock:
                         stop_before_review = run_controls.state.stop_after_current
@@ -14056,6 +14075,7 @@ def _run_locked(
                 persistence=persistence,
                 run_control_lock=run_control_lock,
                 wakeup=wakeup,
+                guard_controller=guard_controller,
             )
             with run_control_lock:
                 # A stop observed here must never let another turn start. Only
@@ -14914,8 +14934,15 @@ def _run_locked(
                 run_controls.stop()
                 inline_tail.stop()
 
+            # Materialized per turn, not once per run: the guard-bin directory
+            # must exist before the child's PATH names it, and a guard added
+            # during the previous turn has to be armed for this one.
+            with run_control_lock:
+                turn_env = guard_controller.prepare_turn()
+
             execution = turn_executor.launch(
                 turn_execution.TurnLaunch(
+                    env=turn_env,
                     harness=turn_harness,
                     cwd=cwd,
                     plan_dir=before.plan_dir,
@@ -15787,6 +15814,7 @@ def _run_locked(
                     persistence=persistence,
                     run_control_lock=run_control_lock,
                     wakeup=wakeup,
+                    guard_controller=guard_controller,
                 )
                 with run_control_lock:
                     stop_after_current_pending = run_controls.state.stop_after_current
@@ -16095,6 +16123,7 @@ def _run_locked(
                 persistence=persistence,
                 run_control_lock=run_control_lock,
                 wakeup=wakeup,
+                guard_controller=guard_controller,
             )
             with run_control_lock:
                 # An unpending request is left set on purpose: the all-complete
@@ -16215,6 +16244,7 @@ def _run_locked(
                     persistence=persistence,
                 )
         else:
+            _expire_run_guards()
             run_controls.stop()
             inline_tail.stop()
             raise
@@ -16282,6 +16312,7 @@ def _run_locked(
         return terminalize(exit_code, cancel=finalization_abort, poll=mailbox_poll)
     finally:
         mailbox_poll.set_abort(None)
+        _expire_run_guards()
         run_controls.stop()
         inline_tail.stop()
 

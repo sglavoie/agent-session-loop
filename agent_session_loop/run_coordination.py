@@ -63,7 +63,7 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
@@ -77,6 +77,7 @@ from . import (
     control_queue,
     durability,
     events,
+    guards,
     guidance_delivery,
     harnesses,
     mailbox,
@@ -1727,6 +1728,7 @@ def initial_control_payload() -> dict[str, Any]:
         "target_harness": None,
         "changed_fields": [],
         "implementation_overrides": {},
+        "guards": [],
         "consumed": False,
         "last_action": None,
     }
@@ -1908,6 +1910,144 @@ def record_control_command_observed(
     persistence.append_event(event_path, events.RUN_CONTROL_EVENT, event_payload)
 
 
+def record_guard_outcome(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    control_payload: dict[str, Any],
+    command_id: str | None,
+    outcome: guards.GuardOutcome,
+    active: Sequence[dict[str, Any]],
+    context: Mapping[str, Any] | None,
+    persistence: CoordinationPersistence,
+) -> None:
+    """Persist one guard mutation's terminal outcome and the active set.
+
+    The event is what ``guard add|remove --wait`` resolves on, so it is
+    appended only after enforcement is genuinely in place (or genuinely
+    refused) — never on queue observation alone. The ``control`` slot carries
+    the full active set afterwards so status can report guards without
+    replaying events.
+    """
+    action = {
+        guards.ACTION_APPLIED: events.RUN_CONTROL_ACTION_GUARD_APPLIED,
+        guards.ACTION_REMOVED: events.RUN_CONTROL_ACTION_GUARD_REMOVED,
+    }.get(outcome.action, events.RUN_CONTROL_ACTION_GUARD_REJECTED)
+    with persistence.lock:
+        control_payload["guards"] = [dict(entry) for entry in active]
+        control_payload["last_action"] = action
+        payload["control"] = dict(control_payload)
+        event_payload: dict[str, Any] = {
+            "run_id": payload.get("run_id"),
+            "action": action,
+            "command_id": command_id,
+            "guard_ids": list(outcome.guard_ids),
+            "guards": [dict(entry) for entry in active],
+            "reason": outcome.reason,
+            "detail": outcome.detail,
+            "message": (
+                f"guard {outcome.action}"
+                if outcome.ok
+                else f"guard rejected: {outcome.reason}"
+            ),
+        }
+        if context is not None:
+            for key in ("session", "turn_index", "total_sessions"):
+                value = context.get(key)
+                if value is not None:
+                    event_payload[key] = value
+        persistence.append_event(event_path, events.RUN_CONTROL_EVENT, event_payload)
+        persistence.write_state(payload)
+
+
+def apply_guard_command(
+    command: control_queue.ControlCommand,
+    *,
+    controller: guards.GuardController | None,
+    event_path: Path,
+    payload: dict[str, Any],
+    control_payload: dict[str, Any],
+    context: Mapping[str, Any] | None,
+    persistence: CoordinationPersistence,
+) -> None:
+    """Run one queued guard mutation against the run that is actually live.
+
+    The expected run ID is compared here rather than at append time because
+    only the drain happens inside the run: a command queued against a run that
+    has since ended must be refused, not silently inherited by its successor.
+    """
+    active: Sequence[dict[str, Any]] = (
+        () if controller is None else controller.to_payload()
+    )
+    if controller is None or command.expected_run_id != controller.run_id:
+        outcome = guards.GuardOutcome(
+            action=guards.ACTION_REJECTED,
+            reason=(
+                guards.REJECT_NO_ACTIVE_RUN
+                if controller is None
+                else guards.REJECT_RUN_CHANGED
+            ),
+            detail=command.expected_run_id,
+        )
+    elif command.command == control_queue.COMMAND_REMOVE_GUARD:
+        outcome = controller.remove(command.guard_id or "")
+        active = controller.to_payload()
+    else:
+        outcome = controller.add(command.deny_commands, reason=command.reason)
+        active = controller.to_payload()
+    record_guard_outcome(
+        event_path=event_path,
+        payload=payload,
+        control_payload=control_payload,
+        command_id=command.id,
+        outcome=outcome,
+        active=active,
+        context=context,
+        persistence=persistence,
+    )
+
+
+def expire_run_guards(
+    *,
+    controller: guards.GuardController | None,
+    event_path: Path,
+    payload: dict[str, Any],
+    control_payload: dict[str, Any],
+    persistence: CoordinationPersistence,
+) -> None:
+    """Disable this run's command gate as the run ends.
+
+    Expiry is the reason a guard is safe to add: it cannot leak into a later
+    run. It runs on every exit path, including the failing ones, and swallows
+    its own errors — a run must not be reported as crashed because a policy
+    file could not be unlinked. The runtime files that stay behind are inert:
+    no later worker inherits this run's ``PATH``.
+    """
+    if controller is None:
+        return
+    try:
+        expired = controller.expire()
+    except OSError:
+        return
+    if not expired:
+        return
+    with contextlib.suppress(Exception), persistence.lock:
+        control_payload["guards"] = []
+        control_payload["last_action"] = events.RUN_CONTROL_ACTION_GUARDS_EXPIRED
+        payload["control"] = dict(control_payload)
+        persistence.append_event(
+            event_path,
+            events.RUN_CONTROL_EVENT,
+            {
+                "run_id": payload.get("run_id"),
+                "action": events.RUN_CONTROL_ACTION_GUARDS_EXPIRED,
+                "guard_ids": [rule.id for rule in expired],
+                "message": "run-scoped command guards expired with the run",
+            },
+        )
+        persistence.write_state(payload)
+
+
 def abort_turn_guidance_text(
     *,
     reason: str,
@@ -2031,6 +2171,7 @@ def drain_external_control_queue(
     abort: harnesses.AbortSignal | None = None,
     mailbox_enabled: bool = False,
     finalization: bool = False,
+    guard_controller: guards.GuardController | None = None,
 ) -> control_queue.DrainResult:
     """Drain queued external control commands and record any state changes.
 
@@ -2055,6 +2196,12 @@ def drain_external_control_queue(
     that runs alongside a turn. Its presence is what tells an observed abort
     command there is something to kill: without it the request degrades to
     stop-after-current instead of dying quietly.
+
+    ``guard_controller`` is the live run's command gate. Guard mutations are
+    handled here instead of through ``apply_external_control_command`` because
+    they act on the filesystem rather than on the run-control state machine,
+    and because their acceptance depends on the run being the one the operator
+    queued against.
 
     ``finalization`` says the signal belongs to the run's terminal work rather
     than to a turn. What changes is that the kill is armed without a grace
@@ -2086,6 +2233,17 @@ def drain_external_control_queue(
                 context=context,
                 persistence=persistence,
             )
+            if command.command in control_queue.GUARD_COMMAND_NAMES:
+                apply_guard_command(
+                    command,
+                    controller=guard_controller,
+                    event_path=event_path,
+                    payload=payload,
+                    control_payload=control_payload,
+                    context=context,
+                    persistence=persistence,
+                )
+                continue
             action = apply_external_control_command(command, control_state)
             if action is None:
                 continue
@@ -2152,6 +2310,7 @@ class MailboxPoll:
         run_control_lock: AbstractContextManager[Any],
         enabled: bool = True,
         wakeup: threading.Event | None = None,
+        guard_controller: guards.GuardController | None = None,
     ) -> None:
         self._plan_dir = plan_dir
         self._state_dir_arg = state_dir_arg
@@ -2164,6 +2323,7 @@ class MailboxPoll:
         self._run_control_lock = run_control_lock
         self._enabled = enabled
         self._wakeup = wakeup
+        self._guard_controller = guard_controller
         self._context: dict[str, Any] | None = None
         self._abort: harnesses.AbortSignal | None = None
         self._finalization = False
@@ -2240,6 +2400,7 @@ class MailboxPoll:
             abort=self._abort,
             mailbox_enabled=self._enabled,
             finalization=self._finalization,
+            guard_controller=self._guard_controller,
         )
 
         if not self._enabled:

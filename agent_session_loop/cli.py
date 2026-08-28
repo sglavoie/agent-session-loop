@@ -1903,6 +1903,70 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="control_cli:control_set_model_from_args",
     )
 
+    control_guard_parser = control_sub.add_parser(
+        "guard",
+        help=(
+            "Add, remove, or list run-scoped command guards enforced through "
+            "the worker's PATH."
+        ),
+    )
+    control_guard_sub = control_guard_parser.add_subparsers(
+        dest="control_guard_command",
+        required=True,
+    )
+
+    control_guard_add_parser = control_guard_sub.add_parser(
+        "add",
+        help="Deny a command for the remainder of the run holding this plan.",
+    )
+    _add_plan_reference_args(control_guard_add_parser)
+    _add_control_wait_args(control_guard_add_parser)
+    control_guard_add_parser.add_argument(
+        "--deny-command",
+        action="append",
+        default=None,
+        metavar="COMMAND",
+        help=(
+            "Command line to deny, matched as an exact argument prefix after "
+            "POSIX tokenization (repeatable; e.g. 'git push origin main')"
+        ),
+    )
+    control_guard_add_parser.add_argument(
+        "--reason",
+        default=None,
+        metavar="TEXT",
+        help="Reason recorded with the guard",
+    )
+    control_guard_add_parser.set_defaults(
+        handler_ref="control_cli:control_guard_add_from_args",
+    )
+
+    control_guard_remove_parser = control_guard_sub.add_parser(
+        "remove",
+        help="Remove one guard by ID, ending its enforcement.",
+    )
+    _add_plan_reference_args(control_guard_remove_parser)
+    _add_control_wait_args(control_guard_remove_parser)
+    control_guard_remove_parser.add_argument(
+        "--id",
+        dest="id",
+        required=True,
+        metavar="GUARD_ID",
+        help="Identifier reported when the guard was applied",
+    )
+    control_guard_remove_parser.set_defaults(
+        handler_ref="control_cli:control_guard_remove_from_args",
+    )
+
+    control_guard_list_parser = control_guard_sub.add_parser(
+        "list",
+        help="Report the guards the active run is enforcing.",
+    )
+    _add_plan_reference_args(control_guard_list_parser)
+    control_guard_list_parser.set_defaults(
+        handler_ref="control_cli:control_guard_list_from_args",
+    )
+
     inbox_parser = subparsers.add_parser(
         "inbox",
         help="Write supervisor messages or read pending worker guidance.",

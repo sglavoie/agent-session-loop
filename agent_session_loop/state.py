@@ -1876,6 +1876,41 @@ def _next_command(snapshot: plans.PlanSnapshot) -> dict[str, Any]:
     }
 
 
+def _command_guard_payload(
+    runner_state: Mapping[str, Any],
+    *,
+    lock_info: LockInfo | None,
+) -> dict[str, Any]:
+    """Summarize the command gate a live run is enforcing.
+
+    Guards belong to a run, so a plan with no live run reports an empty set
+    rather than the last run's guards: enforcement expired with that run, and
+    reporting it as active would describe protection nobody has. The coverage
+    block travels with the summary because a guard's value is inseparable from
+    what it does not cover.
+    """
+    from . import guards
+
+    active: list[dict[str, Any]] = []
+    run_active = bool(
+        lock_info is not None
+        and lock_info.active
+        and runner_state.get("present")
+        and not runner_state.get("paused")
+        and not runner_state.get("run_finished_at")
+    )
+    control = runner_state.get("control")
+    if run_active and isinstance(control, Mapping):
+        recorded = control.get("guards")
+        if isinstance(recorded, list):
+            active = [dict(entry) for entry in recorded if isinstance(entry, Mapping)]
+    return {
+        "active": active,
+        "count": len(active),
+        "coverage": dict(guards.COMMAND_GATE_COVERAGE),
+    }
+
+
 def status_payload(
     snapshot: plans.PlanSnapshot,
     state_dir: str | Path | None = None,
@@ -1980,6 +2015,7 @@ def status_payload(
         progress_journal=progress_journal,
         review_resume=review_resume,
         assurance=runner_state.get("assurance"),
+        command_guards=_command_guard_payload(runner_state, lock_info=lock_info),
         assurance_report=assurance_projection_payload,
         orphaned_state_candidates=orphaned_state_candidates(snapshot, state_dir),
         next_command=_next_command(snapshot),
@@ -2076,6 +2112,17 @@ def _print_text_status(payload: dict[str, Any]) -> None:
                 f"Run state: finalizing ({phase}, {elapsed_text} elapsed, "
                 f"still holds the lock){hint}"
             )
+
+    command_guards = payload.get("command_guards")
+    if isinstance(command_guards, dict) and command_guards.get("active"):
+        coverage = command_guards.get("coverage")
+        mechanism = (
+            coverage.get("mechanism") if isinstance(coverage, dict) else "command gate"
+        )
+        print(f"Command guards: {command_guards['count']} active ({mechanism})")
+        for entry in command_guards["active"]:
+            rendered = " ".join(str(token) for token in entry.get("command", ()))
+            print(f"  {entry.get('id')}: deny {rendered}")
 
     # Reported, never produced: this prints what the last run's audit already
     # recorded and what the shared inbox already holds.

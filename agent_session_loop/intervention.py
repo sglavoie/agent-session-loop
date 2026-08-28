@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -595,6 +595,9 @@ def dispatch_control_command(
     clear_effort: bool = False,
     grace_seconds: Any = None,
     reason: Any = None,
+    deny_commands: Sequence[str] | None = None,
+    guard_id: str | None = None,
+    expected_run_id: str | None = None,
 ) -> ControlDispatch:
     """Append one control command, then wake the runner.
 
@@ -613,6 +616,9 @@ def dispatch_control_command(
         clear_effort=clear_effort,
         grace_seconds=grace_seconds,
         reason=reason,
+        deny_commands=deny_commands,
+        guard_id=guard_id,
+        expected_run_id=expected_run_id,
         command_id=command_id,
     )
     signal = control_signal.notify_runner(plan_dir, state_dir=state_dir)

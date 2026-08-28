@@ -148,6 +148,7 @@ INTEGRATION_MODULES = (
     "tests.test_asl_review_lifecycle",
     "tests.test_asl_workbench_static",
     "tests.test_asl_run_gates",
+    "tests.test_asl_guards",
     "tests.test_asl_reply_flows",
     "tests.test_asl_e2e",
     "tests.test_asl_review",

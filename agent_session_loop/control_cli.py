@@ -23,7 +23,7 @@ import argparse
 import json
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ from . import (
     control_queue,
     control_signal,
     events,
+    guards,
     harnesses,
     intervention,
     responses,
@@ -45,6 +46,9 @@ COMMAND_STOP_AFTER_CURRENT = "control-stop-after-current"
 COMMAND_ABORT = "control-abort"
 COMMAND_SELECT_HARNESS = "control-select-harness"
 COMMAND_SET_MODEL = "control-set-model"
+COMMAND_GUARD_ADD = "control-guard-add"
+COMMAND_GUARD_REMOVE = "control-guard-remove"
+COMMAND_GUARD_LIST = "control-guard-list"
 
 # Shared note for both subcommands: enqueueing always succeeds, but nothing
 # consumes the queue until some runner drains it.
@@ -62,6 +66,8 @@ ABORT_CANCELS_FINALIZATION_NOTE = (
     "no turn active; the run is finalizing, so abort cancels its terminal audit"
 )
 MODEL_APPLIES_TO = "next-implementation-turn"
+GUARD_ADD_NOTE = "enforcement begins once the runner reports the guard applied"
+GUARD_REMOVE_NOTE = "enforcement ends once the runner reports the guard removed"
 
 # A wakeup usually makes the runner drain within milliseconds, so the receipt
 # tail polls far more often than the mailbox waits do.
@@ -90,6 +96,9 @@ class _ReceiptWait:
     elapsed_seconds: float
     run_finished: bool = False
     finalizing: dict[str, Any] | None = None
+    #: The terminal event's own payload, for a wait whose outcome carries a
+    #: refusal reason the caller has to report rather than merely announce.
+    terminal_payload: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -99,7 +108,14 @@ class _ReceiptWait:
             "elapsed_seconds": round(self.elapsed_seconds, 3),
             "run_finished": self.run_finished,
         }
-        if not self.run_finished and self.terminal_action is not None:
+        # Only an unsatisfied wait can be sitting behind a finalizing run. A
+        # satisfied wait whose outcome is final on its own (a guard mutation)
+        # has nothing left to explain.
+        if (
+            not self.run_finished
+            and not self.satisfied
+            and self.terminal_action is not None
+        ):
             payload["finalizing"] = self.finalizing
             payload["note"] = FINALIZING_NOTE
         return payload
@@ -158,6 +174,7 @@ class _ReceiptScan:
     observed: bool = False
     terminal_action: str | None = None
     run_finished: bool = False
+    terminal_payload: dict[str, Any] | None = None
 
 
 def _scan_for_receipt(
@@ -165,9 +182,11 @@ def _scan_for_receipt(
     *,
     command_id: str,
     terminal_actions: tuple[str, ...],
+    terminal_requires_command_id: bool = False,
 ) -> _ReceiptScan:
     observed = False
     terminal_action: str | None = None
+    terminal_payload: dict[str, Any] | None = None
     for record in _read_wait_records(events_path):
         payload = record.get("payload")
         if not isinstance(payload, dict):
@@ -178,6 +197,7 @@ def _scan_for_receipt(
                     observed=True,
                     terminal_action=terminal_action,
                     run_finished=True,
+                    terminal_payload=terminal_payload,
                 )
             continue
         action = payload.get("action")
@@ -191,9 +211,21 @@ def _scan_for_receipt(
         # A terminal action carries no command ID, so only one recorded after
         # this command's receipt can be its outcome. The scan continues past it
         # because the turn ending is not the run ending.
+        #
+        # ``terminal_requires_command_id`` is the stricter rule available to
+        # outcomes that do carry one: a guard mutation's result names the
+        # command it answers, so a concurrent operator's guard cannot be
+        # mistaken for this one's.
         if terminal_action is None and action in terminal_actions:
+            if terminal_requires_command_id and payload.get("command_id") != command_id:
+                continue
             terminal_action = action
-    return _ReceiptScan(observed=observed, terminal_action=terminal_action)
+            terminal_payload = dict(payload)
+    return _ReceiptScan(
+        observed=observed,
+        terminal_action=terminal_action,
+        terminal_payload=terminal_payload,
+    )
 
 
 def _active_finalization(
@@ -218,6 +250,8 @@ def _wait_for_receipt(
     command_id: str,
     timeout: float,
     terminal_actions: tuple[str, ...],
+    terminal_requires_command_id: bool = False,
+    terminal_is_final: bool = False,
 ) -> _ReceiptWait:
     """Tail ``events.jsonl`` until the command is observed, or the deadline.
 
@@ -244,11 +278,15 @@ def _wait_for_receipt(
                 events_path,
                 command_id=command_id,
                 terminal_actions=terminal_actions,
+                terminal_requires_command_id=terminal_requires_command_id,
             )
             last_read_token = current_token
             if scan.observed and (
                 not terminal_actions
-                or (scan.terminal_action is not None and scan.run_finished)
+                or (
+                    scan.terminal_action is not None
+                    and (terminal_is_final or scan.run_finished)
+                )
             ):
                 return _ReceiptWait(
                     observed=True,
@@ -257,6 +295,7 @@ def _wait_for_receipt(
                     timeout_seconds=timeout,
                     elapsed_seconds=time.monotonic() - started,
                     run_finished=scan.run_finished,
+                    terminal_payload=scan.terminal_payload,
                 )
 
         now = time.monotonic()
@@ -268,6 +307,7 @@ def _wait_for_receipt(
                 timeout_seconds=timeout,
                 elapsed_seconds=now - started,
                 run_finished=scan.run_finished,
+                terminal_payload=scan.terminal_payload,
                 finalizing=(
                     _active_finalization(plan_dir, state_dir)
                     if scan.terminal_action is not None
@@ -474,7 +514,13 @@ def _enqueue_and_report(
     clear_effort: bool = False,
     grace_seconds: int | None = None,
     reason: str | None = None,
+    deny_commands: Sequence[str] | None = None,
+    guard_id: str | None = None,
+    expected_run_id: str | None = None,
     terminal_actions: tuple[str, ...] = (),
+    terminal_requires_command_id: bool = False,
+    terminal_is_final: bool = False,
+    failure_actions: tuple[str, ...] = (),
     report: Callable[
         [dict[str, Any], control_queue.ControlCommand],
         tuple[dict[str, Any], str],
@@ -524,6 +570,9 @@ def _enqueue_and_report(
             clear_effort=clear_effort,
             grace_seconds=grace_seconds,
             reason=reason,
+            deny_commands=deny_commands,
+            guard_id=guard_id,
+            expected_run_id=expected_run_id,
         )
     except control_queue.ControlQueueError as error:
         cli_common.print_error(
@@ -564,6 +613,8 @@ def _enqueue_and_report(
             command_id=queued.id,
             timeout=wait_timeout,
             terminal_actions=terminal_actions,
+            terminal_requires_command_id=terminal_requires_command_id,
+            terminal_is_final=terminal_is_final,
         )
         if not wait.satisfied:
             _report_wait_timeout(
@@ -575,6 +626,29 @@ def _enqueue_and_report(
                 signal=notified,
                 run_active=_run_active(status),
                 wait=wait,
+            )
+            return 1
+        if wait.terminal_action in failure_actions:
+            # The runner reached the command and refused it. Reporting that as
+            # a success because the receipt arrived is exactly the mistake
+            # ``--wait`` exists to prevent.
+            outcome = wait.terminal_payload or {}
+            cli_common.print_error(
+                args,
+                command_name=command_name,
+                text_label=text_label,
+                reason=str(outcome.get("reason") or wait.terminal_action),
+                error=(
+                    f"the runner refused command {queued.id}: "
+                    f"{outcome.get('reason') or wait.terminal_action}"
+                ),
+                details={
+                    "queue_path": str(queue_path),
+                    "command_id": queued.id,
+                    "enqueued": True,
+                    "detail": outcome.get("detail"),
+                    "wait": wait.to_payload(),
+                },
             )
             return 1
 
@@ -845,3 +919,226 @@ def control_set_model_from_args(args: argparse.Namespace) -> int:
         clear_effort=clear_effort,
         report=report,
     )
+
+
+def _active_run_id(status: dict[str, Any]) -> str | None:
+    """The run ID a guard would be scoped to, or ``None`` if none is live."""
+    if not _run_active(status):
+        return None
+    runner_state = status.get("runner_state")
+    if not isinstance(runner_state, dict):
+        return None
+    run_id = runner_state.get("run_id")
+    return run_id if isinstance(run_id, str) and run_id else None
+
+
+def _guard_no_active_run_error(
+    args: argparse.Namespace,
+    *,
+    command_name: str,
+    text_label: str,
+) -> int:
+    """Refuse a guard mutation that has no run to scope itself to.
+
+    Unlike every other control command, a guard cannot usefully wait in the
+    queue: it applies to one run's process environment, and a queue line that
+    outlives that run is refused at drain anyway. Refusing here is the same
+    answer, delivered before anything is written.
+    """
+    cli_common.print_error(
+        args,
+        command_name=command_name,
+        text_label=text_label,
+        reason=guards.REJECT_NO_ACTIVE_RUN,
+        error="no active run holds this plan, so there is nothing to guard",
+        hint="start a run first; guards apply to one run and expire with it",
+    )
+    return 1
+
+
+def control_guard_add_from_args(args: argparse.Namespace) -> int:
+    """Add run-scoped command guards to the run holding this plan."""
+    deny_commands = list(getattr(args, "deny_command", None) or [])
+    reason = getattr(args, "reason", None)
+    if not deny_commands:
+        cli_common.print_error(
+            args,
+            command_name=COMMAND_GUARD_ADD,
+            text_label="control guard add",
+            reason=control_queue.REJECT_MISSING_GUARD_RULE,
+            error="guard add requires at least one --deny-command rule",
+        )
+        return 1
+    # Parsed before the plan is even resolved: a malformed rule is the
+    # operator's typo, and naming which token is wrong beats a generic
+    # `invalid-command` from the enqueue path.
+    for rule in deny_commands:
+        try:
+            guards.parse_command_rule(rule)
+        except guards.GuardRuleError as error:
+            cli_common.print_error(
+                args,
+                command_name=COMMAND_GUARD_ADD,
+                text_label="control guard add",
+                reason=error.reason,
+                error=error.message,
+                details={"deny_command": rule},
+            )
+            return 1
+    if reason is not None and (not isinstance(reason, str) or reason == ""):
+        cli_common.print_error(
+            args,
+            command_name=COMMAND_GUARD_ADD,
+            text_label="control guard add",
+            reason=control_queue.REJECT_INVALID_REASON,
+            error="--reason must be non-empty text when provided",
+            details={"reason": repr(reason)},
+        )
+        return 1
+
+    context = cli_common.resolve_plan_context(
+        args,
+        command_name=COMMAND_GUARD_ADD,
+        text_label="control guard add",
+    )
+    if context is None:
+        return 1
+    run_id = _active_run_id(context.status)
+    if run_id is None:
+        return _guard_no_active_run_error(
+            args,
+            command_name=COMMAND_GUARD_ADD,
+            text_label="control guard add",
+        )
+
+    def report(
+        status: dict[str, Any], queued: control_queue.ControlCommand
+    ) -> tuple[dict[str, Any], str]:
+        fields = {
+            "run_id": run_id,
+            "deny_commands": [list(rule) for rule in queued.deny_commands],
+            "reason": queued.reason,
+            "note": GUARD_ADD_NOTE,
+        }
+        summary = (
+            f"Queued guard add for {status['plan_dir']} (command {queued.id}); "
+            f"{GUARD_ADD_NOTE}"
+        )
+        return fields, summary
+
+    return _enqueue_and_report(
+        args,
+        command_name=COMMAND_GUARD_ADD,
+        text_label="control guard add",
+        queue_command=control_queue.COMMAND_ADD_GUARD,
+        deny_commands=deny_commands,
+        expected_run_id=run_id,
+        reason=reason,
+        terminal_actions=events.GUARD_TERMINAL_ACTIONS,
+        terminal_requires_command_id=True,
+        terminal_is_final=True,
+        failure_actions=(events.RUN_CONTROL_ACTION_GUARD_REJECTED,),
+        report=report,
+    )
+
+
+def control_guard_remove_from_args(args: argparse.Namespace) -> int:
+    """Remove one run-scoped command guard by ID."""
+    guard_id = getattr(args, "id", None)
+    if not isinstance(guard_id, str) or not guard_id:
+        cli_common.print_error(
+            args,
+            command_name=COMMAND_GUARD_REMOVE,
+            text_label="control guard remove",
+            reason=control_queue.REJECT_MISSING_GUARD_ID,
+            error="guard remove requires --id",
+        )
+        return 1
+
+    context = cli_common.resolve_plan_context(
+        args,
+        command_name=COMMAND_GUARD_REMOVE,
+        text_label="control guard remove",
+    )
+    if context is None:
+        return 1
+    run_id = _active_run_id(context.status)
+    if run_id is None:
+        return _guard_no_active_run_error(
+            args,
+            command_name=COMMAND_GUARD_REMOVE,
+            text_label="control guard remove",
+        )
+
+    def report(
+        status: dict[str, Any], queued: control_queue.ControlCommand
+    ) -> tuple[dict[str, Any], str]:
+        fields = {
+            "run_id": run_id,
+            "guard_id": guard_id,
+            "note": GUARD_REMOVE_NOTE,
+        }
+        summary = (
+            f"Queued guard remove {guard_id} for {status['plan_dir']} "
+            f"(command {queued.id}); {GUARD_REMOVE_NOTE}"
+        )
+        return fields, summary
+
+    return _enqueue_and_report(
+        args,
+        command_name=COMMAND_GUARD_REMOVE,
+        text_label="control guard remove",
+        queue_command=control_queue.COMMAND_REMOVE_GUARD,
+        guard_id=guard_id,
+        expected_run_id=run_id,
+        terminal_actions=events.GUARD_TERMINAL_ACTIONS,
+        terminal_requires_command_id=True,
+        terminal_is_final=True,
+        failure_actions=(events.RUN_CONTROL_ACTION_GUARD_REJECTED,),
+        report=report,
+    )
+
+
+def control_guard_list_from_args(args: argparse.Namespace) -> int:
+    """Report the guards the active run is currently enforcing.
+
+    A pure read: it never enqueues, so it answers for a finished run too, where
+    the honest answer is an empty set and expired enforcement.
+    """
+    context = cli_common.resolve_plan_context(
+        args,
+        command_name=COMMAND_GUARD_LIST,
+        text_label="control guard list",
+    )
+    if context is None:
+        return 1
+    status = context.status
+    run_id = _active_run_id(status)
+    runner_state = status.get("runner_state")
+    control = runner_state.get("control") if isinstance(runner_state, dict) else None
+    active = control.get("guards") if isinstance(control, dict) else None
+    active = [entry for entry in active if isinstance(entry, dict)] if active else []
+    if run_id is None:
+        active = []
+    payload = responses.success_payload(
+        COMMAND_GUARD_LIST,
+        plan_dir=str(context.snapshot.plan_dir),
+        run_active=run_id is not None,
+        run_id=run_id,
+        guards=active,
+        command_gate=dict(guards.COMMAND_GATE_COVERAGE),
+    )
+    if args.json:
+        responses.print_json(payload)
+    elif not active:
+        print(
+            f"No active command guards for {status['plan_dir']}"
+            if run_id is not None
+            else f"No active run for {status['plan_dir']}; no guards are enforced"
+        )
+    else:
+        print(f"Active command guards for {status['plan_dir']} (run {run_id}):")
+        for entry in active:
+            rendered = " ".join(str(token) for token in entry.get("command", ()))
+            print(f"  {entry.get('id')}  deny: {rendered}")
+    return 0

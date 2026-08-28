@@ -24,13 +24,13 @@ import fcntl
 import json
 import os
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from . import harnesses, run_control, state
+from . import guards, harnesses, run_control, state
 
 CONTROL_QUEUE_FILE_NAME = "control-queue.jsonl"
 
@@ -39,16 +39,30 @@ CommandName = Literal[
     "request-abort-turn",
     "select-future-harness",
     "set-implementation-model",
+    "add-guard",
+    "remove-guard",
 ]
 COMMAND_REQUEST_STOP_AFTER_CURRENT: CommandName = "request-stop-after-current"
 COMMAND_REQUEST_ABORT_TURN: CommandName = "request-abort-turn"
 COMMAND_SELECT_FUTURE_HARNESS: CommandName = "select-future-harness"
 COMMAND_SET_IMPLEMENTATION_MODEL: CommandName = "set-implementation-model"
+COMMAND_ADD_GUARD: CommandName = "add-guard"
+COMMAND_REMOVE_GUARD: CommandName = "remove-guard"
 COMMAND_NAMES: tuple[CommandName, ...] = (
     COMMAND_REQUEST_STOP_AFTER_CURRENT,
     COMMAND_REQUEST_ABORT_TURN,
     COMMAND_SELECT_FUTURE_HARNESS,
     COMMAND_SET_IMPLEMENTATION_MODEL,
+    COMMAND_ADD_GUARD,
+    COMMAND_REMOVE_GUARD,
+)
+
+#: Guard mutations are the only commands scoped to one specific run rather
+#: than to whichever runner happens to drain them. They carry the run ID the
+#: operator saw, and the runner refuses one that names a different run.
+GUARD_COMMAND_NAMES: tuple[CommandName, ...] = (
+    COMMAND_ADD_GUARD,
+    COMMAND_REMOVE_GUARD,
 )
 
 # Grace window an abort gives the worker before the turn is killed. Bounded on
@@ -75,6 +89,23 @@ REJECT_CONFLICTING_EFFORT_OPERATION = "conflicting-effort-operation"
 REJECT_MISSING_MODEL_CONTROL_OPERATION = "missing-model-control-operation"
 REJECT_INVALID_GRACE = "invalid-grace"
 REJECT_INVALID_REASON = "invalid-reason"
+REJECT_MISSING_EXPECTED_RUN_ID = "missing-expected-run-id"
+REJECT_MISSING_GUARD_RULE = "missing-guard-rule"
+REJECT_MISSING_GUARD_ID = "missing-guard-id"
+REJECT_INVALID_GUARD_ID = "invalid-guard-id"
+
+#: A guard rule that cannot be parsed is rejected with the parser's own stable
+#: reason, so the queue, the runner event, and the CLI all say the same thing
+#: about the same malformed rule.
+GUARD_RULE_REJECT_REASONS: tuple[str, ...] = (
+    guards.REJECT_EMPTY_COMMAND_RULE,
+    guards.REJECT_UNPARSABLE_COMMAND_RULE,
+    guards.REJECT_EMPTY_TOKEN,
+    guards.REJECT_EXECUTABLE_NOT_BARE_NAME,
+    guards.REJECT_SHELL_OPERATOR,
+    guards.REJECT_GLOB,
+    guards.REJECT_ENVIRONMENT_ASSIGNMENT,
+)
 
 
 class ControlQueueError(Exception):
@@ -98,6 +129,14 @@ class ControlCommand:
     )
     grace_seconds: int | None = None
     reason: str | None = None
+    #: Parsed argv prefixes for an ``add-guard`` command. Parsed once at
+    #: append time and again at drain, because the queue file is a durable
+    #: interface an external producer may write directly.
+    deny_commands: tuple[tuple[str, ...], ...] = ()
+    guard_id: str | None = None
+    #: The run the operator saw when they queued a guard mutation. A command
+    #: that outlives that run is refused rather than applied to its successor.
+    expected_run_id: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -110,6 +149,9 @@ class ControlCommand:
             "effort_operation": self.effort_operation.to_payload(),
             "grace_seconds": self.grace_seconds,
             "reason": self.reason,
+            "deny_commands": [list(rule) for rule in self.deny_commands],
+            "guard_id": self.guard_id,
+            "expected_run_id": self.expected_run_id,
         }
 
 
@@ -239,6 +281,62 @@ def _abort_fields(payload: dict[str, Any]) -> tuple[int, str | None]:
     return grace, raw_reason
 
 
+@dataclass(frozen=True)
+class _GuardFields:
+    """The validated guard-specific slice of one queue line."""
+
+    deny_commands: tuple[tuple[str, ...], ...] = ()
+    guard_id: str | None = None
+    expected_run_id: str | None = None
+    reason: str | None = None
+
+
+def _guard_fields(command: str, payload: dict[str, Any]) -> _GuardFields:
+    """Validate a guard mutation's payload, raising a stable reason.
+
+    ``expected_run_id`` is mandatory for both mutations and is what makes a
+    guard command run-scoped: a queue line that outlives the run it was
+    written against must be refused, and a producer that omits the field is
+    asking for exactly the misapplication the field exists to prevent.
+    """
+    expected_run_id = payload.get("expected_run_id")
+    if not isinstance(expected_run_id, str) or not expected_run_id:
+        raise ValueError(REJECT_MISSING_EXPECTED_RUN_ID)
+
+    raw_reason = payload.get("reason")
+    if raw_reason is not None and (not isinstance(raw_reason, str) or raw_reason == ""):
+        raise ValueError(REJECT_INVALID_REASON)
+
+    if command == COMMAND_REMOVE_GUARD:
+        guard_id = payload.get("guard_id")
+        if guard_id is None or guard_id == "":
+            raise ValueError(REJECT_MISSING_GUARD_ID)
+        if not isinstance(guard_id, str):
+            raise ValueError(REJECT_INVALID_GUARD_ID)
+        return _GuardFields(
+            guard_id=guard_id,
+            expected_run_id=expected_run_id,
+            reason=raw_reason,
+        )
+
+    raw_rules = payload.get("deny_commands")
+    if not isinstance(raw_rules, list) or not raw_rules:
+        raise ValueError(REJECT_MISSING_GUARD_RULE)
+    parsed: list[tuple[str, ...]] = []
+    for raw_rule in raw_rules:
+        if not isinstance(raw_rule, str):
+            raise ValueError(guards.REJECT_EMPTY_COMMAND_RULE)
+        try:
+            parsed.append(guards.parse_command_rule(raw_rule))
+        except guards.GuardRuleError as error:
+            raise ValueError(error.reason) from error
+    return _GuardFields(
+        deny_commands=tuple(parsed),
+        expected_run_id=expected_run_id,
+        reason=raw_reason,
+    )
+
+
 def append_command(
     plan_dir: str | Path,
     command: CommandName,
@@ -251,6 +349,9 @@ def append_command(
     clear_effort: bool = False,
     grace_seconds: int | None = None,
     reason: str | None = None,
+    deny_commands: Sequence[str] | None = None,
+    guard_id: str | None = None,
+    expected_run_id: str | None = None,
     command_id: str | None = None,
     created_at: str | None = None,
 ) -> ControlCommand:
@@ -270,6 +371,8 @@ def append_command(
     effort_operation = run_control.OverrideOperation.unchanged()
     model_control_record: dict[str, Any] = {}
     abort_record: dict[str, Any] = {}
+    guard_record: dict[str, Any] = {}
+    guard_parsed = _GuardFields()
     resolved_grace: int | None = None
     resolved_reason: str | None = None
     if command == COMMAND_SELECT_FUTURE_HARNESS:
@@ -315,6 +418,21 @@ def append_command(
         # The resolved grace is written back so the queue line is
         # self-describing for every later reader.
         abort_record["grace_seconds"] = resolved_grace
+    elif command in GUARD_COMMAND_NAMES:
+        harness = None
+        if deny_commands is not None:
+            guard_record["deny_commands"] = list(deny_commands)
+        if guard_id is not None:
+            guard_record["guard_id"] = guard_id
+        if expected_run_id is not None:
+            guard_record["expected_run_id"] = expected_run_id
+        if reason is not None:
+            guard_record["reason"] = reason
+        try:
+            guard_parsed = _guard_fields(command, guard_record)
+        except ValueError as error:
+            raise ControlQueueError(str(error)) from error
+        resolved_reason = guard_parsed.reason
     else:
         # Other commands ignore harness; normalize to None for parity.
         harness = None
@@ -326,6 +444,7 @@ def append_command(
         "created_at": created_at or _utc_now_iso(),
         **model_control_record,
         **abort_record,
+        **guard_record,
     }
     line = json.dumps(record, sort_keys=True) + "\n"
 
@@ -350,6 +469,9 @@ def append_command(
         effort_operation=effort_operation,
         grace_seconds=resolved_grace,
         reason=resolved_reason,
+        deny_commands=guard_parsed.deny_commands,
+        guard_id=guard_parsed.guard_id,
+        expected_run_id=guard_parsed.expected_run_id,
     )
 
 
@@ -464,6 +586,7 @@ def drain_queue(
         effort_operation = run_control.OverrideOperation.unchanged()
         grace_value: int | None = None
         reason_value: str | None = None
+        guard_parsed = _GuardFields()
         if command_value == COMMAND_SELECT_FUTURE_HARNESS:
             if harness_value is None or harness_value == "":
                 rejected.append(
@@ -526,6 +649,20 @@ def drain_queue(
                     )
                 )
                 continue
+        elif command_value in GUARD_COMMAND_NAMES:
+            harness_value = None
+            try:
+                guard_parsed = _guard_fields(command_value, payload)
+            except ValueError as error:
+                rejected.append(
+                    RejectedCommand(
+                        line_number=line_number,
+                        reason=str(error),
+                        raw=raw_line,
+                    )
+                )
+                continue
+            reason_value = guard_parsed.reason
         else:
             harness_value = None
 
@@ -544,6 +681,9 @@ def drain_queue(
                 effort_operation=effort_operation,
                 grace_seconds=grace_value,
                 reason=reason_value,
+                deny_commands=guard_parsed.deny_commands,
+                guard_id=guard_parsed.guard_id,
+                expected_run_id=guard_parsed.expected_run_id,
             )
         )
         seen.add(cmd_id)

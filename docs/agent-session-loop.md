@@ -554,6 +554,9 @@ asl control stop-after-current PLAN_DIR_OR_ID [--wait] [--timeout SECONDS] [--st
 asl control abort PLAN_DIR_OR_ID [--grace SECONDS] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control select-harness PLAN_DIR_OR_ID --harness codex|claude|copilot [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness-model MODEL|--clear-harness-model] [--effort EFFORT|--clear-effort] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control guard add PLAN_DIR_OR_ID --deny-command "CMD ARG ..." [--deny-command ...] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control guard remove PLAN_DIR_OR_ID --id GUARD_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control guard list PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
@@ -2530,6 +2533,10 @@ mutated — the runner alone owns `state.json`.
   one set/clear operation is required; omitting all four fails with
   `reason: missing-model-control-operation` before anything is enqueued. An
   unknown target harness fails with `reason: invalid-harness`.
+- `asl control guard add PLAN_DIR_OR_ID --deny-command "git push origin main"`
+  queues a run-scoped command guard; `asl control guard remove --id GUARD_ID`
+  ends one; `asl control guard list` prints the active set without touching the
+  queue. See [Run-scoped command guards](#run-scoped-command-guards).
 
 Enqueueing succeeds for a readable plan even with no runner attached; the
 command simply waits in the queue for the next drain. All four subcommands
@@ -2543,7 +2550,8 @@ traceback. Any other command rejected by the durable queue fails with
 `abort-timeout`, `finalization-timeout`, `invalid-command`, `invalid-grace`,
 `invalid-harness`, `invalid-reason`, `invalid-timeout`,
 `missing-model-control-operation`, `no-runner`, `os-error`, and
-`receipt-timeout`.
+`receipt-timeout`, plus the guard reasons listed under
+[Run-scoped command guards](#run-scoped-command-guards).
 
 Every producer that appends to the queue — the `asl control` subcommands and
 the Workbench control endpoints alike — then sends a best-effort wakeup so the
@@ -2678,6 +2686,109 @@ killed, `finalization-abort-honored` is recorded, and the run finishes within
 seconds. Cancelling the audit costs the audit and nothing else: assurance is
 recorded as `unavailable` with `reason: interrupted`, and the run's own outcome,
 reason, and exit code are whatever the stop already made them.
+
+### Run-scoped command guards
+
+A supervisor who decides mid-run that a worker must not run a particular
+command has, without this, only one lever: telling it so. That works when the
+worker cooperates and fails silently when it does not, and it has to be
+restated for every harness. `asl control guard` is the durable version of the
+same intention, and it does not depend on the model reading anything.
+
+```
+asl control guard add PLAN_DIR_OR_ID --deny-command "CMD ARG ..." [--deny-command ...] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control guard remove PLAN_DIR_OR_ID --id GUARD_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control guard list PLAN_DIR_OR_ID [--state-dir DIR] [--json]
+```
+
+A guard is a **command rule**: an argv prefix, tokenized with POSIX `shlex`
+rules and matched **case-sensitively and exactly** against the front of an
+invocation's argv. `git push origin main` denies `git push origin main` and
+`git push origin main --force`; it does not deny `git push`, `git Push origin
+main`, or `git status`. A one-token rule such as `git` denies every invocation
+of it.
+
+Rules describe a command, never a shell fragment, and every other construct is
+refused before anything is enqueued:
+
+- `missing-guard-rule` — `add` was given no `--deny-command`.
+- `empty-command-rule` — a rule that tokenizes to nothing.
+- `unparsable-command-rule` — a rule `shlex` cannot tokenize (unbalanced quote).
+- `empty-token` — a rule containing an empty argument.
+- `executable-not-bare-name` — the first token is a path (`/usr/bin/git`,
+  `./git`). A rule names a command to be resolved on `PATH`, because that
+  resolution is precisely what the gate intercepts.
+- `shell-operator-in-rule` — the rule contains `|`, `&`, `;`, `<`, `>`, `(`,
+  `)`, a newline, or a `$` expansion.
+- `glob-in-rule` — the rule contains `*`, `?`, or `[`/`]`. Matching is exact; a
+  pattern that looks like it would match more would deny less than it reads.
+- `environment-assignment-in-rule` — a leading `NAME=VALUE` token.
+
+Guards belong to one run and never outlive it. `add` and `remove` require an
+active run and fail with `reason: no-active-run` otherwise, before appending
+anything — a guard queued for a run that does not exist would either enforce
+nothing or, worse, be inherited by an unrelated later run. Each queued mutation
+also carries the run ID the operator saw, and the runner refuses it with
+`run-changed` if the run turned over before the drain. A `remove` naming a
+guard the run does not hold fails with `unknown-guard`. A rule whose executable
+does not resolve on `PATH` fails with `executable-not-found`, since a shim for
+it would shadow nothing while breaking the worker's own resolution, and a gate
+the runner cannot materialize fails with `activation-failed`. A malformed
+queue line — one carrying no `expected_run_id`, no rule, or no guard ID —
+is rejected by the queue itself with `missing-expected-run-id`,
+`missing-guard-rule`, or `missing-guard-id`; `invalid-guard-id` and
+`invalid-reason` cover the wrong types.
+
+Enforcement is a **per-run `PATH` shim**. Before every worker turn the runner
+creates an empty `guard-bin` directory under the run's state directory and
+prepends it to the turn's `PATH`, whichever harness the turn uses. Applying a
+guard resolves the real executable *outside* `guard-bin` once, writes the
+derived policy atomically, installs a small dispatcher into `guard-bin` under
+the command's name, and only then records the guard and appends
+`guard-applied`. A shim that is reached with a non-matching argv `execv`s the
+real executable it recorded at activation; one reached with a matching argv
+prints two stable lines to stderr and exits **`126`**:
+
+```
+asl: command denied by run-scoped guard g-4f2a91c07be3
+asl: matched argv prefix: git push origin main
+```
+
+`remove` rewrites the policy atomically before reporting success, and the run's
+termination expires every guard by deleting the policy. Shims are deliberately
+left behind in both cases: with no policy they are plain delegators, so they
+are inert evidence of what the run enforced rather than something that has to
+be cleaned up correctly for the next turn to work.
+
+`--wait` on `add` and `remove` waits for the guard's own outcome —
+`guard-applied`, `guard-removed`, or `guard-rejected` carrying the enqueued
+`command_id` — not merely for the queue observation, because the observation
+says the runner read the command and nothing about whether the command is being
+enforced. A `guard-rejected` outcome exits 1 and reports the runner's reason.
+
+`asl control guard list` and `asl status` both report the active set and the
+gate's coverage; status prints a `Command guards:` block and its JSON carries
+`command_guards` with `active`, `count`, and `coverage`. A run that has
+finished reports no guards, because it is enforcing none.
+
+The guarantee is **operational, not adversarial** — a safeguard against a
+worker that would otherwise run the command, not a sandbox against one
+determined to evade it. Both halves of that boundary are stated here in the
+same words `status` and `guard list` report them.
+
+Covered:
+
+- a bare executable name run directly by the harness
+- a bare name run through `env NAME=VALUE cmd ...`
+- a bare name run through `sh -c` or any other shell
+- a bare name a child process resolves through PATH, including Python's subprocess
+
+Not covered — these are bypasses, by construction:
+
+- an absolute or relative path to the real executable
+- an equivalent library or network call that never spawns the command
+- a process that clears or rewrites PATH before spawning
+- a command that was already executing when the guard was applied
 
 `status` reads durable plan files and prints session counts, the next pending
 session, content hashes, state paths, lock state, and any active harness turn.
@@ -4450,7 +4561,8 @@ record `stop-after-current-requested`, `stop-after-current-canceled`,
 `abort-turn-satisfied-by-worker`, `finalization-abort-honored`,
 `control-command-observed`, `tail-enabled`,
 `tail-disabled`, and
-`harness-selected`, and `implementation-model-updated` actions with
+`harness-selected`, `guard-applied`, `guard-removed`, `guard-rejected`,
+`guards-expired`, and `implementation-model-updated` actions with
 `stop_after_current`, `tail_enabled`,
 `next_harness`, and, when available, session and turn context. Harness-selection
 events also include `current_harness` and `selected_harness`. Abort events also
@@ -4458,6 +4570,10 @@ include `abort_requested`, `abort_grace_seconds`, `abort_reason`, and — on
 `abort-turn-requested` alone — the `abort_deadline` the terminal actions clear.
 `control-command-observed` is the receipt `asl control --wait` polls for and
 carries the `command_id` and `queue_command` it acknowledges.
+The four `guard-*` actions carry the `command_id` they answer, the `guard_ids`
+they concern, and the active `guards` summary after the change; a rejection
+also carries its `reason` and `detail`. `guards-expired` is recorded once at
+run termination and names the guards the run was still enforcing.
 `finalization-abort-honored` is the abort that arrived after the last turn had
 already ended: it cancels the terminal supervisor audit instead of a turn, arms
 with no grace window, and leaves the run's own outcome untouched. `tail` renders

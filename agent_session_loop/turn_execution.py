@@ -1869,6 +1869,10 @@ class TurnLaunch:
     live_delivery: guidance_delivery.LiveDeliveryEndpoint | None
     stream_callback: harnesses.StreamCallback | None
     build_invocation: Callable[[], harnesses.HarnessInvocation]
+    #: The complete child environment for this turn, or ``None`` to inherit
+    #: this process's. It carries the run's guard-bin ``PATH`` prefix, which is
+    #: what makes a command guard reach the harness and its descendants.
+    env: Mapping[str, str] | None = None
     #: Called once the harness process exists, which for a harness that takes
     #: its prompt up front is the moment the prompt was accepted. It is the
     #: earliest point at which guidance carried in that prompt can honestly be
@@ -1969,6 +1973,7 @@ class TurnExecutor:
                 on_observed_model=live_turn.note_observed_model,
                 abort=launch.abort,
                 live_delivery=launch.live_delivery,
+                env=launch.env,
             )
         except KeyboardInterrupt:
             result = harnesses.HarnessResult(
