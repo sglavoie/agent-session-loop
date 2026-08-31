@@ -184,19 +184,63 @@ class ReviewResume:
         return payload
 
 
+# Parsed review event logs, keyed by file identity rather than by spelling of
+# the path, so two spellings of the same log share one parse.  ``asl plans`` and
+# every Workbench ``/plans`` refresh reach this function hundreds of times for a
+# few dozen distinct logs; parsing each one once per revision collapses that back
+# to a single pass.  The logs are append-only, so ``st_mtime_ns`` plus
+# ``st_size`` invalidates naturally when the runner writes during a live run.
+# One entry per file -- not per revision -- keeps the memo bounded for the
+# long-lived Workbench process.
+_REVIEW_EVENT_CACHE: dict[
+    tuple[int, int], tuple[int, int, tuple[ReviewEventRecord, ...]]
+] = {}
+
+
+def clear_review_event_cache() -> None:
+    """Drop every memoized review event log.
+
+    Only needed when a caller cannot rely on ``st_mtime_ns``/``st_size``
+    invalidation -- notably tests that rewrite a log in place to the same size
+    on a filesystem with coarse timestamps.
+    """
+    _REVIEW_EVENT_CACHE.clear()
+
+
 def read_review_events(event_path: str | Path) -> tuple[ReviewEventRecord, ...]:
     """Read cycle/reopen records in append order, skipping malformed lines."""
+    path = Path(event_path)
+    try:
+        stat = path.stat()
+    except OSError:
+        # Nothing to key on; fall through so an unreadable log still returns ().
+        return _parse_review_events(path) or ()
+    identity = (stat.st_dev, stat.st_ino)
+    cached = _REVIEW_EVENT_CACHE.get(identity)
+    if cached is not None and cached[:2] == (stat.st_mtime_ns, stat.st_size):
+        return cached[2]
+    records = _parse_review_events(path)
+    if records is None:
+        # Readable enough to stat but not to open; leave the memo untouched so a
+        # transient permission failure is not remembered as an empty log.
+        return ()
+    _REVIEW_EVENT_CACHE[identity] = (stat.st_mtime_ns, stat.st_size, records)
+    return records
+
+
+def _parse_review_events(path: Path) -> tuple[ReviewEventRecord, ...] | None:
+    """Parse one event log, or ``None`` when it cannot be opened."""
     relevant = {
         events.REVIEW_CYCLE_EVENT,
         events.REVIEW_REPAIR_REOPENED_EVENT,
     }
     records: list[ReviewEventRecord] = []
     try:
-        event_file = Path(event_path).open(  # noqa: SIM115 - opened here so OSError returns (); closed by the with below
+        event_file = path.open(  # noqa: SIM115 - opened here so OSError returns None; closed by the with below
             "r", encoding="utf-8"
         )
     except OSError:
-        return ()
+        return None
     with event_file:
         for line in event_file:
             line = line.strip()
