@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-__all__ = ["as_literal"]
+__all__ = ["as_literal", "as_optional_literal"]
 
 
 def as_literal[ValueT: str](
@@ -58,3 +58,22 @@ def as_literal[ValueT: str](
         f"{field} must be one of "
         f"{', '.join(repr(permitted) for permitted in allowed)}; got {value!r}"
     )
+
+
+def as_optional_literal[ValueT: str](
+    value: object,
+    allowed: Sequence[ValueT],
+    field: str,
+    *,
+    error: type[Exception] = ValueError,
+) -> ValueT | None:
+    """Narrow ``value`` like :func:`as_literal`, passing ``None`` through.
+
+    The optional form exists because a closed vocabulary and an absent value
+    are different things: a flag nobody passed carries no wrong value to
+    reject. Only ``None`` passes through — every other unpermitted value still
+    raises, so "not supplied" never widens into "not checked".
+    """
+    if value is None:
+        return None
+    return as_literal(value, allowed, field, error=error)

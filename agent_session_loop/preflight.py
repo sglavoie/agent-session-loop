@@ -74,6 +74,7 @@ from .contracts import (
     RegexInFileCheck,
     parse_completion_contract,
 )
+from .literals import as_optional_literal
 from .plans import (
     HANDOFF_HEADING,
     PlanError,
@@ -2829,7 +2830,14 @@ def _check_registered_env_git(
 
 
 def _check_env_harness(harness: str) -> tuple[PreflightFinding, ...]:
-    if harness not in harnesses.HARNESS_NAMES:
+    # Matched out of the vocabulary rather than tested against it: the match is
+    # the permitted value, so the rest of the check carries a `HarnessName`
+    # instead of the `str` it was handed. Unlike `as_literal` this reports
+    # rather than raises — preflight's job is to hand back a red finding.
+    harness_name = next(
+        (name for name in harnesses.HARNESS_NAMES if name == harness), None
+    )
+    if harness_name is None:
         return (
             _finding(
                 "red",
@@ -2839,7 +2847,7 @@ def _check_env_harness(harness: str) -> tuple[PreflightFinding, ...]:
             ),
         )
     try:
-        adapter = harnesses.get_adapter(harness)
+        adapter = harnesses.get_adapter(harness_name)
     except harnesses.HarnessError as error:
         return (
             _finding(
@@ -2859,11 +2867,11 @@ def _check_env_harness(harness: str) -> tuple[PreflightFinding, ...]:
                 detail=f"executable: {adapter.executable}",
             ),
         )
-    return _check_env_harness_version(harness, resolved)
+    return _check_env_harness_version(harness_name, resolved)
 
 
 def _check_env_harness_version(
-    harness: str, executable: str
+    harness: harnesses.HarnessName, executable: str
 ) -> tuple[PreflightFinding, ...]:
     """Classify the resolved harness CLI against the pinned support window.
 
@@ -4014,7 +4022,13 @@ def preflight_from_args(args: argparse.Namespace) -> int:
     plan_dir_arg = args.plan_dir
     cwd_arg: str | None = args.cwd
     harness_arg: str | None = args.harness
-    commit_mode_arg: str | None = args.commit_mode
+    # The two flags feeding `commit_mode` are `store_const`, so the CLI can
+    # only ever supply a permitted value; narrowing here is what makes that
+    # true for a fabricated namespace too, and keeps an unrecognized mode from
+    # quietly skipping the git checks that `commit_mode in COMMIT_MODES` gates.
+    commit_mode_arg = as_optional_literal(
+        args.commit_mode, COMMIT_MODES, "--commit-per-session/--commit-at-end"
+    )
     state_dir_arg: str | None = args.state_dir
     max_pending_sessions_arg: int | None = getattr(
         args,

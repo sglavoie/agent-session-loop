@@ -45,13 +45,22 @@ def error_payload(
     return payload
 
 
-def invocation_step(description: str, invocations: Mapping[str, str]) -> dict[str, Any]:
+def invocation_step[HarnessKeyT: str](
+    description: str, invocations: Mapping[HarnessKeyT, str]
+) -> dict[str, Any]:
     """Build one next step offered as ready-to-paste per-harness invocations.
 
     ``invocations`` maps a harness name to the exact command a user pastes into
     that harness (prefix already applied). The insertion order of
     ``invocations`` is preserved so callers can surface the most likely harness
     first.
+
+    The key type is a type variable rather than a plain ``str`` because
+    ``Mapping`` is invariant in its key: every caller builds this from
+    :func:`harnesses.skill_invocations`, whose keys are the ``HarnessName``
+    literal, and a ``Mapping[HarnessName, str]`` is not a ``Mapping[str, str]``.
+    Binding the key type keeps that mapping accepted without this leaf module
+    having to import the harness vocabulary.
     """
     return {"description": description, "invocations": dict(invocations)}
 

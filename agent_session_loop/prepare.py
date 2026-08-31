@@ -2570,7 +2570,7 @@ def _author_plan_directory(
     transaction = PlanTransaction(output_dir)
     transaction.stage(
         "context.md",
-        authoring.render_context(parsed.context_lines, resolver["source_path"]),
+        authoring.render_context(parsed.context_lines, str(resolver["source_path"])),
     )
     transaction.stage("progress.md", authoring.render_progress_skeleton())
 

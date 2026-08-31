@@ -33,6 +33,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, NoReturn
 
 from . import durability
+from .literals import as_literal
 from .workspaces import (
     Repository,
     RepositoryRegistry,
@@ -731,7 +732,7 @@ class ReadinessMetadata:
     checked_at: str
 
 
-def canonicalize_path(path: str | Path) -> Path:
+def canonicalize_path(path: str | os.PathLike[str]) -> Path:
     """Return a filesystem-canonical path without requiring it to exist."""
     expanded = os.path.expanduser(os.fspath(path))
     return Path(os.path.realpath(os.path.abspath(expanded)))
@@ -897,9 +898,10 @@ def _recover_pending_plan_transaction_locked(
         relative_path = raw_entry.get("path")
         payload_name = raw_entry.get("payload")
         expected_sha = raw_entry.get("sha256")
-        if not all(
-            isinstance(value, str)
-            for value in (relative_path, payload_name, expected_sha)
+        if (
+            not isinstance(relative_path, str)
+            or not isinstance(payload_name, str)
+            or not isinstance(expected_sha, str)
         ):
             raise PlanError(f"pending plan transaction entry #{index} is malformed")
         parsed_path = PurePosixPath(relative_path)
@@ -1734,26 +1736,9 @@ def _join_table_row(leading: str, cells: list[str]) -> str:
     return f"{leading}|{'|'.join(cells)}|"
 
 
-def _status_for_session_id(
-    status_by_session: Mapping[object, StatusValue],
-    session_id: SessionId,
-) -> StatusValue | None:
-    status = status_by_session.get(session_id.value)
-    if status is not None:
-        return status
-
-    status = status_by_session.get(session_id)
-    if status is not None:
-        return status
-
-    if session_id.is_integer:
-        return status_by_session.get(session_id.as_int())
-    return None
-
-
 def _sync_status_table_block(
     block: list[str],
-    status_by_session: Mapping[object, StatusValue],
+    status_by_session: Mapping[str, StatusValue],
 ) -> tuple[list[str], bool]:
     if len(block) < 2:
         return block, False
@@ -1793,7 +1778,9 @@ def _sync_status_table_block(
         session_id = _session_id_from_cell(cells[session_index])
         if session_id is None:
             continue
-        status = _status_for_session_id(status_by_session, session_id)
+        # `status_by_id` keys on `SessionFile.id`, which *is* `SessionId.value`,
+        # so the canonical dotted spelling is the only lookup that can ever hit.
+        status = status_by_session.get(session_id.value)
         if status not in {"pending", "complete"}:
             continue
         synced_rows += 1
@@ -1810,7 +1797,7 @@ def _sync_status_table_block(
 
 def _sync_status_tables_in_text(
     text: str,
-    status_by_session: Mapping[object, StatusValue],
+    status_by_session: Mapping[str, StatusValue],
 ) -> tuple[str, bool]:
     lines = text.splitlines(keepends=False)
     updated: list[str] = []
@@ -1989,10 +1976,9 @@ def _leading_inline_code_or_token(value: str) -> str:
 
 def parse_readiness_state(value: str) -> ReadinessState:
     """Parse and validate a readiness state name."""
-    normalized = value.strip().lower()
-    if normalized in READINESS_STATES:
-        return normalized  # type: ignore[return-value]
-    raise PlanError(f"invalid readiness state: {value!r}")
+    return as_literal(
+        value.strip().lower(), READINESS_STATES, "readiness state", error=PlanError
+    )
 
 
 def _is_readiness_line(line: str) -> bool:

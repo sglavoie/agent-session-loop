@@ -1198,6 +1198,15 @@ def _plan_declares_registry(text: str) -> bool:
         return False
 
 
+#: Contract check keys that hold a path, paired with the target kind each one
+#: becomes. Spelled out so the kind stays the ``TargetKind`` literal
+#: :class:`repository_scope.PathTarget` declares rather than a bare ``str``.
+_CONTRACT_PATH_FIELDS: tuple[tuple[str, repository_scope.TargetKind], ...] = (
+    ("path", "contract-path"),
+    ("cwd", "contract-cwd"),
+)
+
+
 def _contract_file_targets(
     contracts_by_id: Any, session_id: str
 ) -> list[repository_scope.PathTarget]:
@@ -1216,7 +1225,7 @@ def _contract_file_targets(
     for check in checks:
         if not isinstance(check, dict):
             continue
-        for field_name, kind in (("path", "contract-path"), ("cwd", "contract-cwd")):
+        for field_name, kind in _CONTRACT_PATH_FIELDS:
             value = check.get(field_name)
             if isinstance(value, str) and value:
                 targets.append(
@@ -1357,7 +1366,7 @@ def _render_number(value: float) -> int | float:
 def contract_from_payload(
     session_id: int | str | SessionId,
     done_when: tuple[str, ...] | list[str],
-    verify_payload: dict,
+    verify_payload: dict[str, Any],
     *,
     repository_registry: RepositoryRegistry | None = None,
 ) -> _contracts.CompletionContract:
@@ -2341,27 +2350,28 @@ def _split_next_steps(output_dir: Path) -> list[dict[str, Any]]:
     return responses.next_steps_payload([step])["next_steps"]
 
 
-def _resolve_skill_prefix(
-    skill_prefix: str,
-) -> tuple[str | None, str | None]:
+def _resolve_skill_prefix(skill_prefix: str) -> str:
     """Resolve a ``--skill-prefix`` choice to a prefix char.
 
-    Returns ``(prefix, error)``. ``auto`` detects the invoking harness and
-    errors when detection is ambiguous; a named harness maps directly to its
-    prefix.
+    ``auto`` detects the invoking harness and raises :class:`ValueError` when
+    detection is ambiguous; a named harness maps directly to its prefix. The
+    failure is raised rather than returned beside the prefix so the resolved
+    value is a plain ``str`` — the caller's ``except ValueError`` is the same
+    input-error path every other resolution step in this command already
+    takes.
     """
     if skill_prefix == "auto":
         detected = harnesses.detect_invoking_harness()
         if detected is None:
-            return None, (
+            raise ValueError(
                 "could not auto-detect the invoking harness; pass "
                 "--skill-prefix {codex,claude,copilot}"
             )
-        return harnesses.SKILL_PREFIXES[detected], None
+        return harnesses.SKILL_PREFIXES[detected]
     prefix = harnesses.SKILL_PREFIXES.get(skill_prefix)
     if prefix is None:
-        return None, f"unknown skill prefix harness: {skill_prefix}"
-    return prefix, None
+        raise ValueError(f"unknown skill prefix harness: {skill_prefix}")
+    return prefix
 
 
 def _emit_split_error(
@@ -2530,9 +2540,10 @@ def split_from_args(args: Any) -> int:
             "--contracts-file is required unless --check is given",
         )
 
-    prefix, prefix_error = _resolve_skill_prefix(args.skill_prefix)
-    if prefix_error is not None:
-        return _emit_error(SPLIT_REASON_INPUT_ERROR, prefix_error)
+    try:
+        prefix = _resolve_skill_prefix(args.skill_prefix)
+    except ValueError as error:
+        return _emit_error(SPLIT_REASON_INPUT_ERROR, str(error))
 
     # Resolve the source plan (inline stdin capture or an explicit file).
     if args.inline_stdin:
