@@ -2050,14 +2050,24 @@ The typed boundaries carry a ratchet rather than a convention.
 `tests/test_asl_typing_ratchet.py` fails if a code joins the repository-wide
 `disable_error_code` baseline, if any per-module override adds a suppression of
 its own (mypy unions those with the global list, so a narrow disable is a
-repository-wide one wearing a shorter name), or if a module leaves the
-`enable_error_code` list of extracted boundaries. It also lints the shape mypy
-would otherwise have to trust: every public signature in a ratcheted module is
-fully annotated, no durable payload crosses one of those boundaries as a bare
-`dict`, `Mapping`, or `list`, no ratcheted module carries a `type: ignore`, and
-none of them imports the runner. A future extraction adds its module to the
-override list in `pyproject.toml`, to `REQUIRED_RATCHETED_MODULES`, and to
-`FAST_MODULES` in `tests/run_suite.py`.
+repository-wide one wearing a shorter name), or if a module leaves one of the
+two `enable_error_code` lists.
+
+`pyproject.toml` carries two such tables, under two contracts. **Boundary**
+gets the three codes *and* a linter on the shape mypy would otherwise have to
+trust: every public signature fully annotated, no durable payload crossing as a
+bare `dict`, `Mapping`, or `list`, no `type: ignore`, and no import of the
+runner. **Checked** gets the same three codes and nothing else — it is where a
+module lands when it is clean under mypy but cannot meet the extraction rules,
+starting with `compact_state` and `workbench`, which drive the runner and so
+could never satisfy the one-way dependency Boundary enforces. An overrides
+table cannot name itself (mypy rejects an extra key), so the ratchet resolves
+each by an anchor module only that table lists.
+
+A future extraction adds its module to the Boundary table in `pyproject.toml`,
+to `REQUIRED_RATCHETED_MODULES`, and to `FAST_MODULES` in
+`tests/run_suite.py`; a module that is mypy-clean but not linter-clean goes to
+the Checked table and `REQUIRED_CHECKED_MODULES` instead.
 
 Optional post-run assurance stays advisory and never blocks. A run whose audit
 landed `unavailable` or `partial` keeps the success it earned and carries an

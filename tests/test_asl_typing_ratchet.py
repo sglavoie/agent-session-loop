@@ -7,20 +7,36 @@ grows: a new module lands untyped, a tenth code joins the list to keep the
 gate green, and the extraction program's typed boundaries stop being a
 boundary at all.
 
-These tests are that ratchet. They assert three things a future session
-cannot quietly undo:
+These tests are that ratchet. ``pyproject.toml`` carries *two*
+``enable_error_code`` override tables, under two contracts:
+
+* **Boundary** -- mypy codes *and* the linter below: annotated public
+  signatures, parameterized containers, no ``type: ignore``, no import of the
+  runner. That is extraction discipline, which is meaningful for a package
+  boundary and meaningless for a test module or for a package module whose job
+  is to drive the runner.
+* **Checked** -- the same three mypy codes and nothing else. Where a module
+  lands when it is clean under mypy but cannot meet the extraction rules.
+
+Neither table can name itself: mypy rejects an extra key in an overrides table
+as an unrecognized option, so each is looked up by an anchor module only that
+table may list (see ``TABLE_ANCHORS``).
+
+Together the tests assert four things a future session cannot quietly undo:
 
 * the repository-wide ``disable_error_code`` list may only *shrink*, and no
-  per-module override may add a suppression of its own;
-* the ``enable_error_code`` override list of extracted durable boundaries may
-  only *grow*, and every module on it re-enables all three codes;
-* every module on that list keeps its durable-boundary payloads typed --
-  annotated public signatures, parameterized containers, no ``type: ignore``,
-  and no import of the runner it was extracted from.
+  per-module override -- in either table -- may add a suppression of its own;
+* both tables re-enable all three codes, list only modules that exist, and stay
+  sorted and disjoint;
+* each table's module list may only *grow*, measured against its own floor set
+  (``REQUIRED_RATCHETED_MODULES``, ``REQUIRED_CHECKED_MODULES``);
+* every module on the **Boundary** table keeps its durable-boundary payloads
+  typed under the linter rules above.
 
-The third check is a linter, not a mypy run: it fails on the *shape* mypy
+That last check is a linter, not a mypy run: it fails on the *shape* mypy
 would have to trust, so a public entry point that takes a bare ``dict`` is
-caught even though ``dict`` is a perfectly valid annotation.
+caught even though ``dict`` is a perfectly valid annotation. It applies to the
+Boundary table only.
 """
 
 from __future__ import annotations
@@ -53,15 +69,26 @@ BASELINE_DISABLED_CODES = frozenset(
     }
 )
 
-#: The codes an extracted durable boundary opts back in to. All three are ways
-#: a wrong value reaches a durable record instead of raising at the call site.
+#: The codes a ratcheted module opts back in to. All three are ways a wrong
+#: value reaches a durable record instead of raising at the call site.
 RATCHETED_CODES = frozenset({"arg-type", "union-attr", "index"})
 
-#: The package modules that already meet the boundary contract: clean under
-#: all three codes and clean under the linter below. This set is a floor:
-#: every module that becomes clean adds to it, and nothing may leave it. A
-#: module removed from ``pyproject.toml`` fails here rather than silently
-#: rejoining the untyped baseline.
+#: The two override tables. An overrides table has no name key -- mypy rejects
+#: one as an unrecognized option -- so each is named by an anchor module that
+#: only that table may list. The anchors are load-bearing: swap a table's
+#: contract and the lookup below stops finding it.
+BOUNDARY_TABLE = "boundary"
+CHECKED_TABLE = "checked"
+TABLE_ANCHORS = {
+    BOUNDARY_TABLE: "agent_session_loop.artifacts",
+    CHECKED_TABLE: "agent_session_loop.compact_state",
+}
+
+#: The package modules that meet the boundary contract: clean under all three
+#: codes and clean under the linter below. This set is a floor: every module
+#: that becomes clean adds to it, and nothing may leave it. A module removed
+#: from ``pyproject.toml`` fails here rather than silently rejoining the
+#: untyped baseline.
 REQUIRED_RATCHETED_MODULES = frozenset(
     {
         "agent_session_loop",
@@ -136,6 +163,23 @@ REQUIRED_RATCHETED_MODULES = frozenset(
     }
 )
 
+#: The floor for the Checked table, same rule as the set above: clean under all
+#: three codes, but held off the Boundary table by the linter rather than by
+#: mypy. Seeded with the two package modules that import the runner, which is a
+#: rule neither of them could ever satisfy.
+REQUIRED_CHECKED_MODULES = frozenset(
+    {
+        "agent_session_loop.compact_state",
+        "agent_session_loop.workbench",
+    }
+)
+
+#: Each table's floor, keyed by table name.
+REQUIRED_MODULES = {
+    BOUNDARY_TABLE: REQUIRED_RATCHETED_MODULES,
+    CHECKED_TABLE: REQUIRED_CHECKED_MODULES,
+}
+
 #: Container annotations that say nothing about what they hold. A durable
 #: payload crossing a boundary as one of these is exactly the case the
 #: repository-wide ``arg-type`` suppression was hiding. ``Any`` is excluded
@@ -162,16 +206,32 @@ def load_mypy_config() -> dict[str, Any]:
     return tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["mypy"]
 
 
-def ratcheted_override() -> dict[str, Any]:
-    """The single override table that re-enables codes for typed boundaries."""
+def enabling_overrides() -> list[dict[str, Any]]:
+    """Every override table that re-enables codes, in file order."""
     overrides = load_mypy_config()["overrides"]
-    enabling = [override for override in overrides if "enable_error_code" in override]
-    if len(enabling) != 1:
+    return [override for override in overrides if "enable_error_code" in override]
+
+
+def ratcheted_override(table: str) -> dict[str, Any]:
+    """The named override table that re-enables codes under ``table``'s contract.
+
+    The tables are unnamed in TOML, so each is resolved by the anchor module
+    only it may list. Resolving by name rather than by position keeps the
+    guarantee the old "exactly one table" assertion gave: a floor set and the
+    linter each address one unambiguous table.
+    """
+    anchor = TABLE_ANCHORS[table]
+    matching = [
+        override
+        for override in enabling_overrides()
+        if anchor in override.get("module", [])
+    ]
+    if len(matching) != 1:
         raise AssertionError(
-            "expected exactly one enable_error_code override table, "
-            f"found {len(enabling)}"
+            f"expected exactly one enable_error_code override table listing "
+            f"{anchor} (the {table} table), found {len(matching)}"
         )
-    return enabling[0]
+    return matching[0]
 
 
 def module_path(dotted: str) -> Path:
@@ -291,46 +351,84 @@ class GlobalSuppressionRatchetTests(unittest.TestCase):
 
 
 class RatchetedModuleListTests(unittest.TestCase):
-    """The list of typed durable boundaries may only grow."""
+    """Both ratcheted module lists may only grow."""
 
-    def test_every_extracted_boundary_is_still_on_the_list(self) -> None:
-        listed = set(ratcheted_override()["module"])
+    def test_both_named_tables_resolve_and_nothing_else_enables_codes(self) -> None:
+        """Named lookup only stays unambiguous while there are no other tables.
 
-        missing = REQUIRED_RATCHETED_MODULES - listed
-        self.assertEqual(
-            missing,
-            set(),
-            "an extracted durable boundary left the enable_error_code list; "
-            f"restore {sorted(missing)}",
-        )
+        A third ``enable_error_code`` table would be a contract nobody wrote
+        down: the linter would skip it and no floor set would guard it.
+        """
+        resolved = [ratcheted_override(table) for table in REQUIRED_MODULES]
+
+        self.assertEqual(len(enabling_overrides()), len(resolved))
+
+    def test_the_two_tables_are_disjoint(self) -> None:
+        """A module on both would be linted and not linted at once."""
+        boundary = set(ratcheted_override(BOUNDARY_TABLE)["module"])
+        checked = set(ratcheted_override(CHECKED_TABLE)["module"])
+
+        self.assertEqual(boundary & checked, set())
+
+    def test_every_ratcheted_module_is_still_on_its_list(self) -> None:
+        for table, required in REQUIRED_MODULES.items():
+            listed = set(ratcheted_override(table)["module"])
+            missing = required - listed
+            with self.subTest(table=table):
+                self.assertEqual(
+                    missing,
+                    set(),
+                    f"a module left the {table} enable_error_code list; "
+                    f"restore {sorted(missing)}",
+                )
 
     def test_every_listed_module_re_enables_all_three_codes(self) -> None:
-        override = ratcheted_override()
-
-        self.assertEqual(set(override["enable_error_code"]), set(RATCHETED_CODES))
+        for table in REQUIRED_MODULES:
+            override = ratcheted_override(table)
+            with self.subTest(table=table):
+                self.assertEqual(
+                    set(override["enable_error_code"]), set(RATCHETED_CODES)
+                )
 
     def test_every_listed_module_exists(self) -> None:
-        for dotted in ratcheted_override()["module"]:
-            with self.subTest(module=dotted):
-                self.assertTrue(module_path(dotted).is_file())
+        for table in REQUIRED_MODULES:
+            for dotted in ratcheted_override(table)["module"]:
+                with self.subTest(table=table, module=dotted):
+                    self.assertTrue(module_path(dotted).is_file())
 
-    def test_the_list_stays_sorted_so_additions_do_not_collide(self) -> None:
-        listed = list(ratcheted_override()["module"])
+    def test_the_lists_stay_sorted_so_additions_do_not_collide(self) -> None:
+        for table in REQUIRED_MODULES:
+            listed = list(ratcheted_override(table)["module"])
+            with self.subTest(table=table):
+                self.assertEqual(listed, sorted(listed))
 
-        self.assertEqual(listed, sorted(listed))
+    def test_the_required_sets_name_only_real_modules(self) -> None:
+        for table, required in REQUIRED_MODULES.items():
+            for dotted in sorted(required):
+                with self.subTest(table=table, module=dotted):
+                    self.assertTrue(module_path(dotted).is_file())
 
-    def test_the_required_set_names_only_real_modules(self) -> None:
-        for dotted in sorted(REQUIRED_RATCHETED_MODULES):
-            with self.subTest(module=dotted):
-                self.assertTrue(module_path(dotted).is_file())
+    def test_each_anchor_is_on_the_floor_of_the_table_it_names(self) -> None:
+        """An anchor that could be moved off its table would rename it."""
+        for table, anchor in TABLE_ANCHORS.items():
+            with self.subTest(table=table):
+                self.assertIn(anchor, REQUIRED_MODULES[table])
 
 
 class DurableBoundaryTypingTests(unittest.TestCase):
-    """Ratcheted modules keep their durable-boundary payloads typed."""
+    """Boundary modules keep their durable-boundary payloads typed.
+
+    Scoped to the Boundary table. These four rules are extraction discipline,
+    which the Checked table's members are on that table precisely because they
+    cannot meet.
+    """
+
+    def boundary_modules(self) -> list[str]:
+        return list(ratcheted_override(BOUNDARY_TABLE)["module"])
 
     def modules(self) -> list[tuple[str, ast.Module]]:
         parsed: list[tuple[str, ast.Module]] = []
-        for dotted in ratcheted_override()["module"]:
+        for dotted in self.boundary_modules():
             path = module_path(dotted)
             parsed.append((dotted, ast.parse(path.read_text(encoding="utf-8"))))
         return parsed
@@ -384,7 +482,7 @@ class DurableBoundaryTypingTests(unittest.TestCase):
 
     def test_no_ratcheted_module_suppresses_an_error_inline(self) -> None:
         """``# type: ignore`` would reopen locally what the module opted in to."""
-        for dotted in ratcheted_override()["module"]:
+        for dotted in self.boundary_modules():
             source = module_path(dotted).read_text(encoding="utf-8")
             with self.subTest(module=dotted):
                 self.assertNotIn("type: ignore", source)

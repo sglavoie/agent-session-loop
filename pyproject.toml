@@ -47,19 +47,32 @@ disable_error_code = [
     "annotation-unchecked",
 ]
 
-# The modules that already meet the boundary contract are typed, so they opt
-# back in to the three codes the repository-wide baseline still hides. These
-# are the paths where an argument of the wrong type, an attribute read off an
-# optional, or an index into something that is not a mapping would corrupt a
-# durable record — a turn, a transition, a mailbox wait, a control command, a
-# projection payload — rather than raise at the call site. Every module that is
-# clean under the three codes belongs on this list; nothing here is a
-# suppression, so the baseline above only ever shrinks. `enable_error_code`, not a shorter `disable_error_code`: a
-# per-module disable list is unioned with the global one, so re-enabling is the
-# only way back in.
+# Two override tables re-enable the three codes the repository-wide baseline
+# still hides, under two different contracts. Both name the paths where an
+# argument of the wrong type, an attribute read off an optional, or an index
+# into something that is not a mapping would corrupt a durable record — a turn,
+# a transition, a mailbox wait, a control command, a projection payload —
+# rather than raise at the call site. Nothing in either table is a suppression,
+# so the baseline above only ever shrinks. `enable_error_code`, not a shorter
+# `disable_error_code`: a per-module disable list is unioned with the global
+# one, so re-enabling is the only way back in.
 #
-# `tests/test_asl_typing_ratchet.py` enforces both halves of that: the global
-# list may only shrink, and this list may only grow.
+# **Boundary** (below) — mypy codes *and* the AST linter in
+# `tests/test_asl_typing_ratchet.py`: annotated public signatures,
+# parameterized containers, no `type: ignore`, no import of the runner. That
+# linter encodes extraction discipline, which is meaningful for a package
+# boundary and meaningless for a test module or for a package module whose job
+# is to drive the runner.
+#
+# **Checked** (the table after it) — the same three mypy codes and nothing
+# else. It is where a module lands when it is clean under mypy but cannot meet
+# the extraction rules.
+#
+# The tables carry no name key of their own — mypy rejects one as an
+# unrecognized option — so the ratchet names each by an anchor module only that
+# table may list. `tests/test_asl_typing_ratchet.py` enforces every half of
+# this: the global list may only shrink, neither table may add a suppression,
+# and each table has a floor set it may only grow past.
 [[tool.mypy.overrides]]
 module = [
     "agent_session_loop",
@@ -131,6 +144,22 @@ module = [
     "agent_session_loop.turn_execution",
     "agent_session_loop.verification_transitions",
     "agent_session_loop.workspaces",
+]
+enable_error_code = [
+    "arg-type",
+    "union-attr",
+    "index",
+]
+
+# Checked: the three codes, no linter. Seeded with the two package modules that
+# import the runner — `compact_state` reads and rewrites a run's own state, and
+# `workbench` drives runs — so the one-way dependency the Boundary table
+# enforces is not something either of them could ever satisfy. Both are already
+# clean under the three codes.
+[[tool.mypy.overrides]]
+module = [
+    "agent_session_loop.compact_state",
+    "agent_session_loop.workbench",
 ]
 enable_error_code = [
     "arg-type",
