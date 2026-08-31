@@ -31,6 +31,7 @@ import argparse
 import contextlib
 import json
 import math
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -182,22 +183,39 @@ def _plan_dir_for_state_dir(state_dir: Path) -> str | None:
 
 
 def _directory_sizes(state_dir: Path, cutoff: datetime) -> tuple[int, int, int]:
-    """Return (total_bytes, grown_bytes, grown_files) for one state dir."""
+    """Return (total_bytes, grown_bytes, grown_files) for one state dir.
+
+    Walked with :func:`os.scandir` rather than :meth:`Path.rglob` so each entry
+    is classified and sized from the directory entry the kernel already
+    returned, instead of paying a fresh ``stat`` for ``is_file()`` and a second
+    one for ``st_size``.  Directory symlinks are not descended into (matching
+    ``rglob``), while file symlinks are still followed and counted.
+    """
     total = 0
     grown = 0
     grown_files = 0
     cutoff_ts = cutoff.timestamp()
-    for path in state_dir.rglob("*"):
+    pending = [str(state_dir)]
+    while pending:
         try:
-            if not path.is_file():
-                continue
-            stat_result = path.stat()
+            entries = list(os.scandir(pending.pop()))
         except OSError:
+            # Unreadable or vanished subtree; rglob skips these silently too.
             continue
-        total += stat_result.st_size
-        if stat_result.st_mtime >= cutoff_ts:
-            grown += stat_result.st_size
-            grown_files += 1
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(entry.path)
+                    continue
+                if not entry.is_file():
+                    continue
+                stat_result = entry.stat()
+            except OSError:
+                continue
+            total += stat_result.st_size
+            if stat_result.st_mtime >= cutoff_ts:
+                grown += stat_result.st_size
+                grown_files += 1
     return total, grown, grown_files
 
 
