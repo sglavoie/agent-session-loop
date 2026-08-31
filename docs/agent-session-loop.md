@@ -2050,8 +2050,11 @@ The typed boundaries carry a ratchet rather than a convention.
 `tests/test_asl_typing_ratchet.py` fails if a code joins the repository-wide
 `disable_error_code` baseline, if any per-module override adds a suppression of
 its own (mypy unions those with the global list, so a narrow disable is a
-repository-wide one wearing a shorter name), or if a module leaves one of the
-two `enable_error_code` lists.
+repository-wide one wearing a shorter name), if a module leaves one of the
+two `enable_error_code` lists, or if a module in the package is on neither of
+them. That last check derives the package tree rather than reading a list, so a
+module added tomorrow has to pick a table instead of inheriting the global
+suppressions in silence.
 
 `pyproject.toml` carries two such tables, under two contracts. **Boundary**
 gets the three codes *and* a linter on the shape mypy would otherwise have to
@@ -2067,7 +2070,9 @@ is on Boundary: the rule bans importing the runner, not being it. An overrides
 table cannot name itself (mypy rejects an extra key), so the ratchet resolves
 each by an anchor module only that table lists.
 
-A future extraction adds its module to the Boundary table in `pyproject.toml`,
+A new package module is required to be on one of the two tables, so this is a
+step the ratchet fails without rather than a convention. A future extraction
+adds its module to the Boundary table in `pyproject.toml`,
 to `REQUIRED_RATCHETED_MODULES`, and to `FAST_MODULES` in
 `tests/run_suite.py`; a module that is mypy-clean but not linter-clean goes to
 the Checked table and `REQUIRED_CHECKED_MODULES` instead.

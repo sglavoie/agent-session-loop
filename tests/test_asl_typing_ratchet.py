@@ -30,6 +30,9 @@ Together the tests assert four things a future session cannot quietly undo:
   sorted and disjoint;
 * each table's module list may only *grow*, measured against its own floor set
   (``REQUIRED_RATCHETED_MODULES``, ``REQUIRED_CHECKED_MODULES``);
+* every module in the package appears on exactly one of the two tables, so a
+  module added tomorrow cannot sit under the global suppressions unnoticed --
+  the floors only stop listed modules from leaving;
 * every module on the **Boundary** table keeps its durable-boundary payloads
   typed under the linter rules above.
 
@@ -51,6 +54,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
+PACKAGE_ROOT = REPO_ROOT / "agent_session_loop"
 
 #: The repository-wide suppressions as of the session that added this ratchet.
 #: This set is a ceiling: a code may leave it once the tree is clean enough to
@@ -271,6 +275,33 @@ def module_path(dotted: str) -> Path:
     return base.with_suffix(".py")
 
 
+def dotted_name(path: Path) -> str:
+    """The name mypy matches for a module file, relative to the repository root.
+
+    The inverse of :func:`module_path`. An ``__init__.py`` is named by its
+    package -- mypy has no ``agent_session_loop.__init__`` to match -- so the
+    file name is dropped rather than turned into a component.
+    """
+    relative = path.relative_to(REPO_ROOT)
+    if path.name == "__init__.py":
+        return ".".join(relative.parent.parts)
+    return ".".join((*relative.parent.parts, relative.stem))
+
+
+def package_modules() -> frozenset[str]:
+    """Every module in the package, by the dotted name mypy would match.
+
+    Walked recursively so a subpackage added later is discovered rather than
+    silently exempted, and filtered on ``__pycache__`` because a stale ``.pyc``
+    directory holds no source.
+    """
+    return frozenset(
+        dotted_name(path)
+        for path in PACKAGE_ROOT.rglob("*.py")
+        if "__pycache__" not in path.parts
+    )
+
+
 def subscript_base(node: ast.Subscript) -> str | None:
     """Name the generic being parameterized, or ``None`` when it is an expression."""
     if isinstance(node.value, ast.Name):
@@ -438,6 +469,35 @@ class RatchetedModuleListTests(unittest.TestCase):
                     set(),
                     f"a module left the {table} enable_error_code list; "
                     f"restore {sorted(missing)}",
+                )
+
+    def test_every_package_module_is_ratcheted(self) -> None:
+        """A new package module must join a table rather than inherit the debt.
+
+        The floor sets above only stop a *listed* module from leaving. Nothing
+        made a module that never appeared on either table an error, so a module
+        added tomorrow would stay under the globally disabled ``arg-type``,
+        ``union-attr`` and ``index`` codes for as long as nobody noticed. This
+        derives the tree instead of trusting a list, and requires exactly one
+        table per module: neither is a home a module can be missing from, and
+        two would mean it is linted and not linted at once.
+        """
+        tables_by_module: dict[str, list[str]] = {
+            dotted: [] for dotted in package_modules()
+        }
+        for table in REQUIRED_MODULES:
+            for dotted in ratcheted_override(table)["module"]:
+                if dotted in tables_by_module:
+                    tables_by_module[dotted].append(table)
+
+        for dotted, tables in sorted(tables_by_module.items()):
+            with self.subTest(module=dotted):
+                self.assertEqual(
+                    len(tables),
+                    1,
+                    f"{dotted} is on {len(tables)} enable_error_code tables; add "
+                    f"it to {BOUNDARY_TABLE} if it meets the extraction rules, "
+                    f"otherwise to {CHECKED_TABLE}",
                 )
 
     def test_every_listed_module_re_enables_all_three_codes(self) -> None:

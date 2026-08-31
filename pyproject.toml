@@ -76,7 +76,9 @@ disable_error_code = [
 # unrecognized option — so the ratchet names each by an anchor module only that
 # table may list. `tests/test_asl_typing_ratchet.py` enforces every half of
 # this: the global list may only shrink, neither table may add a suppression,
-# and each table has a floor set it may only grow past.
+# each table has a floor set it may only grow past, and every module in the
+# package is on exactly one of the two — that last check walks the package
+# tree, so a new module joins a table or fails the ratchet.
 [[tool.mypy.overrides]]
 module = [
     "agent_session_loop",
