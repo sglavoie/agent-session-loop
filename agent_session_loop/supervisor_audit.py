@@ -223,25 +223,30 @@ def resolve_role(
         inherited_model = review_model
     else:
         return None
-    if harness == implementation_harness:
-        return None
     # Both names are free strings here -- `asl assurance process-pending`
     # accepts an unconstrained `--audit-harness`, and the implementation
     # harness is read back off a recorded run config -- so the closed
     # vocabulary is applied where the role is built. These are the same two
     # checks `AuditRole.__post_init__` makes, with the same labels and the
     # same error, moved one frame out so the narrowed type is what reaches
-    # the durable record.
+    # the durable record. Both are narrowed *before* the equality test:
+    # otherwise an equal pair of unpermitted names would return early and a
+    # malformed configuration would read as "no independent role" instead of
+    # failing closed.
+    selected = as_literal(
+        harness, HARNESS_NAMES, "role 'harness'", error=AssuranceError
+    )
+    implementation = as_literal(
+        implementation_harness,
+        HARNESS_NAMES,
+        "role 'implementation_harness'",
+        error=AssuranceError,
+    )
+    if selected == implementation:
+        return None
     return AuditRole(
-        harness=as_literal(
-            harness, HARNESS_NAMES, "role 'harness'", error=AssuranceError
-        ),
-        implementation_harness=as_literal(
-            implementation_harness,
-            HARNESS_NAMES,
-            "role 'implementation_harness'",
-            error=AssuranceError,
-        ),
+        harness=selected,
+        implementation_harness=implementation,
         source=source,
         timeout_seconds=float(config.timeout_seconds),
         model=config.model if config.model is not None else inherited_model,

@@ -286,6 +286,17 @@ class AuditRoleResolutionTests(unittest.TestCase):
         with self.assertRaises(AssuranceError):
             supervisor_audit.resolve_role(config, implementation_harness="gpt")
 
+    def test_an_equal_unpermitted_pair_is_refused_rather_than_read_as_no_role(
+        self,
+    ) -> None:
+        # Equality alone does not mean "no independent role": two names outside
+        # the vocabulary describe a malformed configuration, so the closed
+        # vocabulary is applied before the pair is compared.
+        config = supervisor_audit.AuditConfig(harness="gpt")
+
+        with self.assertRaises(AssuranceError):
+            supervisor_audit.resolve_role(config, implementation_harness="gpt")
+
     def test_the_role_model_rejects_a_self_audit(self) -> None:
         with self.assertRaises(AssuranceError):
             supervisor_audit.AuditRole(
@@ -350,6 +361,14 @@ class AuditPlanTests(unittest.TestCase):
         self.assertEqual("unavailable", plan.state)
         self.assertEqual(supervisor_audit.REASON_NO_INDEPENDENT_ROLE, plan.reason)
         self.assertIsNone(plan.role)
+
+    def test_an_equal_unpermitted_pair_is_not_planned_as_unavailable(self) -> None:
+        # "No independent role" is a statement about two *permitted* harnesses
+        # being the same one. A pair that is outside the vocabulary is a
+        # malformed configuration and must raise instead of planning a run
+        # whose audit is merely recorded as unavailable.
+        with self.assertRaises(AssuranceError):
+            supervisor_audit.plan_audit(_namespace(harness="gpt", audit_harness="gpt"))
 
     def test_pending_is_persisted_only_for_an_eligible_run(self) -> None:
         plan = supervisor_audit.plan_audit(
