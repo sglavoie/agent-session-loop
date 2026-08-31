@@ -22,7 +22,7 @@ Neither table can name itself: mypy rejects an extra key in an overrides table
 as an unrecognized option, so each is looked up by an anchor module only that
 table may list (see ``TABLE_ANCHORS``).
 
-Together the tests assert four things a future session cannot quietly undo:
+Together the tests assert five things a future session cannot quietly undo:
 
 * the repository-wide ``disable_error_code`` list may only *shrink*, and no
   per-module override -- in either table -- may add a suppression of its own;
