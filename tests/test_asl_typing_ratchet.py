@@ -35,8 +35,10 @@ Together the tests assert four things a future session cannot quietly undo:
 
 That last check is a linter, not a mypy run: it fails on the *shape* mypy
 would have to trust, so a public entry point that takes a bare ``dict`` is
-caught even though ``dict`` is a perfectly valid annotation. It applies to the
-Boundary table only.
+caught even though ``dict`` is a perfectly valid annotation. The bare-container
+rule reads the whole annotation rather than its root, because ``dict | None``
+and ``list[dict]`` restore the untyped payload just as surely. It applies to
+the Boundary table only.
 """
 
 from __future__ import annotations
@@ -269,8 +271,28 @@ def module_path(dotted: str) -> Path:
     return base.with_suffix(".py")
 
 
+def subscript_base(node: ast.Subscript) -> str | None:
+    """Name the generic being parameterized, or ``None`` when it is an expression."""
+    if isinstance(node.value, ast.Name):
+        return node.value.id
+    if isinstance(node.value, ast.Attribute):
+        return node.value.attr
+    return None
+
+
 def unparameterized_container(annotation: ast.expr) -> str | None:
-    """Name the bare container this annotation is, or ``None`` when it is typed."""
+    """Name the first bare container in this annotation, or ``None`` when typed.
+
+    The search recurses through unions and generic arguments, because
+    ``dict | None`` and ``list[dict]`` restore the ``Any``-valued payload the
+    root-only check existed to reject just as surely as a bare ``dict`` does. A
+    fully parameterized nesting such as ``list[dict[str, object]]`` is accepted:
+    every container in it names what it holds.
+
+    ``Literal[...]`` arguments are skipped and string annotations are never
+    parsed -- both hold values rather than types, so ``Literal["dict"]`` is not
+    a bare container.
+    """
     if isinstance(annotation, ast.Name) and annotation.id in UNPARAMETERIZED_CONTAINERS:
         return annotation.id
     if (
@@ -278,6 +300,20 @@ def unparameterized_container(annotation: ast.expr) -> str | None:
         and annotation.attr in UNPARAMETERIZED_CONTAINERS
     ):
         return annotation.attr
+    if isinstance(annotation, ast.Subscript):
+        if subscript_base(annotation) == "Literal":
+            return None
+        return unparameterized_container(annotation.slice)
+    if isinstance(annotation, ast.Tuple | ast.List):
+        for element in annotation.elts:
+            bare = unparameterized_container(element)
+            if bare is not None:
+                return bare
+        return None
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return unparameterized_container(annotation.left) or unparameterized_container(
+            annotation.right
+        )
     return None
 
 
@@ -435,6 +471,48 @@ class RatchetedModuleListTests(unittest.TestCase):
         for table, anchor in TABLE_ANCHORS.items():
             with self.subTest(table=table):
                 self.assertIn(anchor, REQUIRED_MODULES[table])
+
+
+class UnparameterizedContainerTests(unittest.TestCase):
+    """The bare-container rule reads the whole annotation, not just its root.
+
+    Before this, only the root node was inspected, so ``dict | None`` and
+    ``list[dict]`` passed the linter while restoring exactly the ``Any``-valued
+    payload it exists to reject.
+    """
+
+    def bare(self, source: str) -> str | None:
+        return unparameterized_container(ast.parse(source, mode="eval").body)
+
+    def test_a_root_container_is_still_named(self) -> None:
+        self.assertEqual(self.bare("dict"), "dict")
+        self.assertEqual(self.bare("collections.abc.Mapping"), "Mapping")
+
+    def test_a_union_member_is_reached(self) -> None:
+        self.assertEqual(self.bare("dict | None"), "dict")
+        self.assertEqual(self.bare("str | list"), "list")
+
+    def test_a_generic_argument_is_reached(self) -> None:
+        self.assertEqual(self.bare("list[dict]"), "dict")
+        self.assertEqual(self.bare("dict[str, list]"), "list")
+        self.assertEqual(self.bare("Callable[[int], dict]"), "dict")
+        self.assertEqual(self.bare("Callable[..., dict]"), "dict")
+
+    def test_a_fully_parameterized_nesting_is_accepted(self) -> None:
+        self.assertIsNone(self.bare("list[dict[str, object]]"))
+        self.assertIsNone(self.bare("dict[str, list[str]] | None"))
+        self.assertIsNone(
+            self.bare("Callable[[Mapping[str, Any]], dict[str, Any]] | None")
+        )
+
+    def test_literal_arguments_are_values_rather_than_types(self) -> None:
+        """``Literal["dict"]`` names a string, not a container."""
+        self.assertIsNone(self.bare('Literal["dict"]'))
+        self.assertIsNone(self.bare('Literal["dict", "list"] | None'))
+
+    def test_a_string_annotation_is_left_alone(self) -> None:
+        """Forward references are not parsed, so they cannot be misread."""
+        self.assertIsNone(self.bare('"dict"'))
 
 
 class DurableBoundaryTypingTests(unittest.TestCase):

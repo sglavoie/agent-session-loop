@@ -907,7 +907,7 @@ def parse_plan_document(text: str) -> ParsedPlan:
         lines, structural_lines
     )
 
-    current: dict | None = None
+    current: dict[str, Any] | None = None
     first_id_lines: dict[str, int] = {}
 
     def _flush(end: int) -> None:

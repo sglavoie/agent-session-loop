@@ -59,7 +59,8 @@ disable_error_code = [
 #
 # **Boundary** (below) — mypy codes *and* the AST linter in
 # `tests/test_asl_typing_ratchet.py`: annotated public signatures,
-# parameterized containers, no `type: ignore`, no import of the runner. That
+# parameterized containers (recursively: `dict | None` and `list[dict]` are
+# bare too), no `type: ignore`, no import of the runner. That
 # linter encodes extraction discipline, which is meaningful for a package
 # boundary and meaningless for a test module or for a package module whose job
 # is to drive the runner. `runner` itself is on this table: the rule bans

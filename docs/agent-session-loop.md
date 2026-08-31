@@ -2056,8 +2056,10 @@ two `enable_error_code` lists.
 `pyproject.toml` carries two such tables, under two contracts. **Boundary**
 gets the three codes *and* a linter on the shape mypy would otherwise have to
 trust: every public signature fully annotated, no durable payload crossing as a
-bare `dict`, `Mapping`, or `list`, no `type: ignore`, and no import of the
-runner. **Checked** gets the same three codes and nothing else — it is where a
+bare `dict`, `Mapping`, or `list` — anywhere in the annotation, including
+inside a union or a generic argument, so `dict | None` and `list[dict]` are
+rejected while `list[dict[str, object]]` is not — no `type: ignore`, and no
+import of the runner. **Checked** gets the same three codes and nothing else — it is where a
 module lands when it is clean under mypy but cannot meet the extraction rules,
 starting with `compact_state` and `workbench`, which drive the runner and so
 could never satisfy the one-way dependency Boundary enforces. `runner` itself

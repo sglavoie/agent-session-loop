@@ -32,6 +32,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 HOOK_EVENT = "PreToolUse"
 GUIDANCE_CONTEXT_HEADING = "Live supervisor guidance (delivered by ASL)"
@@ -42,7 +43,7 @@ GUIDANCE_CONTEXT_HEADING = "Live supervisor guidance (delivered by ASL)"
 MAX_RECORDS_PER_INVOCATION = 16
 
 
-def _claim(pending_dir: Path, claimed_dir: Path, name: str) -> dict | None:
+def _claim(pending_dir: Path, claimed_dir: Path, name: str) -> dict[str, Any] | None:
     """Take one pending record, or return ``None`` if it is no longer ours.
 
     Read before the rename so a withdrawn record is simply lost to us, and
@@ -76,7 +77,7 @@ def _write_receipt(receipts_dir: Path, guidance_id: str) -> None:
         pass
 
 
-def _render(records: list[dict]) -> str:
+def _render(records: list[dict[str, Any]]) -> str:
     lines = [GUIDANCE_CONTEXT_HEADING, ""]
     for record in records:
         text = str(record.get("text", "")).strip()
@@ -104,7 +105,7 @@ def main(argv: list[str]) -> int:
     except OSError:
         return 0
 
-    records: list[dict] = []
+    records: list[dict[str, Any]] = []
     for name in names[:MAX_RECORDS_PER_INVOCATION]:
         if not name.endswith(".json"):
             continue

@@ -1752,7 +1752,9 @@ def _optional_str(params: Mapping[str, Any], key: str) -> str | None:
 
 # Registered last so the derived capability list below can only advertise names
 # that already have a handler behind them.
-METHOD_HANDLERS: dict[str, Callable[[BridgeSession, Mapping[str, Any]], dict]] = {
+METHOD_HANDLERS: dict[
+    str, Callable[[BridgeSession, Mapping[str, Any]], dict[str, Any]]
+] = {
     METHOD_HANDSHAKE: BridgeSession.session_handshake,
     "runs.snapshot": lambda session, params: session.runs_snapshot(),
     "question.get": BridgeSession.question_get,

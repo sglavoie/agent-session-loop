@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,7 +81,7 @@ def baseline_identity_key(
     check: VerificationCheck,
     cwd: str | Path,
     *,
-    env: dict | None = None,
+    env: Mapping[str, str] | None = None,
     context: VerificationContext | None = None,
 ) -> str:
     """Return the fingerprint-independent cache key for a single check.

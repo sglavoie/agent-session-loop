@@ -31,6 +31,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -151,7 +152,7 @@ def _recipe_executable_identity(recipe: VerifyRecipe) -> str:
 
 
 def environment_signature(
-    env: dict | None = None,
+    env: Mapping[str, str] | None = None,
     keys: tuple[str, ...] = DEFAULT_ENVIRONMENT_KEYS,
 ) -> str:
     """Return a signature over the relevant subset of environment variables."""
@@ -189,7 +190,7 @@ def compute_cache_key(
     recipe: VerifyRecipe,
     cwd: str | Path,
     *,
-    env: dict | None = None,
+    env: Mapping[str, str] | None = None,
     environment_keys: tuple[str, ...] = DEFAULT_ENVIRONMENT_KEYS,
     registry_digest: str | None = None,
     aggregate_repository_fingerprint: str | None = None,
