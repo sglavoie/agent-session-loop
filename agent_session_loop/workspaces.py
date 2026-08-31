@@ -14,7 +14,7 @@ import re
 import subprocess
 import unicodedata
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -32,7 +32,9 @@ _DEFAULT_ORIGIN_PORTS = {"git": 9418, "http": 80, "https": 443, "ssh": 22}
 OPERATOR_REPOSITORY_DISPLAY_LIMIT = 20
 
 
-def bounded_repository_rows(rows, *, limit: int = OPERATOR_REPOSITORY_DISPLAY_LIMIT):
+def bounded_repository_rows[RowT](
+    rows: Iterable[RowT], *, limit: int = OPERATOR_REPOSITORY_DISPLAY_LIMIT
+) -> tuple[tuple[RowT, ...], int]:
     """Return a bounded ordered prefix and the number of omitted rows."""
     ordered = tuple(rows)
     return ordered[:limit], max(0, len(ordered) - limit)

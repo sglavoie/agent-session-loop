@@ -77,6 +77,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.assurance_reconcile",
         "agent_session_loop.assurance_report",
         "agent_session_loop.audit_replay",
+        "agent_session_loop.baseline_cache",
         "agent_session_loop.claude_guidance_hook",
         "agent_session_loop.claude_stream",
         "agent_session_loop.cli",
@@ -88,6 +89,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.commit_groups",
         "agent_session_loop.commit_message",
         "agent_session_loop.config",
+        "agent_session_loop.contracts",
         "agent_session_loop.control_cli",
         "agent_session_loop.control_queue",
         "agent_session_loop.control_signal",
@@ -125,9 +127,12 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.run_flags",
         "agent_session_loop.session_overview",
         "agent_session_loop.startup_context",
+        "agent_session_loop.supervisor_guide",
+        "agent_session_loop.tail",
         "agent_session_loop.transitions",
         "agent_session_loop.turn_execution",
         "agent_session_loop.verification_transitions",
+        "agent_session_loop.workspaces",
     }
 )
 

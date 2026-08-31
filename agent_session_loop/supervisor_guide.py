@@ -70,9 +70,13 @@ def _selected_harness(
     harness: str,
     env: Mapping[str, str] | None,
 ) -> harnesses.HarnessName | None:
-    if harness != AUTO_HARNESS:
-        return harness  # type: ignore[return-value]
-    return harnesses.detect_invoking_harness(env)
+    if harness == AUTO_HARNESS:
+        return harnesses.detect_invoking_harness(env)
+    for name in harnesses.HARNESS_NAMES:
+        if harness == name:
+            return name
+    permitted = ", ".join((AUTO_HARNESS, *harnesses.HARNESS_NAMES))
+    raise ValueError(f"harness must be one of: {permitted}; got {harness!r}")
 
 
 def _skill_invocations(

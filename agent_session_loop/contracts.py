@@ -51,7 +51,7 @@ MAX_COMMAND_TIMEOUT_SECONDS = 3600.0
 BaselineExpectation = Literal["pass", "fail", "skip"]
 
 #: Baseline expectations, in a stable order for error messages.
-BASELINE_EXPECTATIONS: tuple[str, ...] = ("pass", "fail", "skip")
+BASELINE_EXPECTATIONS: tuple[BaselineExpectation, ...] = ("pass", "fail", "skip")
 
 #: Legacy contracts (and any check that omits ``baseline_expectation``) default
 #: to ``skip`` so plans authored before this field parse unchanged. Newly
@@ -338,13 +338,14 @@ def _baseline_expectation(
     raw = payload.get("baseline_expectation")
     if raw is None:
         return DEFAULT_BASELINE_EXPECTATION
-    if raw not in BASELINE_EXPECTATIONS:
-        allowed = ", ".join(BASELINE_EXPECTATIONS)
-        raise PlanError(
-            f"session {session_id.value} contract check #{index + 1} "
-            f"'baseline_expectation' must be one of: {allowed}; got {raw!r}"
-        )
-    return raw  # type: ignore[return-value]
+    for expectation in BASELINE_EXPECTATIONS:
+        if raw == expectation:
+            return expectation
+    allowed = ", ".join(BASELINE_EXPECTATIONS)
+    raise PlanError(
+        f"session {session_id.value} contract check #{index + 1} "
+        f"'baseline_expectation' must be one of: {allowed}; got {raw!r}"
+    )
 
 
 def _check_name(raw_name: object, *, index: int, session_id: SessionId) -> str:

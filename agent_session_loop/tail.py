@@ -7,6 +7,7 @@ import contextlib
 import json
 import sys
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -836,7 +837,7 @@ def _state_run_finished(state_payload: dict[str, Any] | None) -> bool:
     )
 
 
-def follow_events(path: str | Path):
+def follow_events(path: str | Path) -> Iterator[list[dict[str, Any]]]:
     """Incrementally follow appended event records from a JSONL events file.
 
     A generator that yields one *batch* — a ``list`` of decoded event-record

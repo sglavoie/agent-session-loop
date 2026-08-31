@@ -33,6 +33,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import contracts
 from .contracts import VerifyRecipe
@@ -214,13 +215,13 @@ class BaselineRecord:
 
     key: str
     recipe: str
-    result: dict
+    result: dict[str, Any]
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"key": self.key, "recipe": self.recipe, "result": self.result}
 
     @classmethod
-    def from_dict(cls, data: dict) -> BaselineRecord:
+    def from_dict(cls, data: dict[str, Any]) -> BaselineRecord:
         return cls(
             key=str(data.get("key", "")),
             recipe=str(data.get("recipe", "")),
@@ -264,7 +265,9 @@ class BaselineCache:
     def put(self, key: str, record: BaselineRecord) -> None:
         self._entries[key] = record
 
-    def record(self, recipe: VerifyRecipe, cwd: str | Path, result: dict) -> str:
+    def record(
+        self, recipe: VerifyRecipe, cwd: str | Path, result: dict[str, Any]
+    ) -> str:
         """Compute the key for ``recipe``/``cwd`` and store ``result`` under it.
 
         Returns the cache key. Identical recipes deduplicate to one entry.
@@ -284,7 +287,7 @@ class BaselineCache:
     def __contains__(self, key: object) -> bool:
         return key in self._entries
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "version": BASELINE_CACHE_VERSION,
             "entries": {key: record.to_dict() for key, record in self._entries.items()},
