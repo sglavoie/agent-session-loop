@@ -1779,6 +1779,44 @@ class WorkbenchServerTests(unittest.TestCase):
             )
         self.assertNotIn("model", profile)
 
+    def test_registry_pin_refuses_an_unpermitted_commit_mode(self) -> None:
+        # `commit_mode` is a two-value closed set, so an unrecognized value is
+        # a malformed request rather than a preference the launch can resolve.
+        # Refusing it here is what keeps a pin from storing a mode no launch
+        # would ever honour.
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/registry/pin",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "profile": {"commit_mode": "sometimes"},
+            },
+            headers=self._auth(server),
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid-request", body["reason"])
+        self.assertIn("commit_mode", body["error"])
+
+    def test_registry_pin_accepts_an_absent_commit_mode(self) -> None:
+        # Absence is not a wrong value: a profile that never names a mode must
+        # still round-trip as `null` rather than being refused with it.
+        server = self._start_server()
+        status, body, _ = _http_request(
+            f"{self._base_url(server)}/api/registry/pin",
+            method="POST",
+            body={
+                "plan_dir": str(self.canonical_plan_dir),
+                "profile": {"commit_mode": None, "note": "no preference"},
+            },
+            headers=self._auth(server),
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        status, body, _ = _http_request(f"{self._base_url(server)}/api/registry")
+        self.assertEqual(200, status)
+        self.assertIsNone(body["registry"]["pins"][0]["profile"]["commit_mode"])
+
     def test_registry_pin_round_trip_preserves_nullable_boolean_states(
         self,
     ) -> None:

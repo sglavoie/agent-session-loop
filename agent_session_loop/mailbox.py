@@ -347,6 +347,21 @@ GUIDANCE_REASON_PHRASES: dict[GuidanceDeliveryReason, str] = {
 }
 
 
+def _phrase_for[KeyT: str](phrases: Mapping[KeyT, str], value: str) -> str:
+    """Render ``value`` through ``phrases``, falling back to the bare value.
+
+    A plain ``.get`` cannot express this: the tables are keyed by their
+    ``Literal`` vocabulary -- which is what makes a typo in the table itself a
+    type error -- while the callers deliberately accept any string so an
+    unrecognized record still renders as something. Matching against the keys
+    keeps both properties without widening either.
+    """
+    for permitted, phrase in phrases.items():
+        if permitted == value:
+            return phrase
+    return value
+
+
 def describe_guidance_delivery(
     delivery_state: GuidanceDeliveryState | str,
     *,
@@ -362,11 +377,11 @@ def describe_guidance_delivery(
     specific worker; a deferral names why, because "not delivered" is only
     actionable with the reason attached.
     """
-    phrase = GUIDANCE_STATE_PHRASES.get(delivery_state, str(delivery_state))
+    phrase = _phrase_for(GUIDANCE_STATE_PHRASES, str(delivery_state))
     if delivery_state in GUIDANCE_DELIVERED_STATES:
         return f"{phrase} to {harness}" if harness else phrase
     if delivery_reason and delivery_reason != GUIDANCE_REASON_DELIVERED:
-        detail = GUIDANCE_REASON_PHRASES.get(delivery_reason, str(delivery_reason))
+        detail = _phrase_for(GUIDANCE_REASON_PHRASES, str(delivery_reason))
         return f"{phrase} ({detail})"
     return phrase
 
@@ -1968,6 +1983,7 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
                 continue
 
         if kind == KIND_WAIT_END:
+            assert target is not None
             reason_value = payload.get("reason")
             if reason_value not in WAIT_END_REASONS:
                 _reject(
@@ -2008,6 +2024,7 @@ def _parse_mailbox_bytes(data: bytes, mailbox_path: Path) -> MailboxView:
                 continue
 
         if kind == KIND_RECEIPT:
+            assert target is not None
             closure_value = payload.get("closure_id")
             closure = closures.get(target)
             if (

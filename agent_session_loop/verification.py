@@ -100,7 +100,12 @@ class VerificationContext:
     def legacy(
         cls, repo_root: str | Path, *, plan_dir: str | Path | None = None
     ) -> VerificationContext:
-        return cls(root=canonicalize_path(repo_root), plan_dir=plan_dir)
+        return cls(
+            root=canonicalize_path(repo_root),
+            # `__post_init__` canonicalizes this again; converting here is what
+            # keeps the field a `Path` rather than whatever the caller passed.
+            plan_dir=None if plan_dir is None else canonicalize_path(plan_dir),
+        )
 
     @classmethod
     def resolved_workspace(
@@ -937,8 +942,11 @@ def _run_command_check(
     if cancellation is not None and not cancellation.register(process):
         _kill_and_reap(process)
         # No reader thread exists yet, so nothing else will close the pipes.
+        # Both are always present -- Popen was given PIPE for each -- but a
+        # cleanup path is the last place to turn an absent handle into a crash.
         for pipe in (process.stdout, process.stderr):
-            pipe.close()
+            if pipe is not None:
+                pipe.close()
         raise _VerificationCancelled(check.name)
 
     # Output is bounded as it arrives: each pipe feeds a StreamCapture that
@@ -972,10 +980,12 @@ def _run_command_check(
             timed_out = True
             prior_snapshot = _snapshot_descendants(process.pid, _sweep_process_table())
             _kill_and_reap(process)
-        cancelled = cancellation is not None and cancellation.cancelled
-        if cancelled and not timed_out:
-            # The kill came from another thread, so the snapshot did too.
-            prior_snapshot = cancellation.snapshot_for(process)
+        cancelled = False
+        if cancellation is not None and cancellation.cancelled:
+            cancelled = True
+            if not timed_out:
+                # The kill came from another thread, so the snapshot did too.
+                prior_snapshot = cancellation.snapshot_for(process)
         killed = timed_out or cancelled
         _join_readers(
             readers,

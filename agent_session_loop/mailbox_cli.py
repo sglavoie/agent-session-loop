@@ -770,9 +770,12 @@ def _validated_timeout(
     command_name: str,
     text_label: str,
 ) -> float | None:
+    # Anything that is not already a number or a numeric string is out of
+    # range by definition, and the shared out-of-range message below is the
+    # right report for it -- NaN is how it gets there.
     try:
-        timeout = float(value)
-    except TypeError, ValueError:
+        timeout = float(value) if isinstance(value, int | float | str) else math.nan
+    except ValueError:
         timeout = math.nan
     if not math.isfinite(timeout) or timeout < 0 or timeout > MAX_WAIT_TIMEOUT_SECONDS:
         _print_input_error(
@@ -1619,11 +1622,16 @@ def inbox_guidance_from_args(args: argparse.Namespace) -> int:
             # The guidance append is authoritative. A later observation failure
             # must stay a truthful successful append with delivered=false.
             delivery = None
-    # Without a delivery record the guidance is queued by definition: it is
-    # durable and nothing has reported acting on it.
-    delivery_state = (
-        mailbox.GUIDANCE_STATE_QUEUED if delivery is None else delivery.delivery_state
-    )
+    delivery_state: mailbox.GuidanceDeliveryState
+    if delivery is None:
+        # Without a delivery record the guidance is queued by definition: it is
+        # durable and nothing has reported acting on it.
+        delivery_state = mailbox.GUIDANCE_STATE_QUEUED
+    else:
+        # Every record `_wait_for_guidance_delivery` can return is a delivery
+        # attempt -- successful or deferred -- so it carries a state.
+        assert delivery.delivery_state is not None
+        delivery_state = delivery.delivery_state
     delivered = delivery_state in mailbox.GUIDANCE_DELIVERED_STATES
     payload = responses.success_payload(
         COMMAND_INBOX_GUIDANCE,
@@ -2196,7 +2204,10 @@ def _wait_for_reply(
 def ask_from_args(args: argparse.Namespace) -> int:
     """Append or resume a worker question, optionally waiting for closure."""
     text = getattr(args, "text", None)
-    question_id = getattr(args, "question_id", None)
+    question_id_value = getattr(args, "question_id", None)
+    # `--question-id` is a plain string option, so this is identity; spelling it
+    # is what keeps the id a `str` rather than `Any` all the way to the lookup.
+    question_id = None if question_id_value is None else str(question_id_value)
     if (text is None) == (question_id is None):
         _print_input_error(
             args,
@@ -2279,6 +2290,8 @@ def ask_from_args(args: argparse.Namespace) -> int:
                     delivery_mode=mailbox.DELIVERY_MODE_ASYNC,
                 )
         else:
+            # Exactly one of text and question id is set; this is the other arm.
+            assert question_id is not None
             initial_view = mailbox.read_mailbox(
                 context.snapshot.plan_dir,
                 state_dir=args.state_dir,

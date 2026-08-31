@@ -571,7 +571,7 @@ def build_runs_snapshot(
     rows = rows[:MAX_ROWS]
     bounded_warnings = _bounded_strings(warnings, limit=MAX_WARNINGS)
 
-    snapshot = {
+    snapshot: dict[str, Any] = {
         "protocol": PROTOCOL_VERSION,
         # Carried on the snapshot as well as the hello so a cached or replayed
         # projection is self-describing: a client that persists rows can tell
@@ -1545,7 +1545,11 @@ class BridgeSession:
         )
 
     def _control(
-        self, params: Mapping[str, Any], action: str, command: str, **kwargs: Any
+        self,
+        params: Mapping[str, Any],
+        action: str,
+        command: control_queue.CommandName,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         operation_id, replay = self._replay(params)
         if replay is not None:

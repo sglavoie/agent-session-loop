@@ -253,6 +253,15 @@ def candidates_from_checks(
     return _deduplicate(candidates)
 
 
+#: Which check field maps to which surface. Written down once, and annotated,
+#: so the surface stays the `SourceSurface` the record declares instead of
+#: widening to `str` on its way into `IntentCandidate`.
+_CONTRACT_LOCATION_SURFACES: tuple[tuple[str, SourceSurface], ...] = (
+    ("path", "contract-path"),
+    ("cwd", "contract-cwd"),
+)
+
+
 def candidates_from_contract_payloads(
     contracts_by_id: Any,
 ) -> tuple[IntentCandidate, ...]:
@@ -279,10 +288,7 @@ def candidates_from_contract_payloads(
         for check in checks:
             if not isinstance(check, Mapping):
                 continue
-            for field, surface in (
-                ("path", "contract-path"),
-                ("cwd", "contract-cwd"),
-            ):
+            for field, surface in _CONTRACT_LOCATION_SURFACES:
                 value = check.get(field)
                 if isinstance(value, str) and value:
                     candidates.append(IntentCandidate(value=value, surface=surface))

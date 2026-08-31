@@ -32,7 +32,7 @@ import sys
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from . import contracts, plans, repository_evidence, responses
 from .baseline_cache import (
@@ -652,6 +652,21 @@ def _print_text_baseline(result: BaselineRunResult, *, plan_dir_arg: str) -> Non
         print("Baseline: no checks declare a baseline expectation")
 
 
+class _BaselineErrorFields(TypedDict):
+    """The four request facts every ``baseline`` error payload repeats.
+
+    Written down as a type rather than an inline dict because the dict is
+    splatted into :func:`_emit_baseline_error`: without the annotation the
+    argparse values widen to ``Any | None`` and the callee's parameter types
+    stop being checked at the only two sites that use them.
+    """
+
+    plan_dir: str
+    cwd: str
+    per_check_timeout: float | None
+    total_timeout: float | None
+
+
 def baseline_from_args(args: Any) -> int:
     """Run the ``baseline`` subcommand from CLI arguments."""
     plan_dir_arg = args.plan_dir
@@ -660,7 +675,7 @@ def baseline_from_args(args: Any) -> int:
     per_check_timeout = getattr(args, "per_check_timeout", None)
     total_timeout = getattr(args, "total_timeout", None)
 
-    common_fields = {
+    common_fields: _BaselineErrorFields = {
         "plan_dir": str(plan_dir_arg),
         "cwd": str(cwd_arg),
         "per_check_timeout": per_check_timeout,

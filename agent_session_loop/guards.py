@@ -746,16 +746,14 @@ def copilot_deny_tool_rules_from_policy(
     entries = policy.get("guards")
     if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
         return ()
-    commands = [
-        entry.get("command")
-        for entry in entries
-        if isinstance(entry, Mapping) and isinstance(entry.get("command"), Sequence)
-    ]
-    return _dedupe(
-        copilot_deny_tool_rule(command)
-        for command in commands
-        if not isinstance(command, (str, bytes))
-    )
+    commands: list[Sequence[str]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        command = entry.get("command")
+        if isinstance(command, Sequence) and not isinstance(command, (str, bytes)):
+            commands.append(command)
+    return _dedupe(copilot_deny_tool_rule(command) for command in commands)
 
 
 def _dedupe(values: Iterable[str | None]) -> tuple[str, ...]:

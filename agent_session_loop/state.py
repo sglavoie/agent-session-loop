@@ -2679,7 +2679,6 @@ def upgrade_plan_state_schema(
         )
 
     lock = _read_lock_path(plan_state / LOCK_FILE_NAME, canonical_plan_dir)
-    live = lock is not None and lock.active
 
     def _report(
         *,
@@ -2719,7 +2718,9 @@ def upgrade_plan_state_schema(
             note=f"state is already at schema version {current}; nothing to upgrade",
         )
 
-    if live:
+    # Spelled as one test rather than a precomputed flag: the three reads below
+    # are only reachable when a lock exists, and only this form says so.
+    if lock is not None and lock.active:
         raise MigrationError(
             "incompatible-active-run",
             f"plan is locked by pid {lock.pid} and its state is at schema "

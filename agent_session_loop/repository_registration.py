@@ -703,12 +703,16 @@ def _rewrite_contract(
     unlocated: list[tuple[int, CommandCheck]] = []
 
     for check in contract.verify.checks:
-        if isinstance(check, CommandCheck) and check.cwd is None:
-            unlocated.append((len(checks), check))
-            checks.append(check)
-            continue
+        if isinstance(check, CommandCheck):
+            if check.cwd is None:
+                unlocated.append((len(checks), check))
+                checks.append(check)
+                continue
+            location = check.cwd
+        else:
+            location = check.path
         located = _attribute(
-            check.cwd if isinstance(check, CommandCheck) else check.path,
+            location,
             bound_root=bound_root,
             alias_by_root=alias_by_root,
             git_root_cache=git_root_cache,

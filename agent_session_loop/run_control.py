@@ -353,10 +353,13 @@ class RunControlState:
             current = dict(self._implementation_overrides.get(resolved_harness, {}))
             updated = dict(current)
             changed_fields: list[ImplementationOverrideField] = []
-            for field_name, operation in (
+            requested: tuple[
+                tuple[ImplementationOverrideField, OverrideOperation], ...
+            ] = (
                 ("model", model),
                 ("effort", effort),
-            ):
+            )
+            for field_name, operation in requested:
                 if operation.operation == "unchanged":
                     continue
                 if operation.operation == "clear":

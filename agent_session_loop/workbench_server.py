@@ -1608,7 +1608,12 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
     # -- Helpers ------------------------------------------------------------
 
     def _server(self) -> WorkbenchHTTPServer:
-        return self.server  # type: ignore[return-value]
+        # `BaseRequestHandler.server` is declared as the base class, and this
+        # handler is only ever constructed by `WorkbenchHTTPServer`. Asserting
+        # it is what carries the concrete type without an inline suppression.
+        server = self.server
+        assert isinstance(server, WorkbenchHTTPServer)
+        return server
 
     def _require_query_value(self, query: Mapping[str, list[str]], key: str) -> str:
         values = query.get(key)
@@ -1816,6 +1821,27 @@ def _optional_string(body: Mapping[str, Any], key: str) -> str | None:
     return value or None
 
 
+def _coerce_commit_mode(value: Any) -> workbench.CommitMode | None:
+    """Narrow a request's ``commit_mode`` to the vocabulary, or refuse it.
+
+    Unlike the harness names -- which the launch path resolves against a
+    registry -- ``commit_mode`` is a two-value closed set, so an unrecognized
+    value is a malformed request and nothing else. Refusing it here reports it
+    as one instead of letting it travel to the launch as an invalid profile.
+    """
+    text = _coerce_optional_str(value)
+    if text is None:
+        return None
+    mode = next((mode for mode in workbench.COMMIT_MODES if mode == text), None)
+    if mode is None:
+        raise _BadRequestError(
+            "invalid-request",
+            "field 'commit_mode' must be one of "
+            + ", ".join(repr(each) for each in workbench.COMMIT_MODES),
+        )
+    return mode
+
+
 def _coerce_profile_payload(raw: Any) -> workbench.LaunchProfile | None:
     if raw is None:
         return None
@@ -1829,7 +1855,7 @@ def _coerce_profile_payload(raw: Any) -> workbench.LaunchProfile | None:
         harness_model=_coerce_optional_str(raw.get("harness_model")),
         effort=_coerce_optional_str(raw.get("effort")),
         timeout=_coerce_optional_int(raw.get("timeout")),
-        commit_mode=_coerce_optional_str(raw.get("commit_mode")),
+        commit_mode=_coerce_commit_mode(raw.get("commit_mode")),
         review_harness=_coerce_optional_str(raw.get("review_harness")),
         review_harness_model=_coerce_optional_str(raw.get("review_harness_model")),
         max_review_fix_cycles=_coerce_max_review_fix_cycles(
