@@ -57,21 +57,74 @@ BASELINE_DISABLED_CODES = frozenset(
 #: a wrong value reaches a durable record instead of raising at the call site.
 RATCHETED_CODES = frozenset({"arg-type", "union-attr", "index"})
 
-#: Modules extracted out of the runner in sessions 5 and 9-11. This set is a
-#: floor: every future extraction adds to it, and nothing may leave it. A
+#: The package modules that already meet the boundary contract: clean under
+#: all three codes and clean under the linter below. This set is a floor:
+#: every module that becomes clean adds to it, and nothing may leave it. A
 #: module removed from ``pyproject.toml`` fails here rather than silently
 #: rejoining the untyped baseline.
 REQUIRED_RATCHETED_MODULES = frozenset(
     {
+        "agent_session_loop",
+        "agent_session_loop.__main__",
         "agent_session_loop.agent_mux_delivery",
+        "agent_session_loop.agent_mux_pairing",
         "agent_session_loop.agent_mux_projection",
+        "agent_session_loop.artifacts",
+        "agent_session_loop.assurance_catchup",
+        "agent_session_loop.assurance_cli",
+        "agent_session_loop.assurance_draft",
+        "agent_session_loop.assurance_ledger",
+        "agent_session_loop.assurance_reconcile",
+        "agent_session_loop.assurance_report",
+        "agent_session_loop.audit_replay",
+        "agent_session_loop.claude_guidance_hook",
+        "agent_session_loop.claude_stream",
+        "agent_session_loop.cli",
+        "agent_session_loop.cli_common",
+        "agent_session_loop.cli_trace",
         "agent_session_loop.clock",
+        "agent_session_loop.codex_app_server",
+        "agent_session_loop.command_guard",
+        "agent_session_loop.commit_groups",
+        "agent_session_loop.commit_message",
+        "agent_session_loop.config",
+        "agent_session_loop.control_cli",
+        "agent_session_loop.control_queue",
+        "agent_session_loop.control_signal",
+        "agent_session_loop.diagnostics_export",
         "agent_session_loop.durability",
+        "agent_session_loop.events",
+        "agent_session_loop.formatting",
+        "agent_session_loop.guard_pretool_hook",
         "agent_session_loop.guidance_delivery",
         "agent_session_loop.harness_compatibility",
+        "agent_session_loop.harness_failures",
+        "agent_session_loop.harnesses",
+        "agent_session_loop.install_verify",
+        "agent_session_loop.intervention",
+        "agent_session_loop.mailbox_rendering",
         "agent_session_loop.maintenance",
+        "agent_session_loop.metrics",
+        "agent_session_loop.model_availability",
+        "agent_session_loop.pause_policy",
+        "agent_session_loop.process_tree",
+        "agent_session_loop.progress_cli",
+        "agent_session_loop.progress_repair",
+        "agent_session_loop.qna",
+        "agent_session_loop.repository_evidence",
+        "agent_session_loop.repository_scope",
+        "agent_session_loop.responses",
+        "agent_session_loop.retention",
+        "agent_session_loop.retry_hints",
+        "agent_session_loop.review",
+        "agent_session_loop.review_continuation",
+        "agent_session_loop.review_repair",
         "agent_session_loop.review_transitions",
+        "agent_session_loop.run_contention",
         "agent_session_loop.run_coordination",
+        "agent_session_loop.run_flags",
+        "agent_session_loop.session_overview",
+        "agent_session_loop.startup_context",
         "agent_session_loop.transitions",
         "agent_session_loop.turn_execution",
         "agent_session_loop.verification_transitions",
@@ -117,7 +170,16 @@ def ratcheted_override() -> dict[str, Any]:
 
 
 def module_path(dotted: str) -> Path:
-    return REPO_ROOT / Path(*dotted.split(".")).with_suffix(".py")
+    """Resolve a dotted name to its file.
+
+    A package name such as ``agent_session_loop`` is the name mypy matches for
+    that package's ``__init__.py``, so it resolves to the ``__init__`` rather
+    than to a sibling module file that never existed.
+    """
+    base = REPO_ROOT / Path(*dotted.split("."))
+    if base.is_dir():
+        return base / "__init__.py"
+    return base.with_suffix(".py")
 
 
 def unparameterized_container(annotation: ast.expr) -> str | None:

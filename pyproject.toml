@@ -47,14 +47,14 @@ disable_error_code = [
     "annotation-unchecked",
 ]
 
-# The extracted durable boundaries are typed, so they opt back in to the three
-# codes the repository-wide baseline still hides. These are the paths where an
-# argument of the wrong type, an attribute read off an optional, or an index
-# into something that is not a mapping would corrupt a durable record — a turn,
-# a transition, a mailbox wait, a control command, a projection payload —
-# rather than raise at the call site. Every module extracted out of the runner
-# belongs on this list; nothing here is a suppression, so the baseline above
-# only ever shrinks. `enable_error_code`, not a shorter `disable_error_code`: a
+# The modules that already meet the boundary contract are typed, so they opt
+# back in to the three codes the repository-wide baseline still hides. These
+# are the paths where an argument of the wrong type, an attribute read off an
+# optional, or an index into something that is not a mapping would corrupt a
+# durable record — a turn, a transition, a mailbox wait, a control command, a
+# projection payload — rather than raise at the call site. Every module that is
+# clean under the three codes belongs on this list; nothing here is a
+# suppression, so the baseline above only ever shrinks. `enable_error_code`, not a shorter `disable_error_code`: a
 # per-module disable list is unioned with the global one, so re-enabling is the
 # only way back in.
 #
@@ -62,15 +62,67 @@ disable_error_code = [
 # list may only shrink, and this list may only grow.
 [[tool.mypy.overrides]]
 module = [
+    "agent_session_loop",
+    "agent_session_loop.__main__",
     "agent_session_loop.agent_mux_delivery",
+    "agent_session_loop.agent_mux_pairing",
     "agent_session_loop.agent_mux_projection",
+    "agent_session_loop.artifacts",
+    "agent_session_loop.assurance_catchup",
+    "agent_session_loop.assurance_cli",
+    "agent_session_loop.assurance_draft",
+    "agent_session_loop.assurance_ledger",
+    "agent_session_loop.assurance_reconcile",
+    "agent_session_loop.assurance_report",
+    "agent_session_loop.audit_replay",
+    "agent_session_loop.claude_guidance_hook",
+    "agent_session_loop.claude_stream",
+    "agent_session_loop.cli",
+    "agent_session_loop.cli_common",
+    "agent_session_loop.cli_trace",
     "agent_session_loop.clock",
+    "agent_session_loop.codex_app_server",
+    "agent_session_loop.command_guard",
+    "agent_session_loop.commit_groups",
+    "agent_session_loop.commit_message",
+    "agent_session_loop.config",
+    "agent_session_loop.control_cli",
+    "agent_session_loop.control_queue",
+    "agent_session_loop.control_signal",
+    "agent_session_loop.diagnostics_export",
     "agent_session_loop.durability",
+    "agent_session_loop.events",
+    "agent_session_loop.formatting",
+    "agent_session_loop.guard_pretool_hook",
     "agent_session_loop.guidance_delivery",
     "agent_session_loop.harness_compatibility",
+    "agent_session_loop.harness_failures",
+    "agent_session_loop.harnesses",
+    "agent_session_loop.install_verify",
+    "agent_session_loop.intervention",
+    "agent_session_loop.mailbox_rendering",
     "agent_session_loop.maintenance",
+    "agent_session_loop.metrics",
+    "agent_session_loop.model_availability",
+    "agent_session_loop.pause_policy",
+    "agent_session_loop.process_tree",
+    "agent_session_loop.progress_cli",
+    "agent_session_loop.progress_repair",
+    "agent_session_loop.qna",
+    "agent_session_loop.repository_evidence",
+    "agent_session_loop.repository_scope",
+    "agent_session_loop.responses",
+    "agent_session_loop.retention",
+    "agent_session_loop.retry_hints",
+    "agent_session_loop.review",
+    "agent_session_loop.review_continuation",
+    "agent_session_loop.review_repair",
     "agent_session_loop.review_transitions",
+    "agent_session_loop.run_contention",
     "agent_session_loop.run_coordination",
+    "agent_session_loop.run_flags",
+    "agent_session_loop.session_overview",
+    "agent_session_loop.startup_context",
     "agent_session_loop.transitions",
     "agent_session_loop.turn_execution",
     "agent_session_loop.verification_transitions",
