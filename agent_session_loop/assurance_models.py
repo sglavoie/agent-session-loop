@@ -51,6 +51,7 @@ from typing import Any, Literal
 from . import durability
 from .artifacts import sha256_hex
 from .harnesses import HARNESS_NAMES, HarnessName
+from .literals import as_literal
 
 #: Bumped whenever the meaning of any model below changes. The version is part
 #: of every finding fingerprint, so a schema change deliberately retires the
@@ -400,15 +401,6 @@ def _require_identifier(value: object, *, label: str) -> str:
     return text
 
 
-def _require_choice(value: object, *, label: str, choices: Sequence[str]) -> str:
-    if not isinstance(value, str) or value not in choices:
-        raise AssuranceError(
-            f"{label} must be one of {', '.join(repr(choice) for choice in choices)}; "
-            f"got {value!r}"
-        )
-    return value
-
-
 def _require_int(value: object, *, label: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise AssuranceError(f"{label} must be an integer")
@@ -618,7 +610,7 @@ class EvidenceRef:
     detail: str | None = None
 
     def __post_init__(self) -> None:
-        _require_choice(self.kind, label="evidence 'kind'", choices=EVIDENCE_KINDS)
+        as_literal(self.kind, EVIDENCE_KINDS, "evidence 'kind'", error=AssuranceError)
         _require_locator(self.locator, label="evidence 'locator'")
         if self.digest is not None:
             _require_digest(self.digest, label="evidence 'digest'")
@@ -640,8 +632,8 @@ def parse_evidence_ref(payload: object, *, label: str = "evidence") -> EvidenceR
         payload, label=label, allowed_keys=("kind", "locator", "digest", "detail")
     )
     return EvidenceRef(
-        kind=_require_choice(
-            data.get("kind"), label=f"{label} 'kind'", choices=EVIDENCE_KINDS
+        kind=as_literal(
+            data.get("kind"), EVIDENCE_KINDS, f"{label} 'kind'", error=AssuranceError
         ),
         locator=_require_locator(data.get("locator"), label=f"{label} 'locator'"),
         digest=(
@@ -733,8 +725,10 @@ class Finding:
         _require_token(self.category, label="finding 'category'")
         _require_token(self.component, label="finding 'component'")
         _require_token(self.invariant_key, label="finding 'invariant_key'")
-        _require_choice(self.lane, label="finding 'lane'", choices=RUBRIC_LANES)
-        _require_choice(self.severity, label="finding 'severity'", choices=SEVERITIES)
+        as_literal(self.lane, RUBRIC_LANES, "finding 'lane'", error=AssuranceError)
+        as_literal(
+            self.severity, SEVERITIES, "finding 'severity'", error=AssuranceError
+        )
         _require_text(self.summary, label="finding 'summary'")
         _require_text(self.recommendation, label="finding 'recommendation'")
         _require_references(self.evidence, label="finding 'evidence'")
@@ -796,11 +790,14 @@ def parse_finding(payload: object, *, label: str = "finding") -> Finding:
         invariant_key=_require_token(
             data.get("invariant_key"), label=f"{label} 'invariant_key'"
         ),
-        lane=_require_choice(
-            data.get("lane"), label=f"{label} 'lane'", choices=RUBRIC_LANES
+        lane=as_literal(
+            data.get("lane"), RUBRIC_LANES, f"{label} 'lane'", error=AssuranceError
         ),
-        severity=_require_choice(
-            data.get("severity"), label=f"{label} 'severity'", choices=SEVERITIES
+        severity=as_literal(
+            data.get("severity"),
+            SEVERITIES,
+            f"{label} 'severity'",
+            error=AssuranceError,
         ),
         summary=_require_text(data.get("summary"), label=f"{label} 'summary'"),
         recommendation=_require_text(
@@ -913,11 +910,14 @@ class DeterministicResult:
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence", tuple(self.evidence))
         _require_token(self.check, label="deterministic result 'check'")
-        _require_choice(
-            self.lane, label="deterministic result 'lane'", choices=RUBRIC_LANES
+        as_literal(
+            self.lane, RUBRIC_LANES, "deterministic result 'lane'", error=AssuranceError
         )
-        _require_choice(
-            self.status, label="deterministic result 'status'", choices=CHECK_STATUSES
+        as_literal(
+            self.status,
+            CHECK_STATUSES,
+            "deterministic result 'status'",
+            error=AssuranceError,
         )
         _require_token(self.invariant_key, label="deterministic result 'invariant_key'")
         _require_references(self.evidence, label="deterministic result 'evidence'")
@@ -946,11 +946,14 @@ def parse_deterministic_result(
     )
     return DeterministicResult(
         check=_require_token(data.get("check"), label=f"{label} 'check'"),
-        lane=_require_choice(
-            data.get("lane"), label=f"{label} 'lane'", choices=RUBRIC_LANES
+        lane=as_literal(
+            data.get("lane"), RUBRIC_LANES, f"{label} 'lane'", error=AssuranceError
         ),
-        status=_require_choice(
-            data.get("status"), label=f"{label} 'status'", choices=CHECK_STATUSES
+        status=as_literal(
+            data.get("status"),
+            CHECK_STATUSES,
+            f"{label} 'status'",
+            error=AssuranceError,
         ),
         invariant_key=_require_token(
             data.get("invariant_key"), label=f"{label} 'invariant_key'"
@@ -976,8 +979,8 @@ class LaneEvidence:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence", tuple(self.evidence))
-        _require_choice(self.lane, label="lane 'lane'", choices=RUBRIC_LANES)
-        _require_choice(self.status, label="lane 'status'", choices=CHECK_STATUSES)
+        as_literal(self.lane, RUBRIC_LANES, "lane 'lane'", error=AssuranceError)
+        as_literal(self.status, CHECK_STATUSES, "lane 'status'", error=AssuranceError)
         _require_text(self.summary, label="lane 'summary'")
         _require_references(self.evidence, label=f"lane {self.lane!r} 'evidence'")
 
@@ -996,11 +999,14 @@ def parse_lane_evidence(payload: object, *, label: str = "lane") -> LaneEvidence
         payload, label=label, allowed_keys=("lane", "status", "summary", "evidence")
     )
     return LaneEvidence(
-        lane=_require_choice(
-            data.get("lane"), label=f"{label} 'lane'", choices=RUBRIC_LANES
+        lane=as_literal(
+            data.get("lane"), RUBRIC_LANES, f"{label} 'lane'", error=AssuranceError
         ),
-        status=_require_choice(
-            data.get("status"), label=f"{label} 'status'", choices=CHECK_STATUSES
+        status=as_literal(
+            data.get("status"),
+            CHECK_STATUSES,
+            f"{label} 'status'",
+            error=AssuranceError,
         ),
         summary=_require_text(data.get("summary"), label=f"{label} 'summary'"),
         evidence=_require_references(data.get("evidence"), label=f"{label} 'evidence'"),
@@ -1059,7 +1065,7 @@ class SupervisorAudit:
         object.__setattr__(self, "deterministic", tuple(self.deterministic))
         _require_schema_version(self.schema_version, label="audit 'schema_version'")
         _require_identifier(self.run_id, label="audit 'run_id'")
-        _require_choice(self.state, label="audit 'state'", choices=AUDIT_STATES)
+        as_literal(self.state, AUDIT_STATES, "audit 'state'", error=AssuranceError)
         _require_digest(self.input_digest, label="audit 'input_digest'")
         _require_timestamp(self.generated_at, label="audit 'generated_at'")
         if len(self.evidence) > MAX_EVIDENCE_ENTRIES:
@@ -1236,8 +1242,8 @@ def parse_supervisor_audit(payload: object) -> SupervisorAudit:
             data.get("schema_version"), label=f"{label} 'schema_version'"
         ),
         run_id=_require_identifier(data.get("run_id"), label=f"{label} 'run_id'"),
-        state=_require_choice(
-            data.get("state"), label=f"{label} 'state'", choices=AUDIT_STATES
+        state=as_literal(
+            data.get("state"), AUDIT_STATES, f"{label} 'state'", error=AssuranceError
         ),
         input_digest=_require_digest(
             data.get("input_digest"), label=f"{label} 'input_digest'"
@@ -1347,8 +1353,8 @@ class Disposition:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "issue_id", parse_issue_id(self.issue_id))
-        _require_choice(
-            self.kind, label="disposition 'kind'", choices=DISPOSITION_KINDS
+        as_literal(
+            self.kind, DISPOSITION_KINDS, "disposition 'kind'", error=AssuranceError
         )
         _require_timestamp(self.recorded_at, label="disposition 'recorded_at'")
         if self.note is not None:
@@ -1375,8 +1381,8 @@ def parse_disposition(payload: object, *, label: str = "disposition") -> Disposi
     )
     return Disposition(
         issue_id=parse_issue_id(data.get("issue_id")),
-        kind=_require_choice(
-            data.get("kind"), label=f"{label} 'kind'", choices=DISPOSITION_KINDS
+        kind=as_literal(
+            data.get("kind"), DISPOSITION_KINDS, f"{label} 'kind'", error=AssuranceError
         ),
         recorded_at=_require_timestamp(
             data.get("recorded_at"), label=f"{label} 'recorded_at'"
@@ -1549,8 +1555,11 @@ class IssueIdentityBinding:
     def __post_init__(self) -> None:
         object.__setattr__(self, "identity_key", parse_identity_key(self.identity_key))
         object.__setattr__(self, "issue_id", parse_issue_id(self.issue_id))
-        _require_choice(
-            self.source, label="binding 'source'", choices=IDENTITY_BINDING_SOURCES
+        as_literal(
+            self.source,
+            IDENTITY_BINDING_SOURCES,
+            "binding 'source'",
+            error=AssuranceError,
         )
         _require_timestamp(self.bound_at, label="binding 'bound_at'")
         if self.note is not None:
@@ -1589,10 +1598,11 @@ def parse_issue_identity_binding(
     return IssueIdentityBinding(
         identity_key=parse_identity_key(data.get("identity_key")),
         issue_id=parse_issue_id(data.get("issue_id")),
-        source=_require_choice(
+        source=as_literal(
             data.get("source"),
-            label=f"{label} 'source'",
-            choices=IDENTITY_BINDING_SOURCES,
+            IDENTITY_BINDING_SOURCES,
+            f"{label} 'source'",
+            error=AssuranceError,
         ),
         bound_at=_require_timestamp(data.get("bound_at"), label=f"{label} 'bound_at'"),
         note=_optional_text(data.get("note"), label=f"{label} 'note'"),
@@ -1627,8 +1637,8 @@ class Closeout:
                 f"entries; got {len(self.issue_ids)}"
             )
         _require_identifier(self.run_id, label="closeout 'run_id'")
-        _require_choice(
-            self.outcome, label="closeout 'outcome'", choices=CLOSEOUT_OUTCOMES
+        as_literal(
+            self.outcome, CLOSEOUT_OUTCOMES, "closeout 'outcome'", error=AssuranceError
         )
         _require_timestamp(self.recorded_at, label="closeout 'recorded_at'")
         if self.rework_minutes is not None:
@@ -1679,8 +1689,11 @@ def parse_closeout(payload: object, *, label: str = "closeout") -> Closeout:
     )
     return Closeout(
         run_id=_require_identifier(data.get("run_id"), label=f"{label} 'run_id'"),
-        outcome=_require_choice(
-            data.get("outcome"), label=f"{label} 'outcome'", choices=CLOSEOUT_OUTCOMES
+        outcome=as_literal(
+            data.get("outcome"),
+            CLOSEOUT_OUTCOMES,
+            f"{label} 'outcome'",
+            error=AssuranceError,
         ),
         recorded_at=_require_timestamp(
             data.get("recorded_at"), label=f"{label} 'recorded_at'"
@@ -1729,7 +1742,7 @@ class ImprovementPlanDraft:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "issue_id", parse_issue_id(self.issue_id))
-        _require_choice(self.harness, label="draft 'harness'", choices=HARNESS_NAMES)
+        as_literal(self.harness, HARNESS_NAMES, "draft 'harness'", error=AssuranceError)
         # The operator chooses ``--output`` freely, so an absolute path here is
         # ordinary and the run-relative locator rule does not apply.
         _require_text(
@@ -1773,8 +1786,11 @@ def parse_improvement_plan_draft(
     )
     return ImprovementPlanDraft(
         issue_id=parse_issue_id(data.get("issue_id")),
-        harness=_require_choice(
-            data.get("harness"), label=f"{label} 'harness'", choices=HARNESS_NAMES
+        harness=as_literal(
+            data.get("harness"),
+            HARNESS_NAMES,
+            f"{label} 'harness'",
+            error=AssuranceError,
         ),
         output_path=_require_text(
             data.get("output_path"),
@@ -1817,11 +1833,12 @@ class AuditRole:
     effort: str | None = None
 
     def __post_init__(self) -> None:
-        _require_choice(self.harness, label="role 'harness'", choices=HARNESS_NAMES)
-        _require_choice(
+        as_literal(self.harness, HARNESS_NAMES, "role 'harness'", error=AssuranceError)
+        as_literal(
             self.implementation_harness,
-            label="role 'implementation_harness'",
-            choices=HARNESS_NAMES,
+            HARNESS_NAMES,
+            "role 'implementation_harness'",
+            error=AssuranceError,
         )
         if self.harness == self.implementation_harness:
             raise AssuranceError(
@@ -1829,7 +1846,9 @@ class AuditRole:
                 "implementation harness; an audit role that grades its own work "
                 "is not independent"
             )
-        _require_choice(self.source, label="role 'source'", choices=AUDIT_ROLE_SOURCES)
+        as_literal(
+            self.source, AUDIT_ROLE_SOURCES, "role 'source'", error=AssuranceError
+        )
         object.__setattr__(
             self,
             "timeout_seconds",
@@ -1868,16 +1887,23 @@ def parse_audit_role(payload: object, *, label: str = "role") -> AuditRole:
         ),
     )
     return AuditRole(
-        harness=_require_choice(
-            data.get("harness"), label=f"{label} 'harness'", choices=HARNESS_NAMES
+        harness=as_literal(
+            data.get("harness"),
+            HARNESS_NAMES,
+            f"{label} 'harness'",
+            error=AssuranceError,
         ),
-        implementation_harness=_require_choice(
+        implementation_harness=as_literal(
             data.get("implementation_harness"),
-            label=f"{label} 'implementation_harness'",
-            choices=HARNESS_NAMES,
+            HARNESS_NAMES,
+            f"{label} 'implementation_harness'",
+            error=AssuranceError,
         ),
-        source=_require_choice(
-            data.get("source"), label=f"{label} 'source'", choices=AUDIT_ROLE_SOURCES
+        source=as_literal(
+            data.get("source"),
+            AUDIT_ROLE_SOURCES,
+            f"{label} 'source'",
+            error=AssuranceError,
         ),
         timeout_seconds=_require_number(
             data.get("timeout_seconds"), label=f"{label} 'timeout_seconds'", minimum=1.0
@@ -1908,8 +1934,8 @@ class AuditAttempt:
             minimum=1,
             maximum=MAX_AUDIT_ATTEMPT_RECORDS,
         )
-        _require_choice(
-            self.outcome, label="attempt 'outcome'", choices=ATTEMPT_OUTCOMES
+        as_literal(
+            self.outcome, ATTEMPT_OUTCOMES, "attempt 'outcome'", error=AssuranceError
         )
         if self.duration_seconds is not None:
             object.__setattr__(
@@ -1956,8 +1982,11 @@ def parse_audit_attempt(payload: object, *, label: str = "attempt") -> AuditAtte
             minimum=1,
             maximum=MAX_AUDIT_ATTEMPT_RECORDS,
         ),
-        outcome=_require_choice(
-            data.get("outcome"), label=f"{label} 'outcome'", choices=ATTEMPT_OUTCOMES
+        outcome=as_literal(
+            data.get("outcome"),
+            ATTEMPT_OUTCOMES,
+            f"{label} 'outcome'",
+            error=AssuranceError,
         ),
         duration_seconds=(
             None
@@ -2010,7 +2039,7 @@ class AssuranceSummary:
         )
         _require_schema_version(self.schema_version, label="assurance 'schema_version'")
         _require_identifier(self.run_id, label="assurance 'run_id'")
-        _require_choice(self.state, label="assurance 'state'", choices=AUDIT_STATES)
+        as_literal(self.state, AUDIT_STATES, "assurance 'state'", error=AssuranceError)
         _require_bool(self.eligible, label="assurance 'eligible'")
         _require_int(
             self.new_issue_count,
@@ -2170,8 +2199,8 @@ def parse_assurance_summary(payload: object) -> AssuranceSummary:
             data.get("schema_version"), label=f"{label} 'schema_version'"
         ),
         run_id=_require_identifier(data.get("run_id"), label=f"{label} 'run_id'"),
-        state=_require_choice(
-            data.get("state"), label=f"{label} 'state'", choices=AUDIT_STATES
+        state=as_literal(
+            data.get("state"), AUDIT_STATES, f"{label} 'state'", error=AssuranceError
         ),
         eligible=_require_bool(data.get("eligible"), label=f"{label} 'eligible'"),
         reason=(
@@ -2482,10 +2511,11 @@ class ReconciliationManifest:
 def _parse_decision(payload: object, *, label: str) -> ReconciliationDecision:
     if not isinstance(payload, Mapping):
         raise AssuranceError(f"{label} must be a JSON object")
-    kind = _require_choice(
+    kind = as_literal(
         payload.get("decision"),
-        label=f"{label} 'decision'",
-        choices=RECONCILIATION_DECISIONS,
+        RECONCILIATION_DECISIONS,
+        f"{label} 'decision'",
+        error=AssuranceError,
     )
     if kind == DECISION_BIND:
         data = _require_object(

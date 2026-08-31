@@ -20,6 +20,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
+from .literals import as_literal
 from .plans import (
     HANDOFF_HEADING,
     PlanError,
@@ -338,13 +339,12 @@ def _baseline_expectation(
     raw = payload.get("baseline_expectation")
     if raw is None:
         return DEFAULT_BASELINE_EXPECTATION
-    for expectation in BASELINE_EXPECTATIONS:
-        if raw == expectation:
-            return expectation
-    allowed = ", ".join(BASELINE_EXPECTATIONS)
-    raise PlanError(
+    return as_literal(
+        raw,
+        BASELINE_EXPECTATIONS,
         f"session {session_id.value} contract check #{index + 1} "
-        f"'baseline_expectation' must be one of: {allowed}; got {raw!r}"
+        "'baseline_expectation'",
+        error=PlanError,
     )
 
 

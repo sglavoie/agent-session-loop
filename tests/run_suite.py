@@ -97,6 +97,7 @@ FAST_MODULES = (
     "tests.test_asl_startup_context",
     "tests.test_asl_commit_message",
     "tests.test_skill_sync",
+    "tests.test_asl_literals",
 )
 
 # Modules that need nothing outside the Python interpreter: no `git`, no shell
@@ -136,6 +137,7 @@ PORTABLE_MODULES = (
     "tests.test_asl_retention",
     "tests.test_asl_harness_compatibility",
     "tests.test_asl_startup_context",
+    "tests.test_asl_literals",
 )
 
 # Integration modules: fake-harness end-to-end runs, workbench HTTP servers,
@@ -155,6 +157,7 @@ INTEGRATION_MODULES = (
     "tests.test_asl_workbench_launch",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
+    "tests.test_brainnotes_vault_guard",
 )
 
 # Standalone helper-script suites (not part of the tests package).
