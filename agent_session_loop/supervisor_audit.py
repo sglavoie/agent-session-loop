@@ -77,13 +77,19 @@ from . import (
 )
 from .assurance_models import (
     MAX_AUDIT_ATTEMPT_RECORDS,
+    AssuranceError,
     AssuranceSummary,
     AttemptOutcome,
     AuditRole,
+    AuditRoleSource,
     AuditState,
+    CheckStatus,
+    EvidenceKind,
     Finding,
     IssueObservation,
 )
+from .harnesses import HARNESS_NAMES
+from .literals import as_literal
 
 #: Seconds granted to each agent attempt, not to the audit as a whole.
 DEFAULT_AUDIT_TIMEOUT_SECONDS = 600
@@ -209,7 +215,7 @@ def resolve_role(
     """
     if config.harness is not None:
         harness = config.harness
-        source = "explicit"
+        source: AuditRoleSource = "explicit"
         inherited_model: str | None = None
     elif review_harness is not None:
         harness = review_harness
@@ -219,9 +225,23 @@ def resolve_role(
         return None
     if harness == implementation_harness:
         return None
+    # Both names are free strings here -- `asl assurance process-pending`
+    # accepts an unconstrained `--audit-harness`, and the implementation
+    # harness is read back off a recorded run config -- so the closed
+    # vocabulary is applied where the role is built. These are the same two
+    # checks `AuditRole.__post_init__` makes, with the same labels and the
+    # same error, moved one frame out so the narrowed type is what reaches
+    # the durable record.
     return AuditRole(
-        harness=harness,
-        implementation_harness=implementation_harness,
+        harness=as_literal(
+            harness, HARNESS_NAMES, "role 'harness'", error=AssuranceError
+        ),
+        implementation_harness=as_literal(
+            implementation_harness,
+            HARNESS_NAMES,
+            "role 'implementation_harness'",
+            error=AssuranceError,
+        ),
         source=source,
         timeout_seconds=float(config.timeout_seconds),
         model=config.model if config.model is not None else inherited_model,
@@ -1360,7 +1380,7 @@ class _Collector:
         self,
         path: Path | str | None,
         *,
-        kind: str,
+        kind: EvidenceKind,
         digest: str | None = None,
         detail: str | None = None,
     ) -> str | None:
@@ -1465,7 +1485,7 @@ class _Collector:
     # -- files -----------------------------------------------------------
 
     def file_digest(
-        self, path: Path, *, kind: str, section: str | None = None
+        self, path: Path, *, kind: EvidenceKind, section: str | None = None
     ) -> dict[str, Any]:
         """Describe a file by identity alone: locator, size, and digest.
 
@@ -1493,7 +1513,7 @@ class _Collector:
         self.omissions.record(section or kind, record["reason"], str(path))
         return record
 
-    def file_preview(self, path: Path, *, kind: str) -> dict[str, Any]:
+    def file_preview(self, path: Path, *, kind: EvidenceKind) -> dict[str, Any]:
         """Describe a stream by identity plus a bounded, shrinkable preview."""
         capture = artifacts.StreamCapture(
             head_bytes=PREVIEW_HEAD_BYTES, tail_bytes=PREVIEW_TAIL_BYTES
@@ -1521,7 +1541,7 @@ class _Collector:
         return record
 
     def _unavailable_preview(
-        self, path: Path, kind: str, reason: str
+        self, path: Path, kind: EvidenceKind, reason: str
     ) -> dict[str, Any]:
         self.omissions.record(kind, reason, str(path))
         return {
@@ -2255,6 +2275,10 @@ def _plan_metadata(collector: _Collector, plan_dir: Path) -> dict[str, Any]:
     path = plan_dir / plans.PLAN_METADATA_FILE_NAME
     payload, reason = _read_json_file(path)
     if payload is None:
+        # A file holding the literal `null` parses to `None` with no reason, so
+        # it is reported the way every other reader in this module reports an
+        # unusable payload rather than as an omission with a null reason.
+        reason = reason or REASON_MALFORMED
         collector.omissions.record("plan.metadata", reason, str(path))
         return {"available": False, "reason": reason}
     return {
@@ -6477,7 +6501,7 @@ def resolve_identities(
     )
 
 
-def _worst(*statuses: str) -> str:
+def _worst(*statuses: CheckStatus) -> CheckStatus:
     return max(statuses, key=lambda status: _STATUS_PRECEDENCE[status])
 
 
@@ -6498,7 +6522,7 @@ def _anchor(declared: Sequence[str]) -> tuple[str, ...]:
 
 def _deterministic_signal(
     results: Sequence[assurance_models.DeterministicResult],
-) -> str | None:
+) -> CheckStatus | None:
     """Return what the checks on one lane prove, or ``None`` when they prove nothing.
 
     A failure is the strongest signal and wins outright; otherwise a single pass
@@ -6535,7 +6559,7 @@ def _merged_lanes(
     for name in assurance_models.RUBRIC_LANES:
         lane_results = [result for result in results if result.lane == name]
         claim = reported.get(name)
-        claimed = claim.status if claim else "unavailable"
+        claimed: CheckStatus = claim.status if claim else "unavailable"
         deterministic = _deterministic_signal(lane_results)
         status = claimed if deterministic is None else _worst(deterministic, claimed)
         evidence = list(

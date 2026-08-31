@@ -10,7 +10,7 @@ import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Protocol
 
 from . import events, plans, state, workspaces
 from .formatting import (
@@ -21,6 +21,20 @@ from .formatting import (
 
 DEFAULT_LINES = 40
 POLL_INTERVAL_SECONDS = 0.1
+
+
+class TextSink(Protocol):
+    """The stream contract the tail actually needs from its output.
+
+    Declared structurally rather than as ``TextIO`` because every write goes
+    through ``print(..., file=out, flush=True)``: a caller that shares an
+    output lock -- the runner's inline tail does -- hands in a proxy that
+    forwards those two calls and is no more of a file than that.
+    """
+
+    def write(self, text: str, /) -> int: ...
+
+    def flush(self) -> None: ...
 
 
 class TailError(Exception):
@@ -787,7 +801,7 @@ def _session_sort_key(value: Any) -> tuple[tuple[int, ...], str]:
     return (parsed.sort_key, parsed.value)
 
 
-def _print_lines(lines: list[str], out: TextIO) -> None:
+def _print_lines(lines: list[str], out: TextSink) -> None:
     for line in lines:
         print(line, file=out, flush=True)
 
@@ -798,7 +812,7 @@ def _emit_recent(
     state_payload: dict[str, Any] | None,
     run_id: str | None,
     lines: int,
-    out: TextIO,
+    out: TextSink,
     targets: dict[str, dict[str, Any]],
     offsets: dict[str, int],
 ) -> None:
@@ -914,7 +928,7 @@ class _TailFollowLoop:
         seen_event_count: int,
         targets: dict[str, dict[str, Any]],
         offsets: dict[str, int],
-        out: TextIO,
+        out: TextSink,
         poll_interval: float,
         stop_event: threading.Event,
         initial_finished: bool,
@@ -979,7 +993,7 @@ class TailFollower:
         plan_dir: str | Path,
         *,
         state_dir: str | Path | None = None,
-        out: TextIO | None = None,
+        out: TextSink | None = None,
         poll_interval: float = POLL_INTERVAL_SECONDS,
         include_events: bool = True,
         initial_log_lines: int = 0,
@@ -1123,7 +1137,7 @@ def tail_plan(
     state_dir: str | Path | None = None,
     lines: int = DEFAULT_LINES,
     follow: bool = True,
-    out: TextIO = sys.stdout,
+    out: TextSink = sys.stdout,
     poll_interval: float = POLL_INTERVAL_SECONDS,
 ) -> None:
     """Print recent activity and optionally follow live events/logs."""

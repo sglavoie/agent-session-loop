@@ -62,7 +62,10 @@ disable_error_code = [
 # parameterized containers, no `type: ignore`, no import of the runner. That
 # linter encodes extraction discipline, which is meaningful for a package
 # boundary and meaningless for a test module or for a package module whose job
-# is to drive the runner.
+# is to drive the runner. `runner` itself is on this table: the rule bans
+# importing the runner, which the runner does not do, and it meets the other
+# three unchanged — so the strongest available contract is the honest one for
+# it, not a downgrade justified by its size.
 #
 # **Checked** (the table after it) — the same three mypy codes and nothing
 # else. It is where a module lands when it is clean under mypy but cannot meet
@@ -140,9 +143,11 @@ module = [
     "agent_session_loop.run_contention",
     "agent_session_loop.run_coordination",
     "agent_session_loop.run_flags",
+    "agent_session_loop.runner",
     "agent_session_loop.session_overview",
     "agent_session_loop.startup_context",
     "agent_session_loop.supervision_liveness",
+    "agent_session_loop.supervisor_audit",
     "agent_session_loop.supervisor_guide",
     "agent_session_loop.tail",
     "agent_session_loop.transitions",

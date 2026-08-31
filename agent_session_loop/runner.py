@@ -3912,7 +3912,7 @@ def _repair_commit_preflight(
         qualified_paths = [
             f"{alias}:{path}" if alias is not None else path for path in dirty_paths
         ]
-        row = {
+        row: dict[str, Any] = {
             "alias": alias,
             "path": repository_path,
             "resolved_root": str(root),
@@ -7460,7 +7460,7 @@ def _record_abort_satisfied_by_worker(
         control_payload=control_payload,
         action=action,
         context=context,
-        persistence=persistence,
+        persistence=_run_persistence(persistence),
         event_action=events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
         message="turn abort satisfied by the worker inside the grace window",
     )
@@ -11701,6 +11701,12 @@ def _enforce_session_verification(
             turn_payload["verification"] = schedule.turn_verification(session_id)
             _write_json_file(paths["result"], turn_payload)
         return False
+
+    # `schedule.runs` is `state == "contract-ready"`, which
+    # `schedule_verification` returns on exactly one branch: the one guarded by
+    # `contract is not None`. The invariant lives across a module boundary, so
+    # it is restated here to narrow the contract every call below requires.
+    assert contract is not None
 
     # Persist `final_snapshot` to the post-turn inspected snapshot before
     # verification starts. Completion bookkeeping (progress.md append and

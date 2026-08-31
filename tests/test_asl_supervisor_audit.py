@@ -269,6 +269,23 @@ class AuditRoleResolutionTests(unittest.TestCase):
             supervisor_audit.resolve_role(config, implementation_harness="codex")
         )
 
+    def test_an_unpermitted_audit_harness_is_refused_at_resolution(self) -> None:
+        # `asl assurance process-pending --audit-harness` takes a free string,
+        # so the closed vocabulary is applied where the role is built rather
+        # than trusted from the flag.
+        config = supervisor_audit.AuditConfig(harness="gpt")
+
+        with self.assertRaises(AssuranceError):
+            supervisor_audit.resolve_role(config, implementation_harness="codex")
+
+    def test_an_unpermitted_implementation_harness_is_refused_at_resolution(
+        self,
+    ) -> None:
+        config = supervisor_audit.AuditConfig(harness="codex")
+
+        with self.assertRaises(AssuranceError):
+            supervisor_audit.resolve_role(config, implementation_harness="gpt")
+
     def test_the_role_model_rejects_a_self_audit(self) -> None:
         with self.assertRaises(AssuranceError):
             supervisor_audit.AuditRole(
