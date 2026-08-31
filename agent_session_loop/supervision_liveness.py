@@ -173,10 +173,17 @@ def read_record(
     argv = payload.get("argv")
     if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
         return None
+    # Checked one at a time rather than through an `all(...)` over a tuple: the
+    # generator form tests exactly the same thing but leaves each name typed
+    # `Any | None`, so a null host or plan_dir would still reach the record.
     host = payload.get("host")
     stored_plan_dir = payload.get("plan_dir")
     started_at = payload.get("started_at")
-    if not all(isinstance(field, str) for field in (host, stored_plan_dir, started_at)):
+    if not isinstance(host, str):
+        return None
+    if not isinstance(stored_plan_dir, str):
+        return None
+    if not isinstance(started_at, str):
         return None
     return LivenessRecord(
         supervision_id=supervision_id,

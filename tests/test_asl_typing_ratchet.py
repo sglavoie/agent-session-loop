@@ -93,6 +93,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
     {
         "agent_session_loop",
         "agent_session_loop.__main__",
+        "agent_session_loop.agent_mux_contract",
         "agent_session_loop.agent_mux_delivery",
         "agent_session_loop.agent_mux_pairing",
         "agent_session_loop.agent_mux_projection",
@@ -102,6 +103,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.assurance_draft",
         "agent_session_loop.assurance_ledger",
         "agent_session_loop.assurance_models",
+        "agent_session_loop.assurance_projection",
         "agent_session_loop.assurance_reconcile",
         "agent_session_loop.assurance_report",
         "agent_session_loop.audit_replay",
@@ -156,6 +158,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.run_flags",
         "agent_session_loop.session_overview",
         "agent_session_loop.startup_context",
+        "agent_session_loop.supervision_liveness",
         "agent_session_loop.supervisor_guide",
         "agent_session_loop.tail",
         "agent_session_loop.transitions",

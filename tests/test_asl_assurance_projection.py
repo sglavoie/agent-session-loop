@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -1886,6 +1887,30 @@ class ReplayTests(ProjectionTestCase):
     def test_replay_is_stable_across_repeated_reads(self) -> None:
         self.build_every_kind()
         self.assertEqual(self.read(), self.read())
+
+
+class MalformedRecordTests(ProjectionTestCase):
+    def test_an_observation_record_with_no_issue_id_is_refused(self) -> None:
+        # The parse boundary rejects this envelope, so the only way one reaches
+        # the replay is a `LedgerRecord` built in code. Projecting it would have
+        # opened an issue under a null identity.
+        self.publish(_publication())
+        view = ledger.parse_ledger_bytes(
+            self.ledger_path.read_bytes(), self.ledger_path
+        )
+        observation = next(
+            record
+            for record in view.records
+            if record.kind == ledger.KIND_ISSUE_OBSERVED
+        )
+        forged = dataclasses.replace(
+            view, records=(dataclasses.replace(observation, issue_id=None),)
+        )
+        with self.assertRaises(ProjectionError) as caught:
+            projection.project(forged)
+        self.assertEqual(
+            projection.OBSERVATION_WITHOUT_ISSUE_ID, caught.exception.reason
+        )
 
 
 class AnomalyTests(ProjectionTestCase):

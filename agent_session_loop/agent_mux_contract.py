@@ -968,6 +968,16 @@ def _validate_object(
             )
         return problems
 
+    if additional is None:
+        # `_lint_object_node` refuses a schema that omits `additionalProperties`,
+        # but validation runs against whatever schema it is handed. Without this
+        # the map branch below would pass `None` to `_validate_node` and die on
+        # an attribute lookup several frames deeper, blaming the document for a
+        # defect in the contract.
+        raise ContractError(
+            f"schema node at {_pointer(parts)} declares no "
+            "`additionalProperties`; an object node must be closed or a map"
+        )
     names = node["propertyNames"]
     for name in sorted(value):
         child = parts + [name]

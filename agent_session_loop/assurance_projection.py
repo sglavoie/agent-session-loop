@@ -100,6 +100,8 @@ from .assurance_models import (
     IssueMerge,
     IssueObservation,
     IssueState,
+    RubricLane,
+    Severity,
     canonical_json_bytes,
     identity_key_for_issue,
     issue_id_for_identity_key,
@@ -139,8 +141,8 @@ NO_FINDING_STATES: frozenset[str] = frozenset(
 #: messages of one kind inside a single issue.
 SYSTEM_ISSUE_CATEGORY = "assurance"
 SYSTEM_ISSUE_COMPONENT = "agent-session-loop/supervisor-audit"
-SYSTEM_ISSUE_LANE = "unknown-anomalies"
-SYSTEM_ISSUE_SEVERITY = "medium"
+SYSTEM_ISSUE_LANE: RubricLane = "unknown-anomalies"
+SYSTEM_ISSUE_SEVERITY: Severity = "medium"
 UNAVAILABLE_INVARIANT_PREFIX = "audit.availability"
 
 
@@ -164,6 +166,15 @@ MERGE_SOURCE_ALREADY_MERGED = "merge-source-already-merged"
 MERGE_TARGET_ALREADY_MERGED = "merge-target-already-merged"
 MERGE_CYCLE = "merge-cycle"
 UNAVAILABLE_EVIDENCE_REQUIRED = "unavailable-evidence-required"
+#: An observation record reached the replay without the issue id its kind is
+#: required to allocate. `_record_from_envelope` rejects that shape at the parse
+#: boundary, so it can only arrive from a `LedgerRecord` built in code; the
+#: replay refuses it rather than projecting an issue under a null identity.
+OBSERVATION_WITHOUT_ISSUE_ID = "observation-without-issue-id"
+#: An issue node settled with no observation in its history. Nodes are only ever
+#: created by an observation and merges move whole histories, so this cannot
+#: happen for a ledger the replay itself assembled.
+ISSUE_WITHOUT_OBSERVATION = "issue-without-observation"
 
 #: Why a merge cannot be recorded, or why a stored one could not be applied.
 MERGE_REJECTIONS: tuple[str, ...] = (
@@ -1210,6 +1221,12 @@ def _build_issue(node: _IssueNode, identity_keys: Sequence[str] = ()) -> Issue:
             state = payload.result_state
         else:
             plans.append(payload)
+    if finding is None:
+        raise ProjectionError(
+            ISSUE_WITHOUT_OBSERVATION,
+            f"{node.issue_id} settled with no observation in its history; an "
+            "issue with no finding describes nothing to investigate",
+        )
     return Issue(
         issue_id=node.issue_id,
         state=state,
@@ -1247,6 +1264,12 @@ def project(view: LedgerView) -> AssuranceProjection:
             # edited: a hand-written record naming an already-merged source
             # would otherwise resurrect that source as a separate issue no
             # merge chain points at.
+            if record.issue_id is None:
+                raise ProjectionError(
+                    OBSERVATION_WITHOUT_ISSUE_ID,
+                    f"record {record.seq} is an observation with no issue id; "
+                    "an observation is the record that allocates one",
+                )
             issue_id = follow_merge_chain(aliases, record.issue_id)
             node = nodes.get(issue_id)
             if node is None:
