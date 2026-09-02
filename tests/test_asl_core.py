@@ -27,6 +27,7 @@ from agent_session_loop import (
     agent_mux_projection,
     artifacts,
     authoring,
+    commit_settlement,
     contracts,
     durability,
     events,
@@ -5812,7 +5813,12 @@ class ParserAndStateTests(unittest.TestCase):
             payload = self._base_state_payload(Path(tmp) / "state.json")
             payload["events_path"] = str(event_path)
             persistence = run_persistence._RunPersistence(write_state=False)
-            runner._finish_run(event_path, payload, persistence=persistence)
+            commit_settlement._finish_run(
+                event_path,
+                payload,
+                persistence=persistence,
+                finalize_readiness=runner._finalize_readiness_lifecycle,
+            )
 
             records = [
                 json.loads(line)
@@ -5846,7 +5852,12 @@ class ParserAndStateTests(unittest.TestCase):
             payload["observed_model"] = "claude-opus-5"
             payload["observed_model_source"] = "harness_reported"
             persistence = run_persistence._RunPersistence(write_state=False)
-            runner._finish_run(event_path, payload, persistence=persistence)
+            commit_settlement._finish_run(
+                event_path,
+                payload,
+                persistence=persistence,
+                finalize_readiness=runner._finalize_readiness_lifecycle,
+            )
 
             records = [
                 json.loads(line)
@@ -5962,7 +5973,12 @@ class ParserAndStateTests(unittest.TestCase):
             payload["action_required"] = self._live_action_required()
             persistence = run_persistence._RunPersistence(write_state=False)
 
-            runner._finish_run(event_path, payload, persistence=persistence)
+            commit_settlement._finish_run(
+                event_path,
+                payload,
+                persistence=persistence,
+                finalize_readiness=runner._finalize_readiness_lifecycle,
+            )
 
         self.assertIsNone(payload["action_required"])
 
@@ -5976,7 +5992,12 @@ class ParserAndStateTests(unittest.TestCase):
             payload["action_required"] = signal
             persistence = run_persistence._RunPersistence(write_state=False)
 
-            runner._finish_run(event_path, payload, persistence=persistence)
+            commit_settlement._finish_run(
+                event_path,
+                payload,
+                persistence=persistence,
+                finalize_readiness=runner._finalize_readiness_lifecycle,
+            )
 
         self.assertEqual(signal, payload["action_required"])
 
@@ -6085,7 +6106,12 @@ class ParserAndStateTests(unittest.TestCase):
             persistence = run_persistence._RunPersistence(write_state=False)
 
             reason = runner._terminal_review_reason(payload)
-            runner._finish_run(event_path, payload, persistence=persistence)
+            commit_settlement._finish_run(
+                event_path,
+                payload,
+                persistence=persistence,
+                finalize_readiness=runner._finalize_readiness_lifecycle,
+            )
 
         self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, reason)
         self.assertEqual(

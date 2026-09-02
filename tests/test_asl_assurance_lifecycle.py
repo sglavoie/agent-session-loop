@@ -1011,7 +1011,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef)
             and any(
-                isinstance(call.func, ast.Name) and call.func.id == "_finish_run"
+                isinstance(call.func, ast.Attribute) and call.func.attr == "_finish_run"
                 for call in ast.walk(node)
                 if isinstance(call, ast.Call)
             )

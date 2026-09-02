@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import ast
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import commit_groups, events, run_persistence, runner
+from agent_session_loop import (
+    commit_groups,
+    commit_settlement,
+    durability,
+    events,
+    run_persistence,
+)
+from tests.support import assert_no_runner_import
 
 
 def target(alias: str) -> dict[str, object]:
@@ -203,12 +212,12 @@ class UnresolvedCommitGroupTests(unittest.TestCase):
             ]
         }
 
-        self.assertEqual([], runner._unresolved_commit_groups(payload))
+        self.assertEqual([], commit_settlement._unresolved_commit_groups(payload))
 
     def test_failed_group_reports_what_landed_and_what_did_not(self) -> None:
         payload = {"commit_groups": [self.group()]}
 
-        summary = runner._unresolved_commit_groups(payload)[0]
+        summary = commit_settlement._unresolved_commit_groups(payload)[0]
 
         self.assertEqual("g1", summary["group_id"])
         self.assertEqual("3", summary["session_id"])
@@ -216,13 +225,13 @@ class UnresolvedCommitGroupTests(unittest.TestCase):
         self.assertEqual(["OAK", "OWL"], summary["remaining_aliases"])
         self.assertEqual(["SVC"], summary["committed_aliases"])
         self.assertEqual(
-            "session 3 (OAK)", runner._unresolved_commit_group_label(summary)
+            "session 3 (OAK)", commit_settlement._unresolved_commit_group_label(summary)
         )
 
     def test_failure_without_a_durable_group_is_still_reported(self) -> None:
         # A commit that fails before any group exists leaves no row behind, so
         # the recorded failure is the only evidence the run can end honest on.
-        record = runner._commit_failure_record(
+        record = commit_settlement._commit_failure_record(
             scope="end",
             session_id=None,
             group=None,
@@ -231,14 +240,16 @@ class UnresolvedCommitGroupTests(unittest.TestCase):
             message="final auto-commit failed",
         )
         payload: dict[str, object] = {}
-        runner._append_commit_failure(payload, record)
+        commit_settlement._append_commit_failure(payload, record)
 
-        summary = runner._unresolved_commit_groups(payload)[0]
+        summary = commit_settlement._unresolved_commit_groups(payload)[0]
 
         self.assertIsNone(summary["group_id"])
         self.assertEqual(commit_groups.GROUP_STATUS_FAILED, summary["status"])
         self.assertEqual("commit setup refused", summary["error"])
-        self.assertEqual("end-of-run", runner._unresolved_commit_group_label(summary))
+        self.assertEqual(
+            "end-of-run", commit_settlement._unresolved_commit_group_label(summary)
+        )
 
     def test_a_group_that_failed_and_recovered_is_reported_once(self) -> None:
         # The same group is written twice — failed, then complete — and only
@@ -250,7 +261,7 @@ class UnresolvedCommitGroupTests(unittest.TestCase):
                 )
             ],
             "commit_failures": [
-                runner._commit_failure_record(
+                commit_settlement._commit_failure_record(
                     scope="session",
                     session_id="3",
                     group=self.group(),
@@ -261,7 +272,109 @@ class UnresolvedCommitGroupTests(unittest.TestCase):
             ],
         }
 
-        self.assertEqual([], runner._unresolved_commit_groups(payload))
+        self.assertEqual([], commit_settlement._unresolved_commit_groups(payload))
+
+
+class CommitSettlementBoundaryTests(unittest.TestCase):
+    """What `commit_settlement` may reach for, and what it may write."""
+
+    def test_the_module_never_imports_the_runner(self) -> None:
+        assert_no_runner_import(self, commit_settlement)
+
+    def test_every_durable_write_goes_through_the_persistence_handle(self) -> None:
+        # The commit subprocess can run for minutes and this module holds the
+        # run's write mutex around every record it appends, so a second write
+        # path here would be a durable record taken outside that mutex — or a
+        # raw file write with no fsync behind it at all.
+        tree = ast.parse(Path(commit_settlement.__file__).read_text(encoding="utf-8"))
+        receivers = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr in ("append_event", "write_state"):
+                receiver = node.func.value
+                receivers.add(
+                    receiver.id
+                    if isinstance(receiver, ast.Name)
+                    else ast.dump(receiver)
+                )
+
+        self.assertEqual({"persistence"}, receivers)
+
+    def test_the_module_opens_no_file_of_its_own(self) -> None:
+        source = Path(commit_settlement.__file__).read_text(encoding="utf-8")
+        for forbidden in (
+            "open(",
+            "write_text(",
+            "write_json_file(",
+            "append_text(",
+            "mkdir(",
+            "unlink(",
+        ):
+            with self.subTest(call=forbidden):
+                self.assertNotIn(forbidden, source)
+
+    def test_the_readiness_finalizer_enters_as_a_callback_under_the_lock(
+        self,
+    ) -> None:
+        # Session 15 owns `_finalize_readiness_lifecycle`, so it enters here as
+        # a callback rather than as an import. What it writes is part of the
+        # run's terminal state record, so it has to run inside the persistence
+        # mutex and ahead of the state write, not beside it.
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            event_path = Path(tmp) / "events.jsonl"
+            payload: dict[str, object] = {
+                "state_path": str(state_path),
+                "events_path": str(event_path),
+                "run_started_at": "2026-01-01T00:00:00+00:00",
+                "active_turn": {"session_id": "3"},
+                "active_verification": {"session_id": "3"},
+                "turns": [],
+            }
+            calls: list[dict[str, object]] = []
+            lock_free_to_others: list[bool] = []
+
+            def finalize(target: dict[str, object]) -> None:
+                calls.append(target)
+                target["readiness_state_final"] = "complete"
+                # The owner re-acquires a reentrant lock unconditionally, so
+                # only a thread that does not hold it can answer this.
+                probe = threading.Thread(
+                    target=lambda: lock_free_to_others.append(
+                        persistence.lock.acquire(blocking=False)
+                    )
+                )
+                probe.start()
+                probe.join()
+
+            persistence = run_persistence._RunPersistence()
+            commit_settlement._finish_run(
+                event_path,
+                payload,
+                persistence=persistence,
+                finalize_readiness=finalize,
+            )
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            records = [
+                json.loads(line)
+                for line in event_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual([payload], calls)
+        self.assertEqual([False], lock_free_to_others)
+        self.assertIsNone(payload["active_turn"])
+        self.assertIsNone(payload["active_verification"])
+        self.assertIsNotNone(payload["run_finished_at"])
+        self.assertEqual("complete", persisted["readiness_state_final"])
+        finished = [record for record in records if record["name"] == "run_finished"]
+        self.assertEqual(1, len(finished))
+        self.assertEqual(
+            payload["run_finished_at"], finished[0]["payload"]["run_finished_at"]
+        )
 
 
 class DurableLedgerTests(unittest.TestCase):
@@ -287,7 +400,7 @@ class DurableLedgerTests(unittest.TestCase):
                 "state_path": str(state_path),
                 "commit_groups": [{"group_id": "g1", "status": "running"}],
             }
-            with mock.patch.object(runner.durability, "fullsync") as fullsync:
+            with mock.patch.object(durability, "fullsync") as fullsync:
                 run_persistence._write_state_payload(payload)
 
             self.assertEqual(2, fullsync.call_count)

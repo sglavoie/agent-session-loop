@@ -127,6 +127,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.command_guard",
         "agent_session_loop.commit_groups",
         "agent_session_loop.commit_message",
+        "agent_session_loop.commit_settlement",
         "agent_session_loop.config",
         "agent_session_loop.contracts",
         "agent_session_loop.control_cli",

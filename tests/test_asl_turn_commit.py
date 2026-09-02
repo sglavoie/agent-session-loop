@@ -15,7 +15,6 @@ import inspect
 import io
 import json
 import os
-import re
 import signal
 import sys
 import tempfile
@@ -31,6 +30,7 @@ from unittest import mock
 from agent_session_loop import (
     commit_groups,
     commit_message,
+    commit_settlement,
     events,
     harnesses,
     plans,
@@ -1137,7 +1137,7 @@ class CommitFailureProgressTests(unittest.TestCase):
                     "reason": "all-complete",
                     "run_id": "run-1",
                     "duration_seconds": 1.0,
-                    runner.UNRESOLVED_COMMIT_GROUPS_KEY: [
+                    commit_settlement.UNRESOLVED_COMMIT_GROUPS_KEY: [
                         {"session_id": "1", "failed_alias": "SVC"},
                         {"session_id": None, "failed_alias": None},
                     ],
@@ -1324,7 +1324,7 @@ class CommitFailureSoftFailTests(unittest.TestCase):
         self.assertEqual(summaries, persisted["unresolved_commit_groups"])
         self.assertEqual(
             "SVC",
-            runner._unresolved_commit_groups(persisted)[0]["failed_alias"],
+            commit_settlement._unresolved_commit_groups(persisted)[0]["failed_alias"],
         )
 
     def test_a_transient_failure_heals_at_the_next_commit_boundary(self) -> None:
@@ -1371,7 +1371,9 @@ class CommitFailureSoftFailTests(unittest.TestCase):
             by_group[group_id] = by_group.get(group_id, 0) + 1
         self.assertTrue(by_group)
         for attempts in by_group.values():
-            self.assertLessEqual(attempts, runner.MAX_COMMIT_GROUP_RETRIES + 1)
+            self.assertLessEqual(
+                attempts, commit_settlement.MAX_COMMIT_GROUP_RETRIES + 1
+            )
 
 
 class UnregisteredCommitTargetTests(unittest.TestCase):
@@ -1413,7 +1415,7 @@ class UnregisteredCommitTargetTests(unittest.TestCase):
                 session_id="11.1",
                 targets=targets,
                 initial_heads={
-                    str(target["key"]): runner._commit_target_head(target)
+                    str(target["key"]): commit_settlement._commit_target_head(target)
                     for target in targets
                 },
             )
@@ -1430,8 +1432,8 @@ class UnregisteredCommitTargetTests(unittest.TestCase):
 
         final, failed = commit_groups.coordinate_group(
             group,
-            is_clean=runner._commit_target_is_clean,
-            read_head=runner._commit_target_head,
+            is_clean=commit_settlement._commit_target_is_clean,
+            read_head=commit_settlement._commit_target_head,
             run_commit=run_commit,
             persist=lambda *_args: None,
             skip_clean=skip_clean,
@@ -1439,11 +1441,11 @@ class UnregisteredCommitTargetTests(unittest.TestCase):
         return launched, final, failed
 
     def test_a_clean_repository_yields_no_commit_target(self) -> None:
-        self.assertEqual([], runner._dirty_commit_targets(self.context))
+        self.assertEqual([], commit_settlement._dirty_commit_targets(self.context))
 
     def test_a_dirty_repository_still_yields_its_target(self) -> None:
         self._dirty()
-        targets = runner._dirty_commit_targets(self.context)
+        targets = commit_settlement._dirty_commit_targets(self.context)
         self.assertEqual(
             [commit_groups.LEGACY_REPOSITORY_KEY],
             [target["key"] for target in targets],
@@ -1451,13 +1453,17 @@ class UnregisteredCommitTargetTests(unittest.TestCase):
         self.assertEqual(self.repo_root.resolve(), Path(targets[0]["root"]))
 
     def test_the_end_scope_reads_the_same_rule(self) -> None:
-        self.assertEqual([], runner._registered_end_commit_targets(self.context))
+        self.assertEqual(
+            [], commit_settlement._registered_end_commit_targets(self.context)
+        )
         self._dirty()
-        self.assertEqual(1, len(runner._registered_end_commit_targets(self.context)))
+        self.assertEqual(
+            1, len(commit_settlement._registered_end_commit_targets(self.context))
+        )
 
     def test_a_clean_repository_records_no_failed_commit_attempt(self) -> None:
         launched, group, failed = self._coordinate(
-            runner._dirty_commit_targets(self.context)
+            commit_settlement._dirty_commit_targets(self.context)
         )
         self.assertEqual([], launched)
         self.assertIsNone(failed)
@@ -1466,7 +1472,9 @@ class UnregisteredCommitTargetTests(unittest.TestCase):
         self.assertEqual([], group["skipped_repositories"])
 
     def test_the_unfiltered_target_is_what_failed_its_group(self) -> None:
-        launched, group, failed = self._coordinate(runner._commit_targets(self.context))
+        launched, group, failed = self._coordinate(
+            commit_settlement._commit_targets(self.context)
+        )
         self.assertEqual(
             [commit_groups.LEGACY_REPOSITORY_KEY],
             [target["key"] for target in launched],
@@ -1479,7 +1487,7 @@ class UnregisteredCommitTargetTests(unittest.TestCase):
 
     def test_the_resumed_group_no_longer_has_a_failure_to_paper_over(self) -> None:
         _launched, failed_group, _failed = self._coordinate(
-            runner._commit_targets(self.context)
+            commit_settlement._commit_targets(self.context)
         )
         resumed_launches, resumed, refused = self._coordinate(
             [dict(target) for target in failed_group["repositories"]],
@@ -1495,14 +1503,25 @@ class UnregisteredCommitTargetTests(unittest.TestCase):
         self.assertEqual("clean", resumed["skipped_repositories"][0]["reason"])
         # Nothing reaches that path now: the selection never names the target
         # whose refusal put the group into failure.
-        self.assertEqual([], runner._dirty_commit_targets(self.context))
+        self.assertEqual([], commit_settlement._dirty_commit_targets(self.context))
 
     def test_the_unregistered_session_scope_reads_the_filtered_selection(self) -> None:
-        source = inspect.getsource(runner._run_locked)
-        self.assertIn("_dirty_commit_targets(verification_context)", source)
-        self.assertIsNone(
-            re.search(r"(?<![_a-z])_commit_targets\(verification_context\)", source)
-        )
+        # Matched structurally rather than by substring: qualifying the callee
+        # with its owning module made the line long enough for the formatter to
+        # wrap the argument, and a text match reads that as a behaviour change.
+        tree = ast.parse(inspect.getsource(runner._run_locked))
+        selectors = {
+            call.func.attr if isinstance(call.func, ast.Attribute) else call.func.id
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute | ast.Name)
+            and any(
+                isinstance(arg, ast.Name) and arg.id == "verification_context"
+                for arg in call.args
+            )
+        }
+        self.assertIn("_dirty_commit_targets", selectors)
+        self.assertNotIn("_commit_targets", selectors)
 
 
 class PublicationSnapshotTests(unittest.TestCase):

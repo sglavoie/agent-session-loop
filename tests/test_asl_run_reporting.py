@@ -12,8 +12,8 @@ modules cannot state, because they exercise the run rather than the seam:
   and every collaborator the loop wires is given the coordinator's proxy
   instead;
 * the two commit-lifecycle collaborators enter at construction rather than by
-  import, and the defaults this module falls back to still agree with the
-  runner's own constant and labeller; and
+  import, and the defaults this module falls back to still agree with
+  ``commit_settlement``'s own constant and labeller; and
 * output never ends a run: a sink that raises is disabled for the rest of the
   run rather than propagating.
 
@@ -33,7 +33,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import run_reporting, runner, turn_execution
+from agent_session_loop import commit_settlement, run_reporting, runner, turn_execution
 from tests.support import assert_no_runner_import
 
 #: The runner functions that still write ``sys.stderr`` directly after the
@@ -252,16 +252,17 @@ class CommitVocabularySeamTests(unittest.TestCase):
             call(reporter)
         return stream.getvalue()
 
-    def test_the_default_key_is_the_key_the_runner_writes(self) -> None:
+    def test_the_default_key_is_the_key_the_owner_writes(self) -> None:
         self.assertEqual(
-            runner.UNRESOLVED_COMMIT_GROUPS_KEY,
+            commit_settlement.UNRESOLVED_COMMIT_GROUPS_KEY,
             run_reporting.DEFAULT_UNRESOLVED_COMMIT_GROUPS_KEY,
         )
 
-    def test_the_default_labeller_agrees_with_the_runner_s(self) -> None:
-        # Two implementations of one sentence exist only until the commit
-        # lifecycle becomes a module of its own; until then they are pinned
-        # equal rather than trusted to stay so.
+    def test_the_default_labeller_agrees_with_the_owner_s(self) -> None:
+        # `commit_settlement` owns the commit lifecycle's vocabulary and this
+        # module may not import it — `commit_settlement` imports this one for
+        # the reporter type — so the defaults here are a second implementation
+        # of one sentence, pinned equal rather than trusted to stay so.
         summaries: list[dict[str, Any]] = [
             {"session_id": "3", "failed_alias": "OAK"},
             {"session_id": "3", "failed_alias": None},
@@ -272,7 +273,7 @@ class CommitVocabularySeamTests(unittest.TestCase):
         for summary in summaries:
             with self.subTest(summary=summary):
                 self.assertEqual(
-                    runner._unresolved_commit_group_label(summary),
+                    commit_settlement._unresolved_commit_group_label(summary),
                     run_reporting.default_commit_group_label(summary),
                 )
 

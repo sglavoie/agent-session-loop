@@ -34,6 +34,7 @@ from agent_session_loop import (
     agent_mux_delivery,
     agent_mux_projection,
     cli,
+    commit_settlement,
     config,
     control_cli,
     control_queue,
@@ -12812,7 +12813,11 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 run_persistence,
                 "_notify_agent_mux_loop_finished",
             ) as notify:
-                runner._finish_run(event_path, payload)
+                commit_settlement._finish_run(
+                    event_path,
+                    payload,
+                    finalize_readiness=runner._finalize_readiness_lifecycle,
+                )
 
             notify.assert_called_once_with(payload, mock.ANY)
             self.assertIsNotNone(payload["run_finished_at"])
@@ -13206,7 +13211,12 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     message="need input",
                     persistence=persistence,
                 )
-                runner._finish_run(event_path, payload, persistence=persistence)
+                commit_settlement._finish_run(
+                    event_path,
+                    payload,
+                    persistence=persistence,
+                    finalize_readiness=runner._finalize_readiness_lifecycle,
+                )
 
             events_seen = [call.args[0][-1] for call in run.call_args_list]
             self.assertEqual(["AgentSessionLoopPaused"], events_seen)
@@ -13236,7 +13246,12 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     agent_mux_delivery.subprocess, "run", return_value=completed
                 ) as run,
             ):
-                runner._finish_run(event_path, payload, persistence=persistence)
+                commit_settlement._finish_run(
+                    event_path,
+                    payload,
+                    persistence=persistence,
+                    finalize_readiness=runner._finalize_readiness_lifecycle,
+                )
 
             events_seen = [call.args[0][-1] for call in run.call_args_list]
             self.assertEqual(["AgentSessionLoopFinished"], events_seen)

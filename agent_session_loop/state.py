@@ -1696,7 +1696,7 @@ def mark_run_abandoned(
                     "ok": False,
                     "reason": ABANDONED_REASON,
                     "run_finished_at": detected_at,
-                    # The same fields ``runner._finish_run`` clears. A wait
+                    # The same fields ``commit_settlement._finish_run`` clears. A wait
                     # record is deliberately left behind: it is the only
                     # evidence of what the run died holding, and it already
                     # reads as expired once no active lock backs it.
