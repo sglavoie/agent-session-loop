@@ -44,6 +44,7 @@ from agent_session_loop import (
     process_tree,
     progress_repair,
     review_session_body,
+    run_commit,
     run_control,
     run_persistence,
     run_reporting,
@@ -4335,7 +4336,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             progress = run_reporting._ProgressReporter(enabled=True)
             stderr = io.StringIO()
 
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload=payload,
                 event_path=event_path,
                 progress=progress,
@@ -4476,7 +4477,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr_chars": 0,
                 "action_required": None,
             }
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload=payload,
                 event_path=event_path,
                 progress=run_reporting._ProgressReporter(enabled=False),
@@ -5475,7 +5476,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr_chars": 0,
                 "action_required": None,
             }
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload=payload,
                 event_path=event_path,
                 progress=run_reporting._ProgressReporter(enabled=False),
@@ -5885,7 +5886,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr_chars": 0,
                 "action_required": None,
             }
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload=payload,
                 event_path=event_path,
                 progress=run_reporting._ProgressReporter(enabled=False),
@@ -5942,7 +5943,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "action_required": None,
             }
             persistence = run_persistence._RunPersistence()
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload=payload,
                 event_path=event_path,
                 progress=run_reporting._ProgressReporter(enabled=False),
@@ -6110,7 +6111,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr_chars": 0,
             }
             persistence = run_persistence._RunPersistence()
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload=payload,
                 event_path=event_path,
                 progress=run_reporting._ProgressReporter(enabled=False),
@@ -6640,7 +6641,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "--no-mailbox",
             ]
             args = cli.build_parser().parse_args(argv)
-            real_live_turn = runner._LiveTurn
+            real_live_turn = run_commit._LiveTurn
 
             def fast_live_turn(*call_args, **call_kwargs):
                 call_kwargs["heartbeat_interval"] = 0.05
@@ -6655,7 +6656,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     ASL_HANG_RESULT_GRACE_SECONDS="0.05",
                     ASL_HANG_CONFIRM_SAMPLES="1",
                 ),
-                mock.patch.object(runner, "_LiveTurn", side_effect=fast_live_turn),
+                mock.patch.object(run_commit, "_LiveTurn", side_effect=fast_live_turn),
                 redirect_stdout(output),
             ):
                 code = runner.run_from_args(args, run_argv=argv)
@@ -6751,7 +6752,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         persistence = run_persistence._RunPersistence(
             write_state=False, append_events=False
         )
-        live_turn = runner._LiveTurn(
+        live_turn = run_commit._LiveTurn(
             payload=payload,
             event_path=event_path,
             progress=run_reporting._ProgressReporter(enabled=False),
@@ -7029,7 +7030,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
                 "heartbeat_count": 0,
             }
 
-        live_turn = runner._LiveTurn(
+        live_turn = run_commit._LiveTurn(
             payload=payload,
             event_path=event_path,
             progress=mock.Mock(),
@@ -7061,7 +7062,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         self.assertEqual([], fired)
 
         live_turn.finish(runner._utc_now())
-        later_turn = runner._LiveTurn(
+        later_turn = run_commit._LiveTurn(
             payload=payload,
             event_path=event_path,
             progress=mock.Mock(),
@@ -7712,7 +7713,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             "last_activity_at": started_at,
             "heartbeat_count": 0,
         }
-        live_turn = runner._LiveTurn(
+        live_turn = run_commit._LiveTurn(
             payload={"state_path": str(self.state_path)},
             event_path=self.event_path,
             progress=mock.Mock(),
@@ -7784,7 +7785,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
 
     def _live_turn(
         self, sample_tree, *, result_grace_seconds: float = 45.0
-    ) -> runner._LiveTurn:
+    ) -> run_commit._LiveTurn:
         sentinel = runner._HangSentinel(
             sample_tree=sample_tree,
             monotonic=time.monotonic,
@@ -7810,7 +7811,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             "last_activity_at": started_at,
             "heartbeat_count": 0,
         }
-        return runner._LiveTurn(
+        return run_commit._LiveTurn(
             payload={"state_path": str(self.state_path)},
             event_path=self.event_path,
             progress=mock.Mock(),

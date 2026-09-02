@@ -46,6 +46,7 @@ from agent_session_loop import (
     plans,
     process_tree,
     review_session_body,
+    run_commit,
     run_control,
     run_persistence,
     run_selection,
@@ -4246,7 +4247,7 @@ class LiveTurnSchedulerTests(unittest.TestCase):
     def test_polling_disabled_preserves_heartbeat_cadence_and_count(self) -> None:
         clock = self.Clock()
         progress = mock.Mock()
-        live_turn = runner._LiveTurn(
+        live_turn = run_commit._LiveTurn(
             payload={},
             event_path=Path("/tmp/events.jsonl"),
             progress=progress,
@@ -4279,7 +4280,7 @@ class LiveTurnSchedulerTests(unittest.TestCase):
         progress = mock.Mock()
         poll_times: list[float] = []
         poll_observed_unlocked: list[bool] = []
-        live_turn: runner._LiveTurn
+        live_turn: run_commit._LiveTurn
 
         def poll() -> None:
             acquired = live_turn._lock.acquire(blocking=False)
@@ -4290,7 +4291,7 @@ class LiveTurnSchedulerTests(unittest.TestCase):
             if len(poll_times) == 1:
                 clock.now += 31.0
 
-        live_turn = runner._LiveTurn(
+        live_turn = run_commit._LiveTurn(
             payload={},
             event_path=Path("/tmp/events.jsonl"),
             progress=progress,
@@ -4339,7 +4340,7 @@ class LiveTurnSchedulerTests(unittest.TestCase):
                 release_callback.wait()
                 payload["callback_state"] = "complete"
 
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload=payload,
                 event_path=tmp_dir / "events.jsonl",
                 progress=mock.Mock(),
@@ -4402,7 +4403,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
         clock = self.Clock(wakeup, wake_after=2.0)
         poll_times: list[float] = []
         set_at_poll: list[bool] = []
-        live_turn: runner._LiveTurn
+        live_turn: run_commit._LiveTurn
 
         def poll() -> None:
             poll_times.append(clock.now)
@@ -4410,7 +4411,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
             if len(poll_times) == 2:
                 live_turn._stop.set()
 
-        live_turn = runner._LiveTurn(
+        live_turn = run_commit._LiveTurn(
             payload={},
             event_path=Path("/tmp/events.jsonl"),
             progress=mock.Mock(),
@@ -4434,14 +4435,14 @@ class LiveTurnWakeupTests(unittest.TestCase):
         wakeup = threading.Event()
         clock = LiveTurnSchedulerTests.Clock()
         poll_times: list[float] = []
-        live_turn: runner._LiveTurn
+        live_turn: run_commit._LiveTurn
 
         def poll() -> None:
             poll_times.append(clock.now)
             if len(poll_times) == 2:
                 live_turn._stop.set()
 
-        live_turn = runner._LiveTurn(
+        live_turn = run_commit._LiveTurn(
             payload={},
             event_path=Path("/tmp/events.jsonl"),
             progress=mock.Mock(),
@@ -4464,7 +4465,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             wakeup = threading.Event()
             polled = threading.Event()
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload={"state_path": str(tmp_dir / "state.json")},
                 event_path=tmp_dir / "events.jsonl",
                 progress=mock.Mock(),
@@ -4491,7 +4492,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             wakeup = threading.Event()
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload={"state_path": str(tmp_dir / "state.json")},
                 event_path=tmp_dir / "events.jsonl",
                 progress=mock.Mock(),
@@ -5740,7 +5741,7 @@ class HangSentinelTests(unittest.TestCase):
                 cpu_epsilon_seconds=0.5,
                 result_grace_seconds=45.0,
             )
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload={"state_path": str(tmp_dir / "state.json")},
                 event_path=tmp_dir / "events.jsonl",
                 progress=mock.Mock(),
@@ -5797,7 +5798,7 @@ class HangSentinelTests(unittest.TestCase):
                 cpu_epsilon_seconds=0.5,
                 result_grace_seconds=45.0,
             )
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload={"state_path": str(tmp_dir / "state.json")},
                 event_path=tmp_dir / "events.jsonl",
                 progress=mock.Mock(),
@@ -5872,7 +5873,7 @@ class HangSentinelTests(unittest.TestCase):
                 cpu_epsilon_seconds=0.5,
                 result_grace_seconds=45.0,
             )
-            live_turn = runner._LiveTurn(
+            live_turn = run_commit._LiveTurn(
                 payload={"state_path": str(tmp_dir / "state.json")},
                 event_path=tmp_dir / "events.jsonl",
                 progress=mock.Mock(),
@@ -12588,7 +12589,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess,
+                    agent_mux_delivery.subprocess,
                     "run",
                     return_value=completed,
                 ) as run,
@@ -12657,7 +12658,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess,
+                    agent_mux_delivery.subprocess,
                     "run",
                     return_value=completed,
                 ) as run,
@@ -12707,7 +12708,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     return_value="/opt/amx",
                 ) as which,
                 mock.patch.object(
-                    runner.subprocess,
+                    agent_mux_delivery.subprocess,
                     "run",
                     return_value=completed,
                 ) as run,
@@ -12764,7 +12765,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 mock.patch.object(
                     runner.agent_mux_delivery.shutil, "which", return_value=None
                 ),
-                mock.patch.object(runner.subprocess, "run") as run,
+                mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
                 run_persistence._notify_agent_mux_loop_finished(
                     self.finish_payload(Path(tmp))
@@ -12790,7 +12791,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                         return_value="/opt/amx",
                     ),
                     mock.patch.object(
-                        runner.subprocess,
+                        agent_mux_delivery.subprocess,
                         "run",
                         side_effect=failure,
                     ),
@@ -12830,7 +12831,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             with (
                 patched_env(ASL_AGENT_MUX_NOTIFY="off"),
                 mock.patch.object(runner.agent_mux_delivery.shutil, "which") as which,
-                mock.patch.object(runner.subprocess, "run") as run,
+                mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
                 run_persistence._notify_agent_mux_loop_finished(payload)
 
@@ -12851,7 +12852,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                             return_value="/opt/amx",
                         ),
                         mock.patch.object(
-                            runner.subprocess, "run", return_value=completed
+                            agent_mux_delivery.subprocess, "run", return_value=completed
                         ) as run,
                     ):
                         run_persistence._notify_agent_mux_loop_finished(payload)
@@ -12890,7 +12891,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess, "run", return_value=completed
+                    agent_mux_delivery.subprocess, "run", return_value=completed
                 ) as run,
             ):
                 run_persistence._notify_agent_mux_loop_started(payload, persistence)
@@ -12979,7 +12980,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess,
+                    agent_mux_delivery.subprocess,
                     "run",
                     side_effect=[
                         retryable,
@@ -13049,7 +13050,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess, "run", return_value=duplicate
+                    agent_mux_delivery.subprocess, "run", return_value=duplicate
                 ) as run,
             ):
                 run_persistence._notify_agent_mux_loop_finished(
@@ -13083,7 +13084,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess, "run", return_value=permanent
+                    agent_mux_delivery.subprocess, "run", return_value=permanent
                 ) as run,
             ):
                 run_persistence._notify_agent_mux_loop_finished(
@@ -13116,7 +13117,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess,
+                    agent_mux_delivery.subprocess,
                     "run",
                     side_effect=[unsupported, legacy, legacy],
                 ) as run,
@@ -13168,7 +13169,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess, "run", return_value=retryable
+                    agent_mux_delivery.subprocess, "run", return_value=retryable
                 ) as run,
                 mock.patch.object(agent_mux_delivery, "retry_sleep", return_value=None),
             ):
@@ -13195,7 +13196,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess, "run", return_value=completed
+                    agent_mux_delivery.subprocess, "run", return_value=completed
                 ) as run,
             ):
                 runner._pause_run(
@@ -13232,7 +13233,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess, "run", return_value=completed
+                    agent_mux_delivery.subprocess, "run", return_value=completed
                 ) as run,
             ):
                 runner._finish_run(event_path, payload, persistence=persistence)
@@ -13255,7 +13256,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 mock.patch.object(
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
-                mock.patch.object(runner.subprocess, "run") as run,
+                mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
                 run_persistence._notify_agent_mux_loop(
                     runner.AGENT_MUX_TURN_HEARTBEAT_EVENT,
@@ -13280,7 +13281,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 mock.patch.object(
                     runner.agent_mux_delivery.shutil, "which", return_value=None
                 ),
-                mock.patch.object(runner.subprocess, "run") as run,
+                mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
                 run_persistence._notify_agent_mux_loop_finished(payload, persistence)
 
@@ -13311,7 +13312,7 @@ class AgentMuxSuiteIsolationTests(unittest.TestCase):
     def test_notify_helpers_short_circuit_under_suite_default(self) -> None:
         with (
             mock.patch.object(runner.agent_mux_delivery.shutil, "which") as which,
-            mock.patch.object(runner.subprocess, "run") as run,
+            mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
         ):
             run_persistence._notify_agent_mux_loop_started({"run_id": "run-x"})
             run_persistence._notify_agent_mux_loop_finished({"run_id": "run-x"})

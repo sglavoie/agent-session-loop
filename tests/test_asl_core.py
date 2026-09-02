@@ -38,6 +38,7 @@ from agent_session_loop import (
     preflight,
     responses,
     review,
+    run_commit,
     run_inputs,
     run_persistence,
     runner,
@@ -5879,7 +5880,7 @@ class ParserAndStateTests(unittest.TestCase):
     def _fold(self, *turns: dict[str, object]) -> list[dict[str, Any]]:
         projection: list[dict[str, Any]] = []
         for turn in turns:
-            projection = runner._merged_model_projection(projection, turn)
+            projection = run_commit._merged_model_projection(projection, turn)
         return projection
 
     def test_an_unresolved_request_resolves_to_what_every_turn_reported(self) -> None:

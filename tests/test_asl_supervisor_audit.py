@@ -5321,7 +5321,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
     ) -> None:
         """Record one commit before the run's terminal record.
 
-        Shaped like ``runner._run_asl_commit``'s payload, which writes
+        Shaped like ``run_commit._run_asl_commit``'s payload, which writes
         ``success`` and ``status_result`` and no ``ok`` field. A helper that adds
         one grades a record no run emits, and hides that every commit failure but
         ``nonzero-exit`` is reached at exit zero.

@@ -3626,7 +3626,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess,
+                    agent_mux_delivery.subprocess,
                     "run",
                     return_value=self._accepted_delivery(),
                 ) as run,
@@ -3660,7 +3660,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess,
+                    agent_mux_delivery.subprocess,
                     "run",
                     return_value=self._accepted_delivery(),
                 ) as run,
@@ -3695,7 +3695,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
                         return_value="/opt/amx",
                     ),
                     mock.patch.object(
-                        runner.subprocess,
+                        agent_mux_delivery.subprocess,
                         "run",
                         return_value=self._accepted_delivery(),
                     ) as run,
@@ -3725,7 +3725,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
                 mock.patch.object(
                     runner.agent_mux_delivery.shutil, "which", return_value=None
                 ),
-                mock.patch.object(runner.subprocess, "run") as run,
+                mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
                 run_persistence._notify_agent_mux_loop_wait_started(
                     payload,
@@ -3811,7 +3811,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess,
+                    agent_mux_delivery.subprocess,
                     "run",
                     return_value=self._accepted_delivery(),
                 ) as run,
@@ -3848,7 +3848,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess,
+                    agent_mux_delivery.subprocess,
                     "run",
                     return_value=self._accepted_delivery(),
                 ) as run,
@@ -3880,7 +3880,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
-                    runner.subprocess,
+                    agent_mux_delivery.subprocess,
                     "run",
                     return_value=self._accepted_delivery(),
                 ) as run,
@@ -3908,7 +3908,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
                 mock.patch.object(
                     runner.agent_mux_delivery.shutil, "which", return_value=None
                 ),
-                mock.patch.object(runner.subprocess, "run") as run,
+                mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
                 turn_execution.notify_turn_hang_suspected(
                     payload,

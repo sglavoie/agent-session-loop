@@ -174,6 +174,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.review_session_body",
         "agent_session_loop.review_session_contract",
         "agent_session_loop.review_transitions",
+        "agent_session_loop.run_commit",
         "agent_session_loop.run_contention",
         "agent_session_loop.run_control",
         "agent_session_loop.run_coordination",

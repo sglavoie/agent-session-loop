@@ -36,6 +36,7 @@ from agent_session_loop import (
     plans,
     review_guard,
     review_repair,
+    run_commit,
     run_persistence,
     run_reporting,
     run_selection,
@@ -47,7 +48,9 @@ from agent_session_loop import (
 from agent_session_loop import verification as verification_module
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
+    REPO_ROOT,
     _contract_block,
+    assert_no_runner_import,
     fake_commit_harness_env,
     init_git_repo,
     init_multi_repo_workspace,
@@ -57,6 +60,37 @@ from tests.support import (
 )
 
 SPECS = DEFAULT_MULTI_REPO_SPECS[:2]
+
+#: The symbols `run_commit` took from the runner. The program's no-alias rule
+#: says the runner keeps none of them behind, so a re-export added later to
+#: rescue a stale patch target fails here rather than in review.
+MOVED_SYMBOLS = (
+    "_LiveTurn",
+    "_commit_paths",
+    "_build_invocation_payload",
+    "_resolved_model_record",
+    "_merged_model_projection",
+    "_commit_status_result",
+    "_write_commit_artifacts",
+    "_CommitGeneration",
+    "_commit_generation",
+    "_asl_commit_argv",
+    "_asl_commit_env",
+    "_snapshot_commit_descendants",
+    "_sweep_commit_descendants",
+    "_run_bounded_asl_commit",
+    "_run_asl_commit",
+    "_commit_started_payload",
+    "COMMIT_SUBPROCESS_GRACE_SECONDS",
+    "_COMMIT_DRAIN_SECONDS",
+    "CHECKOUT_ROOT",
+    "COMMIT_SUBCOMMAND_ARGV",
+)
+
+#: The three files a commit leaves behind, and the only paths this boundary is
+#: allowed to write. Everything else it produces is a payload it returns for
+#: the loop to append under the run's own lock.
+COMMIT_ARTIFACT_KEYS = ("stdout", "stderr", "result")
 
 
 def _turn_finished_emitters() -> set[str]:
@@ -84,6 +118,90 @@ def _turn_finished_emitters() -> set[str]:
                     emitters.add(node.name)
                     break
     return emitters
+
+
+def _filesystem_writers(source: str) -> dict[str, set[str]]:
+    """Map each function in ``source`` to the write calls it makes.
+
+    A write is either a reach into :mod:`agent_session_loop.durability` -- the
+    atomic writers this boundary is allowed to use -- or one of the raw
+    filesystem verbs a module could reach for instead. Both are collected so
+    the assertion can say *which* functions write and *how*, rather than only
+    counting.
+    """
+    raw_verbs = {"write_text", "write_bytes", "mkdir", "unlink", "touch", "rename"}
+    writers: dict[str, set[str]] = {}
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        calls: set[str] = set()
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            func = inner.func
+            if isinstance(func, ast.Name) and func.id == "open":
+                calls.add("open")
+            elif isinstance(func, ast.Attribute) and (
+                func.attr in raw_verbs or ast.unparse(func).startswith("durability.")
+            ):
+                calls.add(ast.unparse(func))
+        if calls:
+            writers[node.name] = calls
+    return writers
+
+
+class RunCommitBoundaryTests(unittest.TestCase):
+    """``run_commit`` is runner-free and writes only the commit artifacts."""
+
+    def setUp(self) -> None:
+        self.source = Path(run_commit.__file__ or "").read_text(encoding="utf-8")
+
+    def test_run_commit_does_not_import_the_runner(self) -> None:
+        assert_no_runner_import(self, run_commit)
+
+    def test_the_runner_keeps_no_alias_for_the_moved_symbols(self) -> None:
+        for name in MOVED_SYMBOLS:
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(runner, name))
+                self.assertTrue(hasattr(run_commit, name))
+
+    def test_only_the_artifact_writer_touches_the_filesystem(self) -> None:
+        # The subprocess this module runs can take minutes, so the run's write
+        # mutex is deliberately not held across it: the commit-started and
+        # commit-finished payloads are returned for the loop to persist. The
+        # one exception is the commit's own artifact directory, and it goes
+        # through the atomic writers rather than through `Path.write_text`.
+        self.assertEqual(
+            {
+                "_write_commit_artifacts": {
+                    "durability.write_text",
+                    "durability.write_json_file",
+                }
+            },
+            _filesystem_writers(self.source),
+        )
+
+    def test_the_artifact_layout_is_the_one_the_writer_writes(self) -> None:
+        paths = run_commit._commit_paths(
+            Path("/run"), commit_index=7, session_id="3", repository_alias="app"
+        )
+        self.assertEqual(
+            {"artifact_dir", *COMMIT_ARTIFACT_KEYS}, set(paths), msg=str(paths)
+        )
+        self.assertEqual("commit-0007-session-3-app", paths["artifact_dir"].name)
+        for key in COMMIT_ARTIFACT_KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(paths["artifact_dir"], paths[key].parent)
+
+    def test_the_checkout_root_resolves_to_this_repository(self) -> None:
+        # `Path(__file__).resolve().parent.parent` only answers the checkout
+        # while this module sits directly under the package directory. A module
+        # one directory deeper would resolve one level short and silently
+        # commit with whatever `asl` another install put on PYTHONPATH.
+        self.assertEqual(REPO_ROOT, run_commit.CHECKOUT_ROOT)
+        self.assertEqual(
+            Path(run_commit.__file__ or "").parent.name, "agent_session_loop"
+        )
 
 
 class TurnCommitSourceTests(unittest.TestCase):
@@ -432,7 +550,7 @@ class TurnCommitRunTests(unittest.TestCase):
         env = fake_commit_harness_env(self.tmp_path)
 
         with mock.patch.dict(os.environ, env):
-            commit = runner._run_asl_commit(
+            commit = run_commit._run_asl_commit(
                 cwd=repo,
                 run_dir=self.tmp_path / "pathspec-run",
                 commit_index=1,
@@ -440,7 +558,7 @@ class TurnCommitRunTests(unittest.TestCase):
                 repository_alias="SVC",
                 qualified_paths=["SVC:declared.txt"],
                 staging_paths=["SVC:declared.txt"],
-                generation=runner._CommitGeneration(harness="codex"),
+                generation=run_commit._CommitGeneration(harness="codex"),
             )
 
         self.assertEqual(0, commit["returncode"])
@@ -470,7 +588,7 @@ class TurnCommitRunTests(unittest.TestCase):
         env = fake_commit_harness_env(self.tmp_path)
 
         with mock.patch.dict(os.environ, env):
-            commit = runner._run_asl_commit(
+            commit = run_commit._run_asl_commit(
                 cwd=repo,
                 run_dir=self.tmp_path / "prestaged-run",
                 commit_index=1,
@@ -478,7 +596,7 @@ class TurnCommitRunTests(unittest.TestCase):
                 repository_alias="SVC",
                 qualified_paths=["SVC:declared.txt"],
                 staging_paths=["SVC:declared.txt"],
-                generation=runner._CommitGeneration(harness="codex"),
+                generation=run_commit._CommitGeneration(harness="codex"),
             )
 
         self.assertEqual(0, commit["returncode"])
@@ -499,7 +617,7 @@ class TurnCommitRunTests(unittest.TestCase):
         # Every run-owned commit carries a bound, including the default
         # selection a run that named no harness produces: an unbounded nested
         # commit is what turns one stalled message harness into a stalled loop.
-        default_argv = runner._asl_commit_argv(runner._CommitGeneration())
+        default_argv = run_commit._asl_commit_argv(run_commit._CommitGeneration())
         self.assertIn("--timeout", default_argv)
         self.assertEqual(
             str(commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS),
@@ -510,7 +628,7 @@ class TurnCommitRunTests(unittest.TestCase):
         unset = argparse.Namespace(harness="codex", timeout=None, model=None)
         self.assertEqual(
             commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS,
-            runner._commit_generation(unset).timeout,
+            run_commit._commit_generation(unset).timeout,
         )
 
         repo = self.repositories["SVC"]
@@ -522,7 +640,7 @@ class TurnCommitRunTests(unittest.TestCase):
 
         started = time.monotonic()
         with mock.patch.dict(os.environ, env):
-            commit = runner._run_asl_commit(
+            commit = run_commit._run_asl_commit(
                 cwd=repo,
                 run_dir=self.tmp_path / "bounded-run",
                 commit_index=1,
@@ -530,7 +648,7 @@ class TurnCommitRunTests(unittest.TestCase):
                 repository_alias="SVC",
                 qualified_paths=["SVC:declared.txt"],
                 staging_paths=["SVC:declared.txt"],
-                generation=runner._CommitGeneration(harness="codex", timeout=2),
+                generation=run_commit._CommitGeneration(harness="codex", timeout=2),
             )
         elapsed = time.monotonic() - started
 
@@ -574,16 +692,16 @@ class TurnCommitRunTests(unittest.TestCase):
 
         started = time.monotonic()
         with (
-            mock.patch.object(runner, "_asl_commit_argv", return_value=stub),
-            mock.patch.object(runner, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
+            mock.patch.object(run_commit, "_asl_commit_argv", return_value=stub),
+            mock.patch.object(run_commit, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
         ):
-            commit = runner._run_asl_commit(
+            commit = run_commit._run_asl_commit(
                 cwd=repo,
                 run_dir=self.tmp_path / "wedged-run",
                 commit_index=1,
                 session_id="1",
                 repository_alias="SVC",
-                generation=runner._CommitGeneration(harness="codex", timeout=1),
+                generation=run_commit._CommitGeneration(harness="codex", timeout=1),
             )
         elapsed = time.monotonic() - started
 
@@ -623,16 +741,16 @@ class TurnCommitRunTests(unittest.TestCase):
 
         started = time.monotonic()
         with (
-            mock.patch.object(runner, "_asl_commit_argv", return_value=stub),
-            mock.patch.object(runner, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
+            mock.patch.object(run_commit, "_asl_commit_argv", return_value=stub),
+            mock.patch.object(run_commit, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
         ):
-            commit = runner._run_asl_commit(
+            commit = run_commit._run_asl_commit(
                 cwd=repo,
                 run_dir=self.tmp_path / "detached-run",
                 commit_index=1,
                 session_id="1",
                 repository_alias="SVC",
-                generation=runner._CommitGeneration(harness="codex", timeout=1),
+                generation=run_commit._CommitGeneration(harness="codex", timeout=1),
             )
         elapsed = time.monotonic() - started
 
@@ -705,7 +823,7 @@ class TurnCommitRunTests(unittest.TestCase):
         ]
         self.addCleanup(self._reap_recorded_pids, early_pid_path, late_pid_path)
 
-        take_snapshot = runner._snapshot_commit_descendants
+        take_snapshot = run_commit._snapshot_commit_descendants
         captured: dict[str, Any] = {}
 
         def fork_after_snapshot(root_pid: int) -> tuple[Any, ...]:
@@ -719,19 +837,19 @@ class TurnCommitRunTests(unittest.TestCase):
 
         started = time.monotonic()
         with (
-            mock.patch.object(runner, "_asl_commit_argv", return_value=stub),
-            mock.patch.object(runner, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
+            mock.patch.object(run_commit, "_asl_commit_argv", return_value=stub),
+            mock.patch.object(run_commit, "COMMIT_SUBPROCESS_GRACE_SECONDS", 1),
             mock.patch.object(
-                runner, "_snapshot_commit_descendants", fork_after_snapshot
+                run_commit, "_snapshot_commit_descendants", fork_after_snapshot
             ),
         ):
-            commit = runner._run_asl_commit(
+            commit = run_commit._run_asl_commit(
                 cwd=repo,
                 run_dir=self.tmp_path / "late-fork-run",
                 commit_index=1,
                 session_id="1",
                 repository_alias="SVC",
-                generation=runner._CommitGeneration(harness="codex", timeout=1),
+                generation=run_commit._CommitGeneration(harness="codex", timeout=1),
             )
         elapsed = time.monotonic() - started
 
