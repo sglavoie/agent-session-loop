@@ -17,7 +17,6 @@ import functools
 import hashlib
 import json
 import os
-import re
 import shlex
 import signal
 import stat
@@ -73,6 +72,7 @@ from . import (
     run_control,
     run_coordination,
     run_flags,
+    run_inputs,
     run_prompts,
     run_selection,
     state,
@@ -317,21 +317,14 @@ REVIEW_VERDICT_FINGERPRINT_PREFIX = review_transitions.REVIEW_VERDICT_FINGERPRIN
 # is not converging, and every further turn costs a full harness launch.
 MAX_HANDOFF_CORRECTION_ATTEMPTS = 1
 
-# Review repair/rereview cycle control. After a generated review session
-# completes with structured findings, the runner materializes same-plan repair
-# children (``agent_session_loop.review_repair``), executes them serially, and
-# appends the next top-level review session — one *cycle*. Cycles are bounded
-# by ``--max-review-fix-cycles`` (default below; ``0`` still reviews but never
-# creates repair sessions; ``--max-review-fix-plans`` is a deprecated alias),
-# per-group reopen attempts default to two, and the operator-facing cycle cap
-# cannot exceed its absolute ceiling unless that ceiling is raised too.
-# Every review completion appends a ``review_cycle`` event whose fingerprints
+# How one repair/rereview cycle ended. The caps that bound those cycles are
+# resolved in ``run_inputs``; the dispositions themselves are declared beside
+# the continuation policy in ``review_continuation`` and re-exported here for
+# the call sites and tests that read them at this name. Every review completion
+# appends a ``review_cycle`` event whose fingerprints
 # (:func:`review.finding_fingerprint`) let the next cycle detect repeated
 # findings across processes; a repeated fingerprint stops the loop without
 # another cycle.
-DEFAULT_MAX_REPAIR_GROUP_ATTEMPTS = 2
-DEFAULT_MAX_REVIEW_FIX_CYCLES = 4
-DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING = 8
 REVIEW_CYCLE_DISPOSITION_ALL_CLEAR = (
     review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
 )
@@ -412,32 +405,6 @@ _status_changes = plans.status_changes
 _pending_completed = plans.pending_completed
 
 
-def _repository_path_label(alias: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]+", "-", alias).strip("-") or "repository"
-
-
-def _invalid_status_pause(
-    snapshot: plans.PlanSnapshot,
-) -> tuple[str, str, dict[str, Any]] | None:
-    unknown_sessions = _sessions_with_status(snapshot, "unknown")
-    if unknown_sessions:
-        return (
-            "unknown-status",
-            "one or more session handoff statuses are not pending or complete",
-            {"sessions": unknown_sessions},
-        )
-
-    empty_sessions = _sessions_with_status(snapshot, "empty")
-    if empty_sessions:
-        return (
-            "malformed-plan",
-            "one or more session files are missing a populated handoff status",
-            {"sessions": empty_sessions},
-        )
-
-    return None
-
-
 # Reading the control markers a turn's own output carries is part of executing
 # the turn, so the parsers moved with it into ``turn_execution``.
 _signal_line_candidates = turn_execution.signal_line_candidates
@@ -452,323 +419,6 @@ _approval_match_is_content = turn_execution.approval_match_is_content
 _live_action_signal = turn_execution.live_action_signal
 _LIVE_ACTION_REQUIRED_REASONS = turn_execution.LIVE_ACTION_REQUIRED_REASONS
 _clear_live_action_required = turn_execution.clear_live_action_required
-
-
-def _all_sessions_complete(snapshot: plans.PlanSnapshot) -> bool:
-    return all(session.status == "complete" for session in snapshot.sessions)
-
-
-def _validate_run_inputs(
-    args: argparse.Namespace,
-) -> tuple[Path, int | None, int | None, str | None]:
-    cwd = plans.canonicalize_path(args.cwd)
-    if not cwd.is_dir():
-        raise plans.PlanError(f"cwd does not exist or is not a directory: {cwd}")
-
-    commit_mode = run_selection._commit_mode(args)
-
-    # The numeric/harness cross-field checks live in ``run_flags`` so the CLI
-    # runner and the supervisor helper enforce identical rules; cwd existence
-    # and commit-mode resolution stay here because they are CLI-runner specific.
-    errors = run_flags.validate_run_namespace(
-        args,
-        default_max_review_fix_cycles_ceiling=DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING,
-    )
-    if errors:
-        raise RunError(errors[0].message)
-
-    if getattr(args, "spark", False):
-        baseline = config.selected_model_payload(
-            "codex", getattr(args, "harness_model", None)
-        )
-        if baseline["model_source"] == config.MODEL_SOURCE_UNRESOLVED:
-            raise RunError(
-                "--spark requires a distinct resolved baseline model; pass "
-                "--harness-model or configure Codex's default model"
-            )
-        if baseline["model"] == run_selection.SPARK_MODEL:
-            raise RunError(
-                "--spark baseline must differ from the Spark model "
-                f"{run_selection.SPARK_MODEL!r}"
-            )
-
-    _review_guard_excludes(args)
-
-    timeout = getattr(args, "timeout", None)
-    max_sessions = getattr(args, "max_sessions", None)
-    return cwd, timeout, max_sessions, commit_mode
-
-
-def _resolve_run_verification_context(
-    plan_dir: str | Path,
-    cwd: Path,
-) -> verification.VerificationContext:
-    """Resolve the run root once and enforce prepare's durable binding."""
-    registry = plans.read_repository_registry(plan_dir)
-    metadata = plans.load_plan_metadata(plan_dir)
-    if registry is None:
-        if isinstance(metadata, plans.WorkspacePlanMetadata):
-            raise plans.PlanError(
-                "legacy plan has incompatible multi-repository workspace metadata"
-            )
-        if isinstance(metadata, plans.PlanMetadata) and metadata.cwd != str(cwd):
-            raise plans.PlanError(
-                f"run cwd does not match stored plan metadata: {cwd} != {metadata.cwd}"
-            )
-        return verification.VerificationContext.legacy(cwd, plan_dir=plan_dir)
-
-    try:
-        workspace = workspaces.resolve_workspace(cwd, registry)
-    except workspaces.WorkspaceError as error:
-        raise plans.PlanError(f"invalid run workspace: {error}") from error
-    if metadata is None:
-        raise plans.PlanError(
-            "registered plan has no prepared workspace binding; run prepare first"
-        )
-    if not isinstance(metadata, plans.WorkspacePlanMetadata):
-        raise plans.PlanError(
-            "registered plan has incompatible legacy workspace metadata"
-        )
-    if (
-        metadata.workspace_root != str(workspace.root)
-        or metadata.registry_digest != registry.digest
-    ):
-        raise plans.PlanError(
-            "run workspace does not match the prepared workspace binding"
-        )
-    return verification.VerificationContext.resolved_workspace(workspace)
-
-
-def _validate_resume_workspace_binding(
-    args: argparse.Namespace,
-    context: verification.VerificationContext,
-) -> None:
-    """Reject a resume whose current binding differs from its paused run."""
-    persisted = getattr(args, "_resume_workspace_config", None)
-    if not isinstance(persisted, dict):
-        return
-    if context.workspace is None:
-        if any(
-            persisted.get(key) is not None
-            for key in ("workspace_root", "registry_digest", "repositories")
-        ):
-            raise plans.PlanError(
-                "resume workspace mode does not match the persisted run"
-            )
-        return
-    current = run_prompts._workspace_payload_fields(context)
-    for key in ("workspace_root", "registry_digest", "repositories"):
-        if persisted.get(key) != current[key]:
-            raise plans.PlanError(
-                "resume workspace binding does not match the persisted run"
-            )
-
-
-def _runner_owned_roots(
-    plan_dir: Path,
-    state_dir_arg: str | None,
-    *,
-    run_dir: Path | None = None,
-) -> tuple[Path, ...]:
-    """Trees ASL owns, which never count as a repository the run reaches.
-
-    An operator may legitimately keep the plan directory, the state root, or a
-    run directory inside an unrelated checkout. Those are the runner's own
-    bookkeeping, not the work whose destination this gate decides.
-    """
-    roots = [plan_dir, state.state_root(state_dir_arg)]
-    if run_dir is not None:
-        roots.append(run_dir)
-    return tuple(roots)
-
-
-def _repository_intent_message(
-    report: Mapping[str, Any],
-    *,
-    subject: str = "run",
-    registration: repository_registration.RegistrationResult | None = None,
-) -> str:
-    """Name the conflicting roots. ``report`` is already credential-redacted.
-
-    ``registration`` is the outcome of the migration the run gate applies
-    before pausing; without it the message asks for the whole repair by hand.
-    """
-    git_roots = ", ".join(report.get("git_roots", ()))
-    head = (
-        f"{subject} reaches {report.get('git_root_count', 0)} git repositories "
-        f"({git_roots}) but manifest.md declares no top-level `## Repositories` "
-        "table"
-    )
-    if registration is not None and registration.status == "applied":
-        commands = "; then: ".join(registration.next_commands)
-        return (
-            f"{head}; the registry was derived from disk and written into the "
-            f"plan ({len(registration.files)} file(s) rewritten), so nothing is "
-            f"left to hand-edit; run: {commands}"
-        )
-    if registration is not None and registration.status == "refused":
-        return (
-            f"{head}; the registry could not be derived automatically "
-            f"({registration.missing_fact}: {registration.detail}); supply "
-            "that fact, then declare the registry, give every session read and "
-            "write repository scopes, and prepare the workspace before running "
-            "this plan"
-        )
-    return (
-        f"{head}; declare the registry, give every session read and write "
-        "repository scopes, and prepare the workspace before running this plan"
-    )
-
-
-def _run_repository_intent_report(
-    plan_dir: Path,
-    context: verification.VerificationContext,
-    *,
-    state_dir_arg: str | None,
-) -> dict[str, Any] | None:
-    """Judge the repositories this run intends to reach, or ``None`` if one.
-
-    This is the final authority: preflight can be skipped by a loop-ready
-    short circuit and prepare can be skipped entirely by a legacy plan, so a
-    run that never re-derives the verdict here has no gate at all. A registered
-    workspace is exempt because its registry already names every repository.
-    """
-    if context.workspace is not None:
-        return None
-    _, report = preflight.plan_repository_intent(
-        plan_dir,
-        context.root,
-        extra_exempt_roots=_runner_owned_roots(plan_dir, state_dir_arg),
-    )
-    return report
-
-
-def _apply_repository_registry(
-    snapshot: plans.PlanSnapshot,
-    *,
-    cwd: Path,
-) -> tuple[repository_registration.RegistrationResult | None, str | None]:
-    """Write the registry this gate refuses for, when that is still safe.
-
-    Safety is the migration's own rule rather than a private one repeated
-    here: a registry makes a completed handoff's unqualified ``Files
-    modified`` entries illegal, so
-    :func:`repository_registration.register_repositories` refuses a plan
-    carrying one before writing a byte. The run pauses either way, because the
-    rebind the migration names re-runs the prepare pipeline — a validator
-    harness and fresh baselines — which is too large a side effect to trigger
-    silently from a gate.
-    """
-    try:
-        result = repository_registration.register_repositories(
-            snapshot.plan_dir, cwd=cwd
-        )
-    except (plans.PlanError, OSError) as error:
-        return None, str(error)
-    return result, None
-
-
-def _task_packet_artifact_paths(
-    plan_dir: Path,
-    session_id: str,
-    predecessor_id: str | None,
-) -> tuple[Path, ...]:
-    """Every artifact a task packet tells the worker to open and act on."""
-    selected = plans.parse_session_id(session_id)
-    paths = [
-        plan_dir / selected.filename,
-        plan_dir / selected.expansion_filename,
-        plan_dir / "context.md",
-        plan_dir / plans.PROGRESS_FILE_NAME,
-    ]
-    if predecessor_id is not None:
-        paths.append(plan_dir / plans.parse_session_id(predecessor_id).filename)
-    return tuple(paths)
-
-
-def _task_packet_repository_intent_report(
-    prompt: str,
-    *,
-    root: Path,
-    artifact_paths: Sequence[Path],
-    exempt_roots: Sequence[Path],
-    provenance_roots: Sequence[Path] = (),
-) -> dict[str, Any] | None:
-    """Re-derive the verdict from what this turn actually hands the worker.
-
-    The run-level gate judges the plan as split. A turn can carry more than
-    that: expansion notes, shared context, a predecessor handoff, live mailbox
-    guidance, an operator reply, and repair references all reach the worker
-    through the rendered prompt or through the files it points at. Reading
-    them here is what stops a location that no plan file declared from
-    redirecting a legacy turn into a second repository.
-
-    The artifacts read here are plan documents, so provenance metadata is
-    filtered exactly as the plan-level scan filters it, and
-    ``provenance_roots`` carries the declared source document forward. A turn
-    quoting where the plan came from is not a turn that redirects anywhere.
-    """
-    candidates = list(repository_intent.candidates_from_plan_document(prompt))
-    candidates.extend(repository_intent.candidates_from_task_packet(artifact_paths))
-    for path in artifact_paths:
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        candidates.extend(repository_intent.candidates_from_plan_document(text))
-    candidates.extend(repository_intent.candidates_from_execution_roots([root]))
-    intent = repository_intent.resolve_intent(
-        candidates,
-        root=root,
-        exempt_roots=exempt_roots,
-        provenance_roots=provenance_roots,
-    )
-    if not intent.registry_required:
-        return None
-    return repository_intent.intent_report(intent)
-
-
-def _ensure_legacy_run_metadata(
-    plan_dir: Path,
-    context: verification.VerificationContext,
-) -> None:
-    """First-bind an unprepared legacy plan without rewriting existing metadata."""
-    if context.workspace is not None:
-        return
-    if plans.load_plan_metadata(plan_dir) is None:
-        plans.save_plan_metadata(plan_dir, context.root)
-
-
-def _max_review_fix_cycles(args: argparse.Namespace) -> int:
-    """Resolve the repair/rereview cycle cap for this run.
-
-    ``--max-review-fix-cycles`` wins; the deprecated ``--max-review-fix-plans``
-    alias is honored when it is the only flag supplied; otherwise the default
-    applies. Values are validated by :func:`_validate_run_inputs`.
-    """
-    cycles = getattr(args, "max_review_fix_cycles", None)
-    if cycles is not None:
-        return cycles
-    legacy_cycles = getattr(args, "max_review_fix_plans", None)
-    if legacy_cycles is not None:
-        return legacy_cycles
-    return DEFAULT_MAX_REVIEW_FIX_CYCLES
-
-
-def _max_repair_group_attempts(args: argparse.Namespace) -> int:
-    """Resolve the per-group repair reopen cap for this run."""
-    attempts = getattr(args, "max_repair_group_attempts", None)
-    if attempts is not None:
-        return attempts
-    return DEFAULT_MAX_REPAIR_GROUP_ATTEMPTS
-
-
-def _max_review_fix_cycles_ceiling(args: argparse.Namespace) -> int:
-    """Resolve the absolute repair/rereview cycle ceiling for this run."""
-    ceiling = getattr(args, "max_review_fix_cycles_ceiling", None)
-    if ceiling is not None:
-        return ceiling
-    return DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING
 
 
 def _review_guard_excludes(args: argparse.Namespace) -> tuple[str, ...]:
@@ -1415,7 +1065,7 @@ def _commit_paths(
         session_id = plans.parse_session_id(session_id).value
     suffix = _session_path_label(session_id) if session_id is not None else "end"
     if repository_alias is not None:
-        suffix = f"{suffix}-{_repository_path_label(repository_alias)}"
+        suffix = f"{suffix}-{run_inputs._repository_path_label(repository_alias)}"
     artifact_dir = run_dir / f"commit-{commit_index:04d}-{suffix}"
     return {
         "artifact_dir": artifact_dir,
@@ -5131,7 +4781,7 @@ def _review_only_complete_start(
         return False
     if not report.ok:
         return False
-    if not _all_sessions_complete(snapshot):
+    if not run_inputs._all_sessions_complete(snapshot):
         return False
     readiness = report.readiness
     if readiness is None:
@@ -5207,7 +4857,7 @@ def _final_readiness_state(
 ) -> plans.ReadinessState:
     if payload.get("paused") or not payload.get("ok"):
         return "reviewed"
-    if _all_sessions_complete(snapshot):
+    if run_inputs._all_sessions_complete(snapshot):
         return "complete"
     return "loop-ready"
 
@@ -5409,7 +5059,7 @@ def _repair_readiness_gate(
         target_state: plans.ReadinessState = "loop-ready"
         if (
             review_requested
-            and _all_sessions_complete(snapshot)
+            and run_inputs._all_sessions_complete(snapshot)
             and report.readiness is not None
             and report.readiness.state == "complete"
         ):
@@ -6224,7 +5874,7 @@ def _advance_review_cycle(
         "repeated_findings": list(delta.repeated),
         "repeated_finding_keys": list(delta.repeated_keys),
         "repair_session_ids": [],
-        "max_repair_group_attempts": _max_repair_group_attempts(args),
+        "max_repair_group_attempts": run_inputs._max_repair_group_attempts(args),
         "max_review_fix_cycles": max_review_fix_cycles,
     }
     (
@@ -7502,8 +7152,8 @@ def _control_plane_digest_roots(
 ) -> tuple[Path, ...]:
     """The control-plane trees digested entry by entry before and after a turn.
 
-    Narrower than :func:`_runner_owned_roots`, which also names the whole state
-    root: this run's own plan directory, plan state directory, and run
+    Narrower than :func:`run_inputs._runner_owned_roots`, which also names the
+    whole state root: this run's own plan directory, plan state directory, and run
     directory are where a permitted control-plane mutation usually lands, and
     each is small enough to expand. The state root itself is digested too, but
     shallowly -- see :func:`_control_plane_shallow_digest_roots`.
@@ -7547,7 +7197,7 @@ def _turn_external_write_evidence(
         root=root,
         workspace_root=workspace_root,
         repository_roots=repository_roots,
-        control_plane_roots=_runner_owned_roots(
+        control_plane_roots=run_inputs._runner_owned_roots(
             plan_dir, state_dir_arg, run_dir=run_dir
         ),
         provenance_roots=preflight.plan_provenance_exempt_roots(plan_dir),
@@ -8283,7 +7933,9 @@ def _enforce_workspace_write_guard(
         external_writes=_turn_external_write_evidence(
             plan_dir=before.plan_dir,
             artifact_paths=(
-                *_task_packet_artifact_paths(before.plan_dir, session_id, None),
+                *run_inputs._task_packet_artifact_paths(
+                    before.plan_dir, session_id, None
+                ),
                 paths["last_message"],
             ),
             root=workspace.root,
@@ -8426,7 +8078,7 @@ def _enforce_legacy_implementation_write_guard(
         repository_roots={".": cwd},
     )
     artifact_paths = (
-        *_task_packet_artifact_paths(before.plan_dir, session_id, None),
+        *run_inputs._task_packet_artifact_paths(before.plan_dir, session_id, None),
         paths["last_message"],
     )
     evidence = _legacy_implementation_write_guard_evidence(
@@ -8437,7 +8089,7 @@ def _enforce_legacy_implementation_write_guard(
         unobserved=_legacy_unobserved_repositories(
             cwd=cwd,
             artifact_paths=artifact_paths,
-            exempt_roots=_runner_owned_roots(
+            exempt_roots=run_inputs._runner_owned_roots(
                 before.plan_dir, state_dir_arg, run_dir=run_dir
             ),
             provenance_roots=preflight.plan_provenance_exempt_roots(before.plan_dir),
@@ -9646,7 +9298,7 @@ def _repair_paused_handoff_status(
     pause_reason = _runner_pause_reason(str(runner_pause))
     if pause_reason == "runner-pause":
         return after, None
-    invalid = _invalid_status_pause(after)
+    invalid = run_inputs._invalid_status_pause(after)
     if invalid is None:
         return after, None
     sessions = invalid[2].get("sessions") or []
@@ -9744,9 +9396,11 @@ def _run_config_payload(
         "timeout": getattr(args, "timeout", None),
         "max_sessions": getattr(args, "max_sessions", None),
         "max_pending_sessions": getattr(args, "max_pending_sessions", None),
-        "max_repair_group_attempts": _max_repair_group_attempts(args),
-        "max_review_fix_cycles": _max_review_fix_cycles(args),
-        "max_review_fix_cycles_ceiling": _max_review_fix_cycles_ceiling(args),
+        "max_repair_group_attempts": run_inputs._max_repair_group_attempts(args),
+        "max_review_fix_cycles": run_inputs._max_review_fix_cycles(args),
+        "max_review_fix_cycles_ceiling": run_inputs._max_review_fix_cycles_ceiling(
+            args
+        ),
         "review_guard_exclude": list(_review_guard_excludes(args)),
         "review_guard_include_ignored": _review_guard_include_ignored(args),
         "commit_mode": commit_mode,
@@ -9865,7 +9519,7 @@ def _initial_payload(
         review_completed=False,
         review_verdict=None,
         review_skipped_reason=None,
-        max_review_fix_cycles=_max_review_fix_cycles(args),
+        max_review_fix_cycles=run_inputs._max_review_fix_cycles(args),
         review_cycles=[],
         review_fix_disposition=None,
         review_resume=None,
@@ -10142,7 +9796,7 @@ def _run_locked(
         payload["pause_details"] = dict(payload["details"])
         return 1, payload
     if not args.dry_run:
-        _ensure_legacy_run_metadata(snapshot.plan_dir, verification_context)
+        run_inputs._ensure_legacy_run_metadata(snapshot.plan_dir, verification_context)
     state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
     run_dir = state_dir / "runs" / run_id
     # The run's command gate. Constructed for every run and left empty until a
@@ -10495,7 +10149,7 @@ def _run_locked(
     progress.run_started(payload)
     progress.orphaned_state(orphan_candidates)
 
-    invalid_pause = _invalid_status_pause(snapshot)
+    invalid_pause = run_inputs._invalid_status_pause(snapshot)
     if invalid_pause is not None:
         reason, message, details = invalid_pause
         with persistence.lock:
@@ -10541,7 +10195,7 @@ def _run_locked(
         settle_owed_commit_group()
 
     review_requested = getattr(args, "review_harness", None) is not None
-    max_review_fix_cycles = _max_review_fix_cycles(args)
+    max_review_fix_cycles = run_inputs._max_review_fix_cycles(args)
     review_resume: review_continuation.ReviewResume | None = None
     if review_requested:
         review_resume = _set_review_resume(
@@ -10549,13 +10203,13 @@ def _run_locked(
             event_path=event_path,
             payload=payload,
             persistence=persistence,
-            max_repair_group_attempts=_max_repair_group_attempts(args),
+            max_repair_group_attempts=run_inputs._max_repair_group_attempts(args),
             max_review_fix_cycles=max_review_fix_cycles,
             review_requested=True,
         )
 
     if snapshot.next_pending is None:
-        if not _all_sessions_complete(snapshot):
+        if not run_inputs._all_sessions_complete(snapshot):
             _pause_run(
                 event_path,
                 payload,
@@ -10673,7 +10327,7 @@ def _run_locked(
             event_path=event_path,
             payload=payload,
             persistence=persistence,
-            max_repair_group_attempts=_max_repair_group_attempts(args),
+            max_repair_group_attempts=run_inputs._max_repair_group_attempts(args),
             max_review_fix_cycles=max_review_fix_cycles,
             review_requested=True,
         )
@@ -11018,7 +10672,7 @@ def _run_locked(
             pending_session = snapshot.next_pending
 
             if pending_session is None:
-                if not _all_sessions_complete(snapshot):
+                if not run_inputs._all_sessions_complete(snapshot):
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(snapshot)
                     _pause_run(
@@ -11101,7 +10755,9 @@ def _run_locked(
                         event_path=event_path,
                         payload=payload,
                         persistence=persistence,
-                        max_repair_group_attempts=_max_repair_group_attempts(args),
+                        max_repair_group_attempts=run_inputs._max_repair_group_attempts(
+                            args
+                        ),
                         max_review_fix_cycles=max_review_fix_cycles,
                         review_requested=True,
                     )
@@ -11316,7 +10972,7 @@ def _run_locked(
                             payload=payload,
                             persistence=persistence,
                             max_repair_group_attempts=(
-                                _max_repair_group_attempts(args)
+                                run_inputs._max_repair_group_attempts(args)
                             ),
                             max_review_fix_cycles=max_review_fix_cycles,
                             review_requested=True,
@@ -11948,7 +11604,9 @@ def _run_locked(
                     payload=payload,
                     persistence=persistence,
                     workspace=workspace,
-                    max_repair_group_attempts=_max_repair_group_attempts(args),
+                    max_repair_group_attempts=run_inputs._max_repair_group_attempts(
+                        args
+                    ),
                     max_review_fix_cycles=max_review_fix_cycles,
                     review_requested=review_requested,
                 )
@@ -12153,13 +11811,13 @@ def _run_locked(
             packet_intent_report = (
                 None
                 if workspace is not None
-                else _task_packet_repository_intent_report(
+                else run_inputs._task_packet_repository_intent_report(
                     prompt,
                     root=cwd,
-                    artifact_paths=_task_packet_artifact_paths(
+                    artifact_paths=run_inputs._task_packet_artifact_paths(
                         before.plan_dir, session_id, predecessor_id
                     ),
-                    exempt_roots=_runner_owned_roots(
+                    exempt_roots=run_inputs._runner_owned_roots(
                         before.plan_dir, args.state_dir, run_dir=run_dir
                     ),
                     provenance_roots=preflight.plan_provenance_exempt_roots(
@@ -12174,7 +11832,7 @@ def _run_locked(
                     event_path,
                     payload,
                     reason=(events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED),
-                    message=_repository_intent_message(
+                    message=run_inputs._repository_intent_message(
                         packet_intent_report,
                         subject=f"task packet for {session_label}",
                     ),
@@ -13168,7 +12826,7 @@ def _run_locked(
                 turn_index=turn_index,
                 runner_pause=turn_payload.get("runner_pause"),
             )
-            invalid_pause = _invalid_status_pause(after)
+            invalid_pause = run_inputs._invalid_status_pause(after)
             if invalid_pause is not None:
                 reason, message, details = invalid_pause
                 with persistence.lock:
@@ -13927,7 +13585,9 @@ def _run_locked(
                     event_path=event_path,
                     payload=payload,
                     persistence=persistence,
-                    max_repair_group_attempts=_max_repair_group_attempts(args),
+                    max_repair_group_attempts=run_inputs._max_repair_group_attempts(
+                        args
+                    ),
                     max_review_fix_cycles=max_review_fix_cycles,
                     review_requested=review_requested,
                 )
@@ -14146,7 +13806,7 @@ def _run_locked(
                 event_path=event_path,
                 payload=payload,
                 persistence=persistence,
-                max_repair_group_attempts=_max_repair_group_attempts(args),
+                max_repair_group_attempts=run_inputs._max_repair_group_attempts(args),
                 max_review_fix_cycles=max_review_fix_cycles,
                 review_requested=True,
             )
@@ -14795,7 +14455,10 @@ def run_from_args(
             return 1
 
     try:
-        cwd, timeout, max_sessions, commit_mode = _validate_run_inputs(args)
+        cwd, timeout, max_sessions, commit_mode = run_inputs._validate_run_inputs(
+            args,
+            resolve_review_guard_excludes=_review_guard_excludes,
+        )
     except (plans.PlanError, RunError) as error:
         payload = _error_payload(
             args,
@@ -14859,11 +14522,11 @@ def run_from_args(
         return 1
 
     try:
-        verification_context = _resolve_run_verification_context(
+        verification_context = run_inputs._resolve_run_verification_context(
             initial_snapshot.plan_dir,
             cwd,
         )
-        _validate_resume_workspace_binding(args, verification_context)
+        run_inputs._validate_resume_workspace_binding(args, verification_context)
     except plans.PlanError as error:
         payload = _error_payload(
             args,
@@ -14880,20 +14543,20 @@ def run_from_args(
     # Deliberately independent of `--allow-not-loop-ready`: the flag waives
     # readiness, and no readiness marking can stand in for the registry that
     # would have bound a second repository in the first place.
-    intent_report = _run_repository_intent_report(
+    intent_report = run_inputs._run_repository_intent_report(
         initial_snapshot.plan_dir,
         verification_context,
         state_dir_arg=args.state_dir,
     )
     if intent_report is not None:
-        registration, registration_error = _apply_repository_registry(
+        registration, registration_error = run_inputs._apply_repository_registry(
             initial_snapshot,
             cwd=verification_context.root,
         )
         payload = _error_payload(
             args,
             reason=events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
-            message=_repository_intent_message(
+            message=run_inputs._repository_intent_message(
                 intent_report, registration=registration
             ),
             paused=True,

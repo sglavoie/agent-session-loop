@@ -21,6 +21,7 @@ from agent_session_loop import (
     plans,
     prepare,
     run_flags,
+    run_inputs,
     run_selection,
     runner,
     state,
@@ -115,7 +116,10 @@ class SparkFlagTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(runner.RunError, "resolved baseline"),
             ):
-                runner._validate_run_inputs(unresolved)
+                run_inputs._validate_run_inputs(
+                    unresolved,
+                    resolve_review_guard_excludes=runner._review_guard_excludes,
+                )
 
             same_model = parser.parse_args(
                 [
@@ -129,7 +133,10 @@ class SparkFlagTests(unittest.TestCase):
                 ]
             )
             with self.assertRaisesRegex(runner.RunError, "must differ"):
-                runner._validate_run_inputs(same_model)
+                run_inputs._validate_run_inputs(
+                    same_model,
+                    resolve_review_guard_excludes=runner._review_guard_excludes,
+                )
 
 
 class SparkSuitabilityTests(unittest.TestCase):

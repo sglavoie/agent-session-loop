@@ -36,6 +36,7 @@ from agent_session_loop import (
     review_repair,
     review_session_body,
     review_session_contract,
+    run_inputs,
     runner,
     session_overview,
     state,
@@ -88,7 +89,9 @@ class RunFlagValidationTests(unittest.TestCase):
         )
 
         with self.assertRaises(runner.RunError) as caught:
-            runner._validate_run_inputs(args)
+            run_inputs._validate_run_inputs(
+                args, resolve_review_guard_excludes=runner._review_guard_excludes
+            )
         self.assertEqual(message, str(caught.exception))
 
         result = self.autopilot.parse_command(

@@ -46,6 +46,7 @@ from agent_session_loop import (
     review_session_body,
     review_session_contract,
     run_flags,
+    run_inputs,
     run_prompts,
     run_selection,
     runner,
@@ -1728,7 +1729,9 @@ class CommandAndConfigTests(unittest.TestCase):
                 commit_mode=None,
             )
             with self.assertRaises(runner.RunError) as raised:
-                runner._validate_run_inputs(args)
+                run_inputs._validate_run_inputs(
+                    args, resolve_review_guard_excludes=runner._review_guard_excludes
+                )
 
             message = str(raised.exception)
             self.assertIn("--review-harness must differ from --harness", message)
@@ -1745,7 +1748,9 @@ class CommandAndConfigTests(unittest.TestCase):
                 commit_mode=None,
             )
 
-            cwd, timeout, max_sessions, commit_mode = runner._validate_run_inputs(args)
+            cwd, timeout, max_sessions, commit_mode = run_inputs._validate_run_inputs(
+                args, resolve_review_guard_excludes=runner._review_guard_excludes
+            )
 
             self.assertEqual(Path(tmp).resolve(), cwd)
             self.assertIsNone(timeout)
@@ -1767,7 +1772,9 @@ class CommandAndConfigTests(unittest.TestCase):
             )
 
             with self.assertRaises(runner.RunError) as raised:
-                runner._validate_run_inputs(args)
+                run_inputs._validate_run_inputs(
+                    args, resolve_review_guard_excludes=runner._review_guard_excludes
+                )
 
         self.assertEqual(
             "--review-harness-model requires --review-harness",
@@ -1786,7 +1793,9 @@ class CommandAndConfigTests(unittest.TestCase):
                 commit_mode=None,
             )
 
-            runner._validate_run_inputs(args)
+            run_inputs._validate_run_inputs(
+                args, resolve_review_guard_excludes=runner._review_guard_excludes
+            )
 
     def test_review_session_kind_constants(self) -> None:
         self.assertEqual("implementation", runner.SESSION_KIND_IMPLEMENTATION)

@@ -38,6 +38,7 @@ from agent_session_loop import (
     preflight,
     responses,
     review,
+    run_inputs,
     runner,
     state,
     tail,
@@ -1627,7 +1628,9 @@ class ParserAndStateTests(unittest.TestCase):
             )
             unknown = plans.inspect_plan(plan_dir)
             self.assertEqual("unknown", unknown.sessions[0].status)
-            self.assertEqual("unknown-status", runner._invalid_status_pause(unknown)[0])
+            self.assertEqual(
+                "unknown-status", run_inputs._invalid_status_pause(unknown)[0]
+            )
 
             (plan_dir / "session-1.md").write_text(
                 "# Session 1\n\n## Handoff\n\n- **Files modified**: none\n",
@@ -1635,7 +1638,9 @@ class ParserAndStateTests(unittest.TestCase):
             )
             empty = plans.inspect_plan(plan_dir)
             self.assertEqual("empty", empty.sessions[0].status)
-            self.assertEqual("malformed-plan", runner._invalid_status_pause(empty)[0])
+            self.assertEqual(
+                "malformed-plan", run_inputs._invalid_status_pause(empty)[0]
+            )
 
     def test_inspect_plan_wraps_plan_file_read_failures(self) -> None:
         cases = (

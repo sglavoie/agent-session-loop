@@ -83,6 +83,9 @@ from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     run_flags as _run_flags,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    run_inputs as _run_inputs,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     runner as _runner,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
@@ -309,13 +312,13 @@ USER_ACTION_REPLY = _pause_policy.USER_ACTION_REPLY
 classify_pause = _pause_policy.classify_pause
 
 # Default automatic repair/rereview cycle cap, mirroring
-# ``agent_session_loop.runner.DEFAULT_MAX_REVIEW_FIX_CYCLES``. The runner owns
+# ``agent_session_loop.run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES``. The runner owns
 # the repair cycles (Session 18): after a findings review it materializes
 # same-plan repair children, executes them, and rereviews — bounded by
 # ``asl run --max-review-fix-cycles`` (``--max-review-fix-plans`` is a
 # deprecated alias). The helper only validates and forwards the flag; it never
 # creates follow-up fix plans.
-DEFAULT_MAX_REVIEW_FIX_CYCLES = _runner.DEFAULT_MAX_REVIEW_FIX_CYCLES
+DEFAULT_MAX_REVIEW_FIX_CYCLES = _run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES
 
 # Final review artifacts. When a run uses `--review-harness`, ASL writes the
 # review verdict to `<plan-dir>/final-review.md` with a single trailing
@@ -559,7 +562,7 @@ def parse_command(command: str) -> dict:
         namespace,
         defer_resume_dependent=bool(getattr(namespace, "resume", False)),
         default_max_review_fix_cycles_ceiling=(
-            _runner.DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING
+            _run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING
         ),
     )
     if validation_errors:

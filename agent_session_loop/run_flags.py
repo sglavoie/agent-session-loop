@@ -9,7 +9,7 @@ operator actually passed). The two drifted whenever a flag changed.
 This module replaces both hand-written parsers with one declarative spec
 (:data:`RUN_FLAG_SPEC`). :func:`add_run_arguments` builds an ``argparse`` parser
 from the spec in one of three modes, and :func:`validate_run_namespace` holds the
-numeric/harness cross-field checks that both ``runner._validate_run_inputs`` and
+numeric/harness cross-field checks that both ``run_inputs._validate_run_inputs`` and
 the supervisor helper enforce, so they can never disagree.
 
 The spec emits flags in the same fixed order the helper's argv reconstruction
@@ -458,7 +458,7 @@ def validate_run_namespace(
     """Return the shared numeric/harness cross-field errors for ``ns``.
 
     This is the single source of truth for the checks that both
-    ``runner._validate_run_inputs`` and the supervisor helper enforce, so they
+    ``run_inputs._validate_run_inputs`` and the supervisor helper enforce, so they
     can never disagree. Attributes are read defensively with ``getattr`` so a
     partial namespace (e.g. a resume overlay) validates cleanly. Callers decide
     how to surface the errors (the runner raises ``RunError`` from the first;
@@ -469,12 +469,13 @@ def validate_run_namespace(
     ``run_config`` — specifically ``--review-harness-model`` requiring
     ``--review-harness``, where the harness can be rehydrated from state. The
     runner validates *after* applying the resume overlay (``_apply_resume_config``
-    runs before ``_validate_run_inputs``), so it always sees the effective config
-    and never sets this flag. The supervisor helper validates the raw command
-    *before* any overlay, so it sets this flag on a resume command and safely
-    defers the check to the child, which the runner re-runs against the overlaid
-    namespace. This keeps supervisor and runner parity for a model-only resume
-    override while still rejecting the same misuse on a non-resume command.
+    runs before ``run_inputs._validate_run_inputs``), so it always sees the
+    effective config and never sets this flag. The supervisor helper validates
+    the raw command *before* any overlay, so it sets this flag on a resume
+    command and safely defers the check to the child, which the runner re-runs
+    against the overlaid namespace. This keeps supervisor and runner parity for
+    a model-only resume override while still rejecting the same misuse on a
+    non-resume command.
     """
     errors: list[FlagError] = []
 

@@ -38,7 +38,7 @@ SPEC.loader.exec_module(autopilot)
 # Loading the helper installs the repository root on ``sys.path`` so this test
 # remains directly executable from an arbitrary working directory.
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
-    runner,
+    run_inputs,
     supervision_liveness,
 )
 
@@ -143,9 +143,9 @@ class MainTest(unittest.TestCase):
 
 
 class ParseCommandTest(unittest.TestCase):
-    def test_review_cycle_default_matches_runner(self) -> None:
+    def test_review_cycle_default_matches_run_inputs(self) -> None:
         self.assertEqual(
-            runner.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+            run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES,
             autopilot.DEFAULT_MAX_REVIEW_FIX_CYCLES,
         )
 
@@ -305,7 +305,8 @@ class ParseCommandTest(unittest.TestCase):
         # persisted run_config, so a model-only override must not be rejected at
         # parse time; the cross-field check is deferred to the child, which the
         # runner re-runs after applying the resume overlay. This mirrors runner
-        # behavior (`_apply_resume_config` runs before `_validate_run_inputs`).
+        # behavior (`_apply_resume_config` runs before
+        # `run_inputs._validate_run_inputs`).
         result = autopilot.parse_command(
             "asl run /tmp/plan --resume --review-harness-model gpt-5"
         )

@@ -32,6 +32,7 @@ from agent_session_loop import (
     review_repair,
     review_session_body,
     review_session_contract,
+    run_inputs,
     runner,
     state,
     workbench,
@@ -4054,38 +4055,51 @@ class ReviewRepairCycleTests(unittest.TestCase):
 
     def test_max_review_fix_cycles_resolution_and_alias(self) -> None:
         self.assertEqual(
-            runner.DEFAULT_MAX_REVIEW_FIX_CYCLES,
-            runner._max_review_fix_cycles(self._run_args()),
+            run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+            run_inputs._max_review_fix_cycles(self._run_args()),
         )
         self.assertEqual(
             0,
-            runner._max_review_fix_cycles(self._run_args(max_review_fix_cycles=0)),
+            run_inputs._max_review_fix_cycles(self._run_args(max_review_fix_cycles=0)),
         )
         self.assertEqual(
             5,
-            runner._max_review_fix_cycles(self._run_args(max_review_fix_plans=5)),
+            run_inputs._max_review_fix_cycles(self._run_args(max_review_fix_plans=5)),
         )
         self.assertEqual(
             1,
-            runner._max_review_fix_cycles(
+            run_inputs._max_review_fix_cycles(
                 self._run_args(max_review_fix_cycles=1, max_review_fix_plans=9)
             ),
         )
 
     def test_run_input_validation_for_review_fix_flags(self) -> None:
-        runner._validate_run_inputs(self._run_args(max_review_fix_cycles=0))
-        runner._validate_run_inputs(self._run_args(max_review_fix_plans=0))
+        run_inputs._validate_run_inputs(
+            self._run_args(max_review_fix_cycles=0),
+            resolve_review_guard_excludes=runner._review_guard_excludes,
+        )
+        run_inputs._validate_run_inputs(
+            self._run_args(max_review_fix_plans=0),
+            resolve_review_guard_excludes=runner._review_guard_excludes,
+        )
         with self.assertRaisesRegex(
             runner.RunError, "--max-review-fix-cycles must be zero"
         ):
-            runner._validate_run_inputs(self._run_args(max_review_fix_cycles=-1))
+            run_inputs._validate_run_inputs(
+                self._run_args(max_review_fix_cycles=-1),
+                resolve_review_guard_excludes=runner._review_guard_excludes,
+            )
         with self.assertRaisesRegex(
             runner.RunError, "--max-review-fix-plans must be zero"
         ):
-            runner._validate_run_inputs(self._run_args(max_review_fix_plans=-2))
+            run_inputs._validate_run_inputs(
+                self._run_args(max_review_fix_plans=-2),
+                resolve_review_guard_excludes=runner._review_guard_excludes,
+            )
         with self.assertRaisesRegex(runner.RunError, "deprecated alias"):
-            runner._validate_run_inputs(
-                self._run_args(max_review_fix_cycles=2, max_review_fix_plans=2)
+            run_inputs._validate_run_inputs(
+                self._run_args(max_review_fix_cycles=2, max_review_fix_plans=2),
+                resolve_review_guard_excludes=runner._review_guard_excludes,
             )
 
     # ------------------------------------------------------------------

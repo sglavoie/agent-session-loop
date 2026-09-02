@@ -14,7 +14,7 @@ from agent_session_loop import (
     events,
     preflight,
     review_repair,
-    runner,
+    run_inputs,
     state,
     workbench,
 )
@@ -162,7 +162,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = _make_workbench_plan(tmp_path, "ready-continuation")
-            required_cap = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
+            required_cap = run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
             resume = workbench.review_continuation.ReviewResume(
                 source_cycle=2,
                 review_session_id="2",
@@ -172,7 +172,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 blocker=None,
                 historical_materializations=2,
                 minimum_required_cap=required_cap,
-                selected_cap=runner.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+                selected_cap=run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES,
             )
 
             with mock.patch.object(
@@ -197,7 +197,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = _make_workbench_plan(tmp_path, "ready-continuation-exhausted")
-            required_cap = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
+            required_cap = run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
             resume = workbench.review_continuation.ReviewResume(
                 source_cycle=2,
                 review_session_id="2",
@@ -207,7 +207,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 blocker=None,
                 historical_materializations=2,
                 minimum_required_cap=required_cap,
-                selected_cap=runner.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+                selected_cap=run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES,
                 max_repair_group_attempts=2,
                 repair_group_attempts={"runner": 2},
                 repair_groups=(
@@ -242,7 +242,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             plan_dir = _make_workbench_plan(tmp_path, "ready-rereview")
-            required_cap = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
+            required_cap = run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES + 1
             resume = workbench.review_continuation.ReviewResume(
                 source_cycle=2,
                 review_session_id="2",
@@ -252,7 +252,7 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 blocker=None,
                 historical_materializations=2,
                 minimum_required_cap=required_cap,
-                selected_cap=runner.DEFAULT_MAX_REVIEW_FIX_CYCLES,
+                selected_cap=run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES,
             )
 
             with mock.patch.object(

@@ -13,8 +13,8 @@ from pathlib import Path
 from agent_session_loop import (
     authoring,
     plans,
+    run_inputs,
     run_prompts,
-    runner,
     verification,
     workspaces,
 )
@@ -488,7 +488,7 @@ class WorkspaceMetadataTests(unittest.TestCase):
             current_binding = run_prompts._workspace_payload_fields(context)
             self.assertNotIn("workspace_inventory_excludes", current_binding)
 
-            runner._validate_resume_workspace_binding(
+            run_inputs._validate_resume_workspace_binding(
                 argparse.Namespace(
                     _resume_workspace_config={
                         **current_binding,
@@ -499,7 +499,7 @@ class WorkspaceMetadataTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(plans.PlanError, "persisted run"):
-                runner._validate_resume_workspace_binding(
+                run_inputs._validate_resume_workspace_binding(
                     argparse.Namespace(
                         _resume_workspace_config={
                             **current_binding,

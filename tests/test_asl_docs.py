@@ -42,6 +42,7 @@ from agent_session_loop import (
     retention,
     review,
     review_continuation,
+    run_inputs,
     runner,
     startup_context,
     state,
@@ -2913,7 +2914,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         )
         run_help = subparsers.choices["run"].format_help()
         self.assertIn(
-            f"review (default: {runner.DEFAULT_MAX_REVIEW_FIX_CYCLES}).",
+            f"review (default: {run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES}).",
             run_help,
         )
 
@@ -3015,9 +3016,9 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             self.assertIn(f"`{reason}`", self.docs)
 
     def test_docs_pin_review_cycle_default_and_lock_reclamation(self) -> None:
-        default_cycles = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES
-        default_group_attempts = runner.DEFAULT_MAX_REPAIR_GROUP_ATTEMPTS
-        default_cycle_ceiling = runner.DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING
+        default_cycles = run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES
+        default_group_attempts = run_inputs.DEFAULT_MAX_REPAIR_GROUP_ATTEMPTS
+        default_cycle_ceiling = run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES_CEILING
         self.assertIn(
             f"unique source-review materializations (default {default_cycles};",
             self.docs,
@@ -3114,7 +3115,9 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
             )
 
     def test_review_cycle_default_matches_runner_constant(self) -> None:
-        self.assertIn(f"(default {runner.DEFAULT_MAX_REVIEW_FIX_CYCLES};", self.docs)
+        self.assertIn(
+            f"(default {run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES};", self.docs
+        )
 
     def test_recoverable_pause_docs_match_autopilot(self) -> None:
         module_path = REPO_ROOT / "skills" / "asl" / "scripts" / "asl_autopilot.py"

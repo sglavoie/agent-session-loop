@@ -42,7 +42,7 @@ from . import (
     qna,
     responses,
     review_continuation,
-    runner,
+    run_inputs,
     state,
 )
 
@@ -4573,7 +4573,7 @@ def _build_review_continuation_recovery(
         )
         cap_exceeds_default = (
             resume.action == "materialize-repairs"
-            and resume.minimum_required_cap > runner.DEFAULT_MAX_REVIEW_FIX_CYCLES
+            and resume.minimum_required_cap > run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES
         )
         exhausted_group = (
             review_continuation.exhausted_repair_group_details(resume.to_payload())
