@@ -35,6 +35,7 @@ from agent_session_loop import (
     review,
     review_continuation,
     review_repair,
+    review_session_body,
     review_session_contract,
     runner,
     state,
@@ -157,7 +158,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         return json.dumps({"version": 2, "outcome": "all-clear", "findings": []})
 
     def _write_pending_review_session(self) -> plans.SessionFile:
-        return runner.ensure_generated_review_session(
+        return review_session_body.ensure_generated_review_session(
             self.plan_dir, review_harness="claude"
         )[0]
 
@@ -828,7 +829,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(scope_events))
         scope_payload = scope_events[0]["payload"]
-        self.assertEqual(runner.REVIEW_SCOPE_FULL, scope_payload["scope"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_FULL, scope_payload["scope"])
         self.assertIsNone(scope_payload["base_sha"])
         self.assertEqual("no-prior-repair-cycle", scope_payload["fallback_reason"])
         created_payload = next(
@@ -836,7 +837,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             for entry in events_log
             if entry.get("name") == events.REVIEW_SESSION_CREATED_EVENT
         )
-        self.assertEqual(runner.REVIEW_SCOPE_FULL, created_payload["review_scope"])
+        self.assertEqual(
+            review_session_body.REVIEW_SCOPE_FULL, created_payload["review_scope"]
+        )
         self.assertIsNone(created_payload["review_base_sha"])
         review_body = (
             self.plan_dir / f"session-{payload['review_session_id']}.md"
@@ -954,7 +957,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertIsNone(fallback_reason)
         # The prior run wrote its delta review against a clean tree, then died
         # before executing it.
-        review_session, created = runner.ensure_generated_review_session(
+        review_session, created = review_session_body.ensure_generated_review_session(
             self.plan_dir, review_harness="claude", delta=delta
         )
         self.assertTrue(created)
@@ -984,7 +987,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual(1, len(payload["turns"]))
         resumed_body = review_session.path.read_text(encoding="utf-8")
         self.assertIn("  - `src/late.py`", resumed_body)
-        flags = " ".join(runner._DELTA_DIFF_FLAGS)
+        flags = " ".join(review_session_body._DELTA_DIFF_FLAGS)
         self.assertIn(f"git diff {flags} {base}", resumed_body)
         scope_events = [
             entry["payload"]
@@ -992,7 +995,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             if entry["name"] == events.REVIEW_SCOPE_EVENT
         ]
         self.assertEqual(1, len(scope_events))
-        self.assertEqual(runner.REVIEW_SCOPE_DELTA, scope_events[0]["scope"])
+        self.assertEqual(
+            review_session_body.REVIEW_SCOPE_DELTA, scope_events[0]["scope"]
+        )
         self.assertEqual(base, scope_events[0]["base_sha"])
         self.assertIsNone(scope_events[0]["fallback_reason"])
         self.assertIs(True, scope_events[0]["refreshed"])
@@ -2407,7 +2412,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             cwd=self.repo_root,
         )
         self.assertIsNone(fallback_reason)
-        review_session, created = runner.ensure_generated_review_session(
+        review_session, created = review_session_body.ensure_generated_review_session(
             self.plan_dir, review_harness="claude", delta=delta
         )
         self.assertTrue(created)
@@ -2913,7 +2918,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
                 )
             },
         )
-        self.review_session = runner.ensure_generated_review_session(
+        self.review_session = review_session_body.ensure_generated_review_session(
             self.plan_dir, review_harness="claude"
         )[0]
 
@@ -3107,7 +3112,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
                 )
             },
         )
-        self.review_session = runner.ensure_generated_review_session(
+        self.review_session = review_session_body.ensure_generated_review_session(
             self.plan_dir, review_harness="claude"
         )[0]
 
@@ -4650,7 +4655,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
     def _scope_section(self, delta: dict[str, Any]) -> str:
         """Return the `### Scope` text the reviewer is actually told to read."""
-        body = runner.build_generated_review_session_body(
+        body = review_session_body.build_generated_review_session_body(
             plans.parse_session_id("3"),
             review_harness="codex",
             plan_dir=self.plan_dir,
@@ -4679,13 +4684,13 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertIsNone(fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_DELTA, delta["mode"])
         self.assertEqual(base, delta["base_sha"])
         self.assertEqual(["src/repair.py"], delta["changed_files"])
         self.assertEqual([self.finding], delta["prior_findings"])
 
         scope = self._scope_section(delta)
-        flags = " ".join(runner._DELTA_DIFF_FLAGS)
+        flags = " ".join(review_session_body._DELTA_DIFF_FLAGS)
         self.assertEqual(
             [
                 f"git diff {flags} {base}",
@@ -4710,7 +4715,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertIsNone(fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_DELTA, delta["mode"])
         self.assertEqual(["src/base.py", "src/collateral.py"], delta["changed_files"])
         self.assertIn("src/collateral.py", self._scope_section(delta))
 
@@ -4728,7 +4733,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertIsNone(fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_DELTA, delta["mode"])
         self.assertEqual(["src/repair.py"], delta["changed_files"])
         self.assertNotIn("generated/artifact.txt", self._scope_section(delta))
 
@@ -4770,7 +4775,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertIsNone(fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_DELTA, delta["mode"])
         self.assertEqual(["src/base.py", "src/repair.py"], delta["changed_files"])
         self.assertIs(True, delta["baseline_dirty"])
         scope = self._scope_section(delta)
@@ -4796,7 +4801,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertIsNone(fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_DELTA, delta["mode"])
         self.assertEqual(["src/scratch.py"], delta["changed_files"])
         self.assertIn("src/scratch.py", self._scope_section(delta))
 
@@ -4817,7 +4822,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertIsNone(fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_DELTA, delta["mode"])
         self.assertEqual(["src/base.py"], delta["changed_files"])
         self.assertIn("src/base.py", self._scope_section(delta))
 
@@ -4872,7 +4877,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         )
         # Both name selectors still see past the converter, so the repairs are
         # in the file list either way.
-        flags = list(runner._DELTA_DIFF_FLAGS)
+        flags = list(review_session_body._DELTA_DIFF_FLAGS)
         self.assertEqual("masked.txt", self._git("diff", "--name-only", *flags, base))
         self.assertEqual(
             "staged.txt",
@@ -4963,7 +4968,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
                 self.assertIsNone(fallback_reason)
                 assert delta is not None
-                self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+                self.assertEqual(review_session_body.REVIEW_SCOPE_DELTA, delta["mode"])
                 self.assertIn(rel, delta["changed_files"])
                 self.assertIn(rel, self._scope_section(delta))
 
@@ -4995,7 +5000,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertEqual("dirty-base-evidence-missing", fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_FULL, delta["mode"])
         self.assertNotIn("src/", self._scope_section(delta))
 
     def test_cycle_with_unknown_dirtiness_is_full_scope(self) -> None:
@@ -5008,7 +5013,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertEqual("dirty-base-evidence-missing", fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_FULL, delta["mode"])
 
     def test_cycle_without_recorded_base_falls_back_to_full_scope(
         self,
@@ -5020,7 +5025,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertEqual("no-recorded-base", fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_FULL, delta["mode"])
         self.assertNotIn("base_sha", delta)
         self.assertEqual([self.finding], delta["prior_findings"])
         self.assertNotIn("src/", self._scope_section(delta))
@@ -5033,7 +5038,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertEqual("base-unresolvable", fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_FULL, delta["mode"])
         self.assertNotIn("src/", self._scope_section(delta))
 
     def test_rewritten_history_falls_back_to_full_scope(self) -> None:
@@ -5050,7 +5055,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
         self.assertEqual("base-not-ancestor", fallback_reason)
         assert delta is not None
-        self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+        self.assertEqual(review_session_body.REVIEW_SCOPE_FULL, delta["mode"])
         # The reviewer is given no file list at all, so neither the handoff's
         # stale path nor the file the repair really changed can be excluded.
         scope = self._scope_section(delta)
@@ -5081,7 +5086,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
                 self.assertEqual(reason, fallback_reason)
                 assert delta is not None
-                self.assertEqual(runner.REVIEW_SCOPE_FULL, delta["mode"])
+                self.assertEqual(review_session_body.REVIEW_SCOPE_FULL, delta["mode"])
                 self.assertNotIn("src/", self._scope_section(delta))
 
     def _repo_state(self) -> dict[str, Any] | None:
@@ -5141,7 +5146,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         """Render the session file a crashed run would have left pending."""
         delta, fallback_reason = self._compute()
         self.assertIsNone(fallback_reason)
-        return runner.build_generated_review_session_body(
+        return review_session_body.build_generated_review_session_body(
             plans.parse_session_id("3"),
             review_harness="codex",
             plan_dir=self.plan_dir,
@@ -5159,7 +5164,9 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         # is the only thing that can tell the reviewer to read this one.
         (self.repo_root / "src" / "late.py").write_text("late\n", encoding="utf-8")
 
-        refreshed = runner.rescoped_review_session_body(original, self._compute()[0])
+        refreshed = review_session_body.rescoped_review_session_body(
+            original, self._compute()[0]
+        )
 
         assert refreshed is not None
         self.assertIn("  - `src/late.py`", refreshed)
@@ -5197,7 +5204,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         delta, fallback_reason = self._compute()
         self.assertEqual((None, "prior-findings-unavailable"), (delta, fallback_reason))
 
-        refreshed = runner.rescoped_review_session_body(original, delta)
+        refreshed = review_session_body.rescoped_review_session_body(original, delta)
 
         assert refreshed is not None
         self.assertIn("this scope is not narrowed", refreshed)
@@ -5208,24 +5215,28 @@ class ReviewDeltaScopeTests(unittest.TestCase):
 
     def test_a_full_scope_session_is_never_narrowed_by_a_refresh(self) -> None:
         self._record_repair_cycle(repo_head=self._commit("src/base.py", "b\n"))
-        full_body = runner.build_generated_review_session_body(
+        full_body = review_session_body.build_generated_review_session_body(
             plans.parse_session_id("3"),
             review_harness="codex",
             plan_dir=self.plan_dir,
         )
 
         self.assertIsNone(
-            runner.rescoped_review_session_body(full_body, self._compute()[0])
+            review_session_body.rescoped_review_session_body(
+                full_body, self._compute()[0]
+            )
         )
 
     def test_an_unparseable_scope_section_cannot_be_re_scoped(self) -> None:
         self._record_repair_cycle(repo_head=self._commit("src/base.py", "b\n"))
         mangled = self._pending_delta_body().replace(
-            f"{runner.REVIEW_SCOPE_DETAIL_HEADING}\n", "", 1
+            f"{review_session_body.REVIEW_SCOPE_DETAIL_HEADING}\n", "", 1
         )
 
         with self.assertRaises(plans.PlanError):
-            runner.rescoped_review_session_body(mangled, self._compute()[0])
+            review_session_body.rescoped_review_session_body(
+                mangled, self._compute()[0]
+            )
 
     def test_repo_state_is_derived_from_the_guard_fingerprint(self) -> None:
         head = self._git("rev-parse", "HEAD")
@@ -5425,7 +5436,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        review_body = runner.build_generated_review_session_body(
+        review_body = review_session_body.build_generated_review_session_body(
             plans.parse_session_id("3"),
             review_harness="claude",
             plan_dir=self.plan_dir,

@@ -45,6 +45,7 @@ from agent_session_loop import (
     mailbox_rendering,
     plans,
     process_tree,
+    review_session_body,
     run_control,
     runner,
     state,
@@ -3295,7 +3296,7 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
         """
         write_plan(self.plan_dir, statuses)
         if pending_review:
-            runner.ensure_generated_review_session(
+            review_session_body.ensure_generated_review_session(
                 self.plan_dir, review_harness=str(review_harness)
             )
         if stop_before_run:
@@ -3560,7 +3561,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
         if enable_mailbox:
             self._activate_mailbox()
         if pending_review:
-            runner.ensure_generated_review_session(
+            review_session_body.ensure_generated_review_session(
                 self.plan_dir, review_harness=str(review_harness)
             )
         if abort_before_run:

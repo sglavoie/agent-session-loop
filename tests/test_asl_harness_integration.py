@@ -41,6 +41,7 @@ from agent_session_loop import (
     plans,
     process_tree,
     progress_repair,
+    review_session_body,
     run_control,
     runner,
     state,
@@ -2885,7 +2886,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         configured = json.loads(config_path.read_text(encoding="utf-8"))
         configured["claude"] = {"executable": str(fake_codex)}
         config_path.write_text(json.dumps(configured), encoding="utf-8")
-        runner.ensure_generated_review_session(plan_dir, review_harness="claude")
+        review_session_body.ensure_generated_review_session(
+            plan_dir, review_harness="claude"
+        )
         control_queue.append_command(
             plan_dir,
             control_queue.COMMAND_SET_IMPLEMENTATION_MODEL,

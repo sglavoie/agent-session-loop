@@ -34,6 +34,7 @@ from agent_session_loop import (
     preflight,
     review,
     review_repair,
+    review_session_body,
     review_session_contract,
     runner,
     session_overview,
@@ -2503,7 +2504,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
         self.review_harness = "claude"
         session_path = self.plan_dir / "session-1.md"
         session_path.write_text(
-            runner.build_generated_review_session_body(
+            review_session_body.build_generated_review_session_body(
                 plans.parse_session_id("1"),
                 review_harness="claude",
                 plan_dir=self.plan_dir,

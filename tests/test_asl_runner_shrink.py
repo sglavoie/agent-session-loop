@@ -57,6 +57,7 @@ RUNNER_SHRINK_HISTORY: tuple[tuple[str, int, int], ...] = (
     ("3", 17242, 176),
     ("4", 16722, 170),
     ("5", 16206, 162),
+    ("6", 15760, 151),
 )
 
 #: Every ``X = <module>.Y`` assignment in the runner today, mapped to the

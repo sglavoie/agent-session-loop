@@ -18,6 +18,7 @@ from agent_session_loop import (
     plans,
     review,
     review_continuation,
+    review_session_body,
     review_session_contract,
     runner,
     supervisor_audit,
@@ -595,7 +596,7 @@ class BroadReviewGateTests(unittest.TestCase):
         if prior_review:
             prior_id = plans.next_top_level_session_id(plan_dir)
             (plan_dir / prior_id.filename).write_text(
-                runner.build_generated_review_session_body(
+                review_session_body.build_generated_review_session_body(
                     prior_id, review_harness="codex", plan_dir=plan_dir
                 ),
                 encoding="utf-8",
@@ -767,7 +768,7 @@ class BroadReviewGateTests(unittest.TestCase):
                 prior_review=False,
             )
             (plan_dir / review_id.filename).write_text(
-                runner.build_generated_review_session_body(
+                review_session_body.build_generated_review_session_body(
                     review_id, review_harness="codex", plan_dir=plan_dir
                 ),
                 encoding="utf-8",
@@ -790,7 +791,7 @@ class BroadReviewGateTests(unittest.TestCase):
 
 class ReviewArtifactProjectionTests(unittest.TestCase):
     def review_session_text(self, plan_dir: Path, files_modified: str) -> str:
-        body = runner.build_generated_review_session_body(
+        body = review_session_body.build_generated_review_session_body(
             plans.parse_session_id("2"), review_harness="codex", plan_dir=plan_dir
         ).replace("- **Status**: pending", "- **Status**: complete")
         return re.sub(

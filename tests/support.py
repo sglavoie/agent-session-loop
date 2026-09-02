@@ -36,6 +36,7 @@ from agent_session_loop import (
     prepare,
     process_tree,
     review,
+    review_session_body,
     run_control,
     runner,
     state,
@@ -769,7 +770,7 @@ def write_completed_review_plan(
         (("1", "complete"), ("2", "complete")),
         contracts_by_id=contracts_by_id,
     )
-    review_body = runner.build_generated_review_session_body(
+    review_body = review_session_body.build_generated_review_session_body(
         plans.parse_session_id("2"),
         review_harness="codex",
         plan_dir=plan_dir,

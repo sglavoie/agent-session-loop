@@ -30,6 +30,7 @@ from agent_session_loop import (
     review,
     review_continuation,
     review_repair,
+    review_session_body,
     review_session_contract,
     runner,
     state,
@@ -588,26 +589,26 @@ class StructuredReviewArtifactTests(unittest.TestCase):
             plan_dir = Path(tmp)
             session_id = plans.SessionId((7,))
 
-            full = runner.build_generated_review_session_body(
+            full = review_session_body.build_generated_review_session_body(
                 session_id, review_harness="claude", plan_dir=plan_dir
             )
-            delta = runner.build_generated_review_session_body(
+            delta = review_session_body.build_generated_review_session_body(
                 session_id,
                 review_harness="claude",
                 plan_dir=plan_dir,
                 delta={
-                    "mode": runner.REVIEW_SCOPE_DELTA,
+                    "mode": review_session_body.REVIEW_SCOPE_DELTA,
                     "base_sha": "f" * 40,
                     "changed_files": ["agent_session_loop/runner.py"],
                     "prior_findings": [finding],
                 },
             )
-            degraded = runner.build_generated_review_session_body(
+            degraded = review_session_body.build_generated_review_session_body(
                 session_id,
                 review_harness="claude",
                 plan_dir=plan_dir,
                 delta={
-                    "mode": runner.REVIEW_SCOPE_FULL,
+                    "mode": review_session_body.REVIEW_SCOPE_FULL,
                     "prior_findings": [finding],
                 },
             )
@@ -616,7 +617,7 @@ class StructuredReviewArtifactTests(unittest.TestCase):
             self.assertNotIn("## Delta Review Scope", full)
 
             self.assertIn("## Delta Review Scope", delta)
-            flags = " ".join(runner._DELTA_DIFF_FLAGS)
+            flags = " ".join(review_session_body._DELTA_DIFF_FLAGS)
             self.assertIn(f"git diff {flags} {'f' * 40}", delta)
             self.assertIn(f"git diff --cached {flags} {'f' * 40}", delta)
             self.assertIn("`agent_session_loop/runner.py`", delta)
@@ -661,7 +662,7 @@ class StructuredReviewArtifactTests(unittest.TestCase):
             plan_dir = Path(tmp)
             session_id = plans.SessionId((7,))
 
-            body = runner.build_generated_review_session_body(
+            body = review_session_body.build_generated_review_session_body(
                 session_id,
                 review_harness="claude",
                 plan_dir=plan_dir,
@@ -687,7 +688,7 @@ class StructuredReviewArtifactTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            body = runner.build_generated_review_session_body(
+            body = review_session_body.build_generated_review_session_body(
                 plans.SessionId((7,)),
                 review_harness="claude",
                 plan_dir=Path(tmp),
@@ -716,7 +717,7 @@ class StructuredReviewArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
             session_id = plans.SessionId((7,))
-            body = runner.build_generated_review_session_body(
+            body = review_session_body.build_generated_review_session_body(
                 session_id,
                 review_harness="claude",
                 plan_dir=plan_dir,
@@ -810,7 +811,9 @@ class GeneratedReviewReplayTests(unittest.TestCase):
         self._write_replay_plan()
 
         first = review_session_contract._broad_review_verification_checks(self.plan_dir)
-        runner.ensure_generated_review_session(self.plan_dir, review_harness="claude")
+        review_session_body.ensure_generated_review_session(
+            self.plan_dir, review_harness="claude"
+        )
         second = review_session_contract._broad_review_verification_checks(
             self.plan_dir
         )
@@ -828,11 +831,11 @@ class GeneratedReviewReplayTests(unittest.TestCase):
     ) -> None:
         self._write_replay_plan()
         session_id = plans.parse_session_id("3")
-        current = runner.build_generated_review_session_body(
+        current = review_session_body.build_generated_review_session_body(
             session_id,
             review_harness="claude",
             plan_dir=self.plan_dir,
-            delta={"mode": runner.REVIEW_SCOPE_FULL, "prior_findings": []},
+            delta={"mode": review_session_body.REVIEW_SCOPE_FULL, "prior_findings": []},
         )
         old = current.replace(
             review.review_session_version_marker(),
@@ -1321,7 +1324,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             "\n".join(session_one), encoding="utf-8"
         )
 
-        review_body = runner.build_generated_review_session_body(
+        review_body = review_session_body.build_generated_review_session_body(
             plans.parse_session_id("2"),
             review_harness="codex",
             plan_dir=self.plan_dir,
@@ -3092,7 +3095,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        review_body = runner.build_generated_review_session_body(
+        review_body = review_session_body.build_generated_review_session_body(
             plans.parse_session_id("3"),
             review_harness="codex",
             plan_dir=self.plan_dir,
@@ -3355,7 +3358,7 @@ def _write_repair_ready_plan(
     )
     (plan_dir / "session-1.md").write_text("\n".join(session_one), encoding="utf-8")
 
-    review_body = runner.build_generated_review_session_body(
+    review_body = review_session_body.build_generated_review_session_body(
         plans.parse_session_id("2"),
         review_harness="codex",
         plan_dir=plan_dir,
@@ -4471,7 +4474,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             self.plan_dir,
             (("1", "complete"), ("2", "complete"), ("2.1", "pending")),
         )
-        review_body = runner.build_generated_review_session_body(
+        review_body = review_session_body.build_generated_review_session_body(
             plans.parse_session_id("2"),
             review_harness="claude",
             plan_dir=self.plan_dir,
@@ -4534,7 +4537,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             ),
         )
         for review_id in ("2", "3"):
-            review_body = runner.build_generated_review_session_body(
+            review_body = review_session_body.build_generated_review_session_body(
                 plans.parse_session_id(review_id),
                 review_harness="claude",
                 plan_dir=self.plan_dir,
@@ -4628,7 +4631,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             self.plan_dir,
             (("1", "complete"), ("2.1", "pending")),
         )
-        review_body = runner.build_generated_review_session_body(
+        review_body = review_session_body.build_generated_review_session_body(
             plans.parse_session_id("2"),
             review_harness="claude",
             plan_dir=self.plan_dir,
@@ -4708,7 +4711,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         """Run one review cycle whose loop-ready gate refuses the children."""
         finding = _structured_review_finding()
         write_plan_with_ids(self.plan_dir, (("1", "complete"),))
-        review_body = runner.build_generated_review_session_body(
+        review_body = review_session_body.build_generated_review_session_body(
             plans.parse_session_id("2"),
             review_harness="claude",
             plan_dir=self.plan_dir,
@@ -4929,7 +4932,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             ),
         )
         for review_id in review_ids:
-            review_body = runner.build_generated_review_session_body(
+            review_body = review_session_body.build_generated_review_session_body(
                 plans.parse_session_id(review_id),
                 review_harness="claude",
                 plan_dir=plan_dir,
@@ -5380,7 +5383,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        rereview, created = runner.ensure_generated_review_session(
+        rereview, created = review_session_body.ensure_generated_review_session(
             self.plan_dir, review_harness="claude"
         )
         self.assertTrue(created)
@@ -5853,7 +5856,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         # Model a completed findings rereview whose review_cycle event was
         # lost. Its corrected artifact is then materialized successfully,
         # leaving the latest durable cycle attached to the older review 2.
-        eventless_review, created = runner.ensure_generated_review_session(
+        eventless_review, created = review_session_body.ensure_generated_review_session(
             self.plan_dir, review_harness="claude"
         )
         self.assertTrue(created)
@@ -6109,8 +6112,10 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 older_fingerprint = first_payload["review_cycles"][0]["fingerprints"][0]
                 self.assertNotEqual(older_fingerprint, eventless_fingerprint)
 
-                eventless_review, created = runner.ensure_generated_review_session(
-                    self.plan_dir, review_harness="claude"
+                eventless_review, created = (
+                    review_session_body.ensure_generated_review_session(
+                        self.plan_dir, review_harness="claude"
+                    )
                 )
                 self.assertTrue(created)
                 self.assertEqual("3", eventless_review.id)
@@ -6200,7 +6205,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
-        first_review, created = runner.ensure_generated_review_session(
+        first_review, created = review_session_body.ensure_generated_review_session(
             self.plan_dir, review_harness="claude"
         )
         self.assertTrue(created)

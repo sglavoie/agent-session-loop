@@ -43,6 +43,7 @@ from agent_session_loop import (
     retention,
     review,
     review_repair,
+    review_session_body,
     review_session_contract,
     run_flags,
     run_prompts,
@@ -1981,7 +1982,7 @@ class CommandAndConfigTests(unittest.TestCase):
             plan_dir = Path(tmp)
             session_id = plans.SessionId((7,))
 
-            body = runner.build_generated_review_session_body(
+            body = review_session_body.build_generated_review_session_body(
                 session_id,
                 review_harness="claude",
                 plan_dir=plan_dir,
@@ -2019,7 +2020,9 @@ class CommandAndConfigTests(unittest.TestCase):
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("pending", "complete"))
 
-            self.assertIsNone(runner.find_pending_generated_review_session(plan_dir))
+            self.assertIsNone(
+                review_session_body.find_pending_generated_review_session(plan_dir)
+            )
 
     def test_find_pending_generated_review_session_returns_pending_marked_session(
         self,
@@ -2030,7 +2033,7 @@ class CommandAndConfigTests(unittest.TestCase):
             review_id = plans.next_top_level_session_id(plan_dir)
             review_path = plan_dir / review_id.filename
             review_path.write_text(
-                runner.build_generated_review_session_body(
+                review_session_body.build_generated_review_session_body(
                     review_id,
                     review_harness="claude",
                     plan_dir=plan_dir,
@@ -2038,7 +2041,7 @@ class CommandAndConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            found = runner.find_pending_generated_review_session(plan_dir)
+            found = review_session_body.find_pending_generated_review_session(plan_dir)
 
             self.assertIsNotNone(found)
             self.assertEqual(review_id, found.session_id)
@@ -2052,21 +2055,23 @@ class CommandAndConfigTests(unittest.TestCase):
             write_plan(plan_dir, ("complete",))
             review_id = plans.next_top_level_session_id(plan_dir)
             review_path = plan_dir / review_id.filename
-            body = runner.build_generated_review_session_body(
+            body = review_session_body.build_generated_review_session_body(
                 review_id,
                 review_harness="claude",
                 plan_dir=plan_dir,
             ).replace("- **Status**: pending", "- **Status**: complete")
             review_path.write_text(body, encoding="utf-8")
 
-            self.assertIsNone(runner.find_pending_generated_review_session(plan_dir))
+            self.assertIsNone(
+                review_session_body.find_pending_generated_review_session(plan_dir)
+            )
 
     def test_ensure_generated_review_session_creates_new_when_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("complete", "pending"))
 
-            session_file, created = runner.ensure_generated_review_session(
+            session_file, created = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
 
@@ -2089,11 +2094,15 @@ class CommandAndConfigTests(unittest.TestCase):
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("complete",))
 
-            first_file, first_created = runner.ensure_generated_review_session(
-                plan_dir, review_harness="claude"
+            first_file, first_created = (
+                review_session_body.ensure_generated_review_session(
+                    plan_dir, review_harness="claude"
+                )
             )
-            second_file, second_created = runner.ensure_generated_review_session(
-                plan_dir, review_harness="claude"
+            second_file, second_created = (
+                review_session_body.ensure_generated_review_session(
+                    plan_dir, review_harness="claude"
+                )
             )
 
             self.assertTrue(first_created)
@@ -2107,7 +2116,7 @@ class CommandAndConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("complete",))
-            first_file, _ = runner.ensure_generated_review_session(
+            first_file, _ = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
             completed_body = first_file.path.read_text(encoding="utf-8").replace(
@@ -2115,7 +2124,7 @@ class CommandAndConfigTests(unittest.TestCase):
             )
             first_file.path.write_text(completed_body, encoding="utf-8")
 
-            second_file, created = runner.ensure_generated_review_session(
+            second_file, created = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
 
@@ -2133,7 +2142,7 @@ class CommandAndConfigTests(unittest.TestCase):
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("complete",))
 
-            session_file, _ = runner.ensure_generated_review_session(
+            session_file, _ = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
             (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
@@ -2168,7 +2177,7 @@ class CommandAndConfigTests(unittest.TestCase):
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("complete",))
 
-            session_file, _ = runner.ensure_generated_review_session(
+            session_file, _ = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
             (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
@@ -2189,7 +2198,7 @@ class CommandAndConfigTests(unittest.TestCase):
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("complete",))
 
-            session_file, _ = runner.ensure_generated_review_session(
+            session_file, _ = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
             (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
@@ -2219,7 +2228,7 @@ class CommandAndConfigTests(unittest.TestCase):
             plan_dir = Path(tmp)
             write_plan(plan_dir, ("complete",))
 
-            session_file, _ = runner.ensure_generated_review_session(
+            session_file, _ = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
             (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
@@ -5280,12 +5289,12 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
 
             self.assertIsNone(fallback)
             assert delta is not None
-            self.assertEqual(runner.REVIEW_SCOPE_DELTA, delta["mode"])
+            self.assertEqual(review_session_body.REVIEW_SCOPE_DELTA, delta["mode"])
             self.assertEqual(
                 ["SVC:shared.txt", "OAK:shared.txt"],
                 delta["changed_files"],
             )
-            rendered = runner._review_scope_detail_lines(delta)
+            rendered = review_session_body._review_scope_detail_lines(delta)
             text = "\n".join(rendered)
             self.assertIn("git -C tundra_svc diff", text)
             self.assertIn("git -C tundra_OAK diff", text)

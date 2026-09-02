@@ -30,6 +30,7 @@ from agent_session_loop import (
     contracts,
     plans,
     process_tree,
+    review_session_body,
     review_session_contract,
     runner,
     verification,
@@ -1726,7 +1727,7 @@ class VerificationExecutorTests(unittest.TestCase):
         """
         session_id = plans.parse_session_id("9")
         (plan_dir / f"session-{session_id.value}.md").write_text(
-            runner.build_generated_review_session_body(
+            review_session_body.build_generated_review_session_body(
                 session_id, review_harness="codex", plan_dir=plan_dir
             ),
             encoding="utf-8",
