@@ -72,6 +72,15 @@ from tests.support import (
 # saturated by the parallel shards.
 RUN_EXIT_TIMEOUT_SECONDS = 120
 
+# The same backstop for a full ``agent_session_loop run`` driven as a
+# subprocess. These invocations take roughly five seconds idle and half again
+# that under the parallel shards, so the former inline bounds of 10-15s were
+# close enough to real latency to fail as a timeout rather than as the
+# assertion the test actually makes. Like the bound above it is not a latency
+# assertion: it exists so a hung run surfaces as a failure instead of running
+# out the suite's own clock.
+LOOP_RUN_TIMEOUT_SECONDS = 120
+
 # The exact message the harness returned in run 20260814T210616107741Z-55923,
 # which fell through to a fail-closed ``nonzero-exit`` and paused the run with
 # four sessions still pending (ASI-125).
@@ -442,7 +451,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             env=env,
             text=True,
             capture_output=True,
-            timeout=15,
+            timeout=LOOP_RUN_TIMEOUT_SECONDS,
             check=False,
         )
         return completed, json.loads(completed.stdout)
@@ -724,7 +733,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 env=env,
                 text=True,
                 capture_output=True,
-                timeout=15,
+                timeout=LOOP_RUN_TIMEOUT_SECONDS,
                 check=False,
             )
             payload = json.loads(completed.stdout)
@@ -4012,7 +4021,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             ),
             text=True,
             capture_output=True,
-            timeout=10,
+            timeout=LOOP_RUN_TIMEOUT_SECONDS,
             check=False,
         )
 
@@ -4064,7 +4073,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             env=self.loop_env(config_home=config_home, mode="success"),
             text=True,
             capture_output=True,
-            timeout=10,
+            timeout=LOOP_RUN_TIMEOUT_SECONDS,
             check=False,
         )
 
@@ -4087,7 +4096,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             env=self.loop_env(config_home=config_home, mode="failure"),
             text=True,
             capture_output=True,
-            timeout=10,
+            timeout=LOOP_RUN_TIMEOUT_SECONDS,
             check=False,
         )
 
