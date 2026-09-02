@@ -998,7 +998,7 @@ MAILBOX_OWNERSHIP_DELIVERED = "delivered"
 _ORIGIN_KEYS = frozenset({"origin", "origins", "remote", "remote_url", "url"})
 
 #: The bounded enum a reply origin is drawn from, mirroring
-#: ``runner.REPLY_ORIGINS``. No Git remote can collide with these tokens.
+#: ``run_prompts.REPLY_ORIGINS``. No Git remote can collide with these tokens.
 _REPLY_ORIGIN_VALUES = frozenset({"argv", "stdin", "mailbox"})
 
 #: The only values ``assurance.role.source`` may carry.  ``source`` is

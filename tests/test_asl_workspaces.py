@@ -10,7 +10,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_session_loop import authoring, plans, runner, verification, workspaces
+from agent_session_loop import (
+    authoring,
+    plans,
+    run_prompts,
+    runner,
+    verification,
+    workspaces,
+)
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     init_git_repo,
@@ -478,7 +485,7 @@ class WorkspaceMetadataTests(unittest.TestCase):
                 _registry(specs),
             )
             context = verification.VerificationContext.resolved_workspace(resolved)
-            current_binding = runner._workspace_payload_fields(context)
+            current_binding = run_prompts._workspace_payload_fields(context)
             self.assertNotIn("workspace_inventory_excludes", current_binding)
 
             runner._validate_resume_workspace_binding(

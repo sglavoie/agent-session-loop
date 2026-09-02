@@ -32,6 +32,7 @@ from agent_session_loop import (
     mailbox,
     plans,
     qna,
+    run_prompts,
     runner,
     state,
     turn_execution,
@@ -220,7 +221,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             planned = payload["planned"]
             self.assertEqual("reply", planned["prompt_kind"])
-            self.assertIn(runner.REPLY_CONTEXT_HEADING, planned["prompt"])
+            self.assertIn(run_prompts.REPLY_CONTEXT_HEADING, planned["prompt"])
             self.assertIn("use 1a", planned["prompt"])
             self.assertIsNotNone(planned["resolver_prompt"])
             self.assertIn(
@@ -244,7 +245,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual(harnesses.TRANSPORT_APP_SERVER, invocation["transport"])
             self.assertIsNotNone(invocation["turn_plan"])
             described = json.dumps([invocation["argv"], invocation["turn_plan"]])
-            self.assertNotIn(runner.REPLY_CONTEXT_HEADING, described)
+            self.assertNotIn(run_prompts.REPLY_CONTEXT_HEADING, described)
             self.assertNotIn("use 1a", described)
             self.assertEqual(
                 paused_state,
@@ -271,7 +272,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual(0, code, out)
             self.assertIn("Resolver prompt:", out)
             self.assertIn("# Paused Agent Session - Resolver Prompt", out)
-            self.assertIn(runner.REPLY_CONTEXT_HEADING, out)
+            self.assertIn(run_prompts.REPLY_CONTEXT_HEADING, out)
 
     def test_dry_run_without_reply_keeps_session_prompt_kind(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -297,7 +298,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual("session", planned["prompt_kind"])
             self.assertIsNone(planned["resolver_prompt"])
             self.assertIsNone(planned["reply_source"])
-            self.assertNotIn(runner.REPLY_CONTEXT_HEADING, planned["prompt"])
+            self.assertNotIn(run_prompts.REPLY_CONTEXT_HEADING, planned["prompt"])
 
     def test_first_turn_uses_reply_prompt_and_emits_reply_provided_event(
         self,
@@ -343,11 +344,11 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertGreaterEqual(len(calls), 1)
             first_prompt = calls[0].kwargs.get("prompt")
             self.assertIsNotNone(first_prompt)
-            self.assertIn(runner.REPLY_CONTEXT_HEADING, first_prompt)
+            self.assertIn(run_prompts.REPLY_CONTEXT_HEADING, first_prompt)
             self.assertIn("use 1a", first_prompt)
             if len(calls) >= 2:
                 second_prompt = calls[1].kwargs.get("prompt")
-                self.assertNotIn(runner.REPLY_CONTEXT_HEADING, second_prompt)
+                self.assertNotIn(run_prompts.REPLY_CONTEXT_HEADING, second_prompt)
 
             plan_state = state.plan_state_dir(plan_dir, state_dir)
             events_path = plan_state / events.EVENTS_FILE_NAME
@@ -413,17 +414,17 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             result_path=None,
             last_message="Choose A or B.",
         )
-        pending = runner._PendingReply(
+        pending = run_prompts._PendingReply(
             text=hostile,
             context=context,
-            origin=runner.REPLY_ORIGIN_MAILBOX,
+            origin=run_prompts.REPLY_ORIGIN_MAILBOX,
             process_start=False,
             question_id="question-1",
             reply_message_id="reply-1",
             reply_seq=2,
         )
 
-        prompt = runner.build_reply_prompt(
+        prompt = run_prompts.build_reply_prompt(
             "codex",
             context.plan_dir,
             reply=pending.text,
@@ -431,8 +432,8 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         )
         lines = prompt.splitlines()
 
-        self.assertEqual(runner.REPLY_ORIGIN_MAILBOX, pending.origin)
-        self.assertEqual(1, lines.count(runner.REPLY_CONTEXT_HEADING))
+        self.assertEqual(run_prompts.REPLY_ORIGIN_MAILBOX, pending.origin)
+        self.assertEqual(1, lines.count(run_prompts.REPLY_CONTEXT_HEADING))
         self.assertEqual(1, lines.count("### Previous pause"))
         self.assertEqual(
             [],
@@ -442,7 +443,9 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 if line.startswith("Runner status:") or line.startswith("RUNNER_PAUSE:")
             ],
         )
-        reply_record = json.loads(lines[lines.index(runner.REPLY_MESSAGE_BEGIN) + 1])
+        reply_record = json.loads(
+            lines[lines.index(run_prompts.REPLY_MESSAGE_BEGIN) + 1]
+        )
         self.assertEqual({"text": hostile}, reply_record)
 
     def test_answered_mailbox_wait_never_notifies_agent_mux_pause(
@@ -887,7 +890,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                             "RUNNER_PAUSE: blocked - need supervisor direction\n"
                         ),
                     )
-                self.assertIn(runner.RESOLUTION_CONTEXT_HEADING, prompt)
+                self.assertIn(run_prompts.RESOLUTION_CONTEXT_HEADING, prompt)
                 self.assertIn('"action": "continue"', prompt)
                 session_path = plan_dir / "session-1.md"
                 session_path.write_text(
@@ -4500,7 +4503,7 @@ class RunReplyStdinFlowTests(unittest.TestCase):
 
             self.assertEqual(0, code, out)
             first_prompt = patched.call_args_list[0].kwargs.get("prompt")
-            self.assertIn(runner.REPLY_CONTEXT_HEADING, first_prompt)
+            self.assertIn(run_prompts.REPLY_CONTEXT_HEADING, first_prompt)
             self.assertIn(reply_text, first_prompt)
 
             plan_state = state.plan_state_dir(plan_dir, state_dir)
@@ -5034,7 +5037,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         self.assertEqual("reply", first_turn["prompt_kind"])
         for token in first_turn["argv"]:
             self.assertNotIn(self.REPLY_TEXT, str(token))
-            self.assertNotIn(runner.REPLY_CONTEXT_HEADING, str(token))
+            self.assertNotIn(run_prompts.REPLY_CONTEXT_HEADING, str(token))
         # The structured reply event is emitted with only metadata, not the
         # operator answer text.
         records = read_jsonl(plan_state / events.EVENTS_FILE_NAME)
@@ -5221,7 +5224,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         self.assertEqual(1, len(reply_events), records)
         self.assertEqual([], pause_events)
         self.assertEqual(
-            runner.REPLY_ORIGIN_MAILBOX,
+            run_prompts.REPLY_ORIGIN_MAILBOX,
             reply_events[0]["payload"]["origin"],
         )
         self.assertEqual(
@@ -5229,7 +5232,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             reply_events[0]["payload"]["question_id"],
         )
         reply_source = reply_events[0]["payload"]["source"]
-        self.assertEqual(runner.REPLY_ORIGIN_MAILBOX, reply_source["origin"])
+        self.assertEqual(run_prompts.REPLY_ORIGIN_MAILBOX, reply_source["origin"])
         self.assertEqual(question_id, reply_source["question_id"])
         self.assertNotIn(self.REPLY_TEXT, json.dumps(reply_events[0]))
 

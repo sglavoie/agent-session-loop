@@ -36,6 +36,7 @@ from agent_session_loop import (
     repository_evidence,
     review,
     run_flags,
+    run_prompts,
     runner,
     state,
     supervisor_audit,
@@ -2508,7 +2509,7 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual(supervisor_audit.REDACTED, result["authorization"])
 
     def test_a_reply_origin_survives_while_a_remote_is_canonicalized(self) -> None:
-        for origin in runner.REPLY_ORIGINS:
+        for origin in run_prompts.REPLY_ORIGINS:
             with self.subTest(origin=origin), tempfile.TemporaryDirectory() as tmp:
                 workspace, plan_dir, state_dir, run_dir = self._history(Path(tmp))
                 self._rewrite_result(

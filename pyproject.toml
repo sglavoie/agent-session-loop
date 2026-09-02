@@ -158,6 +158,7 @@ module = [
     "agent_session_loop.run_control",
     "agent_session_loop.run_coordination",
     "agent_session_loop.run_flags",
+    "agent_session_loop.run_prompts",
     "agent_session_loop.runner",
     "agent_session_loop.session_overview",
     "agent_session_loop.startup_context",

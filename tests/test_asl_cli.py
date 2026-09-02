@@ -44,6 +44,7 @@ from agent_session_loop import (
     review,
     review_repair,
     run_flags,
+    run_prompts,
     runner,
     state,
     supervisor_guide,
@@ -684,16 +685,16 @@ class CommandAndConfigTests(unittest.TestCase):
 
     def test_build_session_prompt_uses_harness_skill_prefix(self) -> None:
         self.assertTrue(
-            runner.build_session_prompt("codex", "/tmp/plan").startswith(
+            run_prompts.build_session_prompt("codex", "/tmp/plan").startswith(
                 "$session-run "
             )
         )
         self.assertIn(
-            runner.RUNNER_MANAGED_SESSION_ARG,
-            runner.build_session_prompt("codex", "/tmp/plan"),
+            run_prompts.RUNNER_MANAGED_SESSION_ARG,
+            run_prompts.build_session_prompt("codex", "/tmp/plan"),
         )
         self.assertTrue(
-            runner.build_session_prompt("claude", "/tmp/plan").startswith(
+            run_prompts.build_session_prompt("claude", "/tmp/plan").startswith(
                 "/session-run "
             )
         )
@@ -701,7 +702,7 @@ class CommandAndConfigTests(unittest.TestCase):
     def test_build_session_prompt_omits_explicit_session_selector(self) -> None:
         for harness in ("codex", "claude", "copilot"):
             with self.subTest(harness=harness):
-                prompt = runner.build_session_prompt(harness, "/tmp/plan")
+                prompt = run_prompts.build_session_prompt(harness, "/tmp/plan")
                 self.assertNotIn("--session", prompt)
                 self.assertNotIn("session-1.md", prompt)
                 self.assertNotIn("session-2.md", prompt)
@@ -2761,7 +2762,7 @@ class JsonCliTests(unittest.TestCase):
             self.assertFalse(active["run_config"]["no_mailbox"])
             self.assertFalse(active["planned"]["no_mailbox"])
             self.assertIn(
-                runner.MAILBOX_PROTOCOL_HEADING,
+                run_prompts.MAILBOX_PROTOCOL_HEADING,
                 active["planned"]["prompt"],
             )
             self.assertFalse(disabled["planned"]["mailbox_enabled"])
@@ -2772,7 +2773,7 @@ class JsonCliTests(unittest.TestCase):
             self.assertTrue(disabled["run_config"]["no_mailbox"])
             self.assertTrue(disabled["planned"]["no_mailbox"])
             self.assertEqual(
-                runner.build_session_prompt("codex", plan_dir),
+                run_prompts.build_session_prompt("codex", plan_dir),
                 disabled["planned"]["prompt"],
             )
 

@@ -25,6 +25,7 @@ from agent_session_loop import (
     mailbox,
     pause_policy,
     qna,
+    run_prompts,
     runner,
     state,
 )
@@ -1148,7 +1149,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             self.assertEqual("reply", first_turn["prompt_kind"])
             for token in first_turn["argv"]:
                 self.assertNotIn(reply_text, str(token))
-                self.assertNotIn(runner.REPLY_CONTEXT_HEADING, str(token))
+                self.assertNotIn(run_prompts.REPLY_CONTEXT_HEADING, str(token))
             self.assertIn(placeholder, first_turn["argv"])
 
             result_path = Path(first_turn["result_path"])

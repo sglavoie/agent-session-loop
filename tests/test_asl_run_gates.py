@@ -3604,12 +3604,18 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
         return matches[0]
 
     def _call_lines(self, node: ast.AST, name: str) -> list[int]:
+        # A call site keeps its meaning when the callee is extracted into a
+        # package module, so match `name(...)` and `module.name(...)` alike --
+        # otherwise this ordering contract silently stops seeing a reader the
+        # moment the symbol moves out of the runner.
         return sorted(
             call.lineno
             for call in ast.walk(node)
             if isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Name)
-            and call.func.id == name
+            and (
+                (isinstance(call.func, ast.Name) and call.func.id == name)
+                or (isinstance(call.func, ast.Attribute) and call.func.attr == name)
+            )
         )
 
     def _turn_record_line(self) -> int:
