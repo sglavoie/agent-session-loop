@@ -38,6 +38,7 @@ from agent_session_loop import (
     events,
     harness_failures,
     harnesses,
+    live_verification,
     pause_policy,
     plans,
     process_tree,
@@ -4509,7 +4510,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             progress = run_reporting._ProgressReporter(enabled=True)
             stderr = io.StringIO()
 
-            live_verification = runner._LiveVerification(
+            live = live_verification._LiveVerification(
                 event_path=event_path,
                 payload=payload,
                 progress=progress,
@@ -4526,8 +4527,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
 
             with redirect_stderr(stderr):
-                live_verification.start()
-                live_verification.check_started(
+                live.start()
+                live.check_started(
                     check_index=0,
                     name="pytest",
                     kind="command",
@@ -4541,7 +4542,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                         in event_path.read_text(encoding="utf-8")
                     )
                 )
-                live_verification.check_finished(
+                live.check_finished(
                     check_index=0,
                     name="pytest",
                     kind="command",
@@ -4551,14 +4552,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     failure_reason=None,
                     returncode=0,
                 )
-                live_verification.check_skipped(
+                live.check_skipped(
                     check_index=1,
                     name="focused",
                     kind="command",
                     on_failure_of=("pytest",),
                     reason="condition-not-met",
                 )
-                live_verification.finish(
+                live.finish(
                     passed=True,
                     passed_count=1,
                     reason="ok",
@@ -4674,7 +4675,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "active_verification": None,
             }
             persistence = run_persistence._RunPersistence()
-            live_verification = runner._LiveVerification(
+            live = live_verification._LiveVerification(
                 event_path=event_path,
                 payload=payload,
                 progress=run_reporting._ProgressReporter(enabled=False),
@@ -4691,7 +4692,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 heartbeat_interval=60,
             )
 
-            live_verification.start()
+            live.start()
             after_start_state = json.loads(state_path.read_text(encoding="utf-8"))[
                 "active_verification"
             ]
@@ -4702,7 +4703,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(["SVC", "OAK"], after_start_state["check_repos"])
             self.assertIsNone(after_start_state["current_check_index"])
 
-            live_verification.check_started(
+            live.check_started(
                 check_index=0,
                 name="readme",
                 kind="file_exists",
@@ -4718,7 +4719,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual("file_exists", mid_state["current_check_kind"])
             self.assertIsNotNone(mid_state["current_check_started_at"])
 
-            live_verification.check_finished(
+            live.check_finished(
                 check_index=0,
                 name="readme",
                 kind="file_exists",
@@ -4735,7 +4736,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertIsNone(after_check_state["current_check_started_at"])
             self.assertEqual(0, after_check_state["current_check_index"])
 
-            live_verification.finish(
+            live.finish(
                 passed=False,
                 passed_count=0,
                 reason="verify-failed",
@@ -4785,7 +4786,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "active_turn": None,
                 "active_verification": None,
             }
-            live_verification = runner._LiveVerification(
+            live = live_verification._LiveVerification(
                 event_path=event_path,
                 payload=payload,
                 progress=run_reporting._ProgressReporter(enabled=False),
@@ -4802,7 +4803,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 heartbeat_interval=60,
             )
 
-            live_verification.start()
+            live.start()
             started_event = next(
                 record["payload"]
                 for record in read_jsonl(event_path)
@@ -4811,14 +4812,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertTrue(started_event["parallel"])
 
             for index, name in ((0, "fast"), (1, "slow")):
-                live_verification.check_started(
+                live.check_started(
                     check_index=index,
                     name=name,
                     kind="command",
                     argv=("python3",),
                     cwd=None,
                 )
-            live_verification.check_finished(
+            live.check_finished(
                 check_index=0,
                 name="fast",
                 kind="command",
@@ -4845,7 +4846,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(0, finished_event["check_index"])
             self.assertEqual("fast", finished_event["name"])
 
-            live_verification.check_finished(
+            live.check_finished(
                 check_index=1,
                 name="slow",
                 kind="command",
@@ -4860,7 +4861,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             ]
             self.assertIsNone(active["current_check_started_at"])
 
-            live_verification.finish(passed=True, passed_count=2, reason="ok")
+            live.finish(passed=True, passed_count=2, reason="ok")
 
     def test_live_verification_displayed_finish_promotes_remaining_check(
         self,
@@ -4881,7 +4882,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "active_turn": None,
                 "active_verification": None,
             }
-            live_verification = runner._LiveVerification(
+            live = live_verification._LiveVerification(
                 event_path=event_path,
                 payload=payload,
                 progress=run_reporting._ProgressReporter(enabled=False),
@@ -4898,9 +4899,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 heartbeat_interval=60,
             )
 
-            live_verification.start()
+            live.start()
             for index, name in ((0, "slow"), (1, "medium"), (2, "fast")):
-                live_verification.check_started(
+                live.check_started(
                     check_index=index,
                     name=name,
                     kind="command",
@@ -4910,7 +4911,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
             # `fast` holds the display slot and retires first, while `slow` and
             # `medium` are still running.
-            live_verification.check_finished(
+            live.check_finished(
                 check_index=2,
                 name="fast",
                 kind="command",
@@ -4926,12 +4927,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(1, active["current_check_index"])
             self.assertEqual("medium", active["current_check_name"])
             self.assertIsNotNone(active["current_check_started_at"])
-            heartbeat = live_verification._record_heartbeat()
+            heartbeat = live._record_heartbeat()
             self.assertIsNotNone(heartbeat)
             self.assertEqual(1, heartbeat["check_index"])
             self.assertEqual("medium", heartbeat["name"])
 
-            live_verification.check_finished(
+            live.check_finished(
                 check_index=1,
                 name="medium",
                 kind="command",
@@ -4947,14 +4948,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual(0, active["current_check_index"])
             self.assertEqual("slow", active["current_check_name"])
             self.assertIsNotNone(active["current_check_started_at"])
-            heartbeat = live_verification._record_heartbeat()
+            heartbeat = live._record_heartbeat()
             self.assertIsNotNone(heartbeat)
             self.assertEqual(0, heartbeat["check_index"])
             self.assertEqual("slow", heartbeat["name"])
 
             # Only the last active check clears the timer and silences
             # heartbeats.
-            live_verification.check_finished(
+            live.check_finished(
                 check_index=0,
                 name="slow",
                 kind="command",
@@ -4969,9 +4970,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             ]
             self.assertEqual(0, active["current_check_index"])
             self.assertIsNone(active["current_check_started_at"])
-            self.assertIsNone(live_verification._record_heartbeat())
+            self.assertIsNone(live._record_heartbeat())
 
-            live_verification.finish(passed=True, passed_count=3, reason="ok")
+            live.finish(passed=True, passed_count=3, reason="ok")
 
     def test_live_verification_finish_drops_late_check_callbacks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4985,7 +4986,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             }
             progress = run_reporting._ProgressReporter(enabled=True)
             stderr = io.StringIO()
-            live_verification = runner._LiveVerification(
+            live = live_verification._LiveVerification(
                 event_path=event_path,
                 payload=payload,
                 progress=progress,
@@ -5003,21 +5004,19 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
 
             with redirect_stderr(stderr):
-                live_verification.start()
-                live_verification.check_started(
+                live.start()
+                live.check_started(
                     check_index=0,
                     name="first",
                     kind="command",
                     argv=("python3",),
                     cwd=None,
                 )
-                live_verification.finish(
-                    passed=False, passed_count=0, reason="interrupted"
-                )
+                live.finish(passed=False, passed_count=0, reason="interrupted")
                 event_count_at_finish = len(read_jsonl(event_path))
 
                 # Late callbacks from checks the interrupt abandoned.
-                live_verification.check_finished(
+                live.check_finished(
                     check_index=0,
                     name="first",
                     kind="command",
@@ -5027,14 +5026,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     failure_reason=None,
                     returncode=0,
                 )
-                live_verification.check_started(
+                live.check_started(
                     check_index=1,
                     name="second",
                     kind="command",
                     argv=("python3",),
                     cwd=None,
                 )
-                self.assertIsNone(live_verification._record_heartbeat())
+                self.assertIsNone(live._record_heartbeat())
 
             self.assertEqual(event_count_at_finish, len(read_jsonl(event_path)))
             self.assertEqual(
@@ -5067,7 +5066,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             state_path = tmp_dir / events.STATE_FILE_NAME
             progress = run_reporting._ProgressReporter(enabled=True)
             stderr = io.StringIO()
-            live_verification = runner._LiveVerification(
+            live = live_verification._LiveVerification(
                 event_path=event_path,
                 payload={
                     "state_path": str(state_path),
@@ -5098,7 +5097,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 emit_heartbeat(heartbeat)
 
             finisher = threading.Thread(
-                target=lambda: live_verification.finish(
+                target=lambda: live.finish(
                     passed=False, passed_count=0, reason="interrupted"
                 )
             )
@@ -5106,8 +5105,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 redirect_stderr(stderr),
                 mock.patch.object(progress, "verification_heartbeat", parked_heartbeat),
             ):
-                live_verification.start()
-                live_verification.check_started(
+                live.start()
+                live.check_started(
                     check_index=0,
                     name="first",
                     kind="command",
@@ -5120,9 +5119,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     # `finish` sets the stop flag on its way into the heartbeat
                     # join, and the parked heartbeat holds the progress lock,
                     # so it provably has not returned when this callback lands.
-                    wait_until(live_verification._stop.is_set)
+                    wait_until(live._stop.is_set)
                     self.assertTrue(finisher.is_alive())
-                    live_verification.check_finished(
+                    live.check_finished(
                         check_index=0,
                         name="first",
                         kind="command",
@@ -5173,7 +5172,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             state_path = tmp_dir / events.STATE_FILE_NAME
             progress = run_reporting._ProgressReporter(enabled=True)
             stderr = io.StringIO()
-            live_verification = runner._LiveVerification(
+            live = live_verification._LiveVerification(
                 event_path=event_path,
                 payload={
                     "state_path": str(state_path),
@@ -5204,7 +5203,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 emit_check_finished(check)
 
             worker = threading.Thread(
-                target=lambda: live_verification.check_finished(
+                target=lambda: live.check_finished(
                     check_index=0,
                     name="first",
                     kind="command",
@@ -5216,7 +5215,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 )
             )
             finisher = threading.Thread(
-                target=lambda: live_verification.finish(
+                target=lambda: live.finish(
                     passed=False, passed_count=0, reason="interrupted"
                 )
             )
@@ -5226,8 +5225,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     progress, "verification_check_finished", parked_check_finished
                 ),
             ):
-                live_verification.start()
-                live_verification.check_started(
+                live.start()
+                live.check_started(
                     check_index=0,
                     name="first",
                     kind="command",
@@ -5320,7 +5319,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "active_turn": None,
                 "active_verification": None,
             }
-            live_verification = runner._LiveVerification(
+            live = live_verification._LiveVerification(
                 event_path=event_path,
                 payload=payload,
                 progress=run_reporting._ProgressReporter(enabled=False),
@@ -5340,7 +5339,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             finishes: list[int] = []
 
             def on_check_started(event: verification.CheckStartedEvent) -> None:
-                live_verification.check_started(
+                live.check_started(
                     check_index=event.check_index,
                     name=event.name,
                     kind=event.kind,
@@ -5349,7 +5348,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 )
 
             def on_check_finished(event: verification.CheckFinishedEvent) -> None:
-                live_verification.check_finished(
+                live.check_finished(
                     check_index=event.check_index,
                     name=event.name,
                     kind=event.kind,
@@ -5365,7 +5364,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 wait_until(lambda: len(list(started_dir.iterdir())) == running)
                 raise KeyboardInterrupt
 
-            live_verification.start()
+            live.start()
             with (
                 mock.patch.object(
                     verification, "as_completed", interrupt_once_all_running
@@ -5390,7 +5389,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertEqual([], list((tmp_dir / "late").iterdir()))
             self.assertEqual([], finishes)
 
-            live_verification.finish(passed=False, passed_count=0, reason="interrupted")
+            live.finish(passed=False, passed_count=0, reason="interrupted")
             events_at_finish = read_jsonl(event_path)
 
             # The two futures still queued behind the four workers were
@@ -5414,7 +5413,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             event_path = tmp_dir / events.EVENTS_FILE_NAME
             state_path = tmp_dir / events.STATE_FILE_NAME
-            live_verification = runner._LiveVerification(
+            live = live_verification._LiveVerification(
                 event_path=event_path,
                 payload={
                     "state_path": str(state_path),
@@ -5434,8 +5433,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 heartbeat_interval=60,
             )
 
-            live_verification.start()
-            live_verification.finish(passed=True, passed_count=1, reason="ok")
+            live.start()
+            live.finish(passed=True, passed_count=1, reason="ok")
 
             started_event = next(
                 record["payload"]

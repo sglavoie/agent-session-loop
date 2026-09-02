@@ -145,6 +145,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.install_verify",
         "agent_session_loop.intervention",
         "agent_session_loop.literals",
+        "agent_session_loop.live_verification",
         "agent_session_loop.mailbox",
         "agent_session_loop.mailbox_cli",
         "agent_session_loop.mailbox_rendering",

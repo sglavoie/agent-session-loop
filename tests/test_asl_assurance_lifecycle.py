@@ -27,6 +27,7 @@ from agent_session_loop import (
     control_queue,
     events,
     harnesses,
+    live_verification,
     plans,
     run_control,
     run_persistence,
@@ -342,11 +343,11 @@ class _AuditorAbortedMidTurn(_ScriptedAuditor):
         )
 
 
-def _fast_finalization() -> Callable[..., runner._LiveFinalization]:
+def _fast_finalization() -> Callable[..., live_verification._LiveFinalization]:
     """``_LiveFinalization`` whose control drain ticks at test speed."""
-    live = runner._LiveFinalization
+    live = live_verification._LiveFinalization
 
-    def build(**kwargs: object) -> runner._LiveFinalization:
+    def build(**kwargs: object) -> live_verification._LiveFinalization:
         kwargs.setdefault("poll_interval", 0.01)
         return live(**kwargs)  # type: ignore[arg-type]
 
@@ -1312,7 +1313,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             assert isinstance(published, dict)
             self.assertEqual(RUN_ID, published["run_id"])
             self.assertEqual(
-                runner.FINALIZATION_PHASE_ASSURANCE_AUDIT, published["phase"]
+                live_verification.FINALIZATION_PHASE_ASSURANCE_AUDIT, published["phase"]
             )
             # No cancel signal was supplied, so this phase advertises itself as
             # visible but not cancellable.
@@ -1368,7 +1369,9 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             self._stage_outcome(payload, "stopped")
             with (
                 mock.patch.object(harnesses, "run_harness", auditor),
-                mock.patch.object(runner, "_LiveFinalization", _fast_finalization()),
+                mock.patch.object(
+                    live_verification, "_LiveFinalization", _fast_finalization()
+                ),
             ):
                 code = runner._terminalize_run(
                     exit_code=0,
