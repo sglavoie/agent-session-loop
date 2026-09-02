@@ -42,6 +42,7 @@ from agent_session_loop import (
     run_commit,
     run_inputs,
     run_persistence,
+    run_termination,
     runner,
     state,
     tail,
@@ -5817,7 +5818,9 @@ class ParserAndStateTests(unittest.TestCase):
                 event_path,
                 payload,
                 persistence=persistence,
-                finalize_readiness=runner._finalize_readiness_lifecycle,
+                finalize_readiness=run_termination.readiness_finalizer(
+                    runner._write_readiness_state
+                ),
             )
 
             records = [
@@ -5856,7 +5859,9 @@ class ParserAndStateTests(unittest.TestCase):
                 event_path,
                 payload,
                 persistence=persistence,
-                finalize_readiness=runner._finalize_readiness_lifecycle,
+                finalize_readiness=run_termination.readiness_finalizer(
+                    runner._write_readiness_state
+                ),
             )
 
             records = [
@@ -5977,7 +5982,9 @@ class ParserAndStateTests(unittest.TestCase):
                 event_path,
                 payload,
                 persistence=persistence,
-                finalize_readiness=runner._finalize_readiness_lifecycle,
+                finalize_readiness=run_termination.readiness_finalizer(
+                    runner._write_readiness_state
+                ),
             )
 
         self.assertIsNone(payload["action_required"])
@@ -5996,7 +6003,9 @@ class ParserAndStateTests(unittest.TestCase):
                 event_path,
                 payload,
                 persistence=persistence,
-                finalize_readiness=runner._finalize_readiness_lifecycle,
+                finalize_readiness=run_termination.readiness_finalizer(
+                    runner._write_readiness_state
+                ),
             )
 
         self.assertEqual(signal, payload["action_required"])
@@ -6021,7 +6030,7 @@ class ParserAndStateTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             repo_root = Path(tmp) / "repo"
             payload = self._base_state_payload(Path(tmp) / "state.json")
-            runner._set_pause(
+            run_termination.set_pause(
                 payload,
                 reason="not-loop-ready",
                 message="plan is not loop-ready",
@@ -6047,7 +6056,7 @@ class ParserAndStateTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             repo_root = Path(tmp) / "repo"
             payload = self._base_state_payload(Path(tmp) / "state.json")
-            runner._set_pause(
+            run_termination.set_pause(
                 payload,
                 reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
                 message="session 1 wrote outside its declared aliases",
@@ -6063,7 +6072,7 @@ class ParserAndStateTests(unittest.TestCase):
     def test_a_pause_without_a_command_still_records_the_ask(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             payload = self._base_state_payload(Path(tmp) / "state.json")
-            runner._set_pause(
+            run_termination.set_pause(
                 payload,
                 reason="blocked",
                 message="RUNNER_PAUSE: blocked - needs a decision",
@@ -6075,7 +6084,7 @@ class ParserAndStateTests(unittest.TestCase):
     def test_a_retryable_pause_records_no_ask(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             payload = self._base_state_payload(Path(tmp) / "state.json")
-            runner._set_pause(
+            run_termination.set_pause(
                 payload,
                 reason="verify-failed",
                 message="verification failed",
@@ -6088,7 +6097,7 @@ class ParserAndStateTests(unittest.TestCase):
             payload = self._base_state_payload(Path(tmp) / "state.json")
             signal = self._live_action_required()
             payload["action_required"] = signal
-            runner._set_pause(
+            run_termination.set_pause(
                 payload,
                 reason="blocked",
                 message="RUNNER_PAUSE: blocked - needs a decision",
@@ -6110,7 +6119,9 @@ class ParserAndStateTests(unittest.TestCase):
                 event_path,
                 payload,
                 persistence=persistence,
-                finalize_readiness=runner._finalize_readiness_lifecycle,
+                finalize_readiness=run_termination.readiness_finalizer(
+                    runner._write_readiness_state
+                ),
             )
 
         self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, reason)
@@ -6132,7 +6143,7 @@ class ParserAndStateTests(unittest.TestCase):
                 "checks": [self._verification_check()],
                 "failures": [self._verification_check()],
             }
-            runner._pause_run(
+            run_termination._pause_run(
                 event_path,
                 payload,
                 reason="verify-failed",

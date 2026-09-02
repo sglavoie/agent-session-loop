@@ -21,9 +21,11 @@ from agent_session_loop import (
     review_session_body,
     review_session_contract,
     run_persistence,
+    run_termination,
     runner,
     supervisor_audit,
     verification,
+    verification_transitions,
 )
 
 from .support import (
@@ -964,8 +966,10 @@ class TerminalAdjudicationTests(unittest.TestCase):
         payload.update(overrides)
         return payload
 
-    def adjudicate(self, payload: dict[str, Any]) -> runner._TerminalAdjudication:
-        return runner._adjudicate_terminal_run(
+    def adjudicate(
+        self, payload: dict[str, Any]
+    ) -> run_termination._TerminalAdjudication:
+        return run_termination._adjudicate_terminal_run(
             event_path=self.event_path,
             payload=payload,
             persistence=self.persistence,
@@ -983,12 +987,14 @@ class TerminalAdjudicationTests(unittest.TestCase):
 
         self.assertTrue(adjudication.blocked)
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, adjudication.blocker.reason
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            adjudication.blocker.reason,
         )
         self.assertFalse(payload["ok"])
         self.assertTrue(payload["paused"])
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, payload["pause_reason"]
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            payload["pause_reason"],
         )
         unresolved = payload["pause_details"]["deferred_unresolved"]
         self.assertEqual(["broad:1:suite", "broad:1:readme"], unresolved[0]["checks"])
@@ -1047,7 +1053,8 @@ class TerminalAdjudicationTests(unittest.TestCase):
 
         self.assertTrue(adjudication.blocked)
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, adjudication.blocker.reason
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            adjudication.blocker.reason,
         )
 
     def test_an_operator_requested_stop_cannot_strand_a_deferral_green(self) -> None:
@@ -1062,7 +1069,8 @@ class TerminalAdjudicationTests(unittest.TestCase):
         self.assertTrue(adjudication.blocked)
         self.assertEqual("stopped", adjudication.claimed_reason)
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, payload["pause_reason"]
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            payload["pause_reason"],
         )
 
     def test_an_unverifiable_acceptance_is_not_evidence_of_a_deferral(self) -> None:
@@ -1094,7 +1102,8 @@ class TerminalAdjudicationTests(unittest.TestCase):
 
         self.assertTrue(adjudication.blocked)
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, adjudication.blocker.reason
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            adjudication.blocker.reason,
         )
         self.assertEqual(
             [{"session_id": "2", "turn_index": 1, "reason": "checks-failed"}],
@@ -1111,8 +1120,13 @@ class TerminalAdjudicationTests(unittest.TestCase):
         adjudication = self.adjudicate(payload)
 
         self.assertTrue(adjudication.blocked)
-        self.assertEqual(runner.REVIEW_NOT_CLEAR_REASON, adjudication.blocker.reason)
-        self.assertEqual(runner.REVIEW_NOT_CLEAR_REASON, payload["pause_reason"])
+        self.assertEqual(
+            verification_transitions.REVIEW_NOT_CLEAR_REASON,
+            adjudication.blocker.reason,
+        )
+        self.assertEqual(
+            verification_transitions.REVIEW_NOT_CLEAR_REASON, payload["pause_reason"]
+        )
         self.assertEqual(
             "harness-unavailable", payload["pause_details"]["review_skipped_reason"]
         )
@@ -1131,7 +1145,10 @@ class TerminalAdjudicationTests(unittest.TestCase):
 
         adjudication = self.adjudicate(payload)
 
-        self.assertEqual(runner.REVIEW_NOT_CLEAR_REASON, adjudication.blocker.reason)
+        self.assertEqual(
+            verification_transitions.REVIEW_NOT_CLEAR_REASON,
+            adjudication.blocker.reason,
+        )
         self.assertEqual(3, payload["pause_details"]["unresolved_findings"])
         self.assertEqual(
             review.REVIEW_OUTCOME_FINDINGS, payload["pause_details"]["review_outcome"]
@@ -1197,7 +1214,8 @@ class TerminalAdjudicationTests(unittest.TestCase):
             runner.REVIEW_FINDINGS_UNRESOLVED_REASON, adjudication.claimed_reason
         )
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, payload["pause_reason"]
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            payload["pause_reason"],
         )
         # The narrower reason the review path recorded is not lost to the pause.
         self.assertEqual(
@@ -1252,8 +1270,8 @@ class TerminalAdjudicationTests(unittest.TestCase):
         # No mailbox answer makes a failing gate pass, so both reasons have to
         # classify as inspections rather than burning a reply lease first.
         for reason in (
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON,
-            runner.REVIEW_NOT_CLEAR_REASON,
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            verification_transitions.REVIEW_NOT_CLEAR_REASON,
         ):
             with self.subTest(reason=reason):
                 policy = pause_policy.classify_pause(reason)
@@ -1272,10 +1290,13 @@ class TerminalAdjudicationTests(unittest.TestCase):
         self.adjudicate(payload)
 
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, payload["pause_policy"]["reason"]
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            payload["pause_policy"]["reason"],
         )
         action = payload["action_required"]
-        self.assertEqual(runner.REQUIRED_CHECKS_INCOMPLETE_REASON, action["reason"])
+        self.assertEqual(
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON, action["reason"]
+        )
         self.assertEqual(pause_policy.USER_ACTION_INSPECT, action["user_action"])
 
 

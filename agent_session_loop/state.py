@@ -76,8 +76,8 @@ ASSURANCE_SKIP_PREDATES = "predates-assurance"
 # The run already reached a settled assurance state (a verdict, or an opt-out).
 ASSURANCE_SKIP_SETTLED = "audit-already-settled"
 # Assurance states that still owe an audit. Mirrors
-# ``runner._AUDITABLE_ASSURANCE_STATES``; kept as a literal here because state
-# must not import the runner.
+# ``run_coordination.AUDITABLE_ASSURANCE_STATES``; kept as a literal here
+# because state sits below that boundary.
 _ASSURANCE_OWED_STATES = frozenset({"pending", "unavailable"})
 WAITING_FOR_REPLY_STATUS_LIVE = "live"
 WAITING_FOR_REPLY_STATUS_EXPIRED = "expired"

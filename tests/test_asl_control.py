@@ -51,6 +51,7 @@ from agent_session_loop import (
     run_control,
     run_persistence,
     run_selection,
+    run_termination,
     runner,
     state,
     supervision_liveness,
@@ -12816,7 +12817,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 commit_settlement._finish_run(
                     event_path,
                     payload,
-                    finalize_readiness=runner._finalize_readiness_lifecycle,
+                    finalize_readiness=run_termination.readiness_finalizer(
+                        runner._write_readiness_state
+                    ),
                 )
 
             notify.assert_called_once_with(payload, mock.ANY)
@@ -13204,7 +13207,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     agent_mux_delivery.subprocess, "run", return_value=completed
                 ) as run,
             ):
-                runner._pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason="question",
@@ -13215,7 +13218,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     event_path,
                     payload,
                     persistence=persistence,
-                    finalize_readiness=runner._finalize_readiness_lifecycle,
+                    finalize_readiness=run_termination.readiness_finalizer(
+                        runner._write_readiness_state
+                    ),
                 )
 
             events_seen = [call.args[0][-1] for call in run.call_args_list]
@@ -13250,7 +13255,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     event_path,
                     payload,
                     persistence=persistence,
-                    finalize_readiness=runner._finalize_readiness_lifecycle,
+                    finalize_readiness=run_termination.readiness_finalizer(
+                        runner._write_readiness_state
+                    ),
                 )
 
             events_seen = [call.args[0][-1] for call in run.call_args_list]

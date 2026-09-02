@@ -27,6 +27,7 @@ from agent_session_loop import (
     qna,
     run_persistence,
     run_prompts,
+    run_termination,
     runner,
     state,
     task_packet,
@@ -140,7 +141,9 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
 
     def test_set_pause_attaches_pause_policy_block(self) -> None:
         payload: dict[str, object] = {}
-        runner._set_pause(payload, reason="verify-failed", message="checks failed")
+        run_termination.set_pause(
+            payload, reason="verify-failed", message="checks failed"
+        )
         policy = payload["pause_policy"]
         self.assertEqual(pause_policy.classify_pause("verify-failed"), policy)
         self.assertTrue(policy["recoverable"])
@@ -153,7 +156,9 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         self,
     ) -> None:
         payload: dict[str, object] = {}
-        runner._set_pause(payload, reason="quota-exhausted", message="out of quota")
+        run_termination.set_pause(
+            payload, reason="quota-exhausted", message="out of quota"
+        )
         policy = payload["pause_policy"]
         self.assertFalse(policy["recoverable"])
         self.assertTrue(policy["requires_user"])
@@ -166,7 +171,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         for reason in ("blocked", "malformed-plan", "runner-pause"):
             with self.subTest(reason=reason):
                 payload: dict[str, object] = {}
-                runner._set_pause(payload, reason=reason, message="stopped")
+                run_termination.set_pause(payload, reason=reason, message="stopped")
                 policy = payload["pause_policy"]
                 self.assertFalse(policy["recoverable"])
                 self.assertTrue(policy["requires_user"])
@@ -184,7 +189,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.assertIn(reason, events.PAUSE_REASONS)
                 payload: dict[str, object] = {}
-                runner._set_pause(payload, reason=reason, message="blocked")
+                run_termination.set_pause(payload, reason=reason, message="blocked")
                 policy = payload["pause_policy"]
                 self.assertFalse(policy["recoverable"])
                 self.assertTrue(policy["requires_user"])
@@ -218,7 +223,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                     "plan_dir": "/plans/demo",
                     "cwd": "/repo",
                 }
-                runner._set_pause(payload, reason=reason, message="blocked")
+                run_termination.set_pause(payload, reason=reason, message="blocked")
                 remediation = payload["action_required"]["remediation"]
                 self.assertEqual(1, len(remediation))
                 entry = remediation[0]
@@ -240,7 +245,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             }
         ]
         payload: dict[str, object] = {"plan_dir": "/plans/demo", "cwd": "/repo"}
-        runner._set_pause(
+        run_termination.set_pause(
             payload,
             reason="not-loop-ready",
             message="gate refused",
@@ -251,7 +256,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
 
     def test_a_pause_reason_with_no_hint_keeps_an_empty_remediation(self) -> None:
         payload: dict[str, object] = {"plan_dir": "/plans/demo", "cwd": "/repo"}
-        runner._set_pause(payload, reason="blocked", message="needs an answer")
+        run_termination.set_pause(payload, reason="blocked", message="needs an answer")
 
         self.assertEqual([], payload["action_required"]["remediation"])
         self.assertEqual(

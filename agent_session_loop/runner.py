@@ -77,6 +77,7 @@ from . import (
     run_prompts,
     run_reporting,
     run_selection,
+    run_termination,
     state,
     supervisor_audit,
     task_packet,
@@ -455,76 +456,10 @@ _initial_control_payload = run_coordination.initial_control_payload
 _apply_run_control_action = run_coordination.apply_run_control_action
 _record_run_control_action = run_coordination.record_run_control_action
 
-#: The one ending that closes without an audit: a dry run rehearsed a loop and
-#: produced no run to audit. Every other persisted ending is a supervisor
-#: decision — a pause and an interruption most of all — and grading those is
-#: what the audit exists for.
-_UNAUDITED_TERMINAL_OUTCOMES = frozenset({"dry-run"})
-
 #: Assurance states a terminating run still owes an audit for. ``skipped`` is a
 #: settled decision to run no checks; anything else is already a verdict.
 _AUDITABLE_ASSURANCE_STATES = run_coordination.AUDITABLE_ASSURANCE_STATES
 _TerminalAuditContext = run_coordination.TerminalAuditContext
-
-
-def _audited_repositories(
-    context: verification.VerificationContext,
-) -> tuple[tuple[str, ...], bool]:
-    """Name the repositories the audit's boundary check covers, and their source.
-
-    A legacy plan registers no repositories, so the run root is its one
-    repository. Naming nothing there would leave the boundary check comparing
-    two empty snapshots, which can never notice a read-only auditor writing.
-    That run root is routinely not a worktree root, so the audit is told the
-    paths are synthesized: the tolerance that keeps such a run auditable must
-    never reach a repository a plan really registered.
-    """
-    if context.workspace is None:
-        return (".",), False
-    return (
-        tuple(
-            repository.repository.path for repository in context.workspace.repositories
-        ),
-        True,
-    )
-
-
-def _terminal_outcome(payload: Mapping[str, Any]) -> str:
-    """Name the ending a terminating run reached.
-
-    ``all-complete`` covers two different endings an operator reads
-    differently: a run that did the plan's remaining work, and one that found
-    nothing left to do. The turn list is what separates them.
-    """
-    if payload.get("paused"):
-        return "paused"
-    reason = str(payload.get("reason") or "")
-    if reason == "dry-run":
-        return "dry-run"
-    if reason == "all-complete":
-        return "complete" if payload.get("turns") else "no-work"
-    return reason or "stopped"
-
-
-def _attach_terminal_assurance(
-    payload: dict[str, Any],
-    context: _TerminalAuditContext,
-    persistence: run_persistence._RunPersistence,
-    abort: harnesses.AbortSignal | None = None,
-) -> bool:
-    """Audit the run and publish the verdict, over the runner's state projection.
-
-    A thin binding rather than an alias: the coordination boundary is told how
-    to compact this run's payload instead of importing the projection, and the
-    runner is the only place that knows.
-    """
-    return run_coordination.attach_terminal_assurance(
-        payload,
-        context,
-        persistence,
-        abort=abort,
-        state_snapshot=run_persistence._compact_state_payload,
-    )
 
 
 _attach_assurance_report = run_coordination.attach_assurance_report
@@ -569,331 +504,7 @@ _final_review_is_clear = verification_transitions.final_review_is_clear
 _terminal_blocker = verification_transitions.terminal_blocker
 
 
-@dataclass(frozen=True)
-class _TerminalAdjudication:
-    """The typed verdict every terminal path is closed through.
-
-    ``blocker`` is ``None`` when the run kept the outcome it arrived with —
-    including every run that was already paused, whose existing blocker is
-    preserved rather than restated.
-    """
-
-    #: What the run said about itself before adjudication, so an operator can
-    #: see that a success claim was tested rather than assumed.
-    claimed_ok: bool
-    claimed_reason: str
-    blocker: _TerminalBlocker | None = None
-
-    @property
-    def blocked(self) -> bool:
-        return self.blocker is not None
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "claimed_ok": self.claimed_ok,
-            "claimed_reason": self.claimed_reason,
-            "blocked": self.blocked,
-            "reason": None if self.blocker is None else self.blocker.reason,
-            "details": {} if self.blocker is None else self.blocker.details,
-        }
-
-
-def _adjudicate_terminal_run(
-    *,
-    event_path: Path,
-    payload: dict[str, Any],
-    persistence: run_persistence._RunPersistence,
-) -> _TerminalAdjudication:
-    """Decide whether this ending may report the success it arrived with.
-
-    One adjudicator for every terminal path — normal completion, review
-    exhaustion, a resumed run, stop-after-current, and the failure paths — so
-    success has a single definition instead of one per exit. A run that already
-    paused is left exactly as it is: its blocker is the specific one an operator
-    needs, and restating it as a generic adjudication verdict would lose that. A
-    dry run rehearsed a loop and claimed nothing, so it is not adjudicated
-    either.
-
-    A run that is failing but *not* paused is still adjudicated, because the two
-    endings are not the same claim. The only such ending ASL has is
-    ``review-findings-unresolved``, and a run that reaches it while still owing
-    an unredeemed broad-check deferral has a repair loop that never converged —
-    which a resume can converge. Naming that as a pause makes the blocker
-    durable and re-evaluated instead of leaving the deferral stranded behind a
-    plain failure; the specific reason survives on ``claimed_reason`` and on the
-    ``action_required`` record the review path already wrote.
-    """
-    with persistence.lock:
-        claimed_ok = bool(payload.get("ok"))
-        claimed_reason = str(payload.get("reason") or "")
-        already_settled = bool(payload.get("paused")) or claimed_reason == "dry-run"
-        blocker = None if already_settled else _terminal_blocker(payload, event_path)
-        adjudication = _TerminalAdjudication(
-            claimed_ok=claimed_ok,
-            claimed_reason=claimed_reason,
-            blocker=blocker,
-        )
-        payload["terminal_adjudication"] = adjudication.to_payload()
-        persistence.write_state(payload)
-    if blocker is not None:
-        _pause_run(
-            event_path,
-            payload,
-            reason=blocker.reason,
-            message=blocker.message,
-            details=blocker.details,
-            persistence=persistence,
-        )
-    return adjudication
-
-
 _record_degraded_assurance = run_coordination.record_degraded_assurance
-
-
-def _terminalize_run(
-    *,
-    exit_code: int,
-    event_path: Path,
-    payload: dict[str, Any],
-    progress: run_reporting._ProgressReporter | None = None,
-    persistence: run_persistence._RunPersistence | None = None,
-    audit_context: _TerminalAuditContext | None = None,
-    cancel: harnesses.AbortSignal | None = None,
-    poll: Callable[[], None] | None = None,
-) -> int:
-    """Close one run: adjudicate it, audit it, then finalize it.
-
-    Adjudication runs first and is the only thing here that can change the
-    run's verdict: a run may not claim success it did not earn, so
-    :func:`_adjudicate_terminal_run` re-derives success from the durable
-    evidence and pauses the run when the evidence is missing. Auditing stays
-    advisory and downstream of it — an audit that fails or finds something
-    still leaves the adjudicated verdict alone, and it now grades the same
-    verdict an operator reads. The audit runs before finalization so its
-    artifacts and ledger records exist before ``run_finished`` carries the
-    summary that names them; readiness, the terminal event, the state
-    projection, AgentMux, and the final output all follow unchanged.
-
-    ``cancel`` and ``poll`` come from the run loop's exit, the one path that
-    still has a live control queue to drain: together they make the audit
-    cancellable by repeating ``asl control abort``. The early exits that
-    terminalize before the loop starts pass neither, so their finalization is
-    visible but not cancellable.
-    """
-    resolved_persistence = run_persistence._run_persistence(persistence)
-    adjudication = _adjudicate_terminal_run(
-        event_path=event_path,
-        payload=payload,
-        persistence=resolved_persistence,
-    )
-    if adjudication.blocked:
-        exit_code = 1
-    with resolved_persistence.lock:
-        outcome = _terminal_outcome(payload)
-    if audit_context is not None and outcome not in _UNAUDITED_TERMINAL_OUTCOMES:
-        # The coordinator owns the one invariant this block existed for: the
-        # published finalization phase is closed exactly once, cancelled or
-        # not, however the advisory audit inside it ends.
-        run_coordination.TerminalAssuranceCoordinator(
-            payload=payload,
-            context=audit_context,
-            persistence=resolved_persistence,
-            phase=live_verification._LiveFinalization(
-                event_path=event_path,
-                payload=payload,
-                persistence=resolved_persistence,
-                run_id=payload.get("run_id"),
-                phase=live_verification.FINALIZATION_PHASE_ASSURANCE_AUDIT,
-                cancellable=cancel is not None,
-                poll=poll,
-            ),
-            state_snapshot=run_persistence._compact_state_payload,
-            abort=cancel,
-        ).run()
-    _record_degraded_assurance(payload, persistence=resolved_persistence)
-    commit_settlement._finish_run(
-        event_path,
-        payload,
-        progress,
-        persistence=persistence,
-        finalize_readiness=_finalize_readiness_lifecycle,
-    )
-    return exit_code
-
-
-def _final_readiness_state_from_payload(
-    payload: dict[str, Any],
-) -> plans.ReadinessState:
-    if payload.get("paused") or not payload.get("ok"):
-        return "reviewed"
-    final_snapshot = payload.get("final_snapshot")
-    counts: dict[str, Any] | None = None
-    if isinstance(final_snapshot, dict):
-        snapshot_counts = final_snapshot.get("counts")
-        if isinstance(snapshot_counts, dict):
-            counts = snapshot_counts
-    if counts is not None:
-        pending = int(counts.get("pending", 0) or 0)
-        empty = int(counts.get("empty", 0) or 0)
-        unknown = int(counts.get("unknown", 0) or 0)
-        if pending == 0 and empty == 0 and unknown == 0:
-            return "complete"
-    return "loop-ready"
-
-
-def _finalize_readiness_lifecycle(payload: dict[str, Any]) -> None:
-    if not payload.get("readiness_state_active"):
-        return
-    plan_dir_value = payload.get("plan_dir")
-    if not isinstance(plan_dir_value, str) or not plan_dir_value:
-        return
-    final_state = _final_readiness_state_from_payload(payload)
-    success, error = _write_readiness_state(Path(plan_dir_value), final_state)
-    if success:
-        payload["readiness_state_final"] = final_state
-        payload["readiness_state_current"] = final_state
-    else:
-        payload["readiness_state_final"] = None
-        payload["readiness_state_write_error"] = error
-
-
-#: Where a pause's remediation hints sit inside its details payload. A
-#: readiness pause carries the gate payload as its details; the workspace-scope
-#: pause nests that same payload under its own key.
-_PAUSE_REMEDIATION_PATHS: tuple[tuple[str, ...], ...] = (
-    ("repair_hints",),
-    ("readiness_gate", "repair_hints"),
-)
-
-
-def _optional_str(value: Any) -> str | None:
-    """``value`` when it is a non-empty string, else ``None``."""
-    return value if isinstance(value, str) and value else None
-
-
-def _runtime_reason_remediation(
-    reason: str, *, plan_dir: str | None, cwd: str | None
-) -> dict[str, Any] | None:
-    """The repair hint a stable pause reason resolves to, if it has one.
-
-    Shaped like ``_readiness_repair_hints`` entries so a consumer reads one
-    remediation vocabulary whichever source produced it. The plan directory and
-    repository root are substituted when the payload knows them, leaving the
-    placeholders intact rather than quoting them when it does not.
-    """
-
-    hint = preflight.runtime_repair_hint(reason)
-    if hint is None:
-        return None
-    message = hint.message
-    if plan_dir:
-        message = preflight.repair_hint_payload(hint, plan_dir=plan_dir, cwd=cwd)[
-            "message"
-        ]
-    return {
-        "check_id": hint.check_id,
-        "category": hint.category,
-        "fix_category": hint.fix_category,
-        "message": message,
-    }
-
-
-def _pause_remediation(
-    details: Mapping[str, Any],
-    *,
-    reason: str,
-    plan_dir: str | None = None,
-    cwd: str | None = None,
-) -> list[dict[str, Any]]:
-    """Remediation for a pause: its own details first, else its reason.
-
-    A gate that already resolved its findings to repair hints carries them in
-    the pause details, and those are the most specific guidance available. A
-    runner-side refusal carries findings but no hints, so the stable pause
-    reason resolves one from ``preflight.RUNTIME_REPAIR_HINTS`` instead. Without
-    that fallback an ``inspect`` pause tells an operator to look without saying
-    where, which is what the audit filed against `commit-preflight`.
-    """
-
-    for path in _PAUSE_REMEDIATION_PATHS:
-        current: Any = details
-        for key in path:
-            current = current.get(key) if isinstance(current, Mapping) else None
-        if isinstance(current, list) and current:
-            return [entry for entry in current if isinstance(entry, Mapping)]
-    fallback = _runtime_reason_remediation(reason, plan_dir=plan_dir, cwd=cwd)
-    return [] if fallback is None else [fallback]
-
-
-def _set_pause(
-    payload: dict[str, Any],
-    *,
-    reason: str,
-    message: str,
-    details: dict[str, Any] | None = None,
-) -> None:
-    payload["ok"] = False
-    payload["paused"] = True
-    payload["reason"] = reason
-    payload["pause_reason"] = reason
-    payload["pause_message"] = message
-    payload["pause_details"] = {} if details is None else details
-    payload["details"] = payload["pause_details"]
-    # Carry the single-source-of-truth pause classification so consumers
-    # (the supervisor helper, `asl status`, `asl questions`) stop hardcoding
-    # the recoverable/user-required reason sets.
-    policy = pause_policy.classify_pause(reason)
-    payload["pause_policy"] = policy
-    # A pause a machine cannot retry is by definition waiting on a human, so the
-    # terminal state names that ask rather than leaving an operator to infer it
-    # from the reason. A signal the turn already raised is the more specific
-    # record of the same ask and is left standing. Remediation is whatever the
-    # pause evidence carries: a reason with no command still gets a record.
-    if policy["requires_user"] and not isinstance(
-        payload.get("action_required"), Mapping
-    ):
-        payload["action_required"] = {
-            "reason": reason,
-            "message": message,
-            "source": "pause",
-            "user_action": policy["user_action"],
-            "remediation": _pause_remediation(
-                payload["pause_details"],
-                reason=reason,
-                plan_dir=_optional_str(payload.get("plan_dir")),
-                cwd=_optional_str(payload.get("cwd")),
-            ),
-        }
-
-
-def _pause_run(
-    event_path: Path,
-    payload: dict[str, Any],
-    *,
-    reason: str,
-    message: str,
-    details: dict[str, Any] | None = None,
-    persistence: run_persistence._RunPersistence | None = None,
-) -> None:
-    persistence = run_persistence._run_persistence(persistence)
-    with persistence.lock:
-        _set_pause(payload, reason=reason, message=message, details=details)
-        persistence.append_event(
-            event_path,
-            events.RUN_PAUSED_EVENT,
-            {
-                "run_id": payload.get("run_id"),
-                "run_dir": payload.get("run_dir"),
-                "reason": reason,
-                "message": message,
-                "details": (
-                    {}
-                    if details is None
-                    else run_persistence._bounded_verification_details(details)
-                ),
-            },
-        )
-    run_persistence._notify_agent_mux_loop_paused(payload, persistence)
 
 
 # The external control plane owns ``payload["control"]`` and the receipts an
@@ -908,157 +519,6 @@ _degrade_abort_to_stop_after_current = (
 )
 _drain_external_control_queue = run_coordination.drain_external_control_queue
 _MailboxPoll = run_coordination.MailboxPoll
-
-
-def _detach_turn_controls(poll: run_coordination.MailboxPoll) -> None:
-    """Take the finished turn's mid-turn inputs away from the poller.
-
-    Called from ``after_stop``, which runs once the poll thread is joined and
-    before ``active_turn`` is cleared: after this, an observed abort arms
-    nothing and observed guidance is delivered nowhere until the next turn
-    registers its own signal and endpoint.
-    """
-    poll.set_abort(None)
-    poll.set_live_delivery(None)
-
-
-def _record_abort_satisfied_by_worker(
-    listener: run_control.RunControlListener,
-    *,
-    payload: dict[str, Any],
-    event_path: Path,
-    control_payload: dict[str, Any],
-    context: Mapping[str, Any] | None = None,
-    persistence: run_persistence._RunPersistence | None = None,
-) -> None:
-    """Clear a pending abort whose turn ended on its own inside the window."""
-    action = listener.consume_abort_turn()
-    if action is None:
-        return
-    _record_run_control_action(
-        event_path=event_path,
-        payload=payload,
-        control_payload=control_payload,
-        action=action,
-        context=context,
-        persistence=run_persistence._run_persistence(persistence),
-        event_action=events.RUN_CONTROL_ACTION_ABORT_TURN_SATISFIED_BY_WORKER,
-        message="turn abort satisfied by the worker inside the grace window",
-    )
-
-
-def _honor_abort_turn(
-    listener: run_control.RunControlListener,
-    *,
-    snapshot: plans.PlanSnapshot,
-    session_id: str,
-    payload: dict[str, Any],
-    event_path: Path,
-    control_payload: dict[str, Any],
-    plan_cache: plans.PlanSnapshotCache,
-    context: Mapping[str, Any] | None = None,
-    persistence: run_persistence._RunPersistence | None = None,
-) -> None:
-    """Record the clean early stop that follows a killed turn.
-
-    A supervisor-requested abort is not a fault, so this is deliberately not a
-    pause: the killed session goes back to ``pending`` with a Handoff note
-    explaining why it holds no completion, and the run exits ``stopped``.
-    """
-    persistence = run_persistence._run_persistence(persistence)
-    action = listener.consume_abort_turn()
-    reason = ABORT_TURN_DEFAULT_REASON
-    if action is not None:
-        reason = action.abort_reason or ABORT_TURN_DEFAULT_REASON
-        _record_run_control_action(
-            event_path=event_path,
-            payload=payload,
-            control_payload=control_payload,
-            action=action,
-            context=context,
-            persistence=persistence,
-        )
-    reverted = _revert_session_status_to_pending(
-        snapshot,
-        session_id,
-        failure_note=(
-            "turn aborted by supervisor request before it completed "
-            f"({reason}); the session holds no completion from it"
-        ),
-    )
-    snapshot_after = _reinspect_after_revert(
-        snapshot.plan_dir, snapshot, reverted, plan_cache
-    )
-    _honor_stop_after_current(
-        listener,
-        snapshot=snapshot_after,
-        payload=payload,
-        event_path=event_path,
-        control_payload=control_payload,
-        context=context,
-        persistence=persistence,
-    )
-
-
-def _honor_stop_after_current(
-    listener: run_control.RunControlListener,
-    *,
-    snapshot: plans.PlanSnapshot,
-    payload: dict[str, Any],
-    event_path: Path,
-    control_payload: dict[str, Any],
-    context: Mapping[str, Any] | None = None,
-    persistence: run_persistence._RunPersistence | None = None,
-) -> None:
-    """Consume the pending stop request and record the run's clean early exit.
-
-    Consumption happens only here, at the moment the loop actually stops, so a
-    request is never recorded as ``consumed`` by a run that then keeps working.
-    """
-    persistence = run_persistence._run_persistence(persistence)
-    with persistence.lock:
-        action = listener.consume_stop_after_current()
-        if action is not None:
-            _record_run_control_action(
-                event_path=event_path,
-                payload=payload,
-                control_payload=control_payload,
-                action=action,
-                context=context,
-                persistence=persistence,
-            )
-        payload["reason"] = "stopped"
-        payload["final_snapshot"] = _snapshot_payload(snapshot)
-        persistence.write_state(payload)
-
-
-def _stop_before_review_work(
-    listener: run_control.RunControlListener,
-    *,
-    snapshot: plans.PlanSnapshot,
-    payload: dict[str, Any],
-    event_path: Path,
-    control_payload: dict[str, Any],
-    persistence: run_persistence._RunPersistence | None = None,
-) -> None:
-    """Honor a stop that lands when only review work would follow.
-
-    The generated review session and its repair children are work that starts
-    after the session the operator asked to stop after, so an all-complete plan
-    is not a no-op: the run exits ``stopped`` with the review still pending, and
-    re-running the same command later performs it.
-    """
-    persistence = run_persistence._run_persistence(persistence)
-    with persistence.lock:
-        _set_existing_review_verdict(payload, snapshot.plan_dir)
-        _honor_stop_after_current(
-            listener,
-            snapshot=snapshot,
-            payload=payload,
-            event_path=event_path,
-            control_payload=control_payload,
-            persistence=persistence,
-        )
 
 
 def _allow_not_loop_ready(args: argparse.Namespace) -> bool:
@@ -1260,7 +720,7 @@ def _regate_reopened_plan(
     )
     with persistence.lock:
         payload["final_snapshot"] = _snapshot_payload(snapshot)
-    _pause_run(
+    run_termination._pause_run(
         event_path,
         payload,
         reason="not-loop-ready",
@@ -2363,7 +1823,7 @@ def _advance_review_cycle(
       caller re-enters the loop to execute them serially and then append the
       next review session.
     - ``("paused", snapshot)`` — the run was paused (malformed repair output
-      or a failed executability gate); ``_pause_run`` has already fired.
+      or a failed executability gate); ``run_termination._pause_run`` has already fired.
     """
     cursor = review_transitions.REVIEW_CYCLE_MACHINE.start()
     verdict = turn_payload.get("review_verdict")
@@ -2524,7 +1984,7 @@ def _advance_review_cycle(
         )
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(materialized)
-        _pause_run(
+        run_termination._pause_run(
             event_path,
             payload,
             reason=str(settlement.pause_reason),
@@ -2555,7 +2015,7 @@ def _advance_review_cycle(
         )
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(materialized)
-        _pause_run(
+        run_termination._pause_run(
             event_path,
             payload,
             reason=str(settlement.pause_reason),
@@ -2602,7 +2062,7 @@ def _advance_review_cycle(
     except plans.PlanError as error:
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(materialized)
-        _pause_run(
+        run_termination._pause_run(
             event_path,
             payload,
             reason="malformed-plan",
@@ -2865,7 +2325,7 @@ def _enforce_mailbox_completion_guard(
         reason="blocked",
         reopened=reverted is not None,
     )
-    _pause_run(
+    run_termination._pause_run(
         event_path,
         payload,
         reason="blocked",
@@ -2997,7 +2457,7 @@ def _enforce_review_mutation_guard(
         reason=reason,
         reopened=reverted is not None,
     )
-    _pause_run(
+    run_termination._pause_run(
         event_path,
         payload,
         reason=reason,
@@ -3139,7 +2599,7 @@ def _enforce_plan_artifact_guard(
         reason=reason,
         reopened=reverted is not None,
     )
-    _pause_run(
+    run_termination._pause_run(
         event_path,
         payload,
         reason=reason,
@@ -4543,7 +4003,7 @@ def _enforce_workspace_write_guard(
         reason=reason,
         reopened=reverted is not None,
     )
-    _pause_run(
+    run_termination._pause_run(
         event_path,
         payload,
         reason=reason,
@@ -4661,7 +4121,7 @@ def _enforce_legacy_implementation_write_guard(
         reason=reason,
         reopened=reverted is not None,
     )
-    _pause_run(
+    run_termination._pause_run(
         event_path,
         payload,
         reason=reason,
@@ -4975,7 +4435,7 @@ def _enforce_protected_path_guard(
         reason=reason,
         reopened=reverted is not None,
     )
-    _pause_run(
+    run_termination._pause_run(
         event_path,
         payload,
         reason=reason,
@@ -5103,7 +4563,7 @@ def _enforce_review_verdict(
     }
     if "review_artifact_path" in verdict:
         details["review_artifact_path"] = verdict["review_artifact_path"]
-    _pause_run(
+    run_termination._pause_run(
         event_path,
         payload,
         reason="verify-failed",
@@ -5188,7 +4648,7 @@ def _enforce_session_verification(
             reopened=reverted is not None,
             detail=refusal.guard_detail,
         )
-        _pause_run(
+        run_termination._pause_run(
             event_path,
             payload,
             reason=refusal.reason,
@@ -5424,7 +4884,7 @@ def _enforce_session_verification(
         reopened=reverted is not None,
         detail={"summary": summary, "fingerprint": repair.fingerprint},
     )
-    _pause_run(
+    run_termination._pause_run(
         event_path,
         payload,
         reason="verify-failed",
@@ -6363,8 +5823,8 @@ def _run_locked(
     # a group a previous process left unresolved: the declared implementation
     # harness, not whichever harness a live switch moved a turn onto.
     commit_generation = run_commit._commit_generation(args)
-    audited_repositories, audited_registry_declared = _audited_repositories(
-        verification_context
+    audited_repositories, audited_registry_declared = (
+        run_termination._audited_repositories(verification_context)
     )
     audit_context = _TerminalAuditContext(
         plan=supervisor_audit.plan_audit(args),
@@ -6496,24 +5956,26 @@ def _run_locked(
 
         A commit failure no longer stops the run, so the last thing decided
         before the audit runs is whether any group is still owed. The answer is
-        written into the payload here, ahead of ``_terminalize_run``, because
-        every reader that must not miss it — terminal adjudication, the
-        assurance audit, and the final summary — is downstream of this point.
+        written into the payload here, ahead of
+        ``run_termination._terminalize_run``, because every reader that must not
+        miss it — terminal adjudication, the assurance audit, and the final
+        summary — is downstream of this point.
 
         The exit code each caller passes is a proposal, not a verdict: the
-        adjudicator inside ``_terminalize_run`` may refuse a success and return
-        a failing code instead, which is why the returned value is used rather
-        than the one passed in.
+        adjudicator inside ``run_termination._terminalize_run`` may refuse a
+        success and return a failing code instead, which is why the returned
+        value is used rather than the one passed in.
         """
         with persistence.lock:
             payload[commit_settlement.UNRESOLVED_COMMIT_GROUPS_KEY] = (
                 commit_settlement._unresolved_commit_groups(payload)
             )
         return finish_run_locked(
-            _terminalize_run(
+            run_termination._terminalize_run(
                 exit_code=exit_code,
                 event_path=event_path,
                 payload=payload,
+                write_readiness_state=_write_readiness_state,
                 progress=progress,
                 persistence=persistence,
                 audit_context=audit_context,
@@ -6690,7 +6152,7 @@ def _run_locked(
         reason, message, details = invalid_pause
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot)
-        _pause_run(
+        run_termination._pause_run(
             event_path,
             payload,
             reason=reason,
@@ -6703,7 +6165,7 @@ def _run_locked(
     if commit_group_load_error is not None:
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot)
-        _pause_run(
+        run_termination._pause_run(
             event_path,
             payload,
             reason="commit-failed",
@@ -6746,7 +6208,7 @@ def _run_locked(
 
     if snapshot.next_pending is None:
         if not run_inputs._all_sessions_complete(snapshot):
-            _pause_run(
+            run_termination._pause_run(
                 event_path,
                 payload,
                 reason="no-pending-but-incomplete",
@@ -6768,7 +6230,7 @@ def _run_locked(
         if pending_review is not None:
             with persistence.lock:
                 payload["final_snapshot"] = _snapshot_payload(snapshot)
-            _pause_run(
+            run_termination._pause_run(
                 event_path,
                 payload,
                 reason="review-harness-required",
@@ -6806,7 +6268,7 @@ def _run_locked(
     ):
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot)
-        _pause_run(
+        run_termination._pause_run(
             event_path,
             payload,
             reason=MULTI_REPO_CAPABILITY_PAUSE_REASON,
@@ -6928,7 +6390,7 @@ def _run_locked(
         }
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot)
-        _pause_run(
+        run_termination._pause_run(
             event_path,
             payload,
             reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
@@ -6947,7 +6409,7 @@ def _run_locked(
     if non_bypassable:
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot)
-        _pause_run(
+        run_termination._pause_run(
             event_path,
             payload,
             reason="not-loop-ready",
@@ -6991,7 +6453,7 @@ def _run_locked(
             gate_message = _readiness_gate_failure_message(preflight_report)
             with persistence.lock:
                 payload["final_snapshot"] = _snapshot_payload(snapshot)
-            _pause_run(
+            run_termination._pause_run(
                 event_path,
                 payload,
                 reason="not-loop-ready",
@@ -7017,7 +6479,7 @@ def _run_locked(
     except RunError as error:
         with persistence.lock:
             payload["final_snapshot"] = _snapshot_payload(snapshot)
-        _pause_run(
+        run_termination._pause_run(
             event_path,
             payload,
             reason="commit-preflight",
@@ -7211,7 +6673,7 @@ def _run_locked(
                 if not run_inputs._all_sessions_complete(snapshot):
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(snapshot)
-                    _pause_run(
+                    run_termination._pause_run(
                         event_path,
                         payload,
                         reason="no-pending-but-incomplete",
@@ -7318,7 +6780,7 @@ def _run_locked(
                                 payload["reason"] = _terminal_review_reason(payload)
                         else:
                             blocker = review_resume.blocker or "unknown blocker"
-                            _pause_run(
+                            run_termination._pause_run(
                                 event_path,
                                 payload,
                                 reason=(events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR),
@@ -7363,7 +6825,7 @@ def _run_locked(
                                 persistence=persistence,
                                 record=failed_record,
                             )
-                            _pause_run(
+                            run_termination._pause_run(
                                 event_path,
                                 payload,
                                 reason=(events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR),
@@ -7381,12 +6843,13 @@ def _run_locked(
                             break
 
                         if stop_before_review:
-                            _stop_before_review_work(
+                            run_termination._stop_before_review_work(
                                 run_controls,
                                 snapshot=snapshot,
                                 payload=payload,
                                 event_path=event_path,
                                 control_payload=control_payload,
+                                record_existing_review_verdict=_set_existing_review_verdict,
                                 persistence=persistence,
                             )
                             break
@@ -7434,7 +6897,7 @@ def _run_locked(
                             # into even with --allow-not-loop-ready.
                             with persistence.lock:
                                 payload["final_snapshot"] = _snapshot_payload(snapshot)
-                            _pause_run(
+                            run_termination._pause_run(
                                 event_path,
                                 payload,
                                 reason="not-loop-ready",
@@ -7470,7 +6933,7 @@ def _run_locked(
                             )
                             with persistence.lock:
                                 payload["final_snapshot"] = _snapshot_payload(snapshot)
-                            _pause_run(
+                            run_termination._pause_run(
                                 event_path,
                                 payload,
                                 reason=(events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR),
@@ -7491,7 +6954,7 @@ def _run_locked(
                         try:
                             snapshot = plan_cache.get_fresh(snapshot.plan_dir)
                         except plans.PlanError as error:
-                            _pause_run(
+                            run_termination._pause_run(
                                 event_path,
                                 payload,
                                 reason="malformed-plan",
@@ -7526,7 +6989,7 @@ def _run_locked(
                             == review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY
                             and not allow_not_loop_ready
                         ):
-                            _pause_run(
+                            run_termination._pause_run(
                                 event_path,
                                 payload,
                                 reason="not-loop-ready",
@@ -7575,12 +7038,13 @@ def _run_locked(
                         continue
 
                     if stop_before_review:
-                        _stop_before_review_work(
+                        run_termination._stop_before_review_work(
                             run_controls,
                             snapshot=snapshot,
                             payload=payload,
                             event_path=event_path,
                             control_payload=control_payload,
+                            record_existing_review_verdict=_set_existing_review_verdict,
                             persistence=persistence,
                         )
                         break
@@ -7627,7 +7091,7 @@ def _run_locked(
                             )
                             with persistence.lock:
                                 payload["final_snapshot"] = _snapshot_payload(snapshot)
-                            _pause_run(
+                            run_termination._pause_run(
                                 event_path,
                                 payload,
                                 reason=(events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE),
@@ -7650,7 +7114,7 @@ def _run_locked(
                         except RunError as error:
                             with persistence.lock:
                                 payload["final_snapshot"] = _snapshot_payload(snapshot)
-                            _pause_run(
+                            run_termination._pause_run(
                                 event_path,
                                 payload,
                                 reason=(events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE),
@@ -7689,7 +7153,7 @@ def _run_locked(
                     except (plans.PlanError, OSError) as error:
                         with persistence.lock:
                             payload["final_snapshot"] = _snapshot_payload(snapshot)
-                        _pause_run(
+                        run_termination._pause_run(
                             event_path,
                             payload,
                             reason="malformed-plan",
@@ -7752,7 +7216,7 @@ def _run_locked(
                     try:
                         snapshot = plan_cache.get_fresh(snapshot.plan_dir)
                     except plans.PlanError as error:
-                        _pause_run(
+                        run_termination._pause_run(
                             event_path,
                             payload,
                             reason="malformed-plan",
@@ -7911,7 +7375,7 @@ def _run_locked(
                 except (plans.PlanError, OSError) as error:
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(snapshot)
-                    _pause_run(
+                    run_termination._pause_run(
                         event_path,
                         payload,
                         reason="malformed-plan",
@@ -7997,7 +7461,7 @@ def _run_locked(
                     and run_controls.state.stop_after_current
                 )
                 if stop_before_turn:
-                    _honor_stop_after_current(
+                    run_termination._honor_stop_after_current(
                         run_controls,
                         snapshot=before,
                         payload=payload,
@@ -8064,7 +7528,7 @@ def _run_locked(
                 message, details = preflight_failure
                 with persistence.lock:
                     payload["final_snapshot"] = _snapshot_payload(before)
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason="harness-unavailable",
@@ -8156,7 +7620,7 @@ def _run_locked(
                     repair_blocker = repair_resume.blocker or "unknown blocker"
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(before)
-                    _pause_run(
+                    run_termination._pause_run(
                         event_path,
                         payload,
                         reason=events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
@@ -8184,7 +7648,7 @@ def _run_locked(
                 except RepairCommitPreflightError as error:
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(before)
-                    _pause_run(
+                    run_termination._pause_run(
                         event_path,
                         payload,
                         reason="commit-preflight",
@@ -8367,7 +7831,7 @@ def _run_locked(
             if packet_intent_report is not None:
                 with persistence.lock:
                     payload["final_snapshot"] = _snapshot_payload(before)
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason=(events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED),
@@ -8563,7 +8027,7 @@ def _run_locked(
                     }
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(before)
-                    _pause_run(
+                    run_termination._pause_run(
                         event_path,
                         payload,
                         reason=(events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE),
@@ -8641,7 +8105,7 @@ def _run_locked(
                         }
                         with persistence.lock:
                             payload["final_snapshot"] = _snapshot_payload(before)
-                        _pause_run(
+                        run_termination._pause_run(
                             event_path,
                             payload,
                             reason=(
@@ -8701,7 +8165,7 @@ def _run_locked(
                     }
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(before)
-                    _pause_run(
+                    run_termination._pause_run(
                         event_path,
                         payload,
                         reason=(events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE),
@@ -8737,7 +8201,7 @@ def _run_locked(
                 if unavailable is not None:
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(before)
-                    _pause_run(
+                    run_termination._pause_run(
                         event_path,
                         payload,
                         reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
@@ -8959,7 +8423,7 @@ def _run_locked(
                 live_turn=live_turn,
                 active_turn=active_turn,
                 payload=payload,
-                after_stop=lambda: _detach_turn_controls(mailbox_poll),
+                after_stop=lambda: run_termination._detach_turn_controls(mailbox_poll),
                 on_failure=_abandon_turn,
             )
             result = execution.result
@@ -9040,7 +8504,7 @@ def _run_locked(
                 # was killed and whatever it recorded stands: the pause or
                 # completion path below owns the outcome from here.
                 with run_control_lock:
-                    _record_abort_satisfied_by_worker(
+                    run_termination._record_abort_satisfied_by_worker(
                         run_controls,
                         payload=payload,
                         event_path=event_path,
@@ -9099,7 +8563,7 @@ def _run_locked(
                                 if after is not None
                                 else _snapshot_payload(before)
                             )
-                        _pause_run(
+                        run_termination._pause_run(
                             event_path,
                             payload,
                             reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
@@ -9245,7 +8709,7 @@ def _run_locked(
                         if after is not None
                         else _snapshot_payload(before)
                     )
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason="interrupted",
@@ -9262,7 +8726,7 @@ def _run_locked(
                         if after is not None
                         else _snapshot_payload(before)
                     )
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason="timeout",
@@ -9276,7 +8740,7 @@ def _run_locked(
                 # Beside the timeout branch, but not a pause: the operator asked
                 # for this stop, so it is recorded as one.
                 with run_control_lock:
-                    _honor_abort_turn(
+                    run_termination._honor_abort_turn(
                         run_controls,
                         snapshot=after if after is not None else before,
                         session_id=session_id,
@@ -9284,6 +8748,8 @@ def _run_locked(
                         event_path=event_path,
                         control_payload=control_payload,
                         plan_cache=plan_cache,
+                        revert_session_status=_revert_session_status_to_pending,
+                        reinspect=_reinspect_after_revert,
                         context=turn_payload,
                         persistence=persistence,
                     )
@@ -9341,7 +8807,7 @@ def _run_locked(
                     ),
                     detail={"error": plan_error},
                 )
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason="malformed-plan",
@@ -9380,7 +8846,7 @@ def _run_locked(
                     reason=reason,
                     detail=details,
                 )
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason=reason,
@@ -9453,7 +8919,7 @@ def _run_locked(
                             else len(worker_pause_resolution.note)
                         ),
                     }
-                    _pause_run(
+                    run_termination._pause_run(
                         event_path,
                         payload,
                         reason=pause_reason,
@@ -9561,7 +9027,7 @@ def _run_locked(
                                 resolution_message.action
                                 == mailbox.RESOLUTION_ACTION_PAUSE
                             )
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason=pause_reason,
@@ -9651,7 +9117,7 @@ def _run_locked(
                     )
                 with persistence.lock:
                     payload["final_snapshot"] = _snapshot_payload(after)
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason=classification.reason,
@@ -9696,7 +9162,7 @@ def _run_locked(
                         "observed_status_changes": [],
                     },
                 )
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason="no-status-change",
@@ -9727,7 +9193,7 @@ def _run_locked(
                         "observed_status_changes": list(status_changes),
                     },
                 )
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason="multiple-status-changes",
@@ -9759,7 +9225,7 @@ def _run_locked(
                         "observed_status_changes": list(status_changes),
                     },
                 )
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason="unexpected-status-change",
@@ -9830,8 +9296,8 @@ def _run_locked(
                 # whole review turn late. The queue drain is what makes an
                 # `asl control stop` observable at all on a review turn; the
                 # read below is non-consuming, like every other checkpoint —
-                # only `_honor_stop_after_current` consumes, at the moment the
-                # loop actually stops.
+                # only `run_termination._honor_stop_after_current` consumes,
+                # at the moment the loop actually stops.
                 _drain_external_control_queue(
                     plan_dir=before.plan_dir,
                     state_dir_arg=args.state_dir,
@@ -9914,7 +9380,7 @@ def _run_locked(
                     reason="malformed-plan",
                     detail={"error": str(error)},
                 )
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason="malformed-plan",
@@ -9942,7 +9408,7 @@ def _run_locked(
                         reason="malformed-plan",
                         detail={"error": str(error)},
                     )
-                    _pause_run(
+                    run_termination._pause_run(
                         event_path,
                         payload,
                         reason="malformed-plan",
@@ -10079,7 +9545,7 @@ def _run_locked(
                     reason=rejection.reason,
                     detail=rejection.detail,
                 )
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason=rejection.reason,
@@ -10171,7 +9637,7 @@ def _run_locked(
                     and snapshot.next_pending is not None
                 )
                 if stop_now:
-                    _honor_stop_after_current(
+                    run_termination._honor_stop_after_current(
                         run_controls,
                         snapshot=snapshot,
                         payload=payload,
@@ -10320,7 +9786,7 @@ def _run_locked(
                 )
         if isinstance(error, KeyboardInterrupt):
             if not payload.get("paused"):
-                _pause_run(
+                run_termination._pause_run(
                     event_path,
                     payload,
                     reason="interrupted",
@@ -10464,7 +9930,7 @@ def _error_payload(
     payload.update(run_selection._selected_model_effort_payload(args))
     payload["spark"] = run_selection._safe_initial_spark_payload(args)
     if paused:
-        # Match `_set_pause`: a paused error payload carries the same
+        # Match `run_termination.set_pause`: a paused error payload carries the same
         # single-source-of-truth pause classification block.
         payload["pause_policy"] = pause_policy.classify_pause(reason)
     if snapshot is not None:

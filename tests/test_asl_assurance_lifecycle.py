@@ -32,9 +32,11 @@ from agent_session_loop import (
     run_control,
     run_persistence,
     run_selection,
+    run_termination,
     runner,
     state,
     supervisor_audit,
+    verification_transitions,
 )
 from agent_session_loop.assurance_models import RUBRIC_LANES, AuditRole
 from tests.support import (
@@ -80,35 +82,40 @@ class TerminalOutcomeNamingTests(unittest.TestCase):
     def test_all_complete_with_turns_is_a_completed_run(self) -> None:
         payload = {"reason": "all-complete", "turns": [{"name": "turn-0001-01"}]}
 
-        self.assertEqual("complete", runner._terminal_outcome(payload))
+        self.assertEqual("complete", run_termination._terminal_outcome(payload))
 
     def test_all_complete_without_turns_is_a_no_work_run(self) -> None:
         payload = {"reason": "all-complete", "turns": []}
 
-        self.assertEqual("no-work", runner._terminal_outcome(payload))
+        self.assertEqual("no-work", run_termination._terminal_outcome(payload))
 
     def test_a_session_cap_keeps_its_own_reason(self) -> None:
         self.assertEqual(
-            "max-sessions", runner._terminal_outcome({"reason": "max-sessions"})
+            "max-sessions",
+            run_termination._terminal_outcome({"reason": "max-sessions"}),
         )
 
     def test_an_intentional_stop_keeps_its_own_reason(self) -> None:
-        self.assertEqual("stopped", runner._terminal_outcome({"reason": "stopped"}))
+        self.assertEqual(
+            "stopped", run_termination._terminal_outcome({"reason": "stopped"})
+        )
 
     def test_a_pause_outranks_the_reason_it_recorded(self) -> None:
         payload = {"paused": True, "reason": "review-harness-required"}
 
-        self.assertEqual("paused", runner._terminal_outcome(payload))
+        self.assertEqual("paused", run_termination._terminal_outcome(payload))
 
     def test_a_dry_run_is_named_apart_from_every_executed_ending(self) -> None:
-        self.assertEqual("dry-run", runner._terminal_outcome({"reason": "dry-run"}))
+        self.assertEqual(
+            "dry-run", run_termination._terminal_outcome({"reason": "dry-run"})
+        )
 
     def test_an_unnamed_reason_still_resolves_to_an_audited_outcome(self) -> None:
         """A future cap-driven stop is audited by construction, not by listing."""
-        outcome = runner._terminal_outcome({"reason": "max-pending-sessions"})
+        outcome = run_termination._terminal_outcome({"reason": "max-pending-sessions"})
 
         self.assertEqual("max-pending-sessions", outcome)
-        self.assertNotIn(outcome, runner._UNAUDITED_TERMINAL_OUTCOMES)
+        self.assertNotIn(outcome, run_termination._UNAUDITED_TERMINAL_OUTCOMES)
 
 
 class _RunHistory:
@@ -991,10 +998,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
 
         self._stage_outcome(payload, outcome)
         with mock.patch.object(runner.supervisor_audit, "audit_terminal_run", record):
-            code = runner._terminalize_run(
+            code = run_termination._terminalize_run(
                 exit_code=exit_code,
                 event_path=Path(str(payload["events_path"])),
                 payload=payload,
+                write_readiness_state=runner._write_readiness_state,
                 audit_context=self._context(payload),
             )
         return code, calls
@@ -1004,18 +1012,25 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
 
         Every persisted ending — including the ones no fixture here reaches —
         gets audited exactly when finalizing has no other way in.
+
+        Both modules are read, not just the one that owns the terminal path: the
+        runner keeping its own way into ``_finish_run`` would reopen the same
+        hole the assertion exists to close.
         """
-        tree = ast.parse(Path(runner.__file__).read_text(encoding="utf-8"))
-        callers = {
-            node.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef)
-            and any(
-                isinstance(call.func, ast.Attribute) and call.func.attr == "_finish_run"
-                for call in ast.walk(node)
-                if isinstance(call, ast.Call)
-            )
-        }
+        callers: set[str] = set()
+        for module in (run_termination, runner):
+            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            callers |= {
+                node.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)
+                and any(
+                    isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "_finish_run"
+                    for call in ast.walk(node)
+                    if isinstance(call, ast.Call)
+                )
+            }
 
         self.assertEqual({"_terminalize_run"}, callers)
 
@@ -1055,11 +1070,17 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             self.assertEqual(1, code)
             self.assertFalse(payload["ok"])
             self.assertTrue(payload["paused"])
-            self.assertEqual(runner.REVIEW_NOT_CLEAR_REASON, payload["pause_reason"])
+            self.assertEqual(
+                verification_transitions.REVIEW_NOT_CLEAR_REASON,
+                payload["pause_reason"],
+            )
             self.assertEqual(1, len(calls))
             audited = calls[0]["state_payload"]
             self.assertTrue(audited["paused"])
-            self.assertEqual(runner.REVIEW_NOT_CLEAR_REASON, audited["pause_reason"])
+            self.assertEqual(
+                verification_transitions.REVIEW_NOT_CLEAR_REASON,
+                audited["pause_reason"],
+            )
 
     def test_the_terminal_event_carries_the_bounded_assurance_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1160,10 +1181,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             with mock.patch.object(
                 runner.supervisor_audit, "audit_terminal_run", record
             ):
-                runner._terminalize_run(
+                run_termination._terminalize_run(
                     exit_code=0,
                     event_path=event_path,
                     payload=payload,
+                    write_readiness_state=runner._write_readiness_state,
                     audit_context=self._context(payload),
                 )
 
@@ -1178,7 +1200,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             )
 
     def test_an_unaudited_ending_finalizes_without_launching_an_auditor(self) -> None:
-        for outcome in sorted(runner._UNAUDITED_TERMINAL_OUTCOMES):
+        for outcome in sorted(run_termination._UNAUDITED_TERMINAL_OUTCOMES):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
                 payload = self._payload(Path(tmp), ["--audit-harness", "claude"])
 
@@ -1236,10 +1258,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             with mock.patch.object(
                 runner.supervisor_audit, "audit_terminal_run", interrupt
             ):
-                code = runner._terminalize_run(
+                code = run_termination._terminalize_run(
                     exit_code=runner.INTERRUPTED_EXIT,
                     event_path=Path(str(payload["events_path"])),
                     payload=payload,
+                    write_readiness_state=runner._write_readiness_state,
                     audit_context=self._context(payload),
                 )
 
@@ -1260,10 +1283,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
 
             self._stage_outcome(payload, "complete")
             with mock.patch.object(harnesses, "run_harness", auditor):
-                code = runner._terminalize_run(
+                code = run_termination._terminalize_run(
                     exit_code=1,
                     event_path=Path(str(payload["events_path"])),
                     payload=payload,
+                    write_readiness_state=runner._write_readiness_state,
                     audit_context=self._context(payload),
                 )
 
@@ -1301,10 +1325,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             with mock.patch.object(
                 runner.supervisor_audit, "audit_terminal_run", record
             ):
-                runner._terminalize_run(
+                run_termination._terminalize_run(
                     exit_code=0,
                     event_path=event_path,
                     payload=payload,
+                    write_readiness_state=runner._write_readiness_state,
                     audit_context=self._context(payload),
                 )
 
@@ -1373,10 +1398,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                     live_verification, "_LiveFinalization", _fast_finalization()
                 ),
             ):
-                code = runner._terminalize_run(
+                code = run_termination._terminalize_run(
                     exit_code=0,
                     event_path=event_path,
                     payload=payload,
+                    write_readiness_state=runner._write_readiness_state,
                     persistence=persistence,
                     audit_context=context,
                     cancel=abort,

@@ -42,6 +42,7 @@ from agent_session_loop import (
     run_selection,
     runner,
     state,
+    verification_transitions,
 )
 from tests.support import (
     REPO_ROOT,
@@ -1773,7 +1774,8 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertTrue(payload["paused"])
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, payload["pause_reason"]
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            payload["pause_reason"],
         )
         adjudication = payload["terminal_adjudication"]
         self.assertTrue(adjudication["claimed_ok"])
@@ -1811,7 +1813,8 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
 
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, payload["pause_reason"]
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            payload["pause_reason"],
         )
         self.assertEqual(
             first["pause_details"]["deferred_unresolved"][0]["checks"],
@@ -1833,7 +1836,8 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(1, blocked_completed.returncode, blocked_completed.stderr)
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, blocked["pause_reason"]
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            blocked["pause_reason"],
         )
 
         completed, payload = self._run(
@@ -1869,7 +1873,8 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertTrue(payload["paused"])
         self.assertEqual(
-            runner.REQUIRED_CHECKS_INCOMPLETE_REASON, payload["pause_reason"]
+            verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
+            payload["pause_reason"],
         )
         adjudication = payload["terminal_adjudication"]
         self.assertFalse(adjudication["claimed_ok"])
