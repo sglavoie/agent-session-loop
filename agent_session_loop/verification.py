@@ -674,7 +674,8 @@ _FAILURE_DIAGNOSTIC_MAX_BYTES = 2048
 FAILURE_DIAGNOSTIC_KEY = "failure_diagnostic"
 
 #: The marker a generated ASL gate stamps on its rejection line, and the value
-#: it stamps (``runner._VALIDATOR_FAIL_HELPER``). It is a cheap first filter,
+#: it stamps (``review_session_contract._VALIDATOR_FAIL_HELPER``). It is a
+#: cheap first filter,
 #: not authentication: the literal is public and every command can print it, so
 #: what a promoted line rests on is the runner's own provenance stamp, then the
 #: vocabulary below. It is stripped once read, since it says nothing about the

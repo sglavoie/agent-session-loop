@@ -35,6 +35,7 @@ from agent_session_loop import (
     review,
     review_continuation,
     review_repair,
+    review_session_contract,
     runner,
     state,
 )
@@ -411,7 +412,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("2", review_session_id)
         review_path = self.plan_dir / f"session-{review_session_id}.md"
         self.assertTrue(review_path.is_file())
-        self.assertTrue(runner.is_generated_review_session_file(review_path))
+        self.assertTrue(
+            review_session_contract.is_generated_review_session_file(review_path)
+        )
         # Both impl and review turns ran with the right kind tag.
         turns = payload["turns"]
         self.assertEqual(2, len(turns))
@@ -740,7 +743,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         review_candidates = [
             path
             for path in self.plan_dir.glob("session-*.md")
-            if runner.is_generated_review_session_file(path)
+            if review_session_contract.is_generated_review_session_file(path)
         ]
         self.assertEqual([], review_candidates)
 
@@ -805,7 +808,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             created_payload["review_session_path"],
         )
         self.assertEqual(
-            str(runner.final_review_output_path(canonical_plan_dir)),
+            str(review_session_contract.final_review_output_path(canonical_plan_dir)),
             created_payload["review_output_path"],
         )
 
@@ -1263,7 +1266,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         review_path = next(
             path
             for path in self.plan_dir.glob("session-*.md")
-            if runner.is_generated_review_session_file(path)
+            if review_session_contract.is_generated_review_session_file(path)
         )
         review_text = review_path.read_text(encoding="utf-8")
         self.assertIn("- **Status**: pending", review_text)
@@ -1418,7 +1421,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         completed, _ = self._run(review_harness="claude", json_mode=False)
 
         self.assertEqual(0, completed.returncode, completed.stderr)
-        expected_path = runner.final_review_output_path(
+        expected_path = review_session_contract.final_review_output_path(
             plans.canonicalize_path(self.plan_dir)
         )
         self.assertIn(f"Review: {expected_path}", completed.stdout)
@@ -1501,7 +1504,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             },
             payload["review_verdict"],
         )
-        review_path = runner.final_review_output_path(
+        review_path = review_session_contract.final_review_output_path(
             plans.canonicalize_path(self.plan_dir)
         )
         self.assertTrue(review_path.is_file())
@@ -2274,7 +2277,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         return [
             path
             for path in sorted(self.plan_dir.glob("session-*.md"))
-            if runner.is_generated_review_session_file(path)
+            if review_session_contract.is_generated_review_session_file(path)
         ]
 
     def test_stop_after_current_prevents_the_generated_review(self) -> None:
@@ -2614,7 +2617,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertIsNone(payload["review_session_id"])
         self.assertEqual(
             str(
-                runner.final_review_output_path(plans.canonicalize_path(self.plan_dir))
+                review_session_contract.final_review_output_path(
+                    plans.canonicalize_path(self.plan_dir)
+                )
             ),
             payload["review_output_path"],
         )
@@ -2707,11 +2712,13 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         review_candidates = [
             path
             for path in self.plan_dir.glob("session-*.md")
-            if runner.is_generated_review_session_file(path)
+            if review_session_contract.is_generated_review_session_file(path)
         ]
         self.assertEqual([], review_candidates)
         # No final-review.md should be written either.
-        self.assertFalse(runner.final_review_output_path(self.plan_dir).is_file())
+        self.assertFalse(
+            review_session_contract.final_review_output_path(self.plan_dir).is_file()
+        )
         # No review-session-created event should have been emitted.
         review_events = [
             entry
@@ -5159,10 +5166,14 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         # Identity, version marker, and the pending handoff survive intact.
         session_path = self.plan_dir / "session-3.md"
         session_path.write_text(refreshed, encoding="utf-8")
-        self.assertTrue(runner.is_generated_review_session_file(session_path))
+        self.assertTrue(
+            review_session_contract.is_generated_review_session_file(session_path)
+        )
         self.assertEqual(
-            runner.generated_review_session_version(session_path),
-            runner.generated_review_session_version(self.plan_dir / "session-2.md"),
+            review_session_contract.generated_review_session_version(session_path),
+            review_session_contract.generated_review_session_version(
+                self.plan_dir / "session-2.md"
+            ),
         )
         session = plans.SessionFile(
             session_id=plans.parse_session_id("3"), path=session_path

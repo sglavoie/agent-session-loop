@@ -1,0 +1,51 @@
+import json, pathlib, re, sys
+CHECK = 'final-review-artifact-consistent'
+def fail(reason, **detail):
+    detail.update(check=CHECK, reason=reason, asl_diagnostic='generated-gate/1')
+    sys.stderr.write(json.dumps(detail, sort_keys=True) + '\n')
+    sys.exit(1)
+ALLOWED_CHECK_KEYS = {'command': ['argv', 'baseline_expectation', 'cwd', 'name', 'on_failure_of', 'repo', 'review_replay', 'timeout_seconds', 'type'], 'file_exists': ['baseline_expectation', 'name', 'on_failure_of', 'path', 'repo', 'review_replay', 'type'], 'regex_in_file': ['baseline_expectation', 'name', 'on_failure_of', 'path', 'pattern', 'repo', 'review_replay', 'type']}
+CHECK_SEMANTICS = {'file_exists': 'file_exists asserts the path EXISTS and has no absence semantics', 'regex_in_file': 'regex_in_file asserts the pattern is PRESENT and has no absence semantics'}
+md = pathlib.Path('final-review.md').read_text(encoding='utf-8')
+path = pathlib.Path('final-review.json')
+if not path.is_file(): fail('artifact-missing', path=str(path))
+try:
+    artifact = json.loads(path.read_text(encoding='utf-8'))
+except ValueError as error:
+    fail('artifact-unparsable', path=str(path), error=str(error))
+if not isinstance(artifact, dict): fail('artifact-not-object', type=type(artifact).__name__)
+EXPECTED_VERSION = 2
+if artifact.get('version') != EXPECTED_VERSION: fail('artifact-version-unsupported', version=artifact.get('version'), expected=EXPECTED_VERSION)
+outcome = artifact.get('outcome')
+findings = artifact.get('findings')
+if outcome not in ('all-clear', 'findings'): fail('artifact-outcome-invalid', outcome=outcome)
+if not isinstance(findings, list): fail('artifact-findings-not-list', type=type(findings).__name__)
+required = ('id', 'severity', 'title', 'evidence', 'explanation', 'repair_group', 'done_criteria', 'verification_checks')
+tally = {'high': 0, 'med': 0, 'low': 0}
+for index, finding in enumerate(findings):
+    if not isinstance(finding, dict): fail('finding-not-object', index=index, type=type(finding).__name__)
+    missing = [key for key in required if not finding.get(key)]
+    if missing: fail('finding-missing-keys', index=index, finding_id=finding.get('id'), missing=missing)
+    if finding['severity'] not in tally: fail('finding-severity-invalid', index=index, finding_id=finding.get('id'), severity=finding['severity'])
+    tally[finding['severity']] += 1
+    entries = finding.get('verification_checks')
+    if not isinstance(entries, list) or not entries: fail('finding-verification-checks-empty', index=index, finding_id=finding.get('id'))
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict): fail('verification-check-not-object', index=index, finding_id=finding.get('id'), check_index=position, type=type(entry).__name__)
+        allowed = ALLOWED_CHECK_KEYS.get(entry.get('type'))
+        if allowed is None: continue
+        unknown = sorted(key for key in entry if key not in allowed)
+        if unknown: fail('verification-check-unknown-keys', index=index, finding_id=finding.get('id'), check_index=position, check_name=entry.get('name'), unknown=unknown, allowed=allowed, semantics=CHECK_SEMANTICS.get(entry.get('type'), ''))
+if (outcome == 'findings') != bool(findings): fail('artifact-outcome-findings-mismatch', outcome=outcome, finding_count=len(findings))
+nonempty = [line.strip() for line in md.splitlines() if line.strip()]
+status = nonempty[-1] if nonempty else ''
+if status == 'Status: All clear, no findings':
+    if outcome != 'all-clear': fail('status-outcome-mismatch', status=status, outcome=outcome)
+    sys.exit(0)
+match = re.fullmatch(r'Status: ([0-9]+) Findings \(([0-9]+) high, ([0-9]+) med, ([0-9]+) low\)', status)
+if match is None: fail('status-line-malformed', status=status)
+total, high, med, low = (int(value) for value in match.groups())
+if outcome != 'findings': fail('status-outcome-mismatch', status=status, outcome=outcome)
+if len(findings) != total: fail('status-total-mismatch', status_total=total, finding_count=len(findings))
+if tally['high'] != high or tally['med'] != med or tally['low'] != low: fail('status-tally-mismatch', status_tally={'high': high, 'med': med, 'low': low}, artifact_tally=tally)
+sys.exit(0)

@@ -43,6 +43,7 @@ from agent_session_loop import (
     retention,
     review,
     review_repair,
+    review_session_contract,
     run_flags,
     run_prompts,
     runner,
@@ -1831,8 +1832,12 @@ class CommandAndConfigTests(unittest.TestCase):
             ]
         )
 
-        self.assertTrue(runner.contains_review_session_marker(body_with_marker))
-        self.assertFalse(runner.contains_review_session_marker(body_without_marker))
+        self.assertTrue(
+            review_session_contract.contains_review_session_marker(body_with_marker)
+        )
+        self.assertFalse(
+            review_session_contract.contains_review_session_marker(body_without_marker)
+        )
 
     def test_is_generated_review_session_file_reads_marker_from_disk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1845,10 +1850,16 @@ class CommandAndConfigTests(unittest.TestCase):
             )
             other_path.write_text("# Session 1\n", encoding="utf-8")
 
-            self.assertTrue(runner.is_generated_review_session_file(review_path))
-            self.assertFalse(runner.is_generated_review_session_file(other_path))
+            self.assertTrue(
+                review_session_contract.is_generated_review_session_file(review_path)
+            )
             self.assertFalse(
-                runner.is_generated_review_session_file(plan_dir / "missing.md")
+                review_session_contract.is_generated_review_session_file(other_path)
+            )
+            self.assertFalse(
+                review_session_contract.is_generated_review_session_file(
+                    plan_dir / "missing.md"
+                )
             )
 
     def test_final_review_output_path_joins_filename(self) -> None:
@@ -1857,11 +1868,11 @@ class CommandAndConfigTests(unittest.TestCase):
 
             self.assertEqual(
                 plan_dir / runner.FINAL_REVIEW_FILENAME,
-                runner.final_review_output_path(plan_dir),
+                review_session_contract.final_review_output_path(plan_dir),
             )
 
     def test_parse_review_verdict_accepts_all_clear_status(self) -> None:
-        verdict = runner.parse_review_verdict(
+        verdict = review_session_contract.parse_review_verdict(
             "## Findings\n"
             "- Reviewed agent_session_loop/runner.py.\n"
             "Status: All clear, no findings\n"
@@ -1875,7 +1886,7 @@ class CommandAndConfigTests(unittest.TestCase):
         )
 
     def test_parse_review_verdict_accepts_counted_findings_status(self) -> None:
-        verdict = runner.parse_review_verdict(
+        verdict = review_session_contract.parse_review_verdict(
             "## Findings\n"
             "- High issue in agent_session_loop/runner.py.\n"
             "Status: 5 Findings (2 high, 2 med, 1 low)\n"
@@ -1890,15 +1901,19 @@ class CommandAndConfigTests(unittest.TestCase):
 
     def test_parse_review_verdict_rejects_missing_status(self) -> None:
         with self.assertRaisesRegex(
-            runner.ReviewVerdictError, "missing required final Status line"
+            review_session_contract.ReviewVerdictError,
+            "missing required final Status line",
         ):
-            runner.parse_review_verdict("## Findings\n- Nothing to report.\n")
+            review_session_contract.parse_review_verdict(
+                "## Findings\n- Nothing to report.\n"
+            )
 
     def test_parse_review_verdict_rejects_multiple_status_lines(self) -> None:
         with self.assertRaisesRegex(
-            runner.ReviewVerdictError, "expected exactly one Status line"
+            review_session_contract.ReviewVerdictError,
+            "expected exactly one Status line",
         ):
-            runner.parse_review_verdict(
+            review_session_contract.parse_review_verdict(
                 "Status: All clear, no findings\n"
                 "## Findings\n"
                 "Status: All clear, no findings\n"
@@ -1906,24 +1921,26 @@ class CommandAndConfigTests(unittest.TestCase):
 
     def test_parse_review_verdict_rejects_non_final_status(self) -> None:
         with self.assertRaisesRegex(
-            runner.ReviewVerdictError,
+            review_session_contract.ReviewVerdictError,
             "Status line must be the final non-empty line",
         ):
-            runner.parse_review_verdict(
+            review_session_contract.parse_review_verdict(
                 "## Findings\nStatus: All clear, no findings\n- trailing note\n"
             )
 
     def test_parse_review_verdict_rejects_malformed_status(self) -> None:
-        with self.assertRaisesRegex(runner.ReviewVerdictError, "malformed Status line"):
-            runner.parse_review_verdict(
+        with self.assertRaisesRegex(
+            review_session_contract.ReviewVerdictError, "malformed Status line"
+        ):
+            review_session_contract.parse_review_verdict(
                 "## Findings\nStatus: 1 Finding (1 high, 0 med, 0 low)\n"
             )
 
     def test_parse_review_verdict_rejects_count_mismatch(self) -> None:
         with self.assertRaisesRegex(
-            runner.ReviewVerdictError, "severity counts do not add up"
+            review_session_contract.ReviewVerdictError, "severity counts do not add up"
         ):
-            runner.parse_review_verdict(
+            review_session_contract.parse_review_verdict(
                 "## Findings\nStatus: 5 Findings (2 high, 2 med, 0 low)\n"
             )
 
@@ -2059,7 +2076,11 @@ class CommandAndConfigTests(unittest.TestCase):
                 plans.canonicalize_path(plan_dir / "session-3.md"),
                 session_file.path,
             )
-            self.assertTrue(runner.is_generated_review_session_file(session_file.path))
+            self.assertTrue(
+                review_session_contract.is_generated_review_session_file(
+                    session_file.path
+                )
+            )
             status = plans.read_session_status(session_file)
             self.assertEqual("pending", status.status)
 

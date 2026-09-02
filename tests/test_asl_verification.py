@@ -30,6 +30,7 @@ from agent_session_loop import (
     contracts,
     plans,
     process_tree,
+    review_session_contract,
     runner,
     verification,
 )
@@ -1732,7 +1733,7 @@ class VerificationExecutorTests(unittest.TestCase):
         )
         contract = contracts.read_completion_contract(plan_dir, session_id.value)
         assert contract is not None
-        return runner._authenticated_generated_review_contract(
+        return review_session_contract._authenticated_generated_review_contract(
             contract, plan_dir=plan_dir
         )
 
@@ -1814,7 +1815,7 @@ class VerificationExecutorTests(unittest.TestCase):
                 timeout_seconds=60.0,
             )
 
-            stamped = runner._authenticated_generated_review_contract(
+            stamped = review_session_contract._authenticated_generated_review_contract(
                 contracts.CompletionContract(
                     session_id=authentic.session_id,
                     done_when=authentic.done_when,
@@ -1850,7 +1851,7 @@ class VerificationExecutorTests(unittest.TestCase):
         reasons: set[str] = set()
         with tempfile.TemporaryDirectory() as tmp:
             for aliases in ((), ("repo-a", "repo-b")):
-                payload = runner._generated_review_contract_payload(
+                payload = review_session_contract._generated_review_contract_payload(
                     plans.parse_session_id("9"),
                     plan_dir=Path(tmp),
                     repository_aliases=aliases,

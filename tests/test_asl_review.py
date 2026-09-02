@@ -30,6 +30,7 @@ from agent_session_loop import (
     review,
     review_continuation,
     review_repair,
+    review_session_contract,
     runner,
     state,
     workbench,
@@ -808,9 +809,11 @@ class GeneratedReviewReplayTests(unittest.TestCase):
     def test_broad_review_replays_only_opted_in_durable_gates(self) -> None:
         self._write_replay_plan()
 
-        first = runner._broad_review_verification_checks(self.plan_dir)
+        first = review_session_contract._broad_review_verification_checks(self.plan_dir)
         runner.ensure_generated_review_session(self.plan_dir, review_harness="claude")
-        second = runner._broad_review_verification_checks(self.plan_dir)
+        second = review_session_contract._broad_review_verification_checks(
+            self.plan_dir
+        )
 
         self.assertEqual(first, second)
         self.assertEqual(["broad:1:durable-readme"], [row["name"] for row in first])
@@ -851,7 +854,7 @@ class GeneratedReviewReplayTests(unittest.TestCase):
         )[0]
         old_handoff = old.split("## Handoff", 1)[1]
 
-        refreshed = runner.refreshed_generated_review_contract(
+        refreshed = review_session_contract.refreshed_generated_review_contract(
             old,
             session_id,
             plan_dir=self.plan_dir,

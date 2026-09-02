@@ -34,6 +34,7 @@ from agent_session_loop import (
     preflight,
     review,
     review_repair,
+    review_session_contract,
     runner,
     session_overview,
     state,
@@ -2509,7 +2510,9 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        self.assertTrue(runner.is_generated_review_session_file(session_path))
+        self.assertTrue(
+            review_session_contract.is_generated_review_session_file(session_path)
+        )
 
     def _use_workspace_fixture(self) -> None:
         """Re-point this fixture at a registered two-repository workspace.

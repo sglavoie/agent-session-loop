@@ -18,6 +18,7 @@ from agent_session_loop import (
     plans,
     review,
     review_continuation,
+    review_session_contract,
     runner,
     supervisor_audit,
     verification,
@@ -351,7 +352,7 @@ class CommandFailureDetailTests(unittest.TestCase):
 
 class GeneratedReviewValidatorDiagnosticTests(unittest.TestCase):
     def run_checks(self, plan_dir: Path) -> dict[str, subprocess.CompletedProcess[str]]:
-        payload = runner._generated_review_contract_payload(
+        payload = review_session_contract._generated_review_contract_payload(
             plans.parse_session_id("2"), plan_dir=plan_dir
         )
         results: dict[str, subprocess.CompletedProcess[str]] = {}
@@ -542,7 +543,7 @@ class GeneratedReviewValidatorDiagnosticTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_completed_review_plan(plan_dir, [])
-            payload = runner._generated_review_contract_payload(
+            payload = review_session_contract._generated_review_contract_payload(
                 plans.parse_session_id("2"),
                 plan_dir=plan_dir,
                 repository_aliases=("SVC", "OAK"),
@@ -612,7 +613,7 @@ class BroadReviewGateTests(unittest.TestCase):
             review_id = self.write_plan(
                 plan_dir, contracts_by_id, prior_review=prior_review
             )
-            payload = runner._generated_review_contract_payload(
+            payload = review_session_contract._generated_review_contract_payload(
                 review_id, plan_dir=plan_dir
             )
         return list(payload["checks"])

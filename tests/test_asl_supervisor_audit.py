@@ -35,6 +35,7 @@ from agent_session_loop import (
     plans,
     repository_evidence,
     review,
+    review_session_contract,
     run_flags,
     run_prompts,
     runner,
@@ -3364,10 +3365,12 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
         review_path.write_text("no heading anywhere here\n", encoding="utf-8")
         payload = next(
             item
-            for item in runner._generated_review_gate_payloads(plan_dir=plan_dir)
+            for item in review_session_contract._generated_review_gate_payloads(
+                plan_dir=plan_dir
+            )
             if item["name"] == "final-review-output-evidence-based"
         )
-        contract = runner._authenticated_generated_review_contract(
+        contract = review_session_contract._authenticated_generated_review_contract(
             contracts.CompletionContract(
                 session_id=plans.parse_session_id("1"),
                 done_when=("reviewed",),

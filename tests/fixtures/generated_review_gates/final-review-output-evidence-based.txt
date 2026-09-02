@@ -1,0 +1,29 @@
+import json, pathlib, re, sys
+CHECK = 'final-review-output-evidence-based'
+def fail(reason, **detail):
+    detail.update(check=CHECK, reason=reason, asl_diagnostic='generated-gate/1')
+    sys.stderr.write(json.dumps(detail, sort_keys=True) + '\n')
+    sys.exit(1)
+review_path = pathlib.Path('final-review.md')
+try:
+    text = review_path.read_text(encoding='utf-8')
+except OSError as error:
+    fail('review-output-unreadable', path=str(review_path), error=str(error))
+if not text.strip(): fail('review-output-empty', path=str(review_path))
+heading_re = re.compile(r'(?im)^\s{0,3}#{1,6}\s+(?:Findings?|Risks?|Concerns?|Assessment|Review|Summary)\b|^\s*(?:Findings?|Risks?|Concerns?|Assessment|Review|Summary)\s*:\s*$')
+if heading_re.search(text) is None: fail('missing-required-heading')
+path_re = re.compile(r'(?<![\w./-])(?:[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+)(?::\d+)?|(?<![\w./-])(?:[A-Za-z0-9_.-]+\.(?:py|md|txt|json|toml|yaml|yml|js|ts|tsx|jsx|css|html|rst|sh|sql|ini|cfg|lock))(?:[:#][A-Za-z0-9_.-]+)?(?::\d+)?')
+refs = {match.group(0).rstrip('.,);]') for match in path_re.finditer(text)}
+nonempty_lines = [line.strip() for line in text.splitlines() if line.strip()]
+status_lines = [line.strip() for line in text.splitlines() if line.strip().startswith('Status:')]
+if len(status_lines) != 1 or status_lines[0] != nonempty_lines[-1]: fail('status-line-not-final', status_line_count=len(status_lines), last_line=nonempty_lines[-1] if nonempty_lines else '')
+status = status_lines[0]
+def require_evidence():
+    if len(refs) < 3: fail('insufficient-path-evidence', path_reference_count=len(refs), required=3)
+    sys.exit(0)
+if status == 'Status: All clear, no findings': require_evidence()
+match = re.fullmatch(r'Status: ([0-9]+) Findings \(([0-9]+) high, ([0-9]+) med, ([0-9]+) low\)', status)
+if match is None: fail('status-line-malformed', status=status)
+total, high, med, low = (int(value) for value in match.groups())
+if total <= 0 or high + med + low != total: fail('status-tally-inconsistent', total=total, high=high, med=med, low=low)
+require_evidence()
