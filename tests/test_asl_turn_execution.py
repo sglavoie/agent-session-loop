@@ -32,7 +32,7 @@ from agent_session_loop import (
     harnesses,
     plans,
     run_persistence,
-    runner,
+    run_reporting,
     turn_execution,
 )
 
@@ -247,7 +247,9 @@ class TurnExecutorBoundaryTests(unittest.TestCase):
         persistence: turn_execution.TurnPersistence = run_persistence._RunPersistence(
             write_state=False
         )
-        progress: turn_execution.TurnProgress = runner._ProgressReporter(enabled=False)
+        progress: turn_execution.TurnProgress = run_reporting._ProgressReporter(
+            enabled=False
+        )
         self.assertIsNotNone(persistence.lock)
         self.assertIsNotNone(progress)
 

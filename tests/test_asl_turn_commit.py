@@ -37,6 +37,7 @@ from agent_session_loop import (
     review_guard,
     review_repair,
     run_persistence,
+    run_reporting,
     run_selection,
     runner,
     state,
@@ -134,7 +135,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
             event_path=self.tmp_path / "events.jsonl",
             payload=payload,
             persistence=run_persistence._RunPersistence(write_state=False),
-            progress=runner._ProgressReporter(enabled=False),
+            progress=run_reporting._ProgressReporter(enabled=False),
             turn_payload=turn_payload,
             live_turn=dict(turn_payload),
             accepted=self.snapshot,
@@ -150,7 +151,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
             event_path=self.tmp_path / "events.jsonl",
             payload=payload,
             persistence=run_persistence._RunPersistence(write_state=False),
-            progress=runner._ProgressReporter(enabled=False),
+            progress=run_reporting._ProgressReporter(enabled=False),
             turn_payload=turn_payload,
             live_turn=dict(turn_payload),
             accepted=self.snapshot,
@@ -975,7 +976,7 @@ class CommitFailureProgressTests(unittest.TestCase):
 
     def _emitted(self, call: Any) -> str:
         stream = io.StringIO()
-        progress = runner._ProgressReporter(enabled=True)
+        progress = run_reporting._ProgressReporter(enabled=True)
         with redirect_stderr(stream):
             call(progress)
         return stream.getvalue()

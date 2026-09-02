@@ -16,7 +16,7 @@ from pathlib import Path
 
 from agent_session_loop import (
     events,
-    runner,
+    run_reporting,
     state,
     tail,
 )
@@ -1143,7 +1143,7 @@ class TailFollowerTests(unittest.TestCase):
                 out=out,
                 poll_interval=0.01,
                 include_events=False,
-                initial_log_lines=runner.INLINE_TAIL_INITIAL_LOG_LINES,
+                initial_log_lines=run_reporting.INLINE_TAIL_INITIAL_LOG_LINES,
                 initial_log_scope="active",
             )
             self.addCleanup(self.cleanup_follower, follower)
@@ -1219,7 +1219,7 @@ class TailFollowerTests(unittest.TestCase):
                 out=out,
                 poll_interval=0.01,
                 include_events=False,
-                initial_log_lines=runner.INLINE_TAIL_INITIAL_LOG_LINES,
+                initial_log_lines=run_reporting.INLINE_TAIL_INITIAL_LOG_LINES,
                 initial_log_scope="active",
             )
             self.addCleanup(self.cleanup_follower, follower)
@@ -1320,7 +1320,7 @@ class TailFollowerTests(unittest.TestCase):
                 out=out,
                 poll_interval=0.01,
                 include_events=False,
-                initial_log_lines=runner.INLINE_TAIL_INITIAL_LOG_LINES,
+                initial_log_lines=run_reporting.INLINE_TAIL_INITIAL_LOG_LINES,
                 initial_log_scope="active",
             )
             self.addCleanup(self.cleanup_follower, follower)

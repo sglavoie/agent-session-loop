@@ -45,6 +45,7 @@ from agent_session_loop import (
     review_session_body,
     run_control,
     run_persistence,
+    run_reporting,
     run_selection,
     runner,
     state,
@@ -1097,7 +1098,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         }
 
         text = "\n".join(
-            runner._compact_status_lines(
+            run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
@@ -1143,7 +1144,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         }
 
         text = "\n".join(
-            runner._compact_status_lines(
+            run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
@@ -1179,7 +1180,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         }
 
         text = "\n".join(
-            runner._compact_status_lines(
+            run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
@@ -1219,7 +1220,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         }
 
         text = "\n".join(
-            runner._compact_status_lines(
+            run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
                 snapshot=None,
@@ -1261,7 +1262,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         }
 
         text = "\n".join(
-            runner._compact_status_lines(
+            run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
@@ -1319,7 +1320,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         }
 
         text = "\n".join(
-            runner._compact_status_lines(
+            run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
@@ -1375,7 +1376,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         }
 
         text = "\n".join(
-            runner._compact_status_lines(
+            run_reporting._compact_status_lines(
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
@@ -4330,7 +4331,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr_chars": 0,
                 "action_required": None,
             }
-            progress = runner._ProgressReporter(enabled=True)
+            progress = run_reporting._ProgressReporter(enabled=True)
             stderr = io.StringIO()
 
             live_turn = runner._LiveTurn(
@@ -4477,7 +4478,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             live_turn = runner._LiveTurn(
                 payload=payload,
                 event_path=event_path,
-                progress=runner._ProgressReporter(enabled=False),
+                progress=run_reporting._ProgressReporter(enabled=False),
                 active_turn=active_turn,
                 persistence=persistence,
                 heartbeat_interval=60,
@@ -4505,7 +4506,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "active_verification": None,
             }
             persistence = run_persistence._RunPersistence()
-            progress = runner._ProgressReporter(enabled=True)
+            progress = run_reporting._ProgressReporter(enabled=True)
             stderr = io.StringIO()
 
             live_verification = runner._LiveVerification(
@@ -4676,7 +4677,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             live_verification = runner._LiveVerification(
                 event_path=event_path,
                 payload=payload,
-                progress=runner._ProgressReporter(enabled=False),
+                progress=run_reporting._ProgressReporter(enabled=False),
                 persistence=persistence,
                 run_id="run-2",
                 turn_index=3,
@@ -4787,7 +4788,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             live_verification = runner._LiveVerification(
                 event_path=event_path,
                 payload=payload,
-                progress=runner._ProgressReporter(enabled=False),
+                progress=run_reporting._ProgressReporter(enabled=False),
                 persistence=run_persistence._RunPersistence(),
                 run_id="run-3",
                 turn_index=1,
@@ -4883,7 +4884,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             live_verification = runner._LiveVerification(
                 event_path=event_path,
                 payload=payload,
-                progress=runner._ProgressReporter(enabled=False),
+                progress=run_reporting._ProgressReporter(enabled=False),
                 persistence=run_persistence._RunPersistence(),
                 run_id="run-5",
                 turn_index=1,
@@ -4982,7 +4983,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "active_turn": None,
                 "active_verification": None,
             }
-            progress = runner._ProgressReporter(enabled=True)
+            progress = run_reporting._ProgressReporter(enabled=True)
             stderr = io.StringIO()
             live_verification = runner._LiveVerification(
                 event_path=event_path,
@@ -5064,7 +5065,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             event_path = tmp_dir / events.EVENTS_FILE_NAME
             state_path = tmp_dir / events.STATE_FILE_NAME
-            progress = runner._ProgressReporter(enabled=True)
+            progress = run_reporting._ProgressReporter(enabled=True)
             stderr = io.StringIO()
             live_verification = runner._LiveVerification(
                 event_path=event_path,
@@ -5170,7 +5171,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             event_path = tmp_dir / events.EVENTS_FILE_NAME
             state_path = tmp_dir / events.STATE_FILE_NAME
-            progress = runner._ProgressReporter(enabled=True)
+            progress = run_reporting._ProgressReporter(enabled=True)
             stderr = io.StringIO()
             live_verification = runner._LiveVerification(
                 event_path=event_path,
@@ -5322,7 +5323,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             live_verification = runner._LiveVerification(
                 event_path=event_path,
                 payload=payload,
-                progress=runner._ProgressReporter(enabled=False),
+                progress=run_reporting._ProgressReporter(enabled=False),
                 persistence=run_persistence._RunPersistence(),
                 run_id="run-7",
                 turn_index=1,
@@ -5420,7 +5421,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     "active_turn": None,
                     "active_verification": None,
                 },
-                progress=runner._ProgressReporter(enabled=False),
+                progress=run_reporting._ProgressReporter(enabled=False),
                 persistence=run_persistence._RunPersistence(),
                 run_id="run-4",
                 turn_index=1,
@@ -5478,7 +5479,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             live_turn = runner._LiveTurn(
                 payload=payload,
                 event_path=event_path,
-                progress=runner._ProgressReporter(enabled=False),
+                progress=run_reporting._ProgressReporter(enabled=False),
                 active_turn=active_turn,
                 heartbeat_interval=60,
             )
@@ -5888,7 +5889,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             live_turn = runner._LiveTurn(
                 payload=payload,
                 event_path=event_path,
-                progress=runner._ProgressReporter(enabled=False),
+                progress=run_reporting._ProgressReporter(enabled=False),
                 active_turn=active_turn,
                 heartbeat_interval=60,
             )
@@ -5945,7 +5946,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             live_turn = runner._LiveTurn(
                 payload=payload,
                 event_path=event_path,
-                progress=runner._ProgressReporter(enabled=False),
+                progress=run_reporting._ProgressReporter(enabled=False),
                 active_turn=active_turn,
                 persistence=persistence,
                 heartbeat_interval=60,
@@ -6113,7 +6114,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             live_turn = runner._LiveTurn(
                 payload=payload,
                 event_path=event_path,
-                progress=runner._ProgressReporter(enabled=False),
+                progress=run_reporting._ProgressReporter(enabled=False),
                 active_turn=active_turn,
                 persistence=persistence,
                 heartbeat_interval=60,
@@ -6754,7 +6755,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         live_turn = runner._LiveTurn(
             payload=payload,
             event_path=event_path,
-            progress=runner._ProgressReporter(enabled=False),
+            progress=run_reporting._ProgressReporter(enabled=False),
             active_turn=active_turn,
             persistence=persistence,
             heartbeat_interval=3600,
