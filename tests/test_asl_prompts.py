@@ -22,6 +22,7 @@ from agent_session_loop import (
     plans,
     qna,
     run_prompts,
+    run_selection,
     runner,
     task_packet,
     workspaces,
@@ -509,7 +510,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 )
                 for index in range(pending_count)
             ]
-            pending = runner._pending_guidance_snapshot(
+            pending = run_selection._pending_guidance_snapshot(
                 enabled=True,
                 plan_dir=plan_dir,
                 state_dir_arg=state_dir,
@@ -575,7 +576,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 "x" * (runner.MAX_RENDERED_GUIDANCE_BYTES + 1024),
                 state_dir=state_dir,
             )
-            pending = runner._pending_guidance_snapshot(
+            pending = run_selection._pending_guidance_snapshot(
                 enabled=True,
                 plan_dir=plan_dir,
                 state_dir_arg=state_dir,
@@ -663,7 +664,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 "x" * (runner.MAX_RENDERED_GUIDANCE_BYTES + 1024),
                 state_dir=state_dir,
             )
-            pending = runner._pending_guidance_snapshot(
+            pending = run_selection._pending_guidance_snapshot(
                 enabled=True,
                 plan_dir=plan_dir,
                 state_dir_arg=state_dir,
@@ -712,7 +713,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 )
                 for index in range(runner.MAX_RENDERED_GUIDANCE)
             ]
-            pending = runner._pending_guidance_snapshot(
+            pending = run_selection._pending_guidance_snapshot(
                 enabled=True,
                 plan_dir=plan_dir,
                 state_dir_arg=state_dir,

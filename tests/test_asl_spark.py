@@ -21,6 +21,7 @@ from agent_session_loop import (
     plans,
     prepare,
     run_flags,
+    run_selection,
     runner,
     state,
 )
@@ -124,7 +125,7 @@ class SparkFlagTests(unittest.TestCase):
                     tmp,
                     "--spark",
                     "--harness-model",
-                    runner.SPARK_MODEL,
+                    run_selection.SPARK_MODEL,
                 ]
             )
             with self.assertRaisesRegex(runner.RunError, "must differ"):
@@ -220,12 +221,12 @@ class SparkRoutingTests(unittest.TestCase):
         return argparse.Namespace(**values)
 
     @mock.patch.object(
-        runner,
+        run_selection,
         "_session_spark_suitability",
         return_value=(True, "small explicit session"),
     )
     def test_eligible_codex_routes_spark(self, _suitability: mock.Mock) -> None:
-        model, selected, route = runner._spark_turn_route(
+        model, selected, route = run_selection._spark_turn_route(
             self._args(),
             plan_dir=Path("/tmp/plan"),
             session_path=Path("/tmp/plan/session-1.md"),
@@ -236,13 +237,13 @@ class SparkRoutingTests(unittest.TestCase):
             spark_state={"available": True},
             run_suppression=None,
         )
-        self.assertEqual(runner.SPARK_MODEL, model)
+        self.assertEqual(run_selection.SPARK_MODEL, model)
         self.assertEqual(config.MODEL_SOURCE_SPARK, selected["model_source"])
         self.assertEqual("spark", route["decision"])
         self.assertEqual("high", selected["effort"])
 
     @mock.patch.object(
-        runner,
+        run_selection,
         "_session_spark_suitability",
         return_value=(True, "small explicit session"),
     )
@@ -270,7 +271,7 @@ class SparkRoutingTests(unittest.TestCase):
             ),
         ):
             with self.subTest(cause=cause):
-                model, _selected, route = runner._spark_turn_route(
+                model, _selected, route = run_selection._spark_turn_route(
                     self._args(),
                     plan_dir=Path("/tmp/plan"),
                     session_path=Path("/tmp/plan/session-1.md"),
@@ -281,7 +282,7 @@ class SparkRoutingTests(unittest.TestCase):
                     spark_state=availability_state,
                     run_suppression=suppression,
                 )
-                self.assertNotEqual(runner.SPARK_MODEL, model)
+                self.assertNotEqual(run_selection.SPARK_MODEL, model)
                 self.assertEqual("baseline", route["decision"])
                 self.assertEqual(cause, route["suppression_cause"])
 
@@ -293,7 +294,7 @@ class ModelAvailabilityTests(unittest.TestCase):
             now = datetime(2026, 8, 14, 12, tzinfo=UTC)
             recorded = model_availability.suppress_until(
                 root,
-                runner.SPARK_MODEL,
+                run_selection.SPARK_MODEL,
                 reason="quota-exhausted",
                 retry_hint="3600",
                 run_id="run-1",
@@ -302,12 +303,12 @@ class ModelAvailabilityTests(unittest.TestCase):
             self.assertIsNotNone(recorded)
             self.assertFalse(
                 model_availability.availability(
-                    root, runner.SPARK_MODEL, now=now + timedelta(minutes=30)
+                    root, run_selection.SPARK_MODEL, now=now + timedelta(minutes=30)
                 ).available
             )
             self.assertTrue(
                 model_availability.availability(
-                    root, runner.SPARK_MODEL, now=now + timedelta(hours=2)
+                    root, run_selection.SPARK_MODEL, now=now + timedelta(hours=2)
                 ).available
             )
 
@@ -317,7 +318,9 @@ class ModelAvailabilityTests(unittest.TestCase):
             (root / model_availability.LEDGER_FILENAME).write_text(
                 "{", encoding="utf-8"
             )
-            availability = model_availability.availability(root, runner.SPARK_MODEL)
+            availability = model_availability.availability(
+                root, run_selection.SPARK_MODEL
+            )
             self.assertFalse(availability.available)
             self.assertEqual("ledger-unreadable", availability.reason)
             self.assertIsNotNone(availability.warning)
@@ -397,7 +400,7 @@ class SparkFallbackIntegrationTests(unittest.TestCase):
             self.assertEqual(0, code)
             self.assertEqual("all-complete", payload["reason"])
             self.assertEqual(2, len(payload["turns"]))
-            self.assertEqual(runner.SPARK_MODEL, payload["turns"][0]["model"])
+            self.assertEqual(run_selection.SPARK_MODEL, payload["turns"][0]["model"])
             self.assertEqual("gpt-baseline", payload["turns"][1]["model"])
             self.assertEqual(
                 "quota-exhausted",

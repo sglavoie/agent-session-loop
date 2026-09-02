@@ -56,7 +56,6 @@ from . import (
     pause_policy,
     plans,
     preflight,
-    prepare,
     process_tree,
     progress_repair,
     qna,
@@ -75,6 +74,7 @@ from . import (
     run_coordination,
     run_flags,
     run_prompts,
+    run_selection,
     state,
     supervisor_audit,
     tail,
@@ -89,6 +89,7 @@ from .formatting import (
     format_turn_finished_message,
     format_turn_started_message,
 )
+from .run_errors import RunError
 
 NOT_IMPLEMENTED_EXIT = 2
 # Turn timing, hang thresholds and the control-poll cadence are the turn
@@ -109,10 +110,6 @@ LIVE_CONTROL_POLL_INTERVAL_SECONDS = turn_execution.LIVE_CONTROL_POLL_INTERVAL_S
 VERIFICATION_HEARTBEAT_INTERVAL_SECONDS = 30.0
 FINALIZATION_HEARTBEAT_INTERVAL_SECONDS = 30.0
 FINALIZATION_PHASE_ASSURANCE_AUDIT = "assurance-audit"
-COMMIT_MODE_PER_SESSION = "per-session"
-COMMIT_MODE_END = "end"
-COMMIT_MODES = (COMMIT_MODE_PER_SESSION, COMMIT_MODE_END)
-REPAIR_COMMIT_MODE_PER_CHILD = "per-child"
 #: The checkout this module was imported from. Auto-commit re-enters that same
 #: checkout as a subprocess rather than resolving a name on PATH, so a run
 #: always commits with the ``asl commit`` it ships with.
@@ -172,7 +169,6 @@ REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION = (
 )
 SESSION_KIND_IMPLEMENTATION = plans.SESSION_KIND_IMPLEMENTATION
 SESSION_KIND_REVIEW = plans.SESSION_KIND_REVIEW
-SPARK_MODEL = "gpt-5.3-codex-spark"
 SESSION_KINDS: tuple[str, ...] = plans.SESSION_KINDS
 TRUSTED_RUNNER_SIGNAL_SOURCES = turn_execution.TRUSTED_RUNNER_SIGNAL_SOURCES
 RUNNER_STATUS_SOURCE_ABSENT = turn_execution.RUNNER_STATUS_SOURCE_ABSENT
@@ -373,10 +369,6 @@ REVIEW_BROAD_FAILURES_DEFERRED_REASON = (
 )
 
 
-class RunError(Exception):
-    """Raised when the run loop cannot continue safely."""
-
-
 class RepairCommitPreflightError(RunError):
     """A generated repair child cannot safely enter its owned commit phase."""
 
@@ -390,468 +382,14 @@ def _not_implemented(command: str) -> int:
     return NOT_IMPLEMENTED_EXIT
 
 
-def _requested_model(
-    args: argparse.Namespace,
-    *,
-    harness: str,
-    is_review_turn: bool = False,
-    implementation_overrides: Mapping[str, Mapping[str, str]] | None = None,
-) -> str | None:
-    """Return the raw model request appropriate for one harness turn.
-
-    Resolution for reporting is intentionally separate: a model omitted from
-    the CLI is still represented by its harness-native configured/default
-    value, but must not be forwarded to the harness subprocess. A live
-    implementation-harness switch also deliberately starts at that switched
-    harness's native default instead of inheriting the declared implementation
-    model.
-    """
-    if is_review_turn:
-        return getattr(args, "review_harness_model", None)
-    override = (implementation_overrides or {}).get(harness, {}).get("model")
-    if override is not None:
-        return override
-    if harness != args.harness:
-        return None
-    return getattr(args, "harness_model", None)
-
-
-def _requested_effort(
-    args: argparse.Namespace,
-    *,
-    harness: str,
-    is_review_turn: bool = False,
-    implementation_overrides: Mapping[str, Mapping[str, str]] | None = None,
-) -> str | None:
-    """Return the raw effort request appropriate for one harness turn."""
-    if not is_review_turn:
-        override = (implementation_overrides or {}).get(harness, {}).get("effort")
-        if override is not None:
-            return override
-    return getattr(args, "effort", None)
-
-
-def _selected_model_effort_payload(
-    args: argparse.Namespace,
-    *,
-    harness: str | None = None,
-    is_review_turn: bool = False,
-    implementation_overrides: Mapping[str, Mapping[str, str]] | None = None,
-) -> dict[str, str | None]:
-    selected_harness = args.harness if harness is None else harness
-    selected = config.model_effort_payload(
-        selected_harness,
-        model=_requested_model(
-            args,
-            harness=selected_harness,
-            is_review_turn=is_review_turn,
-            implementation_overrides=implementation_overrides,
-        ),
-        effort=_requested_effort(
-            args,
-            harness=selected_harness,
-            is_review_turn=is_review_turn,
-            implementation_overrides=implementation_overrides,
-        ),
-    )
-    if not is_review_turn:
-        harness_overrides = (implementation_overrides or {}).get(selected_harness, {})
-        if "model" in harness_overrides:
-            selected["model_source"] = config.MODEL_SOURCE_CONTROL
-        if "effort" in harness_overrides:
-            selected["effort_source"] = config.EFFORT_SOURCE_CONTROL
-    return selected
-
-
-def _selected_future_harness(
-    args: argparse.Namespace,
-    control_payload: dict[str, Any],
-) -> str:
-    selected = control_payload.get("next_harness") or args.harness
-    if selected not in harnesses.HARNESS_NAMES:
-        raise RunError(f"unsupported selected harness: {selected}")
-    return str(selected)
-
-
-def _spark_baseline_payload(args: argparse.Namespace) -> dict[str, str]:
-    """Return the resolved Codex baseline used when Spark is enabled."""
-    return config.selected_model_payload("codex", getattr(args, "harness_model", None))
-
-
-def _initial_spark_payload(args: argparse.Namespace) -> dict[str, Any]:
-    enabled = bool(getattr(args, "spark", False))
-    baseline = _spark_baseline_payload(args)
-    if not enabled:
-        return {
-            "enabled": False,
-            "model": SPARK_MODEL,
-            "spark_model": SPARK_MODEL,
-            "baseline": baseline["model"],
-            "baseline_model": baseline["model"],
-            "baseline_source": baseline["model_source"],
-            "available": False,
-            "availability": False,
-            "reason": "disabled",
-            "retry_at": None,
-            "warning": None,
-            "active_route": None,
-        }
-    availability = model_availability.availability(
-        state.state_root(getattr(args, "state_dir", None)), SPARK_MODEL
-    )
-    return {
-        "enabled": True,
-        "model": SPARK_MODEL,
-        "spark_model": SPARK_MODEL,
-        "baseline": baseline["model"],
-        "baseline_model": baseline["model"],
-        "baseline_source": baseline["model_source"],
-        **availability.to_dict(),
-        "active_route": None,
-    }
-
-
-def _safe_initial_spark_payload(args: argparse.Namespace) -> dict[str, Any]:
-    try:
-        return _initial_spark_payload(args)
-    except OSError as error:
-        baseline = _spark_baseline_payload(args)
-        return {
-            "enabled": bool(getattr(args, "spark", False)),
-            "model": SPARK_MODEL,
-            "spark_model": SPARK_MODEL,
-            "baseline": baseline["model"],
-            "baseline_model": baseline["model"],
-            "baseline_source": baseline["model_source"],
-            "available": False,
-            "availability": False,
-            "reason": "ledger-unreadable",
-            "retry_at": None,
-            "warning": f"model availability ledger is unreadable: {error}",
-            "active_route": None,
-        }
-
-
-def _session_spark_suitability(
-    plan_dir: Path,
-    session_id: str,
-) -> tuple[bool, str]:
-    """Load one conservative preparation marker without blocking a run."""
-    try:
-        validation = prepare.load_prepare_validation(plan_dir)
-    except (OSError, plans.PlanError, ValueError) as error:
-        return False, f"Spark eligibility metadata unreadable: {error}"
-    if validation is None:
-        return False, "Spark eligibility metadata missing; using baseline"
-    session = validation.session(session_id)
-    if session is None:
-        return False, "Spark eligibility marker missing for session; using baseline"
-    return session.spark.eligible, session.spark.reason
-
-
-def _spark_turn_route(
-    args: argparse.Namespace,
-    *,
-    plan_dir: Path,
-    session_path: Path,
-    session_id: str,
-    harness: str,
-    is_review_turn: bool,
-    implementation_overrides: Mapping[str, Mapping[str, str]],
-    spark_state: Mapping[str, Any],
-    run_suppression: str | None,
-    fallback_reason: str | None = None,
-) -> tuple[str | None, dict[str, str | None], dict[str, Any]]:
-    """Select one implementation model according to Spark policy precedence."""
-    eligible, eligibility_reason = _session_spark_suitability(plan_dir, session_id)
-    baseline_model = _requested_model(
-        args,
-        harness=harness,
-        is_review_turn=is_review_turn,
-        implementation_overrides=implementation_overrides,
-    )
-    selected = _selected_model_effort_payload(
-        args,
-        harness=harness,
-        is_review_turn=is_review_turn,
-        implementation_overrides=implementation_overrides,
-    )
-    suppression: str | None = None
-    decision = "baseline"
-
-    if is_review_turn:
-        suppression = "review-or-audit"
-    elif not bool(getattr(args, "spark", False)):
-        suppression = "spark-disabled"
-    elif implementation_overrides.get(harness):
-        suppression = "live-set-model-override"
-    elif harness != "codex":
-        suppression = "non-codex-harness"
-    elif review_repair.is_generated_review_repair_session_file(session_path):
-        suppression = "generated-final-review-repair"
-    elif run_suppression is not None:
-        suppression = run_suppression
-    elif not bool(spark_state.get("available")):
-        suppression = str(spark_state.get("reason") or "spark-unavailable")
-    elif not eligible:
-        suppression = "session-ineligible"
-    else:
-        decision = "spark"
-        baseline_model = SPARK_MODEL
-        selected["model"] = SPARK_MODEL
-        selected["model_source"] = config.MODEL_SOURCE_SPARK
-
-    route = {
-        "eligible": eligible,
-        "reason": eligibility_reason,
-        "eligibility_reason": eligibility_reason,
-        "decision": decision,
-        "selected": decision,
-        "suppression_cause": suppression,
-        "fallback_reason": fallback_reason,
-    }
-    return baseline_model, selected, route
-
-
-def _safe_harness_config_payload() -> dict[str, Any]:
-    try:
-        return config.harness_config_payload()
-    except config.ConfigError as error:
-        config_path = config.default_config_path()
-        return {
-            "path": str(config_path),
-            "present": config_path.exists(),
-            "configured_harnesses": [],
-            "error": str(error),
-        }
-
-
-def _harness_preflight_failure(
-    requested_harness: str,
-    *,
-    session_id: str,
-) -> tuple[str, dict[str, Any]] | None:
-    config_path = config.default_config_path()
-    details: dict[str, Any] = {
-        **_session_identity_payload(session_id),
-        "session_file": plans.session_id_to_filename(session_id),
-        "requested_harness": requested_harness,
-        "config_path": str(config_path),
-    }
-
-    try:
-        adapter = harnesses.get_adapter(requested_harness)
-    except (config.ConfigError, harnesses.HarnessError) as error:
-        details.update(
-            {
-                "executable": None,
-                "resolved_executable": None,
-                "error": str(error),
-            }
-        )
-        return str(error), details
-
-    details["executable"] = adapter.executable
-    try:
-        executable_path = adapter.resolve_executable()
-    except OSError as error:
-        details.update(
-            {
-                "resolved_executable": None,
-                "error": str(error),
-            }
-        )
-        return str(error), details
-
-    if executable_path is None:
-        message = (
-            f"{requested_harness} executable not found on PATH: {adapter.executable}"
-        )
-        details.update(
-            {
-                "resolved_executable": None,
-                "error": message,
-            }
-        )
-        return message, details
-
-    details["resolved_executable"] = executable_path
-    return None
-
-
 # The run loop and the turn boundary have to stamp the same moments the same
 # way, so the clock primitives live in the leaf ``clock`` module.
 _utc_run_id = clock.utc_run_id
 _utc_now = clock.utc_now
 _utc_iso_now = clock.utc_iso_now
 _isoformat = clock.isoformat
-
-
-def _positive_int_env(name: str) -> int | None:
-    raw = os.environ.get(name)
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        return None
-    if value <= 0:
-        return None
-    return value
-
-
-def _kitty_window_id_from_env() -> int | None:
-    return _positive_int_env("KITTY_WINDOW_ID")
-
-
 _duration_seconds = clock.duration_seconds
 _parse_datetime = clock.parse_datetime
-
-
-def _unsafe_bypass(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "unsafe_bypass", True))
-
-
-def _no_mailbox(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "no_mailbox", False))
-
-
-def _mailbox_activation_payload(
-    args: argparse.Namespace,
-    plan_dir: str | Path,
-) -> dict[str, Any]:
-    """Resolve mailbox activation without making mailbox failures fatal."""
-    state_dir_arg = getattr(args, "state_dir", None)
-    mailbox_path = mailbox.mailbox_path_for_plan(plan_dir, state_dir_arg)
-    lease_path = mailbox.lease_path_for_plan(plan_dir, state_dir_arg)
-    disabled = _no_mailbox(args)
-    mailbox_present = False if disabled else mailbox_path.exists()
-    lease_fresh = False
-    lease_reason: str | None = None
-    error: str | None = None
-
-    if not disabled:
-        try:
-            lease = mailbox.read_lease(plan_dir, state_dir=state_dir_arg)
-        except (OSError, mailbox.MailboxError) as exc:
-            lease_reason = (
-                exc.reason
-                if isinstance(exc, mailbox.MailboxError)
-                else mailbox.ERROR_LEASE_READ
-            )
-            error = str(exc)
-        else:
-            lease_fresh = lease.fresh
-            lease_reason = lease.reason
-
-    if disabled:
-        enabled = False
-        reason = "disabled-by-flag"
-    elif mailbox_present:
-        enabled = True
-        reason = "mailbox-present"
-    elif lease_fresh:
-        enabled = True
-        reason = "fresh-lease"
-    else:
-        enabled = False
-        reason = "inactive"
-
-    return {
-        "enabled": enabled,
-        "reason": reason,
-        "disabled_by_flag": disabled,
-        "mailbox_path": str(mailbox_path),
-        "mailbox_present": mailbox_present,
-        "lease_path": str(lease_path),
-        "lease_fresh": lease_fresh,
-        "lease_reason": lease_reason,
-        "error": error,
-    }
-
-
-def _pending_guidance_snapshot(
-    *,
-    enabled: bool,
-    plan_dir: str | Path,
-    state_dir_arg: str | Path | None,
-) -> tuple[mailbox.MailboxMessage, ...]:
-    """Return pending guidance for one prompt, degrading to an empty snapshot."""
-    if not enabled:
-        return ()
-    try:
-        return mailbox.pending_guidance(plan_dir, state_dir=state_dir_arg)
-    except OSError, mailbox.MailboxError:
-        return ()
-
-
-def _record_next_turn_guidance_delivery(
-    *,
-    plan_dir: str | Path,
-    state_dir_arg: str | Path | None,
-    event_path: Path,
-    persistence: _RunPersistence,
-    pending_guidance: Sequence[mailbox.MailboxMessage],
-    harness: str,
-    run_id: str,
-    session_id: str,
-    turn_index: int,
-) -> None:
-    """Record guidance carried into a turn whose prompt has just been accepted.
-
-    Only for a harness with no same-turn channel at all. There, the prompt is
-    not a fallback for a failed steer — it is the delivery mechanism, and the
-    process starting with that prompt in hand is the strongest evidence such a
-    harness can produce. Recording it is what turns an indefinitely queued
-    record into a receipt naming the turn that received it.
-
-    For every other harness this is never called: their ledger already carries
-    the live attempt's own verdict, and adding a next-turn receipt beside it
-    would claim two deliveries of one record.
-
-    Best effort throughout. A ledger that cannot take these records leaves the
-    guidance deliverable, which the next turn's prompt will carry again.
-    """
-    for message in pending_guidance:
-        try:
-            record = mailbox.append_guidance_delivery(
-                plan_dir,
-                message.id,
-                delivery_state=mailbox.GUIDANCE_STATE_DELIVERED_NEXT_TURN,
-                delivery_reason=mailbox.GUIDANCE_REASON_DELIVERED,
-                channel=mailbox.GUIDANCE_CHANNEL_NEXT_TURN,
-                run_id=run_id,
-                session_id=session_id,
-                turn_index=turn_index,
-                harness=harness,
-                state_dir=state_dir_arg,
-            )
-        except OSError, mailbox.MailboxError:
-            return
-        persistence.append_event(
-            event_path,
-            events.MAILBOX_EVENT,
-            {
-                "action": events.MAILBOX_ACTION_GUIDANCE_DELIVERED,
-                **mailbox.guidance_delivery_event_payload(record),
-            },
-        )
-
-
-def _approval_mode(args: argparse.Namespace) -> str:
-    return "unsafe-bypass" if _unsafe_bypass(args) else "harness-default"
-
-
-def _commit_mode(args: argparse.Namespace) -> str | None:
-    value = getattr(args, "commit_mode", None)
-    if value is None or value in COMMIT_MODES:
-        return value
-    raise RunError("commit_mode must be None, 'per-session', or 'end'")
-
-
-def _commit_mode_payload(args: argparse.Namespace) -> str | None:
-    value = getattr(args, "commit_mode", None)
-    return value if value in COMMIT_MODES else None
 
 
 # Session identity and plan-snapshot projections live in ``plans``: they are
@@ -927,7 +465,7 @@ def _validate_run_inputs(
     if not cwd.is_dir():
         raise plans.PlanError(f"cwd does not exist or is not a directory: {cwd}")
 
-    commit_mode = _commit_mode(args)
+    commit_mode = run_selection._commit_mode(args)
 
     # The numeric/harness cross-field checks live in ``run_flags`` so the CLI
     # runner and the supervisor helper enforce identical rules; cwd existence
@@ -948,9 +486,10 @@ def _validate_run_inputs(
                 "--spark requires a distinct resolved baseline model; pass "
                 "--harness-model or configure Codex's default model"
             )
-        if baseline["model"] == SPARK_MODEL:
+        if baseline["model"] == run_selection.SPARK_MODEL:
             raise RunError(
-                f"--spark baseline must differ from the Spark model {SPARK_MODEL!r}"
+                "--spark baseline must differ from the Spark model "
+                f"{run_selection.SPARK_MODEL!r}"
             )
 
     _review_guard_excludes(args)
@@ -1652,7 +1191,7 @@ def _repair_commit_preflight(
     when any of it falls outside.
     """
     details: dict[str, Any] = {
-        "repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD,
+        "repair_commit_mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
         "repositories": [],
     }
     workspace = verification_context.workspace
@@ -2098,8 +1637,8 @@ def _commit_generation(args: argparse.Namespace) -> _CommitGeneration:
         return _CommitGeneration()
     return _CommitGeneration(
         harness=harness,
-        model=_requested_model(args, harness=harness),
-        effort=_requested_effort(args, harness=harness),
+        model=run_selection._requested_model(args, harness=harness),
+        effort=run_selection._requested_effort(args, harness=harness),
     )
 
 
@@ -10211,9 +9750,9 @@ def _run_config_payload(
         "review_guard_exclude": list(_review_guard_excludes(args)),
         "review_guard_include_ignored": _review_guard_include_ignored(args),
         "commit_mode": commit_mode,
-        "repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD,
-        "unsafe_bypass": _unsafe_bypass(args),
-        "no_mailbox": _no_mailbox(args),
+        "repair_commit_mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
+        "unsafe_bypass": run_selection._unsafe_bypass(args),
+        "no_mailbox": run_selection._no_mailbox(args),
         "allow_not_loop_ready": _allow_not_loop_ready(args),
         "note": getattr(args, "note", None),
         "cwd": str(cwd),
@@ -10239,8 +9778,8 @@ def _initial_payload(
     verification_context: verification.VerificationContext | None = None,
 ) -> dict[str, Any]:
     context = verification_context or verification.VerificationContext.legacy(cwd)
-    model_effort = _selected_model_effort_payload(args)
-    spark = _safe_initial_spark_payload(args)
+    model_effort = run_selection._selected_model_effort_payload(args)
+    spark = run_selection._safe_initial_spark_payload(args)
     review_harness = getattr(args, "review_harness", None)
     review_requested = review_harness is not None
     review_output_path = (
@@ -10276,9 +9815,9 @@ def _initial_payload(
         active_turn=None,
         active_verification=None,
         action_required=None,
-        approval_mode=_approval_mode(args),
+        approval_mode=run_selection._approval_mode(args),
         commit_mode=commit_mode,
-        repair_commit_mode=REPAIR_COMMIT_MODE_PER_CHILD,
+        repair_commit_mode=run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
         max_pending_sessions=getattr(args, "max_pending_sessions", None),
         note=getattr(args, "note", None),
         run_config=_run_config_payload(
@@ -10288,12 +9827,12 @@ def _initial_payload(
             verification_context=context,
         ),
         assurance=assurance.to_dict(),
-        no_mailbox=_no_mailbox(args),
+        no_mailbox=run_selection._no_mailbox(args),
         mailbox_enabled=bool(mailbox_activation.get("enabled")),
         mailbox_activation=dict(mailbox_activation),
         plan_dir=str(snapshot.plan_dir),
         cwd=str(cwd),
-        kitty_window_id=_kitty_window_id_from_env(),
+        kitty_window_id=run_selection._kitty_window_id_from_env(),
         harness=args.harness,
         spark=spark,
         **model_effort,
@@ -10305,7 +9844,7 @@ def _initial_payload(
         events_path=str(event_path),
         state_path=str(state_path),
         lock_path=str(lock_info.path),
-        harness_config=_safe_harness_config_payload(),
+        harness_config=run_selection._safe_harness_config_payload(),
         completed_sessions=[],
         completed_session_ids=[],
         commits=[],
@@ -10357,15 +9896,15 @@ def _dry_run_payload(
     )
     next_pending = snapshot.next_pending
     mailbox_enabled = bool(mailbox_activation.get("enabled"))
-    pending_guidance = _pending_guidance_snapshot(
+    pending_guidance = run_selection._pending_guidance_snapshot(
         enabled=mailbox_enabled,
         plan_dir=snapshot.plan_dir,
         state_dir_arg=getattr(args, "state_dir", None),
     )
     audit = supervisor_audit.plan_audit(args).to_dict()
     if next_pending is None:
-        model_effort = _selected_model_effort_payload(args)
-        spark = _safe_initial_spark_payload(args)
+        model_effort = run_selection._selected_model_effort_payload(args)
+        spark = run_selection._safe_initial_spark_payload(args)
         return {
             "next_pending": None,
             "next_pending_id": None,
@@ -10375,7 +9914,7 @@ def _dry_run_payload(
             "prompt_kind": "session",
             "reply_source": None,
             "audit": audit,
-            "no_mailbox": _no_mailbox(args),
+            "no_mailbox": run_selection._no_mailbox(args),
             "mailbox_enabled": mailbox_enabled,
             "mailbox_activation": dict(mailbox_activation),
             "review_requested": review_requested,
@@ -10392,8 +9931,8 @@ def _dry_run_payload(
     turn_harness = args.review_harness if is_review_session else args.harness
     if turn_harness is None:
         raise RunError("--review-harness is required for a review session")
-    spark = _safe_initial_spark_payload(args)
-    requested_model, model_effort, spark_route = _spark_turn_route(
+    spark = run_selection._safe_initial_spark_payload(args)
+    requested_model, model_effort, spark_route = run_selection._spark_turn_route(
         args,
         plan_dir=snapshot.plan_dir,
         session_path=next_pending.path,
@@ -10506,7 +10045,7 @@ def _dry_run_payload(
         turn_harness,
         cwd=cwd,
         plan_dir=snapshot.plan_dir,
-        unsafe_bypass=_unsafe_bypass(args),
+        unsafe_bypass=run_selection._unsafe_bypass(args),
         last_message_path=paths["last_message"],
         model=requested_model,
         effort=args.effort,
@@ -10525,7 +10064,7 @@ def _dry_run_payload(
         "prompt_kind": prompt_kind,
         "reply_source": reply_source,
         "audit": audit,
-        "no_mailbox": _no_mailbox(args),
+        "no_mailbox": run_selection._no_mailbox(args),
         "mailbox_enabled": mailbox_enabled,
         "mailbox_activation": dict(mailbox_activation),
         "review_requested": review_requested,
@@ -10638,7 +10177,9 @@ def _run_locked(
         commit_group_load_error = str(error)
     else:
         commit_group_load_error = None
-    mailbox_activation = _mailbox_activation_payload(args, snapshot.plan_dir)
+    mailbox_activation = run_selection._mailbox_activation_payload(
+        args, snapshot.plan_dir
+    )
     mailbox_enabled = bool(mailbox_activation["enabled"])
     review_guard_excludes = _review_guard_excludes(args)
     review_guard_include_ignored = _review_guard_include_ignored(args)
@@ -10929,13 +10470,13 @@ def _run_locked(
             "max_sessions": max_sessions,
             "max_pending_sessions": getattr(args, "max_pending_sessions", None),
             "commit_mode": commit_mode,
-            "repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD,
+            "repair_commit_mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
             "note": payload.get("note"),
             "run_id": run_id,
             "run_dir": str(run_dir),
             "run_started_at": payload["run_started_at"],
             "approval_mode": payload["approval_mode"],
-            "no_mailbox": _no_mailbox(args),
+            "no_mailbox": run_selection._no_mailbox(args),
             "mailbox_enabled": mailbox_enabled,
             "counts": payload["initial_snapshot"]["counts"],
             "next_pending": payload["initial_snapshot"]["next_pending"],
@@ -11271,7 +10812,7 @@ def _run_locked(
             return terminalize(1)
 
     try:
-        if commit_mode == COMMIT_MODE_END:
+        if commit_mode == run_selection.COMMIT_MODE_END:
             _validate_commit_at_end_scope(
                 snapshot=snapshot,
                 max_sessions=max_sessions,
@@ -11493,7 +11034,10 @@ def _run_locked(
                     )
                     break
 
-                if commit_mode == COMMIT_MODE_END and not commit_at_end_attempted:
+                if (
+                    commit_mode == run_selection.COMMIT_MODE_END
+                    and not commit_at_end_attempted
+                ):
                     commit_at_end_attempted = True
                     with persistence.lock:
                         payload["final_snapshot"] = _snapshot_payload(snapshot)
@@ -12274,7 +11818,9 @@ def _run_locked(
                 turn_harness = args.review_harness
             else:
                 with run_control_lock:
-                    turn_harness = _selected_future_harness(args, control_payload)
+                    turn_harness = run_selection._selected_future_harness(
+                        args, control_payload
+                    )
                     implementation_overrides = (
                         run_controls.state.implementation_overrides
                     )
@@ -12283,7 +11829,7 @@ def _run_locked(
             if getattr(args, "spark", False) and spark_run_suppression is None:
                 try:
                     refreshed_availability = model_availability.availability(
-                        state.state_root(args.state_dir), SPARK_MODEL
+                        state.state_root(args.state_dir), run_selection.SPARK_MODEL
                     )
                 except OSError as error:
                     refreshed_availability = model_availability.Availability(
@@ -12293,28 +11839,30 @@ def _run_locked(
                     )
                 with persistence.lock:
                     payload["spark"].update(refreshed_availability.to_dict())
-            requested_model, turn_model_effort, spark_route = _spark_turn_route(
-                args,
-                plan_dir=before.plan_dir,
-                session_path=pending_session.path,
-                session_id=session_id,
-                harness=turn_harness,
-                is_review_turn=is_review_session,
-                implementation_overrides=implementation_overrides,
-                spark_state=payload["spark"],
-                run_suppression=spark_run_suppression,
-                fallback_reason=spark_fallback_reason,
+            requested_model, turn_model_effort, spark_route = (
+                run_selection._spark_turn_route(
+                    args,
+                    plan_dir=before.plan_dir,
+                    session_path=pending_session.path,
+                    session_id=session_id,
+                    harness=turn_harness,
+                    is_review_turn=is_review_session,
+                    implementation_overrides=implementation_overrides,
+                    spark_state=payload["spark"],
+                    run_suppression=spark_run_suppression,
+                    fallback_reason=spark_fallback_reason,
+                )
             )
             spark_fallback_reason = None
             with persistence.lock:
                 payload["spark"]["active_route"] = spark_route
-            requested_effort = _requested_effort(
+            requested_effort = run_selection._requested_effort(
                 args,
                 harness=turn_harness,
                 is_review_turn=is_review_session,
                 implementation_overrides=implementation_overrides,
             )
-            preflight_failure = _harness_preflight_failure(
+            preflight_failure = run_selection._harness_preflight_failure(
                 turn_harness,
                 session_id=session_id,
             )
@@ -12348,7 +11896,7 @@ def _run_locked(
                 repair_references = repair_references + (
                     _review_verdict_repair_references(event_path, session_id)
                 )
-            pending_guidance = _pending_guidance_snapshot(
+            pending_guidance = run_selection._pending_guidance_snapshot(
                 enabled=mailbox_enabled,
                 plan_dir=before.plan_dir,
                 state_dir_arg=args.state_dir,
@@ -12651,7 +12199,7 @@ def _run_locked(
                 **session_identity,
                 "session_kind": session_kind,
                 **(
-                    {"repair_commit_mode": REPAIR_COMMIT_MODE_PER_CHILD}
+                    {"repair_commit_mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD}
                     if is_repair_session
                     else {}
                 ),
@@ -13174,7 +12722,7 @@ def _run_locked(
                     cwd=cwd,
                     plan_dir=before.plan_dir,
                     prompt=prompt,
-                    unsafe_bypass=_unsafe_bypass(args),
+                    unsafe_bypass=run_selection._unsafe_bypass(args),
                     timeout=timeout,
                     model=requested_model,
                     effort=requested_effort,
@@ -13183,11 +12731,11 @@ def _run_locked(
                     stream_callback=stream_callback,
                     on_prompt_accepted=(
                         functools.partial(
-                            _record_next_turn_guidance_delivery,
+                            run_selection._record_next_turn_guidance_delivery,
                             plan_dir=before.plan_dir,
                             state_dir_arg=args.state_dir,
                             event_path=event_path,
-                            persistence=persistence,
+                            append_event=persistence.append_event,
                             pending_guidance=pending_guidance,
                             harness=turn_harness,
                             run_id=run_id,
@@ -13205,7 +12753,7 @@ def _run_locked(
                         turn_harness,
                         cwd=cwd,
                         plan_dir=before.plan_dir,
-                        unsafe_bypass=_unsafe_bypass(args),
+                        unsafe_bypass=run_selection._unsafe_bypass(args),
                         last_message_path=paths["last_message"],
                         model=requested_model,
                         effort=requested_effort,
@@ -13844,7 +13392,7 @@ def _run_locked(
                     try:
                         cooldown = model_availability.suppress_until(
                             state.state_root(args.state_dir),
-                            SPARK_MODEL,
+                            run_selection.SPARK_MODEL,
                             reason=classification.reason,
                             retry_hint=classification.retry_at,
                             run_id=run_id,
@@ -13883,7 +13431,7 @@ def _run_locked(
                                 "run_id": run_id,
                                 "session_id": session_id,
                                 "failed_turn_index": turn_index,
-                                "failed_model": SPARK_MODEL,
+                                "failed_model": run_selection.SPARK_MODEL,
                                 "fallback_model": payload["spark"]["baseline"],
                                 "failure_classification": classification.to_dict(),
                                 "retry_at": payload["spark"].get("retry_at"),
@@ -14218,7 +13766,8 @@ def _run_locked(
 
             repair_owned_commit = is_repair_session and commit_mode is None
             if not is_review_session and (
-                commit_mode == COMMIT_MODE_PER_SESSION or repair_owned_commit
+                commit_mode == run_selection.COMMIT_MODE_PER_SESSION
+                or repair_owned_commit
             ):
                 session_targets: list[dict[str, Any]] = []
                 try:
@@ -14261,7 +13810,7 @@ def _run_locked(
                 if repair_owned_commit:
                     with persistence.lock:
                         turn_payload["repair_commit"] = {
-                            "mode": REPAIR_COMMIT_MODE_PER_CHILD,
+                            "mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
                             "result": (
                                 "no-changes"
                                 if not session_targets
@@ -14685,7 +14234,7 @@ def _error_payload(
         pause_reason=reason if paused else None,
         pause_message=message if paused else "",
         pause_details={},
-        commit_mode=_commit_mode_payload(args),
+        commit_mode=run_selection._commit_mode_payload(args),
         note=getattr(args, "note", None),
         commits=[],
         commit_groups=[],
@@ -14707,8 +14256,8 @@ def _error_payload(
         review_verdict=None,
         review_skipped_reason=reason if review_requested else None,
     )
-    payload.update(_selected_model_effort_payload(args))
-    payload["spark"] = _safe_initial_spark_payload(args)
+    payload.update(run_selection._selected_model_effort_payload(args))
+    payload["spark"] = run_selection._safe_initial_spark_payload(args)
     if paused:
         # Match `_set_pause`: a paused error payload carries the same
         # single-source-of-truth pause classification block.
@@ -15511,7 +15060,7 @@ def _print_doctor_error(
             cwd=str(cwd) if cwd is not None else str(args.cwd),
             plan_dir=str(plan_dir) if plan_dir is not None else str(args.plan_dir),
         )
-        payload.update(_selected_model_effort_payload(args))
+        payload.update(run_selection._selected_model_effort_payload(args))
         responses.print_json(payload)
     else:
         print(f"agent-session-loop doctor: {error}", file=sys.stderr)
@@ -15628,14 +15177,14 @@ def doctor_from_args(args: argparse.Namespace) -> int:
         last_message_path = (
             state.plan_state_dir(snapshot.plan_dir) / "last-message-doctor.txt"
         )
-        model_effort = _selected_model_effort_payload(args)
+        model_effort = run_selection._selected_model_effort_payload(args)
         invocation = run_prompts.build_harness_invocation(
             args.harness,
             cwd=verification_context.root,
             plan_dir=snapshot.plan_dir,
-            unsafe_bypass=_unsafe_bypass(args),
+            unsafe_bypass=run_selection._unsafe_bypass(args),
             last_message_path=last_message_path,
-            model=_requested_model(args, harness=args.harness),
+            model=run_selection._requested_model(args, harness=args.harness),
             effort=args.effort,
             prompt=prompt,
         )

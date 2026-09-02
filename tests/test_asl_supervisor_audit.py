@@ -38,6 +38,7 @@ from agent_session_loop import (
     review_session_contract,
     run_flags,
     run_prompts,
+    run_selection,
     runner,
     state,
     supervisor_audit,
@@ -628,7 +629,9 @@ class AuditRunOutputTests(unittest.TestCase):
             cwd=tmp_dir,
             run_id=RUN_ID,
             commit_mode=None,
-            mailbox_activation=runner._mailbox_activation_payload(args, plan_dir),
+            mailbox_activation=run_selection._mailbox_activation_payload(
+                args, plan_dir
+            ),
         )
 
     def test_a_fresh_eligible_run_starts_pending(self) -> None:

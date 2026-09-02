@@ -47,6 +47,7 @@ from agent_session_loop import (
     review_session_contract,
     run_flags,
     run_prompts,
+    run_selection,
     runner,
     state,
     supervisor_guide,
@@ -1133,11 +1134,11 @@ class CommandAndConfigTests(unittest.TestCase):
                 state_dir=state_dir,
             )
 
-            enabled = runner._mailbox_activation_payload(
+            enabled = run_selection._mailbox_activation_payload(
                 argparse.Namespace(state_dir=str(state_dir), no_mailbox=False),
                 plan_dir,
             )
-            disabled = runner._mailbox_activation_payload(
+            disabled = run_selection._mailbox_activation_payload(
                 argparse.Namespace(state_dir=str(state_dir), no_mailbox=True),
                 plan_dir,
             )

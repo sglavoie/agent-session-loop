@@ -47,6 +47,7 @@ from agent_session_loop import (
     process_tree,
     review_session_body,
     run_control,
+    run_selection,
     runner,
     state,
     supervision_liveness,
@@ -12135,7 +12136,7 @@ class RunControlTests(unittest.TestCase):
 
         self.assertEqual(
             "gpt-5-control",
-            runner._requested_model(
+            run_selection._requested_model(
                 args,
                 harness="codex",
                 implementation_overrides=overrides,
@@ -12143,13 +12144,13 @@ class RunControlTests(unittest.TestCase):
         )
         self.assertEqual(
             "xhigh",
-            runner._requested_effort(
+            run_selection._requested_effort(
                 args,
                 harness="codex",
                 implementation_overrides=overrides,
             ),
         )
-        selected = runner._selected_model_effort_payload(
+        selected = run_selection._selected_model_effort_payload(
             args,
             harness="codex",
             implementation_overrides=overrides,
@@ -12159,7 +12160,7 @@ class RunControlTests(unittest.TestCase):
         self.assertEqual("xhigh", selected["effort"])
         self.assertEqual(config.EFFORT_SOURCE_CONTROL, selected["effort_source"])
 
-        cleared = runner._selected_model_effort_payload(
+        cleared = run_selection._selected_model_effort_payload(
             args,
             harness="codex",
             implementation_overrides={},
@@ -12169,7 +12170,7 @@ class RunControlTests(unittest.TestCase):
         self.assertEqual("medium", cleared["effort"])
         self.assertEqual(config.EFFORT_SOURCE_FLAG, cleared["effort_source"])
 
-        review = runner._selected_model_effort_payload(
+        review = run_selection._selected_model_effort_payload(
             args,
             harness="claude",
             is_review_turn=True,
@@ -12486,12 +12487,12 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
     def test_kitty_window_id_from_env_accepts_positive_int(self) -> None:
         with patched_env(KITTY_WINDOW_ID="42"):
-            self.assertEqual(42, runner._kitty_window_id_from_env())
+            self.assertEqual(42, run_selection._kitty_window_id_from_env())
 
     def test_kitty_window_id_from_env_ignores_missing_or_invalid_values(self) -> None:
         for raw in (None, "", "0", "-7", "not-an-int"):
             with self.subTest(raw=raw), patched_env(KITTY_WINDOW_ID=raw):
-                self.assertIsNone(runner._kitty_window_id_from_env())
+                self.assertIsNone(run_selection._kitty_window_id_from_env())
 
     def test_wait_lifecycle_delivery_constants_and_phases(self) -> None:
         self.assertEqual(

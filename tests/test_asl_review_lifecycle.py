@@ -37,6 +37,7 @@ from agent_session_loop import (
     review_repair,
     review_session_body,
     review_session_contract,
+    run_selection,
     runner,
     state,
 )
@@ -1904,7 +1905,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIsNone(payload["commit_mode"])
         self.assertEqual(
-            runner.REPAIR_COMMIT_MODE_PER_CHILD, payload["repair_commit_mode"]
+            run_selection.REPAIR_COMMIT_MODE_PER_CHILD, payload["repair_commit_mode"]
         )
         self.assertEqual(1, len(read_jsonl(commit_log)))
         self.assertEqual(
@@ -1966,7 +1967,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("commit-preflight", payload["pause_reason"])
         self.assertEqual("2.1", payload["pause_details"]["session_id"])
         self.assertEqual(
-            runner.REPAIR_COMMIT_MODE_PER_CHILD,
+            run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
             payload["pause_details"]["repair_commit_mode"],
         )
         dirty = payload["pause_details"]["dirty_repositories"]

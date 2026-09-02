@@ -43,6 +43,7 @@ from agent_session_loop import (
     progress_repair,
     review_session_body,
     run_control,
+    run_selection,
     runner,
     state,
     task_packet,
@@ -422,9 +423,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             command.extend(["--timeout", str(timeout)])
         if max_sessions is not None:
             command.extend(["--max-sessions", str(max_sessions)])
-        if commit_mode == runner.COMMIT_MODE_PER_SESSION:
+        if commit_mode == run_selection.COMMIT_MODE_PER_SESSION:
             command.append("--commit-per-session")
-        elif commit_mode == runner.COMMIT_MODE_END:
+        elif commit_mode == run_selection.COMMIT_MODE_END:
             command.append("--commit-at-end")
         elif commit_mode is not None:
             raise ValueError(f"unsupported commit_mode: {commit_mode}")
@@ -918,9 +919,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         ]
         if max_sessions is not None:
             command.extend(["--max-sessions", str(max_sessions)])
-        if commit_mode == runner.COMMIT_MODE_PER_SESSION:
+        if commit_mode == run_selection.COMMIT_MODE_PER_SESSION:
             command.append("--commit-per-session")
-        elif commit_mode == runner.COMMIT_MODE_END:
+        elif commit_mode == run_selection.COMMIT_MODE_END:
             command.append("--commit-at-end")
         elif commit_mode is not None:
             raise ValueError(f"unsupported commit_mode: {commit_mode}")
@@ -2067,7 +2068,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 config_home=config_home,
                 mode="streaming-success",
                 cwd=repo_dir,
-                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
                 extra_env=commit_env,
             )
 
@@ -3133,7 +3134,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     statuses=("pending", "pending"),
                     listener=listener,
                     cwd=repo_dir,
-                    commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                    commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
                     extra_env=commit_env,
                 )
             )
@@ -3554,7 +3555,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 mode="success",
                 statuses=("pending",),
                 cwd=repo_dir,
-                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
                 extra_env=commit_env,
             )
 
@@ -3586,7 +3587,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 mode="success",
                 statuses=("pending", "pending"),
                 cwd=repo_dir,
-                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
                 extra_env=commit_env,
             )
 
@@ -3594,7 +3595,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertFalse(payload["paused"])
             self.assertEqual("all-complete", payload["reason"])
-            self.assertEqual(runner.COMMIT_MODE_PER_SESSION, payload["commit_mode"])
+            self.assertEqual(
+                run_selection.COMMIT_MODE_PER_SESSION, payload["commit_mode"]
+            )
             self.assertEqual([1, 2], payload["completed_sessions"])
             self.assertEqual(
                 initial_commit_count + 2,
@@ -3680,14 +3683,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 mode="success",
                 statuses=("pending", "pending"),
                 cwd=repo_dir,
-                commit_mode=runner.COMMIT_MODE_END,
+                commit_mode=run_selection.COMMIT_MODE_END,
                 extra_env=commit_env,
             )
 
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertTrue(payload["ok"])
             self.assertEqual("all-complete", payload["reason"])
-            self.assertEqual(runner.COMMIT_MODE_END, payload["commit_mode"])
+            self.assertEqual(run_selection.COMMIT_MODE_END, payload["commit_mode"])
             self.assertEqual([1, 2], payload["completed_sessions"])
             self.assertEqual(1, len(payload["commits"]))
             self.assertEqual(1, len(read_jsonl(commit_log)))
@@ -3737,7 +3740,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 mode="success",
                 statuses=("pending", "pending"),
                 cwd=repo_dir,
-                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
                 extra_env=commit_env,
             )
 
@@ -3807,7 +3810,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 mode="success",
                 statuses=("pending", "pending"),
                 cwd=repo_dir,
-                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
                 extra_env=commit_env,
             )
 
@@ -3894,7 +3897,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 config_home=config_home,
                 cwd=plan_dir,
                 max_sessions=1,
-                commit_mode=runner.COMMIT_MODE_PER_SESSION,
+                commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
                 extra_env=failing_env,
             )
             self.assertEqual(0, first.returncode, first.stderr)
@@ -4412,7 +4415,9 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 note=None,
                 allow_not_loop_ready=False,
             )
-            mailbox_activation = runner._mailbox_activation_payload(args, plan_dir)
+            mailbox_activation = run_selection._mailbox_activation_payload(
+                args, plan_dir
+            )
             payload = runner._initial_payload(
                 args=args,
                 snapshot=snapshot,
