@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_session_loop import plans, repository_evidence, runner, workspaces
+from agent_session_loop import (
+    plans,
+    repository_evidence,
+    review_guard,
+    runner,
+    workspaces,
+)
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
     init_git_repo,
@@ -58,7 +64,7 @@ class RepositoryEvidenceParityTests(unittest.TestCase):
         extracted = repository_evidence.capture_repository_fingerprint(
             self.repository, self.plan_dir
         )
-        compatibility = runner._capture_review_repo_fingerprint(
+        compatibility = review_guard._capture_review_repo_fingerprint(
             self.repository, self.plan_dir
         )
 
@@ -67,7 +73,7 @@ class RepositoryEvidenceParityTests(unittest.TestCase):
             repository_evidence.compare_repository_fingerprints(
                 extracted, compatibility
             ),
-            runner._review_guard_changed_paths(extracted, compatibility),
+            review_guard._review_guard_changed_paths(extracted, compatibility),
         )
 
     def test_fingerprint_records_ref_mutation_and_classifies_rewritten_head(

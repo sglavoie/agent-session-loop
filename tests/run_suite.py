@@ -63,6 +63,7 @@ FAST_MODULES = (
     "tests.test_asl_review_transitions",
     "tests.test_asl_review_session_contract",
     "tests.test_asl_review_session_body",
+    "tests.test_asl_review_guard",
     "tests.test_asl_transitions",
     "tests.test_asl_run_coordination",
     "tests.test_asl_run_selection",

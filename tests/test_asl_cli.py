@@ -42,6 +42,7 @@ from agent_session_loop import (
     responses,
     retention,
     review,
+    review_guard,
     review_repair,
     review_session_body,
     review_session_contract,
@@ -1184,9 +1185,9 @@ class CommandAndConfigTests(unittest.TestCase):
         )
 
         self.assertFalse(default_args.review_guard_include_ignored)
-        self.assertFalse(runner._review_guard_include_ignored(default_args))
+        self.assertFalse(review_guard._review_guard_include_ignored(default_args))
         self.assertTrue(enabled_args.review_guard_include_ignored)
-        self.assertTrue(runner._review_guard_include_ignored(enabled_args))
+        self.assertTrue(review_guard._review_guard_include_ignored(enabled_args))
         self.assertIn("review_guard_include_ignored", runner._RESUME_OVERLAY_DESTS)
 
     def test_review_guard_exclude_merges_env_and_flags(self) -> None:
@@ -1203,9 +1204,13 @@ class CommandAndConfigTests(unittest.TestCase):
 
         with mock.patch.dict(
             os.environ,
-            {runner.REVIEW_GUARD_EXCLUDE_ENV_VAR: os.pathsep.join(["notes", "claude"])},
+            {
+                review_guard.REVIEW_GUARD_EXCLUDE_ENV_VAR: os.pathsep.join(
+                    ["notes", "claude"]
+                )
+            },
         ):
-            resolved = runner._review_guard_excludes(args)
+            resolved = review_guard._review_guard_excludes(args)
 
         self.assertEqual(("claude", "nested/dir", "notes"), resolved)
 
@@ -1218,7 +1223,7 @@ class CommandAndConfigTests(unittest.TestCase):
                     ["run", "/tmp/plan", "--review-guard-exclude", value]
                 )
                 with self.assertRaises(runner.RunError):
-                    runner._review_guard_excludes(args)
+                    review_guard._review_guard_excludes(args)
 
     def test_review_guard_exclude_invalid_value_is_input_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1730,7 +1735,8 @@ class CommandAndConfigTests(unittest.TestCase):
             )
             with self.assertRaises(runner.RunError) as raised:
                 run_inputs._validate_run_inputs(
-                    args, resolve_review_guard_excludes=runner._review_guard_excludes
+                    args,
+                    resolve_review_guard_excludes=review_guard._review_guard_excludes,
                 )
 
             message = str(raised.exception)
@@ -1749,7 +1755,7 @@ class CommandAndConfigTests(unittest.TestCase):
             )
 
             cwd, timeout, max_sessions, commit_mode = run_inputs._validate_run_inputs(
-                args, resolve_review_guard_excludes=runner._review_guard_excludes
+                args, resolve_review_guard_excludes=review_guard._review_guard_excludes
             )
 
             self.assertEqual(Path(tmp).resolve(), cwd)
@@ -1773,7 +1779,8 @@ class CommandAndConfigTests(unittest.TestCase):
 
             with self.assertRaises(runner.RunError) as raised:
                 run_inputs._validate_run_inputs(
-                    args, resolve_review_guard_excludes=runner._review_guard_excludes
+                    args,
+                    resolve_review_guard_excludes=review_guard._review_guard_excludes,
                 )
 
         self.assertEqual(
@@ -1794,7 +1801,7 @@ class CommandAndConfigTests(unittest.TestCase):
             )
 
             run_inputs._validate_run_inputs(
-                args, resolve_review_guard_excludes=runner._review_guard_excludes
+                args, resolve_review_guard_excludes=review_guard._review_guard_excludes
             )
 
     def test_review_session_kind_constants(self) -> None:

@@ -5595,7 +5595,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             statuses=("pending",)
         )
         self.enable_fake_review_harness(config_home, fake_codex)
-        # The repair child runs behind `_repair_commit_preflight`, which
+        # The repair child runs behind `review_guard._repair_commit_preflight`,
+        # which
         # refuses to start on a dirty writable repository. Give the run its own
         # clean repository so the gate answers to this test rather than to
         # whatever is uncommitted in this checkout.

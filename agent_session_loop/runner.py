@@ -29,7 +29,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, TextIO
 
@@ -64,6 +64,7 @@ from . import (
     responses,
     review,
     review_continuation,
+    review_guard,
     review_repair,
     review_session_body,
     review_session_contract,
@@ -89,6 +90,7 @@ from .formatting import (
     format_turn_finished_message,
     format_turn_started_message,
 )
+from .review_guard import RepairCommitPreflightError
 from .run_errors import RunError
 
 NOT_IMPLEMENTED_EXIT = 2
@@ -240,12 +242,6 @@ RESULT_SCHEMA_VERSION = turn_execution.RESULT_SCHEMA_VERSION
 # diagnostics remain recoverable from the referenced artifact.
 _VERIFICATION_OUTPUT_KEYS = ("stdout", "stderr")
 
-# Repo-relative paths the review mutation guard ignores, on top of any
-# ``--review-guard-exclude`` values. Stow packages whose files the harness
-# rewrites mid-turn (its own settings, caches) would otherwise revert a
-# complete review turn.
-REVIEW_GUARD_EXCLUDE_ENV_VAR = "ASL_REVIEW_GUARD_EXCLUDE"
-
 # Bounded mailbox reply waits, supervisor leases, the external control plane,
 # and terminal assurance are coordination, not run-loop logic: they live in
 # :mod:`agent_session_loop.run_coordination` behind typed APIs that own their
@@ -362,14 +358,6 @@ REVIEW_BROAD_FAILURES_DEFERRED_REASON = (
 )
 
 
-class RepairCommitPreflightError(RunError):
-    """A generated repair child cannot safely enter its owned commit phase."""
-
-    def __init__(self, message: str, details: Mapping[str, Any]) -> None:
-        super().__init__(message)
-        self.details = dict(details)
-
-
 def _not_implemented(command: str) -> int:
     print(f"agent-session-loop {command}: not implemented yet", file=sys.stderr)
     return NOT_IMPLEMENTED_EXIT
@@ -419,581 +407,6 @@ _approval_match_is_content = turn_execution.approval_match_is_content
 _live_action_signal = turn_execution.live_action_signal
 _LIVE_ACTION_REQUIRED_REASONS = turn_execution.LIVE_ACTION_REQUIRED_REASONS
 _clear_live_action_required = turn_execution.clear_live_action_required
-
-
-def _review_guard_excludes(args: argparse.Namespace) -> tuple[str, ...]:
-    """Resolve the review mutation guard's allowlist as sorted POSIX paths.
-
-    Merges :data:`REVIEW_GUARD_EXCLUDE_ENV_VAR` (``os.pathsep``-separated) with
-    every ``--review-guard-exclude`` value. Absolute paths and ``..`` segments
-    raise :class:`RunError` so an allowlist can never reach outside the
-    repository, and so a typo fails the run instead of silently widening the
-    guard's blind spot.
-    """
-    raw: list[str] = []
-    env_value = os.environ.get(REVIEW_GUARD_EXCLUDE_ENV_VAR)
-    if env_value:
-        raw.extend(env_value.split(os.pathsep))
-    raw.extend(getattr(args, "review_guard_exclude", None) or ())
-
-    excludes: set[str] = set()
-    for entry in raw:
-        candidate = entry.strip()
-        if not candidate:
-            continue
-        pure = PurePosixPath(candidate)
-        if pure.is_absolute():
-            raise RunError(
-                "--review-guard-exclude must be repo-relative, got "
-                f"absolute path {candidate!r}"
-            )
-        if ".." in pure.parts:
-            raise RunError(
-                "--review-guard-exclude must not contain '..' segments, got "
-                f"{candidate!r}"
-            )
-        normalized = pure.as_posix().rstrip("/")
-        if normalized:
-            excludes.add(normalized)
-    return tuple(sorted(excludes))
-
-
-def _review_guard_include_ignored(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "review_guard_include_ignored", False))
-
-
-def _run_git(
-    cwd: Path,
-    args: list[str],
-) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except FileNotFoundError as error:
-        raise RunError("git executable not found on PATH") from error
-    except OSError as error:
-        raise RunError(f"could not run git {' '.join(args)}: {error}") from error
-
-
-def _run_git_bytes(
-    cwd: Path,
-    args: list[str],
-) -> subprocess.CompletedProcess[bytes]:
-    """Run git without decoding, for output whose bytes must survive intact.
-
-    Text mode translates ``\\r\\n`` and a lone ``\\r`` to ``\\n``, which collapses
-    values differing only in those bytes onto one another.
-    """
-    try:
-        return subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            capture_output=True,
-            check=False,
-        )
-    except FileNotFoundError as error:
-        raise RunError("git executable not found on PATH") from error
-    except OSError as error:
-        raise RunError(f"could not run git {' '.join(args)}: {error}") from error
-
-
-def _read_git_head(cwd: Path) -> dict[str, Any]:
-    result = _run_git(cwd, ["rev-parse", "--verify", "HEAD"])
-    head = result.stdout.strip() if result.returncode == 0 else None
-    return {
-        "head": head,
-        "returncode": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-    }
-
-
-def _capture_review_repo_fingerprint(
-    cwd: str | Path,
-    plan_dir: str | Path,
-    *,
-    exclude: tuple[str, ...] = (),
-    include_ignored: bool = False,
-) -> dict[str, Any]:
-    """Compatibility wrapper for the extracted repository evidence engine."""
-    return repository_evidence.capture_repository_fingerprint(
-        cwd,
-        plan_dir,
-        exclude=exclude,
-        include_ignored=include_ignored,
-        _run_git_fn=_run_git,
-        _run_git_bytes_fn=_run_git_bytes,
-    )
-
-
-def _review_guard_unavailable_detail(
-    fingerprint: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    """Compatibility wrapper for fail-closed repository evidence details."""
-    return repository_evidence.repository_evidence_unavailable(fingerprint)
-
-
-def _default_excludes_file() -> Path | None:
-    """Compatibility wrapper for Git's default global excludes path."""
-    return repository_evidence.default_excludes_file()
-
-
-def _effective_excludes_file(cwd: Path, repo_root: Path) -> tuple[str, Path | None]:
-    """Compatibility wrapper for effective global exclude resolution."""
-    return repository_evidence.effective_excludes_file(
-        cwd, repo_root, _run_git_bytes_fn=_run_git_bytes
-    )
-
-
-def _review_repo_state(fingerprint: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Compatibility wrapper for state derived from repository evidence."""
-    return repository_evidence.repository_state(fingerprint)
-
-
-def _index_flagged_paths(listing_text: str) -> list[str]:
-    """Compatibility wrapper for diff-suppressed Git index entries."""
-    return repository_evidence.index_flagged_paths(listing_text)
-
-
-def _review_guard_changed_paths(
-    before: Mapping[str, Any],
-    after: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Compatibility wrapper for single-repository evidence comparison."""
-    return repository_evidence.compare_repository_fingerprints(before, after)
-
-
-def _review_guard_changed_summary(changed_paths: Mapping[str, Any]) -> str:
-    """Compatibility wrapper for the historical bounded change summary."""
-    return repository_evidence.format_repository_changes(changed_paths)
-
-
-def _validate_git_worktree(cwd: Path) -> None:
-    result = _run_git(cwd, ["rev-parse", "--is-inside-work-tree"])
-    if result.returncode != 0 or result.stdout.strip() != "true":
-        detail = result.stderr.strip() or result.stdout.strip()
-        if detail:
-            raise RunError(f"cwd is not inside a git repository: {detail}")
-        raise RunError("cwd is not inside a git repository")
-
-
-def _validate_clean_git_status(cwd: Path) -> None:
-    result = _run_git(cwd, ["status", "--porcelain"])
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        if detail:
-            raise RunError(f"could not inspect git status: {detail}")
-        raise RunError("could not inspect git status")
-    if result.stdout:
-        raise RunError("git status --porcelain must be empty before auto-commit")
-
-
-def _git_status_is_clean(cwd: Path) -> bool:
-    result = _run_git(cwd, ["status", "--porcelain"])
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip()
-        if detail:
-            raise RunError(f"could not inspect git status: {detail}")
-        raise RunError("could not inspect git status")
-    return not bool(result.stdout)
-
-
-def _validate_commit_preflight(
-    cwd: Path,
-    *,
-    verification_context: verification.VerificationContext | None = None,
-) -> dict[str, Any]:
-    context = verification_context or verification.VerificationContext.legacy(cwd)
-    if context.workspace is None:
-        _validate_git_worktree(cwd)
-        _validate_clean_git_status(cwd)
-        return {}
-
-    repositories: list[dict[str, Any]] = []
-    for repository in context.workspace.repositories:
-        _validate_git_worktree(repository.root)
-        try:
-            clean = _git_status_is_clean(repository.root)
-        except RunError as error:
-            raise RunError(
-                f"could not inspect repository {repository.alias}: {error}"
-            ) from error
-        repositories.append(
-            {
-                "alias": repository.alias,
-                "path": repository.repository.path,
-                "resolved_root": str(repository.root),
-                "clean": clean,
-            }
-        )
-        if not clean:
-            raise RunError(
-                "git status --porcelain must be empty before auto-commit "
-                f"in repository {repository.alias}"
-            )
-    return {"repositories": repositories}
-
-
-def _porcelain_dirty_paths(output: str) -> list[str]:
-    """Name every dirty path individually from NUL-framed porcelain output.
-
-    ``--untracked-files=all`` is what makes a newly created directory read as
-    the files inside it, which is the only form the write guard ever records a
-    path in; the collapsed ``dir/`` entry the default listing prints matches no
-    recorded path at all. ``-z`` is what keeps a path holding a quote or a
-    newline from arriving as a quoted rendering that no recorded path matches
-    either. A rename or copy entry carries its source path as a second field,
-    and that source is dirt of its own, so both sides are named.
-    """
-    fields = output.split("\0")
-    paths: list[str] = []
-    index = 0
-    while index < len(fields):
-        entry = fields[index]
-        index += 1
-        if not entry:
-            continue
-        status, path = entry[:2], entry[3:]
-        if path:
-            paths.append(path)
-        if "R" in status or "C" in status:
-            if index < len(fields) and fields[index]:
-                paths.append(fields[index])
-            index += 1
-    return list(dict.fromkeys(paths))
-
-
-def _retained_turn_changed_paths(record: Mapping[str, Any]) -> frozenset[str]:
-    """Qualified paths the retained violating turn is proven to have written.
-
-    The guard's own ``changed`` evidence is the proof: it is the before/after
-    comparison of that turn and nothing else, already qualified by alias. The
-    record's ``violations`` are a projection of these same paths, so reading
-    ``changed`` reads both the authorized and the escaped half of the retained
-    work. Anything the guard could not see -- an ignored path, an excluded one,
-    the plan directory -- is deliberately absent: not being observed is not
-    proof of origin.
-    """
-    paths: set[str] = set()
-    changed = record.get("changed")
-    if not isinstance(changed, Mapping):
-        return frozenset()
-    for entry in changed.values():
-        if not isinstance(entry, Mapping):
-            continue
-        qualified = entry.get("qualified_paths")
-        if isinstance(qualified, Sequence) and not isinstance(qualified, (str, bytes)):
-            paths.update(str(path) for path in qualified)
-    return frozenset(paths)
-
-
-@dataclass(frozen=True)
-class _RetainedContentEvidence:
-    """Whether retained paths still hold the bytes their own turn left behind.
-
-    ``available`` is the only key a caller may sanction on: it is false whenever
-    the comparison could not be made at all, and an unproven path is never a
-    proven one. ``drifted`` names the retained paths whose current worktree or
-    index content no longer matches the post-turn record.
-    """
-
-    available: bool
-    drifted: frozenset[str] = frozenset()
-    reason: str | None = None
-    repositories: tuple[str, ...] = ()
-
-    def payload(self) -> dict[str, Any]:
-        record: dict[str, Any] = {
-            "available": self.available,
-            "drifted_paths": sorted(self.drifted),
-            "repositories": list(self.repositories),
-        }
-        if self.reason is not None:
-            record["reason"] = self.reason
-        return record
-
-
-def _retained_turn_content_drift(
-    record: Mapping[str, Any],
-    *,
-    workspace: workspaces.ResolvedWorkspace,
-    scope: plans.SessionScope,
-    plan_dir: Path,
-) -> _RetainedContentEvidence:
-    """Compare the writable repositories against the retained turn's own after-state.
-
-    A pathname is not an origin. The violating turn's guard record proves which
-    paths that turn wrote, but the bytes sitting at one of those paths now are
-    whatever the last writer put there, and between the pause and this resume
-    that writer may have been an operator. The record's ``snapshot_after`` is the
-    durable description of what the turn actually left behind — per path, in the
-    worktree and in the index — so recapturing the same evidence now and
-    comparing the two vectors is what distinguishes a retained path that is still
-    retained content from one that has since been rewritten.
-
-    The comparison is made under the exclusion policy the record itself names
-    rather than this run's, because a fingerprint captured under a different
-    policy describes a different thing and would report drift where none
-    happened. Everything that cannot be compared — a missing after-vector, a
-    writable repository the vector never covered, a capture failure, a
-    repository that has since disappeared — returns ``available=False`` so the
-    caller sanctions nothing.
-    """
-    writable = tuple(
-        repository.repository.path
-        for repository in workspace.repositories
-        if repository.alias in scope.writes
-    )
-    if not writable:
-        return _RetainedContentEvidence(
-            False, reason="the repair child declares no writable registered repository"
-        )
-    recorded_after = record.get("snapshot_after")
-    if not isinstance(recorded_after, Mapping) or not recorded_after:
-        return _RetainedContentEvidence(
-            False, reason="retained turn recorded no post-turn content evidence"
-        )
-    recorded: repository_evidence.WorkspaceSnapshot = OrderedDict()
-    for key, fingerprint in recorded_after.items():
-        linked = repository_evidence.split_linked_worktree_key(str(key))
-        owner = linked[0] if linked is not None else str(key)
-        if owner in writable and isinstance(fingerprint, Mapping):
-            recorded[str(key)] = dict(fingerprint)
-    uncovered = [path for path in writable if path not in recorded]
-    if uncovered:
-        return _RetainedContentEvidence(
-            False,
-            reason=(
-                "retained turn recorded no post-turn content evidence for "
-                f"{', '.join(sorted(uncovered))}"
-            ),
-        )
-    exclude = tuple(str(entry) for entry in record.get("excluded") or ())
-    include_ignored = bool(record.get("include_ignored"))
-    try:
-        current = repository_evidence.capture_registered_snapshot(
-            workspace.root,
-            plan_dir,
-            writable,
-            default_exclude=exclude,
-            include_ignored=include_ignored,
-            _run_git_fn=_run_git,
-            _run_git_bytes_fn=_run_git_bytes,
-        )
-    except repository_evidence.RepositoryEvidenceError as error:
-        return _RetainedContentEvidence(
-            False, reason=f"current content evidence unavailable: {error}"
-        )
-    comparison = repository_evidence.compare_workspace_snapshots(recorded, current)
-    unavailable = comparison.get("unavailable") or {}
-    removed = comparison.get("removed") or []
-    if unavailable or removed:
-        named = ", ".join(sorted({*map(str, unavailable), *map(str, removed)}))
-        return _RetainedContentEvidence(
-            False, reason=f"content evidence could not be compared for {named}"
-        )
-    evidence = _workspace_write_guard_evidence(
-        workspace=workspace,
-        scope=scope,
-        comparison=comparison,
-        exclude=exclude,
-        include_ignored=include_ignored,
-    )
-    # Both sets are produced by one projection, so the drifted paths are
-    # qualified exactly the way the retained paths they are subtracted from are.
-    return _RetainedContentEvidence(
-        True,
-        drifted=_retained_turn_changed_paths(evidence),
-        repositories=writable,
-    )
-
-
-def _repair_commit_preflight(
-    cwd: Path,
-    *,
-    verification_context: verification.VerificationContext,
-    session_scope: plans.SessionScope | None,
-    plan_dir: Path | None = None,
-    retained_scope_repair: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Require a clean writable set for one repair child.
-
-    ``retained_scope_repair`` is the uncleared write-scope-violation record for
-    this same child. On that path the runner is the author of *some* of the
-    dirt: it deliberately retained the violating turn's changes and reverted the
-    child to pending so its durable scope could be repaired. Demanding a clean
-    writable set there dead-ends the very repair the retention exists to enable,
-    so the sanction covers exactly the paths that turn is recorded as having
-    written and still recorded as holding the content it left at them. The
-    sanction stops there. A legacy repair child's commit is still
-    repository-wide, so any other dirty path -- work an operator started after
-    the pause in a repository the child is about to touch, or an edit they made
-    to a retained path itself -- would be staged and committed under the
-    repair's name; that case raises here, before the harness starts, rather than
-    riding along. A registered child stages only the paths its own turn guard
-    recorded, but the gate stays uniform: dirt the child did not author is not
-    its to carry, whichever staging path it takes. Nothing escapes review
-    either: the retained-scope branch still judges every retained change against
-    the child's post-regeneration write scope before the turn starts, and pauses
-    when any of it falls outside.
-    """
-    details: dict[str, Any] = {
-        "repair_commit_mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
-        "repositories": [],
-    }
-    workspace = verification_context.workspace
-    if workspace is None:
-        selected = [(None, ".", cwd)]
-    else:
-        if session_scope is None or not session_scope.writes:
-            message = "generated repair child declares no writable repository"
-            details["error"] = message
-            raise RepairCommitPreflightError(message, details)
-        write_aliases = set(session_scope.writes)
-        selected = [
-            (repository.alias, repository.repository.path, repository.root)
-            for repository in workspace.repositories
-            if repository.alias in write_aliases
-        ]
-
-    dirty_repositories: list[dict[str, Any]] = []
-    for alias, repository_path, root in selected:
-        worktree = _run_git(root, ["rev-parse", "--is-inside-work-tree"])
-        if worktree.returncode != 0 or worktree.stdout.strip() != "true":
-            detail = worktree.stderr.strip() or worktree.stdout.strip()
-            message = f"writable repository {alias or '.'} is not a Git worktree" + (
-                f": {detail}" if detail else ""
-            )
-            details["error"] = message
-            raise RepairCommitPreflightError(message, details)
-        status = _run_git(
-            root, ["status", "--porcelain", "-z", "--untracked-files=all"]
-        )
-        if status.returncode != 0:
-            detail = status.stderr.strip() or status.stdout.strip()
-            message = f"could not inspect writable repository {alias or '.'}"
-            if detail:
-                message += f": {detail}"
-            details["error"] = message
-            raise RepairCommitPreflightError(message, details)
-        dirty_paths = _porcelain_dirty_paths(status.stdout)
-        qualified_paths = [
-            f"{alias}:{path}" if alias is not None else path for path in dirty_paths
-        ]
-        row: dict[str, Any] = {
-            "alias": alias,
-            "path": repository_path,
-            "resolved_root": str(root),
-            "clean": not dirty_paths,
-            "dirty_paths": qualified_paths,
-        }
-        details["repositories"].append(row)
-        if dirty_paths:
-            dirty_repositories.append(row)
-
-    if dirty_repositories:
-        if retained_scope_repair is not None:
-            if workspace is None or plan_dir is None:
-                content = _RetainedContentEvidence(
-                    False,
-                    reason="retained-scope recovery requires a registered workspace",
-                )
-            else:
-                assert session_scope is not None
-                content = _retained_turn_content_drift(
-                    retained_scope_repair,
-                    workspace=workspace,
-                    scope=session_scope,
-                    plan_dir=plan_dir,
-                )
-            retained_paths = (
-                _retained_turn_changed_paths(retained_scope_repair) - content.drifted
-                if content.available
-                else frozenset()
-            )
-            sanctioned: list[str] = []
-            unsanctioned: list[str] = []
-            drifted_dirty: list[str] = []
-            unsanctioned_rows: list[dict[str, Any]] = []
-            for row in dirty_repositories:
-                stray = [
-                    path for path in row["dirty_paths"] if path not in retained_paths
-                ]
-                sanctioned.extend(
-                    path for path in row["dirty_paths"] if path in retained_paths
-                )
-                drifted_dirty.extend(path for path in stray if path in content.drifted)
-                if stray:
-                    unsanctioned.extend(stray)
-                    unsanctioned_rows.append(row)
-            details["retained_scope_repair"] = {
-                "session_id": retained_scope_repair.get("session_id"),
-                "sanctioned_repositories": ", ".join(
-                    str(row["alias"] or ".")
-                    for row in dirty_repositories
-                    if any(path in retained_paths for path in row["dirty_paths"])
-                ),
-                "sanctioned_dirty_paths": sanctioned,
-                "retained_turn_paths": sorted(
-                    _retained_turn_changed_paths(retained_scope_repair)
-                ),
-                "unsanctioned_dirty_paths": unsanctioned,
-                "content_drifted_dirty_paths": drifted_dirty,
-                "content_evidence": content.payload(),
-            }
-            if not unsanctioned:
-                return details
-            named = ", ".join(unsanctioned[:3])
-            if len(unsanctioned) > 3:
-                named += f" (+{len(unsanctioned) - 3} more)"
-            if not content.available:
-                message = (
-                    "generated repair child cannot recover its retained changes "
-                    "without durable evidence of what the retained turn left "
-                    f"behind: {content.reason}; dirty paths: {named}"
-                )
-            elif drifted_dirty:
-                message = (
-                    "generated repair child cannot recover its retained changes "
-                    "after they were edited; dirty paths the retained turn did "
-                    f"not leave behind: {named}"
-                )
-            else:
-                message = (
-                    "generated repair child cannot recover its retained changes "
-                    "while unrelated work is present; dirty paths the retained "
-                    f"turn did not write: {named}"
-                )
-            details["error"] = message
-            details["dirty_repositories"] = unsanctioned_rows
-            raise RepairCommitPreflightError(message, details)
-        labels = ", ".join(str(row["alias"] or ".") for row in dirty_repositories)
-        message = (
-            "generated repair child requires clean writable repositories before "
-            f"execution; dirty: {labels}"
-        )
-        details["error"] = message
-        details["dirty_repositories"] = dirty_repositories
-        raise RepairCommitPreflightError(message, details)
-    return details
-
-
-def _validate_commit_at_end_scope(
-    *,
-    snapshot: plans.PlanSnapshot,
-    max_sessions: int | None,
-) -> None:
-    if max_sessions is None:
-        return
-    pending_count = _status_counts(snapshot)["pending"]
-    if max_sessions < pending_count:
-        raise RunError(
-            "--commit-at-end cannot be combined with --max-sessions when "
-            "not all currently pending sessions can complete in one invocation"
-        )
 
 
 # The turn boundary writes the same artifacts this loop does, so the atomic
@@ -1483,7 +896,7 @@ def _run_asl_commit(
     resolved_generation = generation or _CommitGeneration()
     argv = _asl_commit_argv(resolved_generation, staging_paths)
     subprocess_timeout = resolved_generation.timeout + COMMIT_SUBPROCESS_GRACE_SECONDS
-    head_before_payload = _read_git_head(canonical_cwd)
+    head_before_payload = review_guard._read_git_head(canonical_cwd)
     started_at = _utc_now()
     exec_error = None
     timed_out = False
@@ -1511,11 +924,11 @@ def _run_asl_commit(
             stderr=exec_error,
         )
     finished_at = _utc_now()
-    head_after_payload = _read_git_head(canonical_cwd)
+    head_after_payload = review_guard._read_git_head(canonical_cwd)
     head_before = head_before_payload["head"]
     head_after = head_after_payload["head"]
     try:
-        clean_after: bool | None = _git_status_is_clean(canonical_cwd)
+        clean_after: bool | None = review_guard._git_status_is_clean(canonical_cwd)
     except RunError as error:
         clean_after = None
         status_error = str(error)
@@ -3614,11 +3027,11 @@ def _persist_commit_group(
 
 
 def _commit_target_head(target: Mapping[str, Any]) -> str | None:
-    return _read_git_head(Path(str(target["root"]))).get("head")
+    return review_guard._read_git_head(Path(str(target["root"]))).get("head")
 
 
 def _commit_target_is_clean(target: Mapping[str, Any]) -> bool:
-    return _git_status_is_clean(Path(str(target["root"])))
+    return review_guard._git_status_is_clean(Path(str(target["root"])))
 
 
 def _commit_targets(
@@ -3761,7 +3174,7 @@ def _registered_end_commit_targets(
     aliases = [
         repository.alias
         for repository in workspace.repositories
-        if not _git_status_is_clean(repository.root)
+        if not review_guard._git_status_is_clean(repository.root)
     ]
     return _commit_targets(verification_context, aliases=aliases)
 
@@ -5303,10 +4716,14 @@ def _compute_review_delta_context(
         return degraded, "dirty-base-evidence-missing"
 
     try:
-        resolved = _run_git(cwd, ["rev-parse", "--verify", f"{base}^{{commit}}"])
+        resolved = review_guard._run_git(
+            cwd, ["rev-parse", "--verify", f"{base}^{{commit}}"]
+        )
         if resolved.returncode != 0:
             return degraded, "base-unresolvable"
-        ancestor = _run_git(cwd, ["merge-base", "--is-ancestor", base, "HEAD"])
+        ancestor = review_guard._run_git(
+            cwd, ["merge-base", "--is-ancestor", base, "HEAD"]
+        )
         if ancestor.returncode != 0:
             # A rebase, reset, or amend moved the recorded base off the current
             # history; diffing against it would misreport the repair scope.
@@ -5314,12 +4731,12 @@ def _compute_review_delta_context(
         # Both probes are pinned to repository-wide, root-relative, rename-free
         # output; see :data:`review_session_body._DELTA_DIFF_FLAGS` for what
         # each flag rules out.
-        names = _run_git(
+        names = review_guard._run_git(
             cwd, ["diff", "--name-only", *review_session_body._DELTA_DIFF_FLAGS, base]
         )
         if names.returncode != 0:
             return degraded, "base-diff-failed"
-        index_names = _run_git(
+        index_names = review_guard._run_git(
             cwd,
             [
                 "diff",
@@ -5339,7 +4756,7 @@ def _compute_review_delta_context(
         # evidence ("did anything move"), not the scope ("which code changed and
         # must be reread"). A failed scan degrades to full scope rather than
         # narrowing against a file list that is missing those paths.
-        untracked = _run_git(
+        untracked = review_guard._run_git(
             cwd,
             [
                 "ls-files",
@@ -5357,7 +4774,9 @@ def _compute_review_delta_context(
         # Every flagged path therefore joins the scope wholesale: the same
         # blindness that hides the repair also makes it impossible to tell
         # which flagged entries moved.
-        index_flags = _run_git(cwd, ["ls-files", "-v", "--full-name", "--", ":(top)"])
+        index_flags = review_guard._run_git(
+            cwd, ["ls-files", "-v", "--full-name", "--", ":(top)"]
+        )
         if index_flags.returncode != 0:
             return degraded, "index-flags-scan-failed"
     except RunError:
@@ -5374,7 +4793,7 @@ def _compute_review_delta_context(
                         *names.stdout.splitlines(),
                         *index_names.stdout.splitlines(),
                         *untracked.stdout.splitlines(),
-                        *_index_flagged_paths(index_flags.stdout),
+                        *review_guard._index_flagged_paths(index_flags.stdout),
                         *baseline_dirty,
                     )
                     if line
@@ -5435,19 +4854,19 @@ def _compute_registered_review_delta_context(
         else:
             return degraded, f"dirty-base-evidence-missing:{repository.alias}"
         try:
-            resolved = _run_git(
+            resolved = review_guard._run_git(
                 repository.root,
                 ["rev-parse", "--verify", f"{base}^{{commit}}"],
             )
-            ancestor = _run_git(
+            ancestor = review_guard._run_git(
                 repository.root,
                 ["merge-base", "--is-ancestor", base, "HEAD"],
             )
-            names = _run_git(
+            names = review_guard._run_git(
                 repository.root,
                 ["diff", "--name-only", *review_session_body._DELTA_DIFF_FLAGS, base],
             )
-            index_names = _run_git(
+            index_names = review_guard._run_git(
                 repository.root,
                 [
                     "diff",
@@ -5457,7 +4876,7 @@ def _compute_registered_review_delta_context(
                     base,
                 ],
             )
-            untracked = _run_git(
+            untracked = review_guard._run_git(
                 repository.root,
                 [
                     "ls-files",
@@ -5468,7 +4887,7 @@ def _compute_registered_review_delta_context(
                     ":(top)",
                 ],
             )
-            index_flags = _run_git(
+            index_flags = review_guard._run_git(
                 repository.root,
                 ["ls-files", "-v", "--full-name", "--", ":(top)"],
             )
@@ -5492,7 +4911,7 @@ def _compute_registered_review_delta_context(
                     *names.stdout.splitlines(),
                     *index_names.stdout.splitlines(),
                     *untracked.stdout.splitlines(),
-                    *_index_flagged_paths(index_flags.stdout),
+                    *review_guard._index_flagged_paths(index_flags.stdout),
                     *baseline_dirty,
                 )
                 if line
@@ -6397,14 +5816,14 @@ def _enforce_review_mutation_guard(
     same session file. Returns ``True`` when the run must pause (the caller
     must ``break``).
     """
-    fingerprint_after = _capture_review_repo_fingerprint(
+    fingerprint_after = review_guard._capture_review_repo_fingerprint(
         cwd,
         before.plan_dir,
         exclude=exclude,
         include_ignored=include_ignored,
     )
     excluded = list(exclude)
-    unavailable = _review_guard_unavailable_detail(fingerprint_after)
+    unavailable = review_guard._review_guard_unavailable_detail(fingerprint_after)
     if unavailable is not None:
         reason = events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE
         failure_note = f"review mutation guard unavailable: {unavailable['reason']}"
@@ -6420,7 +5839,7 @@ def _enforce_review_mutation_guard(
         }
     elif fingerprint_after != fingerprint_before:
         reason = "review-mutated-worktree"
-        changed_paths = _review_guard_changed_paths(
+        changed_paths = review_guard._review_guard_changed_paths(
             fingerprint_before, fingerprint_after
         )
         failure_note = (
@@ -6430,7 +5849,7 @@ def _enforce_review_mutation_guard(
         message = (
             f"review session {session_label} mutated repository content "
             "outside the plan directory"
-            f"{_review_guard_changed_summary(changed_paths)}"
+            f"{review_guard._review_guard_changed_summary(changed_paths)}"
         )
         evidence = {
             "fingerprint_before": fingerprint_before,
@@ -6446,7 +5865,7 @@ def _enforce_review_mutation_guard(
                 "excluded": excluded,
                 "include_ignored": include_ignored,
             }
-            repo_state = _review_repo_state(fingerprint_after)
+            repo_state = review_guard._review_repo_state(fingerprint_after)
             if repo_state is not None:
                 turn_payload["review_repo_state"] = repo_state
             _write_json_file(paths["result"], turn_payload)
@@ -6663,8 +6082,8 @@ def _capture_workspace_write_guard_snapshot(
         tuple(repository.repository.path for repository in workspace.repositories),
         default_exclude=exclude,
         include_ignored=include_ignored,
-        _run_git_fn=_run_git,
-        _run_git_bytes_fn=_run_git_bytes,
+        _run_git_fn=review_guard._run_git,
+        _run_git_bytes_fn=review_guard._run_git_bytes,
     )
 
 
@@ -6680,7 +6099,7 @@ def _capture_legacy_implementation_snapshot(
         (
             (
                 ".",
-                _capture_review_repo_fingerprint(
+                review_guard._capture_review_repo_fingerprint(
                     cwd,
                     plan_dir,
                     exclude=exclude,
@@ -7244,7 +6663,7 @@ def _annotate_history_transitions(
                     root,
                     before_head,
                     after_head,
-                    _run_git_fn=_run_git,
+                    _run_git_fn=review_guard._run_git,
                 )
             )
         except repository_evidence.RepositoryEvidenceError as error:
@@ -8220,7 +7639,7 @@ def _protected_path_review_changed_paths(
     if not isinstance(fingerprint_before, Mapping):
         return None
     try:
-        fingerprint_after = _capture_review_repo_fingerprint(
+        fingerprint_after = review_guard._capture_review_repo_fingerprint(
             guard_context["cwd"],
             guard_context["before"].plan_dir,
             exclude=exclude,
@@ -8228,7 +7647,7 @@ def _protected_path_review_changed_paths(
         )
     except Exception:
         return None
-    if _review_guard_unavailable_detail(fingerprint_after) is not None:
+    if review_guard._review_guard_unavailable_detail(fingerprint_after) is not None:
         return None
     if fingerprint_after == fingerprint_before:
         # Equal fingerprints prove the whole worktree is unchanged, which
@@ -8238,7 +7657,9 @@ def _protected_path_review_changed_paths(
     return tuple(
         repository_evidence.qualified_repository_paths(
             guards.LEGACY_PATH_QUALIFIER,
-            _review_guard_changed_paths(fingerprint_before, fingerprint_after),
+            review_guard._review_guard_changed_paths(
+                fingerprint_before, fingerprint_after
+            ),
         )
     )
 
@@ -9401,8 +8822,10 @@ def _run_config_payload(
         "max_review_fix_cycles_ceiling": run_inputs._max_review_fix_cycles_ceiling(
             args
         ),
-        "review_guard_exclude": list(_review_guard_excludes(args)),
-        "review_guard_include_ignored": _review_guard_include_ignored(args),
+        "review_guard_exclude": list(review_guard._review_guard_excludes(args)),
+        "review_guard_include_ignored": review_guard._review_guard_include_ignored(
+            args
+        ),
         "commit_mode": commit_mode,
         "repair_commit_mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
         "unsafe_bypass": run_selection._unsafe_bypass(args),
@@ -9835,8 +9258,8 @@ def _run_locked(
         args, snapshot.plan_dir
     )
     mailbox_enabled = bool(mailbox_activation["enabled"])
-    review_guard_excludes = _review_guard_excludes(args)
-    review_guard_include_ignored = _review_guard_include_ignored(args)
+    review_guard_excludes = review_guard._review_guard_excludes(args)
+    review_guard_include_ignored = review_guard._review_guard_include_ignored(args)
     # One selection for every commit this run makes, including the recovery of
     # a group a previous process left unresolved: the declared implementation
     # harness, not whichever harness a live switch moved a turn onto.
@@ -10467,12 +9890,12 @@ def _run_locked(
 
     try:
         if commit_mode == run_selection.COMMIT_MODE_END:
-            _validate_commit_at_end_scope(
+            review_guard._validate_commit_at_end_scope(
                 snapshot=snapshot,
                 max_sessions=max_sessions,
             )
         if commit_mode is not None:
-            commit_preflight = _validate_commit_preflight(
+            commit_preflight = review_guard._validate_commit_preflight(
                 cwd,
                 verification_context=verification_context,
             )
@@ -11635,10 +11058,11 @@ def _run_locked(
                     )
                     break
                 try:
-                    repair_commit_preflight = _repair_commit_preflight(
+                    repair_commit_preflight = review_guard._repair_commit_preflight(
                         cwd,
                         verification_context=verification_context,
                         session_scope=session_scope,
+                        workspace_evidence=_workspace_write_guard_evidence,
                         plan_dir=before.plan_dir,
                         retained_scope_repair=retained_scope_repair,
                     )
@@ -12182,7 +11606,7 @@ def _run_locked(
             # legacy review turn has no write-guard snapshot and this
             # fingerprint is the only turn-start comparison it will ever hold.
             review_fingerprint_before: dict[str, Any] | None = (
-                _capture_review_repo_fingerprint(
+                review_guard._capture_review_repo_fingerprint(
                     cwd,
                     before.plan_dir,
                     exclude=review_guard_excludes,
@@ -12192,7 +11616,7 @@ def _run_locked(
                 else None
             )
             if review_fingerprint_before is not None:
-                unavailable = _review_guard_unavailable_detail(
+                unavailable = review_guard._review_guard_unavailable_detail(
                     review_fingerprint_before
                 )
                 if unavailable is not None:
@@ -14457,7 +13881,7 @@ def run_from_args(
     try:
         cwd, timeout, max_sessions, commit_mode = run_inputs._validate_run_inputs(
             args,
-            resolve_review_guard_excludes=_review_guard_excludes,
+            resolve_review_guard_excludes=review_guard._review_guard_excludes,
         )
     except (plans.PlanError, RunError) as error:
         payload = _error_payload(

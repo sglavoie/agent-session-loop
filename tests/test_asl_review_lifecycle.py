@@ -34,6 +34,7 @@ from agent_session_loop import (
     plans,
     review,
     review_continuation,
+    review_guard,
     review_repair,
     review_session_body,
     review_session_contract,
@@ -1084,7 +1085,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
 
         completed, payload = self._run(
             review_harness="claude",
-            extra_env={runner.REVIEW_GUARD_EXCLUDE_ENV_VAR: "README.md"},
+            extra_env={review_guard.REVIEW_GUARD_EXCLUDE_ENV_VAR: "README.md"},
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
@@ -1111,7 +1112,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         completed, payload = self._run(
             review_harness="claude",
             review_guard_exclude=("README.md",),
-            extra_env={runner.REVIEW_GUARD_EXCLUDE_ENV_VAR: "notes"},
+            extra_env={review_guard.REVIEW_GUARD_EXCLUDE_ENV_VAR: "notes"},
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
@@ -2989,7 +2990,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
                 runner.harnesses, "run_harness", side_effect=fake_run_harness
             ),
             mock.patch.object(
-                runner,
+                review_guard,
                 "_capture_review_repo_fingerprint",
                 side_effect=fingerprints,
             ),
@@ -3314,7 +3315,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
     def _fingerprint(
         self, *exclude: str, include_ignored: bool = False
     ) -> dict[str, Any]:
-        return runner._capture_review_repo_fingerprint(
+        return review_guard._capture_review_repo_fingerprint(
             self.repo_root,
             self.plan_dir,
             exclude=exclude,
@@ -3415,7 +3416,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         after = self._fingerprint("*")
 
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["README.md"], changed["tracked"])
 
     def test_one_exclusion_selects_the_same_tracked_and_untracked_subtree(
@@ -3435,7 +3436,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self._write("logs1/scratch.txt", "new\n")
         after = self._fingerprint("logs[1]")
 
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["logs1/kept.txt"], changed["tracked"])
         self.assertEqual(["logs1/scratch.txt"], changed["untracked_added"])
 
@@ -3447,14 +3448,16 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self._write("nested/scratch.txt", "new\n")
         nested = self.repo_root / "nested"
 
-        fingerprint = runner._capture_review_repo_fingerprint(nested, self.plan_dir)
+        fingerprint = review_guard._capture_review_repo_fingerprint(
+            nested, self.plan_dir
+        )
 
-        self.assertIsNone(runner._review_guard_unavailable_detail(fingerprint))
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(fingerprint))
         self.assertEqual(
             ["nested/scratch.txt"],
             [entry[0] for entry in fingerprint["untracked"]],
         )
-        excluded = runner._capture_review_repo_fingerprint(
+        excluded = review_guard._capture_review_repo_fingerprint(
             nested, self.plan_dir, exclude=("nested",)
         )
         self.assertEqual([], excluded["untracked"])
@@ -3473,16 +3476,16 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
             check=True,
         )
         nested = self.repo_root / "inside"
-        before = runner._capture_review_repo_fingerprint(nested, self.plan_dir)
+        before = review_guard._capture_review_repo_fingerprint(nested, self.plan_dir)
 
         self._write("inside/tracked.txt", "two\n")
         self._write("outside/tracked.txt", "two\n")
         self._write("inside/scratch.txt", "new\n")
         self._write("outside/scratch.txt", "new\n")
-        after = runner._capture_review_repo_fingerprint(nested, self.plan_dir)
+        after = review_guard._capture_review_repo_fingerprint(nested, self.plan_dir)
 
-        self.assertIsNone(runner._review_guard_unavailable_detail(after))
-        changed = runner._review_guard_changed_paths(before, after)
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(after))
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(
             ["inside/tracked.txt", "outside/tracked.txt"], changed["tracked"]
         )
@@ -3504,7 +3507,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         strict_after = self._fingerprint(include_ignored=True)
         self.assertEqual(
             ["ignored/cache.txt"],
-            runner._review_guard_changed_paths(strict_before, strict_after)[
+            review_guard._review_guard_changed_paths(strict_before, strict_after)[
                 "untracked_changed"
             ],
         )
@@ -3532,7 +3535,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         )
         self.assertEqual(
             ["cache.link"],
-            runner._review_guard_changed_paths(strict_before, strict_after)[
+            review_guard._review_guard_changed_paths(strict_before, strict_after)[
                 "untracked_changed"
             ],
         )
@@ -3557,11 +3560,11 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         )
         self.assertEqual(before["untracked"], after["untracked"])
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["generated/.gitignore"], changed["worktree_ignore"])
         self.assertEqual(
             ": generated/.gitignore",
-            runner._review_guard_changed_summary(changed),
+            review_guard._review_guard_changed_summary(changed),
         )
         # The rule the turn wrote is evidence; the payload it hides is the
         # ordinary ignored content the default scan still defers to git about.
@@ -3587,14 +3590,14 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         self.assertEqual(
             ["generated/.gitignore"],
-            runner._review_guard_changed_paths(before, edited)["worktree_ignore"],
+            review_guard._review_guard_changed_paths(before, edited)["worktree_ignore"],
         )
         # The strict scan lists the same file under `untracked`, so the summary
         # would otherwise name it twice.
         self.assertEqual(
             ": generated/.gitignore",
-            runner._review_guard_changed_summary(
-                runner._review_guard_changed_paths(
+            review_guard._review_guard_changed_summary(
+                review_guard._review_guard_changed_paths(
                     strict_before, self._fingerprint(include_ignored=True)
                 )
             ),
@@ -3606,7 +3609,9 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual([], deleted["worktree_ignore"])
         self.assertEqual(
             ["generated/.gitignore"],
-            runner._review_guard_changed_paths(edited, deleted)["worktree_ignore"],
+            review_guard._review_guard_changed_paths(edited, deleted)[
+                "worktree_ignore"
+            ],
         )
 
     def test_ignored_gitignore_symlink_stays_out_of_worktree_ignore_evidence(
@@ -3637,9 +3642,9 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual([], after["untracked"])
         self.assertEqual([], after["worktree_ignore"])
         self.assertEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual([], changed["worktree_ignore"])
-        self.assertEqual("", runner._review_guard_changed_summary(changed))
+        self.assertEqual("", review_guard._review_guard_changed_summary(changed))
 
     def test_gitignore_git_cannot_apply_stays_out_of_the_evidence(self) -> None:
         # Git never descends into an ignored directory, so a `.gitignore`
@@ -3681,11 +3686,11 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         # excludes file `core.excludesFile` names).
         self.assertEqual(before["untracked"], after["untracked"])
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual([".git/info/exclude"], changed["ignore_config"])
         self.assertEqual(
             ": .git/info/exclude",
-            runner._review_guard_changed_summary(changed),
+            review_guard._review_guard_changed_summary(changed),
         )
 
     def test_absent_git_info_exclude_still_trips_on_creation(self) -> None:
@@ -3701,7 +3706,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         after = self._fingerprint()
 
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual([".git/info/exclude"], changed["ignore_config"])
 
     def test_git_info_exclude_resolves_from_a_nested_cwd(self) -> None:
@@ -3713,7 +3718,9 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         nested = self.repo_root / "nested"
         nested.mkdir()
 
-        fingerprint = runner._capture_review_repo_fingerprint(nested, self.plan_dir)
+        fingerprint = review_guard._capture_review_repo_fingerprint(
+            nested, self.plan_dir
+        )
 
         self.assertEqual(
             "file", self._ignore_config(fingerprint)[".git/info/exclude"][0]
@@ -3745,11 +3752,11 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual(before["untracked"], after["untracked"])
         self.assertEqual("", git_stdout(self.repo_root, "status", "--short").strip())
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["target:.git/info/rules"], changed["ignore_config"])
         self.assertEqual(
             ": target:.git/info/rules",
-            runner._review_guard_changed_summary(changed),
+            review_guard._review_guard_changed_summary(changed),
         )
 
     def test_dangling_symlinked_source_moves_when_its_target_appears(
@@ -3766,7 +3773,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         target.write_text("secret.txt\n", encoding="utf-8")
         after = self._fingerprint()
 
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["target:.git/info/rules"], changed["ignore_config"])
 
     def test_replacing_a_symlinked_source_with_its_target_trips_the_guard(
@@ -3782,7 +3789,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         after = self._fingerprint()
 
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(
             [".git/info/exclude", "target:.git/info/rules"],
             changed["ignore_config"],
@@ -3795,7 +3802,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         fingerprint = self._fingerprint()
 
-        detail = runner._review_guard_unavailable_detail(fingerprint)
+        detail = review_guard._review_guard_unavailable_detail(fingerprint)
         assert detail is not None
         self.assertEqual("ignore-config-target-unresolved", detail["reason"])
         self.assertNotIn("ignore_config", fingerprint)
@@ -3815,7 +3822,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         with mock.patch.object(Path, "read_bytes", fake_read_bytes):
             fingerprint = self._fingerprint()
 
-        detail = runner._review_guard_unavailable_detail(fingerprint)
+        detail = review_guard._review_guard_unavailable_detail(fingerprint)
         assert detail is not None
         self.assertEqual("ignore-config-target-path-unreadable", detail["reason"])
         self.assertEqual("target:.git/info/rules", detail["path"])
@@ -3843,12 +3850,12 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual(before["untracked"], after["untracked"])
         self.assertEqual("", git_stdout(self.repo_root, "status", "--short").strip())
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertIn("config:core.excludesFile", changed["ignore_config"])
         self.assertIn(".git/review-excludes", changed["ignore_config"])
         self.assertIn(
             "config:core.excludesFile",
-            runner._review_guard_changed_summary(changed),
+            review_guard._review_guard_changed_summary(changed),
         )
 
     def test_core_excludes_file_trailing_newline_cannot_hide_a_review_mutation(
@@ -3874,12 +3881,12 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual(before["untracked"], after["untracked"])
         self.assertEqual("", git_stdout(self.repo_root, "status", "--short").strip())
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertIn("config:core.excludesFile", changed["ignore_config"])
         self.assertIn(".git/review-excludes\n", changed["ignore_config"])
         self.assertIn(
             "config:core.excludesFile",
-            runner._review_guard_changed_summary(changed),
+            review_guard._review_guard_changed_summary(changed),
         )
 
     def test_effective_excludes_file_preserves_every_pathname_byte(self) -> None:
@@ -3889,7 +3896,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         markers = set()
         for value in (".git/x\rex", ".git/x\r\nex", ".git/x\nex"):
             self._set_excludes_file(value)
-            marker, selected = runner._effective_excludes_file(
+            marker, selected = review_guard._effective_excludes_file(
                 self.repo_root, self.repo_root
             )
             markers.add(marker)
@@ -3909,7 +3916,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         after = self._fingerprint()
 
         self.assertEqual(before["untracked"], after["untracked"])
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual([".git/review-excludes"], changed["ignore_config"])
 
     def _symlink_selected_excludes_file(self, target: str) -> Path:
@@ -3938,11 +3945,11 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual(before["untracked"], after["untracked"])
         self.assertEqual("", git_stdout(self.repo_root, "status", "--short").strip())
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["target:.git/review-rules"], changed["ignore_config"])
         self.assertIn(
             "target:.git/review-rules",
-            runner._review_guard_changed_summary(changed),
+            review_guard._review_guard_changed_summary(changed),
         )
 
     def test_stable_symlinked_ignore_sources_leave_the_fingerprint_still(
@@ -3993,9 +4000,9 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         # untouched, and git hides the file the new rule names.
         self.assertEqual(before["untracked"], after["untracked"])
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual([collide], changed["ignore_config"])
-        self.assertIn(collide, runner._review_guard_changed_summary(changed))
+        self.assertIn(collide, review_guard._review_guard_changed_summary(changed))
 
     def test_dev_null_excludes_file_leaves_the_fingerprint_still(self) -> None:
         self._set_excludes_file("/dev/null")
@@ -4018,7 +4025,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         fingerprint = self._fingerprint()
 
-        detail = runner._review_guard_unavailable_detail(fingerprint)
+        detail = review_guard._review_guard_unavailable_detail(fingerprint)
         assert detail is not None
         self.assertEqual("excludes-file-target-node-unsupported", detail["reason"])
         self.assertEqual("target:/dev/null", detail["path"])
@@ -4039,18 +4046,20 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         )
         after = self._fingerprint()
 
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual([".git/review-excludes"], changed["ignore_config"])
 
     def test_unset_excludes_file_falls_back_to_the_xdg_default(self) -> None:
         xdg = self.tmp_path / "xdg"
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False):
-            self.assertEqual(xdg / "git" / "ignore", runner._default_excludes_file())
+            self.assertEqual(
+                xdg / "git" / "ignore", review_guard._default_excludes_file()
+            )
             os.environ["XDG_CONFIG_HOME"] = ""
             os.environ["HOME"] = str(self.tmp_path / "home")
             self.assertEqual(
                 self.tmp_path / "home" / ".config" / "git" / "ignore",
-                runner._default_excludes_file(),
+                review_guard._default_excludes_file(),
             )
 
     def test_non_excluded_change_still_trips_the_guard(self) -> None:
@@ -4060,7 +4069,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         after = self._fingerprint("claude")
 
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["README.md"], changed["tracked"])
 
     def test_changed_paths_reports_tracked_and_untracked_movement(self) -> None:
@@ -4074,7 +4083,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self._write("added.txt", "added\n")
         after = self._fingerprint()
 
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(
             {
                 "tracked": ["README.md"],
@@ -4094,7 +4103,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         )
         self.assertEqual(
             ": README.md, added.txt, kept.txt (+1 more)",
-            runner._review_guard_changed_summary(changed),
+            review_guard._review_guard_changed_summary(changed),
         )
 
     def test_untracked_symlink_is_fingerprinted_as_a_node(self) -> None:
@@ -4116,7 +4125,9 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertNotEqual(before, after)
         self.assertEqual(
             ["link"],
-            runner._review_guard_changed_paths(before, after)["untracked_changed"],
+            review_guard._review_guard_changed_paths(before, after)[
+                "untracked_changed"
+            ],
         )
 
     def test_retargeted_dangling_symlink_trips_the_guard(self) -> None:
@@ -4132,7 +4143,9 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertNotEqual(before, after)
         self.assertEqual(
             ["link"],
-            runner._review_guard_changed_paths(before, after)["untracked_changed"],
+            review_guard._review_guard_changed_paths(before, after)[
+                "untracked_changed"
+            ],
         )
 
     def test_renamed_tracked_file_names_both_sides(self) -> None:
@@ -4167,19 +4180,19 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
             check=True,
         )
 
-        before = runner._capture_review_repo_fingerprint(unborn, self.plan_dir)
-        self.assertIsNone(runner._review_guard_unavailable_detail(before))
+        before = review_guard._capture_review_repo_fingerprint(unborn, self.plan_dir)
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(before))
         self.assertEqual("", before["head"])
         self.assertEqual(["tracked.txt"], before["tracked_changed"])
 
         (unborn / "tracked.txt").write_text("two\n", encoding="utf-8")
-        after = runner._capture_review_repo_fingerprint(unborn, self.plan_dir)
+        after = review_guard._capture_review_repo_fingerprint(unborn, self.plan_dir)
 
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["tracked.txt"], changed["tracked"])
         # No commit exists, so no base ref can be recorded for delta scoping.
-        self.assertIsNone(runner._review_repo_state(after))
+        self.assertIsNone(review_guard._review_repo_state(after))
 
     def test_staged_change_masked_by_a_restored_file_trips_the_guard(
         self,
@@ -4198,9 +4211,11 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual(before["untracked"], after["untracked"])
         self.assertEqual(["README.md"], after["index_changed"])
         self.assertNotEqual(before, after)
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["README.md"], changed["tracked"])
-        self.assertEqual(": README.md", runner._review_guard_changed_summary(changed))
+        self.assertEqual(
+            ": README.md", review_guard._review_guard_changed_summary(changed)
+        )
 
     def test_an_excluded_path_is_dropped_from_the_index_evidence_too(
         self,
@@ -4245,7 +4260,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         self.assertNotEqual(before["diff_sha256"], after["diff_sha256"])
         self.assertNotEqual(before["tracked_patches"], after["tracked_patches"])
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["masked.txt"], changed["tracked"])
 
     def test_a_textconv_driver_cannot_mask_a_staged_mutation(self) -> None:
@@ -4264,7 +4279,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         self.assertNotEqual(before["index_diff_sha256"], after["index_diff_sha256"])
         self.assertNotEqual(before["index_patches"], after["index_patches"])
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["masked.txt"], changed["tracked"])
 
     def test_an_external_diff_driver_cannot_mask_a_mutation(self) -> None:
@@ -4282,12 +4297,12 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual("CONSTANT\n", self._git("diff", "HEAD", "--", "README.md"))
         self.assertNotEqual(before["diff_sha256"], after["diff_sha256"])
         self.assertNotEqual(before["tracked_patches"], after["tracked_patches"])
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["README.md"], changed["tracked"])
 
     def test_a_named_path_git_renders_no_patch_for_fails_closed(self) -> None:
         self._write("README.md", "mutated\n")
-        real_run_git = runner._run_git
+        real_run_git = review_guard._run_git
 
         def fake_run_git(cwd, args):
             result = real_run_git(cwd, args)
@@ -4297,12 +4312,12 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
                 )
             return result
 
-        with mock.patch.object(runner, "_run_git", fake_run_git):
+        with mock.patch.object(review_guard, "_run_git", fake_run_git):
             fingerprint = self._fingerprint()
 
         # A named path with no patch carries no content, so pairing short would
         # make any two of its contents compare equal.
-        detail = runner._review_guard_unavailable_detail(fingerprint)
+        detail = review_guard._review_guard_unavailable_detail(fingerprint)
         self.assertIsNotNone(detail)
         self.assertEqual("tracked-patch-missing", detail["reason"])
         self.assertNotIn("tracked_patches", fingerprint)
@@ -4320,14 +4335,14 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         self.assertEqual(
             2, self._git("diff", "HEAD", "--", "README.md").count("diff --git ")
         )
-        self.assertIsNone(runner._review_guard_unavailable_detail(after))
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(after))
         self.assertEqual(["README.md"], after["tracked_changed"])
         self.assertEqual(
             ["README.md"], [entry[0] for entry in after["tracked_patches"]]
         )
         self.assertEqual(
             ["README.md"],
-            runner._review_guard_changed_paths(before, after)["tracked"],
+            review_guard._review_guard_changed_paths(before, after)["tracked"],
         )
 
     def test_a_staged_typechange_pairs_both_of_its_patches(self) -> None:
@@ -4344,12 +4359,12 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
                 "diff --git "
             ),
         )
-        self.assertIsNone(runner._review_guard_unavailable_detail(after))
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(after))
         self.assertEqual(["README.md"], after["index_changed"])
         self.assertEqual(["README.md"], [entry[0] for entry in after["index_patches"]])
         self.assertEqual(
             ["README.md"],
-            runner._review_guard_changed_paths(before, after)["tracked"],
+            review_guard._review_guard_changed_paths(before, after)["tracked"],
         )
 
     def test_a_typechange_does_not_misattribute_later_patches(self) -> None:
@@ -4374,7 +4389,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         )
         self.assertEqual(
             ["b.txt"],
-            runner._review_guard_changed_paths(before, after)["tracked"],
+            review_guard._review_guard_changed_paths(before, after)["tracked"],
         )
 
     def _flag_index_entry(self, rel: str, flag: str) -> None:
@@ -4411,10 +4426,10 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
                 self.assertEqual(before["untracked"], after["untracked"])
 
                 self.assertNotEqual(before, after)
-                changed = runner._review_guard_changed_paths(before, after)
+                changed = review_guard._review_guard_changed_paths(before, after)
                 self.assertEqual([rel], changed["tracked"])
                 self.assertEqual(
-                    f": {rel}", runner._review_guard_changed_summary(changed)
+                    f": {rel}", review_guard._review_guard_changed_summary(changed)
                 )
 
     def test_deleted_skip_worktree_file_trips_the_guard(self) -> None:
@@ -4431,7 +4446,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
 
         self.assertEqual("", self._git_status_porcelain())
         self.assertEqual(["sparse.txt", "absent"], after["index_flagged"][0][:2])
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertEqual(["sparse.txt"], changed["tracked"])
 
     def test_an_excluded_index_flagged_path_is_not_fingerprinted(self) -> None:
@@ -4469,7 +4484,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
             "index-name-status": ("diff", "--cached", "HEAD", "--name-status"),
             "untracked": ("ls-files", "--others"),
         }
-        real_run_git = runner._run_git
+        real_run_git = review_guard._run_git
         for label, prefix in failing.items():
             with self.subTest(probe=label):
 
@@ -4483,10 +4498,10 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
                         )
                     return real_run_git(cwd, args)
 
-                with mock.patch.object(runner, "_run_git", fake_run_git):
+                with mock.patch.object(review_guard, "_run_git", fake_run_git):
                     fingerprint = self._fingerprint()
 
-                detail = runner._review_guard_unavailable_detail(fingerprint)
+                detail = review_guard._review_guard_unavailable_detail(fingerprint)
                 self.assertIsNotNone(detail)
                 self.assertEqual("git-command-failed", detail["reason"])
                 self.assertEqual(128, detail["returncode"])
@@ -4509,7 +4524,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         with mock.patch.object(Path, "read_bytes", fake_read_bytes):
             fingerprint = self._fingerprint()
 
-        detail = runner._review_guard_unavailable_detail(fingerprint)
+        detail = review_guard._review_guard_unavailable_detail(fingerprint)
         self.assertIsNotNone(detail)
         self.assertEqual("untracked-path-unreadable", detail["reason"])
         self.assertEqual("scratch.txt", detail["path"])
@@ -4521,7 +4536,7 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
     def test_untracked_path_git_reports_but_that_vanished_fails_closed(
         self,
     ) -> None:
-        real_run_git = runner._run_git
+        real_run_git = review_guard._run_git
 
         def fake_run_git(cwd, args):
             if tuple(args[:2]) == ("ls-files", "--others"):
@@ -4533,10 +4548,10 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
                 )
             return real_run_git(cwd, args)
 
-        with mock.patch.object(runner, "_run_git", fake_run_git):
+        with mock.patch.object(review_guard, "_run_git", fake_run_git):
             fingerprint = self._fingerprint()
 
-        detail = runner._review_guard_unavailable_detail(fingerprint)
+        detail = review_guard._review_guard_unavailable_detail(fingerprint)
         self.assertIsNotNone(detail)
         self.assertEqual("untracked-path-unreadable", detail["reason"])
         self.assertEqual("vanished.txt", detail["path"])
@@ -4545,10 +4560,10 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         def fake_run_git(cwd, args):
             raise runner.RunError("git executable not found on PATH")
 
-        with mock.patch.object(runner, "_run_git", fake_run_git):
+        with mock.patch.object(review_guard, "_run_git", fake_run_git):
             fingerprint = self._fingerprint()
 
-        detail = runner._review_guard_unavailable_detail(fingerprint)
+        detail = review_guard._review_guard_unavailable_detail(fingerprint)
         self.assertIsNotNone(detail)
         self.assertEqual("git-unrunnable", detail["reason"])
         self.assertIn("git executable not found", detail["error"])
@@ -4560,12 +4575,12 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         # The ceiling keeps the answer independent of whatever encloses the
         # temporary directory on the machine running the suite.
         with patched_env(GIT_CEILING_DIRECTORIES=str(self.tmp_path)):
-            fingerprint = runner._capture_review_repo_fingerprint(
+            fingerprint = review_guard._capture_review_repo_fingerprint(
                 outside, self.plan_dir
             )
 
         self.assertEqual({"git": False}, fingerprint)
-        self.assertIsNone(runner._review_guard_unavailable_detail(fingerprint))
+        self.assertIsNone(review_guard._review_guard_unavailable_detail(fingerprint))
 
     def test_changed_paths_reports_a_moved_head(self) -> None:
         before = self._fingerprint()
@@ -4578,9 +4593,9 @@ class ReviewMutationGuardFingerprintTests(unittest.TestCase):
         )
         after = self._fingerprint()
 
-        changed = runner._review_guard_changed_paths(before, after)
+        changed = review_guard._review_guard_changed_paths(before, after)
         self.assertTrue(changed["head_changed"])
-        self.assertEqual("", runner._review_guard_changed_summary(changed))
+        self.assertEqual("", review_guard._review_guard_changed_summary(changed))
 
 
 class ReviewDeltaScopeTests(unittest.TestCase):
@@ -5067,7 +5082,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         base = self._commit("src/base.py", "base\n")
         self._record_repair_cycle(repo_head=base)
         self._commit("src/repair.py", "repaired\n")
-        real_run_git = runner._run_git
+        real_run_git = review_guard._run_git
 
         for prefix, reason in (
             (("diff", "--name-only"), "base-diff-failed"),
@@ -5082,7 +5097,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
                         return subprocess.CompletedProcess(args, 128, "", "boom")
                     return real_run_git(cwd, args)
 
-                with mock.patch.object(runner, "_run_git", fail_one):
+                with mock.patch.object(review_guard, "_run_git", fail_one):
                     delta, fallback_reason = self._compute()
 
                 self.assertEqual(reason, fallback_reason)
@@ -5091,8 +5106,8 @@ class ReviewDeltaScopeTests(unittest.TestCase):
                 self.assertNotIn("src/", self._scope_section(delta))
 
     def _repo_state(self) -> dict[str, Any] | None:
-        return runner._review_repo_state(
-            runner._capture_review_repo_fingerprint(
+        return review_guard._review_repo_state(
+            review_guard._capture_review_repo_fingerprint(
                 self.repo_root, self.plan_dir, exclude=()
             )
         )
@@ -5259,7 +5274,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
             },
             dirty,
         )
-        self.assertIsNone(runner._review_repo_state({"git": False}))
+        self.assertIsNone(review_guard._review_repo_state({"git": False}))
 
     def test_repo_state_records_an_index_only_dirty_path(self) -> None:
         head = self._git("rev-parse", "HEAD")

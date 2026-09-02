@@ -33,6 +33,7 @@ from agent_session_loop import (
     plans,
     preflight,
     review,
+    review_guard,
     review_repair,
     review_session_body,
     review_session_contract,
@@ -90,7 +91,7 @@ class RunFlagValidationTests(unittest.TestCase):
 
         with self.assertRaises(runner.RunError) as caught:
             run_inputs._validate_run_inputs(
-                args, resolve_review_guard_excludes=runner._review_guard_excludes
+                args, resolve_review_guard_excludes=review_guard._review_guard_excludes
             )
         self.assertEqual(message, str(caught.exception))
 
@@ -2908,7 +2909,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             self.protected.write_text("review rewrote this\n", encoding="utf-8")
             raise RuntimeError("synthetic review crash")
 
-        real_capture = runner._capture_review_repo_fingerprint
+        real_capture = review_guard._capture_review_repo_fingerprint
         captures: list[object] = []
 
         def capture_then_fail(*args: object, **kwargs: object) -> Any:
@@ -2924,7 +2925,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
                 runner.harnesses, "run_harness", side_effect=edit_then_raise
             ),
             mock.patch.object(
-                runner,
+                review_guard,
                 "_capture_review_repo_fingerprint",
                 side_effect=capture_then_fail,
             ),

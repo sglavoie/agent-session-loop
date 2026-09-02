@@ -45,7 +45,7 @@ def _args(**overrides: Any) -> argparse.Namespace:
 
 
 class _RecordingResolver:
-    """Stand-in for the loop's allowlist parser, remembering every call."""
+    """Stand-in for the review guard's allowlist parser, remembering calls."""
 
     def __init__(self, error: Exception | None = None) -> None:
         self.calls: list[argparse.Namespace] = []
@@ -86,9 +86,10 @@ class RunInputsBoundaryTests(unittest.TestCase):
     def test_the_allowlist_parser_arrives_as_a_callback(self) -> None:
         source = Path(run_inputs.__file__ or "").read_text(encoding="utf-8")
 
-        # The review guard's allowlist parser is still part of the loop. It
-        # arrives as a callable so this module never imports the runner, and
-        # so the refusal keeps its position in the sequence.
+        # The allowlist parser now lives in `review_guard`, but it still
+        # arrives as a callable rather than as an import: the seam is what
+        # fixes *when* the refusal runs, keeping it at its position in the
+        # sequence instead of hoisting it to this module's own imports.
         self.assertIn(
             "ReviewGuardExcludeResolver = Callable"
             "[[argparse.Namespace], tuple[str, ...]]",

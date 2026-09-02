@@ -20,6 +20,7 @@ from agent_session_loop import (
     model_availability,
     plans,
     prepare,
+    review_guard,
     run_flags,
     run_inputs,
     run_selection,
@@ -118,7 +119,7 @@ class SparkFlagTests(unittest.TestCase):
             ):
                 run_inputs._validate_run_inputs(
                     unresolved,
-                    resolve_review_guard_excludes=runner._review_guard_excludes,
+                    resolve_review_guard_excludes=review_guard._review_guard_excludes,
                 )
 
             same_model = parser.parse_args(
@@ -135,7 +136,7 @@ class SparkFlagTests(unittest.TestCase):
             with self.assertRaisesRegex(runner.RunError, "must differ"):
                 run_inputs._validate_run_inputs(
                     same_model,
-                    resolve_review_guard_excludes=runner._review_guard_excludes,
+                    resolve_review_guard_excludes=review_guard._review_guard_excludes,
                 )
 
 

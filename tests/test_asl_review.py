@@ -29,6 +29,7 @@ from agent_session_loop import (
     progress_repair,
     review,
     review_continuation,
+    review_guard,
     review_repair,
     review_session_body,
     review_session_contract,
@@ -4076,30 +4077,30 @@ class ReviewRepairCycleTests(unittest.TestCase):
     def test_run_input_validation_for_review_fix_flags(self) -> None:
         run_inputs._validate_run_inputs(
             self._run_args(max_review_fix_cycles=0),
-            resolve_review_guard_excludes=runner._review_guard_excludes,
+            resolve_review_guard_excludes=review_guard._review_guard_excludes,
         )
         run_inputs._validate_run_inputs(
             self._run_args(max_review_fix_plans=0),
-            resolve_review_guard_excludes=runner._review_guard_excludes,
+            resolve_review_guard_excludes=review_guard._review_guard_excludes,
         )
         with self.assertRaisesRegex(
             runner.RunError, "--max-review-fix-cycles must be zero"
         ):
             run_inputs._validate_run_inputs(
                 self._run_args(max_review_fix_cycles=-1),
-                resolve_review_guard_excludes=runner._review_guard_excludes,
+                resolve_review_guard_excludes=review_guard._review_guard_excludes,
             )
         with self.assertRaisesRegex(
             runner.RunError, "--max-review-fix-plans must be zero"
         ):
             run_inputs._validate_run_inputs(
                 self._run_args(max_review_fix_plans=-2),
-                resolve_review_guard_excludes=runner._review_guard_excludes,
+                resolve_review_guard_excludes=review_guard._review_guard_excludes,
             )
         with self.assertRaisesRegex(runner.RunError, "deprecated alias"):
             run_inputs._validate_run_inputs(
                 self._run_args(max_review_fix_cycles=2, max_review_fix_plans=2),
-                resolve_review_guard_excludes=runner._review_guard_excludes,
+                resolve_review_guard_excludes=review_guard._review_guard_excludes,
             )
 
     # ------------------------------------------------------------------

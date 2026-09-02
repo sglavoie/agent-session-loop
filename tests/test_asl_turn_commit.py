@@ -34,6 +34,7 @@ from agent_session_loop import (
     events,
     harnesses,
     plans,
+    review_guard,
     review_repair,
     run_selection,
     runner,
@@ -358,7 +359,9 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertEqual([], payload["commits"])
         self.assertIn(
             "README.md",
-            runner._run_git(self.repositories["SVC"], ["status", "--porcelain"]).stdout,
+            review_guard._run_git(
+                self.repositories["SVC"], ["status", "--porcelain"]
+            ).stdout,
         )
 
     def _mark_repair_session(self) -> None:
@@ -378,7 +381,7 @@ class TurnCommitRunTests(unittest.TestCase):
         (self.repositories["OAK"] / "preexisting.txt").write_text(
             "read-only dirty state\n", encoding="utf-8"
         )
-        oak_head = runner._read_git_head(self.repositories["OAK"])["head"]
+        oak_head = review_guard._read_git_head(self.repositories["OAK"])["head"]
         commit_log = self.tmp_path / "commit-turns.jsonl"
         env = fake_commit_harness_env(self.tmp_path, log_path=commit_log)
 
@@ -406,16 +409,16 @@ class TurnCommitRunTests(unittest.TestCase):
         )
         self.assertEqual(
             "",
-            runner._run_git(
+            review_guard._run_git(
                 self.repositories["SVC"], ["status", "--porcelain"]
             ).stdout.strip(),
         )
         self.assertEqual(
             oak_head,
-            runner._read_git_head(self.repositories["OAK"])["head"],
+            review_guard._read_git_head(self.repositories["OAK"])["head"],
         )
         self.assertTrue(
-            runner._run_git(
+            review_guard._run_git(
                 self.repositories["OAK"], ["status", "--porcelain"]
             ).stdout.strip()
         )
@@ -442,7 +445,7 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertEqual(["--pathspec", "declared.txt"], commit["argv"][-2:])
         self.assertEqual(
             ["declared.txt"],
-            runner._run_git(
+            review_guard._run_git(
                 repo, ["show", "--name-only", "--format=", "HEAD"]
             ).stdout.split(),
         )
@@ -451,7 +454,7 @@ class TurnCommitRunTests(unittest.TestCase):
         # the probe reports `dirty-after-commit` rather than success.
         self.assertEqual(
             "?? unrelated.txt",
-            runner._run_git(repo, ["status", "--porcelain"]).stdout.strip(),
+            review_guard._run_git(repo, ["status", "--porcelain"]).stdout.strip(),
         )
         self.assertEqual("dirty-after-commit", commit["status_result"])
         self.assertFalse(commit["success"])
@@ -461,7 +464,7 @@ class TurnCommitRunTests(unittest.TestCase):
         (repo / "declared.txt").write_text("session work\n", encoding="utf-8")
         (repo / "unrelated.txt").write_text("somebody else's edit\n", encoding="utf-8")
         # Somebody staged their own work before the run's commit boundary.
-        runner._run_git(repo, ["add", "--", "unrelated.txt"])
+        review_guard._run_git(repo, ["add", "--", "unrelated.txt"])
         env = fake_commit_harness_env(self.tmp_path)
 
         with mock.patch.dict(os.environ, env):
@@ -479,7 +482,7 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertEqual(0, commit["returncode"])
         self.assertEqual(
             ["declared.txt"],
-            runner._run_git(
+            review_guard._run_git(
                 repo, ["show", "--name-only", "--format=", "HEAD"]
             ).stdout.split(),
         )
@@ -487,7 +490,7 @@ class TurnCommitRunTests(unittest.TestCase):
         # commit; it is still staged, now against the new HEAD.
         self.assertEqual(
             "A  unrelated.txt",
-            runner._run_git(repo, ["status", "--porcelain"]).stdout.strip(),
+            review_guard._run_git(repo, ["status", "--porcelain"]).stdout.strip(),
         )
 
     def test_runner_commit_generation_is_bounded(self) -> None:
@@ -794,7 +797,7 @@ class TurnCommitRunTests(unittest.TestCase):
         exclude_path.parent.mkdir(parents=True, exist_ok=True)
         exclude_path.write_text("# baseline\n", encoding="utf-8")
         self.assertEqual(
-            "", runner._run_git(repo, ["status", "--porcelain"]).stdout.strip()
+            "", review_guard._run_git(repo, ["status", "--porcelain"]).stdout.strip()
         )
         commit_log = self.tmp_path / "commit-turns.jsonl"
         env = fake_commit_harness_env(self.tmp_path, log_path=commit_log)
@@ -826,7 +829,7 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertEqual(["--pathspec", "repair.txt"], commit["argv"][-2:])
         self.assertEqual(
             ["repair.txt"],
-            runner._run_git(
+            review_guard._run_git(
                 repo, ["show", "--name-only", "--format=", "HEAD"]
             ).stdout.split(),
         )
@@ -1232,7 +1235,7 @@ class CommitFailureSoftFailTests(unittest.TestCase):
         self.assertLess(recovered, session_2_started)
         self.assertEqual(
             "",
-            runner._run_git(
+            review_guard._run_git(
                 self.repositories["SVC"], ["status", "--porcelain"]
             ).stdout.strip(),
         )
