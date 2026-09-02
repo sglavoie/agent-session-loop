@@ -1475,7 +1475,8 @@ def _abandoned_event_payload(
 ) -> dict[str, Any]:
     """Build the synthetic ``run_finished`` payload for an abandoned run.
 
-    A strict subset of :func:`runner._run_finished_event_payload` so existing
+    A strict subset of the payload
+    :func:`run_persistence._run_finished_event_payload` builds, so existing
     consumers keep reading the same field names, plus the two keys that mark
     the record as reconstructed rather than observed.
     """

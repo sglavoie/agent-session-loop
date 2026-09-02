@@ -29,6 +29,7 @@ from agent_session_loop import (
     harnesses,
     plans,
     run_control,
+    run_persistence,
     run_selection,
     runner,
     state,
@@ -1340,7 +1341,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             plan_dir = Path(str(payload["plan_dir"]))
             context = self._context(payload)
             abort = harnesses.AbortSignal()
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
             mailbox_poll = runner._MailboxPoll(
                 plan_dir=plan_dir,
                 state_dir_arg=str(tmp_dir / "state"),

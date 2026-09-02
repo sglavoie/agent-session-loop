@@ -18,6 +18,7 @@ from agent_session_loop import (
     harness_failures,
     harnesses,
     plans,
+    run_persistence,
     runner,
     state,
 )
@@ -125,7 +126,9 @@ class StateCompactionTests(unittest.TestCase):
         # Compaction performs the v2 output bounding and nothing more. It does
         # not attach an AgentMux projection, so it must not claim the v3 that
         # promises one; ``asl migrate-state`` is what upgrades this record.
-        self.assertEqual(runner.COMPACT_STATE_SCHEMA_VERSION, payload["version"])
+        self.assertEqual(
+            run_persistence.COMPACT_STATE_SCHEMA_VERSION, payload["version"]
+        )
         self.assertNotIn(agent_mux_projection.PROJECTION_KEY, payload)
         turn = payload["turns"][0]
         self.assertNotIn("sessions", turn["before"])
@@ -173,7 +176,7 @@ class StateCompactionTests(unittest.TestCase):
         )
 
         # Unit-level: the in-memory projection keeps the key verbatim.
-        compact = runner._compact_state_payload(
+        compact = run_persistence._compact_state_payload(
             json.loads(state_path.read_text(encoding="utf-8"))
         )
         self.assertEqual(run_config, compact["run_config"])
@@ -467,7 +470,7 @@ class StateCompactionTests(unittest.TestCase):
             "pause_details": None,
         }
 
-        compact = runner._compact_state_payload(payload)
+        compact = run_persistence._compact_state_payload(payload)
         serialized = json.dumps(compact, sort_keys=True, indent=2) + "\n"
 
         self.assertLess(len(serialized.encode("utf-8")), 1_000_000)

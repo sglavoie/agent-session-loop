@@ -31,6 +31,7 @@ from agent_session_loop import (
     events,
     harnesses,
     plans,
+    run_persistence,
     runner,
     turn_execution,
 )
@@ -243,7 +244,7 @@ class TurnExecutorBoundaryTests(unittest.TestCase):
     def test_the_run_loop_collaborators_satisfy_the_protocols(self) -> None:
         # The Protocols exist so turn_execution never imports runner; that is
         # only true if the runner's own objects still fit through them.
-        persistence: turn_execution.TurnPersistence = runner._RunPersistence(
+        persistence: turn_execution.TurnPersistence = run_persistence._RunPersistence(
             write_state=False
         )
         progress: turn_execution.TurnProgress = runner._ProgressReporter(enabled=False)

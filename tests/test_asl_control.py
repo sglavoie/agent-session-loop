@@ -47,6 +47,7 @@ from agent_session_loop import (
     process_tree,
     review_session_body,
     run_control,
+    run_persistence,
     run_selection,
     runner,
     state,
@@ -2735,7 +2736,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
             event_path=self.event_path,
             control_payload=self.control_payload,
             context=None,
-            persistence=runner._RunPersistence(),
+            persistence=run_persistence._RunPersistence(),
             run_control_lock=threading.Lock(),
             wakeup=wakeup,
             abort=abort,
@@ -2925,7 +2926,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
             payload=self.payload,
             control_payload=self.control_payload,
             action=action,
-            persistence=runner._RunPersistence(),
+            persistence=run_persistence._RunPersistence(),
         )
 
         expected_overrides = {
@@ -2966,7 +2967,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
             payload=self.payload,
             control_payload=self.control_payload,
             action=clear_action,
-            persistence=runner._RunPersistence(),
+            persistence=run_persistence._RunPersistence(),
         )
         self.assertEqual({}, self.control_payload["implementation_overrides"])
         cleared_event = read_jsonl(self.event_path)[-1]["payload"]
@@ -4017,7 +4018,7 @@ class MailboxPollTests(unittest.TestCase):
             "control": runner._initial_control_payload(),
         }
         self.control_payload = dict(self.payload["control"])  # type: ignore[arg-type]
-        self.persistence = runner._RunPersistence()
+        self.persistence = run_persistence._RunPersistence()
         self.poll = runner._MailboxPoll(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
@@ -4173,7 +4174,7 @@ class MailboxPollTests(unittest.TestCase):
             payload=self.payload,
             event_path=self.event_path,
             control_payload=self.control_payload,
-            persistence=runner._RunPersistence(write_state=False),
+            persistence=run_persistence._RunPersistence(write_state=False),
             run_control_lock=threading.Lock(),
         )
 
@@ -7002,7 +7003,7 @@ class ControlCliWaitTests(unittest.TestCase):
                         event_path=self.event_path,
                         control_payload=control_payload,
                         context=None,
-                        persistence=runner._RunPersistence(write_state=False),
+                        persistence=run_persistence._RunPersistence(write_state=False),
                         run_control_lock=threading.Lock(),
                         wakeup=None,
                         abort=abort,
@@ -12554,7 +12555,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
         with patched_env(ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS=None):
             self.assertEqual(
                 runner.AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
-                runner._agent_mux_notify_timeout(),
+                run_persistence._agent_mux_notify_timeout(),
             )
 
     def test_agent_mux_notify_timeout_honors_env_override(self) -> None:
@@ -12563,7 +12564,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 self.subTest(raw=raw),
                 patched_env(ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS=raw),
             ):
-                self.assertEqual(expected, runner._agent_mux_notify_timeout())
+                self.assertEqual(expected, run_persistence._agent_mux_notify_timeout())
 
     def test_agent_mux_notify_timeout_fails_safe_on_invalid_override(self) -> None:
         for raw in ("", "0", "-1", "not-a-float", "inf", "nan"):
@@ -12573,7 +12574,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     runner.AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
-                    runner._agent_mux_notify_timeout(),
+                    run_persistence._agent_mux_notify_timeout(),
                 )
 
     def test_notification_subprocess_uses_env_timeout_override(self) -> None:
@@ -12592,7 +12593,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     return_value=completed,
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_finished(payload)
+                run_persistence._notify_agent_mux_loop_finished(payload)
 
             run.assert_called_once()
             self.assertEqual(30.0, run.call_args.kwargs["timeout"])
@@ -12615,7 +12616,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 "started_at": "2026-06-11T12:01:00Z",
             }
 
-            hook_payload = runner._agent_mux_loop_payload(
+            hook_payload = run_persistence._agent_mux_loop_payload(
                 payload,
                 reason=runner.AGENT_MUX_TURN_START_REASON,
                 active_turn=active_turn,
@@ -12661,7 +12662,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     return_value=completed,
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_started(payload)
+                run_persistence._notify_agent_mux_loop_started(payload)
                 turn_execution.notify_turn_started(payload, active_turn)
 
             self.assertEqual(2, run.call_count)
@@ -12711,7 +12712,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     return_value=completed,
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_finished(payload)
+                run_persistence._notify_agent_mux_loop_finished(payload)
 
             which.assert_called_once_with("amx")
             run.assert_called_once()
@@ -12728,7 +12729,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             self.assertEqual(subprocess.PIPE, kwargs["stdout"])
             self.assertEqual(subprocess.PIPE, kwargs["stderr"])
             self.assertEqual(
-                runner.AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS,
+                run_persistence.AGENT_MUX_FINISH_NOTIFY_TIMEOUT_SECONDS,
                 kwargs["timeout"],
             )
             self.assertFalse(kwargs["check"])
@@ -12765,7 +12766,9 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 ),
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
-                runner._notify_agent_mux_loop_finished(self.finish_payload(Path(tmp)))
+                run_persistence._notify_agent_mux_loop_finished(
+                    self.finish_payload(Path(tmp))
+                )
 
             run.assert_not_called()
 
@@ -12795,7 +12798,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                         agent_mux_delivery, "retry_sleep", return_value=None
                     ),
                 ):
-                    runner._notify_agent_mux_loop_finished(payload)
+                    run_persistence._notify_agent_mux_loop_finished(payload)
 
     def test_finish_run_notifies_after_setting_finished_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12805,7 +12808,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload["run_finished_at"] = None
 
             with mock.patch.object(
-                runner,
+                run_persistence,
                 "_notify_agent_mux_loop_finished",
             ) as notify:
                 runner._finish_run(event_path, payload)
@@ -12829,7 +12832,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 mock.patch.object(runner.agent_mux_delivery.shutil, "which") as which,
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
-                runner._notify_agent_mux_loop_finished(payload)
+                run_persistence._notify_agent_mux_loop_finished(payload)
 
             which.assert_not_called()
             run.assert_not_called()
@@ -12851,7 +12854,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                             runner.subprocess, "run", return_value=completed
                         ) as run,
                     ):
-                        runner._notify_agent_mux_loop_finished(payload)
+                        run_persistence._notify_agent_mux_loop_finished(payload)
                     run.assert_called_once()
 
     def test_lifecycle_notifications_carry_phase_sequence_and_identity(
@@ -12865,7 +12868,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload["agent_mux_sequence"] = 0
             payload["pause_reason"] = "verify-failed"
             payload["pause_message"] = "check exploded"
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
             active_turn = {
                 "harness": "claude",
                 "turn_index": 1,
@@ -12890,12 +12893,12 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.subprocess, "run", return_value=completed
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_started(payload, persistence)
+                run_persistence._notify_agent_mux_loop_started(payload, persistence)
                 turn_execution.notify_turn_started(payload, active_turn, persistence)
                 turn_execution.notify_turn_heartbeat(payload, active_turn, persistence)
                 turn_execution.notify_turn_finished(payload, active_turn, persistence)
-                runner._notify_agent_mux_loop_paused(payload, persistence)
-                runner._notify_agent_mux_loop_finished(payload, persistence)
+                run_persistence._notify_agent_mux_loop_paused(payload, persistence)
+                run_persistence._notify_agent_mux_loop_finished(payload, persistence)
 
             events_seen = [call.args[0][-1] for call in run.call_args_list]
             self.assertEqual(
@@ -12955,7 +12958,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload = self.finish_payload(tmp_dir)
             payload["events_path"] = str(tmp_dir / "events.jsonl")
             payload["agent_mux_sequence"] = 0
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
             retryable = subprocess.CompletedProcess(
                 ["/opt/amx"],
                 75,
@@ -12988,7 +12991,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     agent_mux_delivery, "retry_sleep", return_value=None
                 ) as retry_sleep,
             ):
-                runner._notify_agent_mux_loop_finished(payload, persistence)
+                run_persistence._notify_agent_mux_loop_finished(payload, persistence)
 
             self.assertEqual(3, run.call_count)
             retry_sleep.assert_has_calls([mock.call(0.1), mock.call(0.3)])
@@ -13049,8 +13052,8 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.subprocess, "run", return_value=duplicate
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_finished(
-                    payload, runner._RunPersistence()
+                run_persistence._notify_agent_mux_loop_finished(
+                    payload, run_persistence._RunPersistence()
                 )
             run.assert_called_once()
             outcome = read_jsonl(Path(str(payload["events_path"])))[0]["payload"]
@@ -13083,8 +13086,8 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     runner.subprocess, "run", return_value=permanent
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_finished(
-                    payload, runner._RunPersistence()
+                run_persistence._notify_agent_mux_loop_finished(
+                    payload, run_persistence._RunPersistence()
                 )
             run.assert_called_once()
             event_text = Path(str(payload["events_path"])).read_text(encoding="utf-8")
@@ -13107,7 +13110,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             payload = self.finish_payload(tmp_dir)
             payload["events_path"] = str(tmp_dir / "events.jsonl")
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
             with (
                 mock.patch.object(
                     runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
@@ -13118,8 +13121,8 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     side_effect=[unsupported, legacy, legacy],
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_started(payload, persistence)
-                runner._notify_agent_mux_loop_finished(payload, persistence)
+                run_persistence._notify_agent_mux_loop_started(payload, persistence)
+                run_persistence._notify_agent_mux_loop_finished(payload, persistence)
 
             self.assertEqual(3, run.call_count)
             self.assertIn("--strict", run.call_args_list[0].args[0])
@@ -13169,8 +13172,8 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 ) as run,
                 mock.patch.object(agent_mux_delivery, "retry_sleep", return_value=None),
             ):
-                runner._notify_agent_mux_loop_finished(
-                    payload, runner._RunPersistence()
+                run_persistence._notify_agent_mux_loop_finished(
+                    payload, run_persistence._RunPersistence()
                 )
             self.assertEqual(3, run.call_count)
             outcome = read_jsonl(Path(str(payload["events_path"])))[0]["payload"]
@@ -13185,7 +13188,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload = self.finish_payload(tmp_dir)
             payload["run_finished_at"] = None
             payload["agent_mux_sequence"] = 0
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
 
             with (
                 mock.patch.object(
@@ -13222,7 +13225,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload = self.finish_payload(tmp_dir)
             payload["run_finished_at"] = None
             payload["agent_mux_sequence"] = 0
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
 
             with (
                 mock.patch.object(
@@ -13246,7 +13249,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             payload = self.finish_payload(Path(tmp))
             payload["agent_mux_sequence"] = 0
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
 
             with (
                 mock.patch.object(
@@ -13254,7 +13257,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 ),
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
-                runner._notify_agent_mux_loop(
+                run_persistence._notify_agent_mux_loop(
                     runner.AGENT_MUX_TURN_HEARTBEAT_EVENT,
                     payload,
                     reason=runner.AGENT_MUX_TURN_HEARTBEAT_REASON,
@@ -13271,7 +13274,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload = self.finish_payload(tmp_dir)
             payload["events_path"] = str(tmp_dir / "events.jsonl")
             payload["agent_mux_sequence"] = 0
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
 
             with (
                 mock.patch.object(
@@ -13279,7 +13282,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 ),
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
-                runner._notify_agent_mux_loop_finished(payload, persistence)
+                run_persistence._notify_agent_mux_loop_finished(payload, persistence)
 
             run.assert_not_called()
             self.assertEqual(1, payload["agent_mux_sequence"])
@@ -13303,15 +13306,15 @@ class AgentMuxSuiteIsolationTests(unittest.TestCase):
             runner.AGENT_MUX_NOTIFY_OFF,
             os.environ.get(runner.AGENT_MUX_NOTIFY_ENV_VAR),
         )
-        self.assertFalse(runner._agent_mux_notify_enabled())
+        self.assertFalse(run_persistence._agent_mux_notify_enabled())
 
     def test_notify_helpers_short_circuit_under_suite_default(self) -> None:
         with (
             mock.patch.object(runner.agent_mux_delivery.shutil, "which") as which,
             mock.patch.object(runner.subprocess, "run") as run,
         ):
-            runner._notify_agent_mux_loop_started({"run_id": "run-x"})
-            runner._notify_agent_mux_loop_finished({"run_id": "run-x"})
+            run_persistence._notify_agent_mux_loop_started({"run_id": "run-x"})
+            run_persistence._notify_agent_mux_loop_finished({"run_id": "run-x"})
 
         which.assert_not_called()
         run.assert_not_called()

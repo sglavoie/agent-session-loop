@@ -23,6 +23,7 @@ from agent_session_loop import (
     harnesses,
     mailbox,
     run_control,
+    run_persistence,
     runner,
 )
 from tests.support import read_jsonl
@@ -616,7 +617,7 @@ class MailboxPollDeliveryTests(unittest.TestCase):
             "run_id": "run-1",
             "control": runner._initial_control_payload(),
         }
-        self.persistence = runner._RunPersistence()
+        self.persistence = run_persistence._RunPersistence()
         self.poll = runner._MailboxPoll(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),

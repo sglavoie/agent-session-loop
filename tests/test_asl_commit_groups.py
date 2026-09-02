@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_session_loop import commit_groups, events, runner
+from agent_session_loop import commit_groups, events, run_persistence, runner
 
 
 def target(alias: str) -> dict[str, object]:
@@ -288,7 +288,7 @@ class DurableLedgerTests(unittest.TestCase):
                 "commit_groups": [{"group_id": "g1", "status": "running"}],
             }
             with mock.patch.object(runner.durability, "fullsync") as fullsync:
-                runner._write_state_payload(payload)
+                run_persistence._write_state_payload(payload)
 
             self.assertEqual(2, fullsync.call_count)
             persisted = json.loads(state_path.read_text(encoding="utf-8"))

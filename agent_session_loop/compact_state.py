@@ -4,7 +4,7 @@ Historical plan state directories accumulate large ``state.json`` records that
 embed every turn's full plan snapshot and raw verification output, oversized
 ``run_finished`` / ``run_paused`` events, and per-turn ``result.json`` files that
 carry complete command stdout/stderr. Session 3 made *new* runs write the
-compact v2 projection at the ``runner._write_state_payload`` chokepoint; this
+compact v2 projection at the ``run_persistence._write_state_payload`` chokepoint; this
 module retroactively compacts the records already on disk.
 
 Compaction is lossless for failed-check output — the full stream is extracted to
@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import artifacts, events, plans, runner, state
+from . import artifacts, events, plans, run_persistence, runner, state
 
 # Subdirectory (relative to a turn artifact directory) where failed-command
 # gzip artifacts live, matching the runner-managed verification convention.
@@ -210,15 +210,17 @@ def _compact_event_record(record: dict[str, Any]) -> dict[str, Any]:
         return compact
     name = record.get("name")
     if name == "run_finished" and "turns" in payload:
-        compact["payload"] = runner._run_finished_event_payload(payload)
+        compact["payload"] = run_persistence._run_finished_event_payload(payload)
         return compact
-    new_payload = runner._bounded_verification_details(payload)
+    new_payload = run_persistence._bounded_verification_details(payload)
     if isinstance(new_payload, dict):
         for nested_key in ("details", "pause_details"):
             nested = new_payload.get(nested_key)
             if isinstance(nested, dict):
                 new_payload = dict(new_payload)
-                new_payload[nested_key] = runner._bounded_verification_details(nested)
+                new_payload[nested_key] = run_persistence._bounded_verification_details(
+                    nested
+                )
     compact["payload"] = new_payload
     return compact
 
@@ -253,7 +255,7 @@ def _compact_state_file(path: Path, *, apply: bool, stats: _Stats) -> None:
         stats.bytes_after += len(original)
         return
     original = path.read_bytes()
-    compact = _dump_state_bytes(runner._compact_state_payload(payload))
+    compact = _dump_state_bytes(run_persistence._compact_state_payload(payload))
     _rewrite(path, original, compact, apply=apply, stats=stats)
 
 

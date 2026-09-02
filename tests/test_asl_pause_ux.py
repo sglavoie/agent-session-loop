@@ -25,6 +25,7 @@ from agent_session_loop import (
     mailbox,
     pause_policy,
     qna,
+    run_persistence,
     run_prompts,
     runner,
     state,
@@ -129,7 +130,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             ],
         }
 
-        bounded = runner._bounded_verification_details(details)
+        bounded = run_persistence._bounded_verification_details(details)
 
         failure = bounded["failures"][0]
         self.assertNotIn("stdout", failure)
@@ -340,10 +341,10 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 unsupervised_ceiling_seconds=900.0,
                 last_lease_activity_at=started_at + timedelta(minutes=1),
             )
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
 
             with mock.patch.object(
-                runner, "_notify_agent_mux_loop_paused"
+                run_persistence, "_notify_agent_mux_loop_paused"
             ) as notify_paused:
                 runner._set_waiting_for_reply(
                     event_path,
@@ -445,7 +446,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 question_id=question_id,
                 run_id="run-1",
                 settings=settings,
-                persistence=runner._RunPersistence(
+                persistence=run_persistence._RunPersistence(
                     write_state=False,
                     append_events=False,
                 ),
@@ -474,7 +475,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 resolution_action=resolution.action,
                 resolution_message_id=resolution.id,
                 resolution_seq=resolution.seq,
-                persistence=runner._RunPersistence(write_state=False),
+                persistence=run_persistence._RunPersistence(write_state=False),
             )
             [record] = read_jsonl(event_path)
 
@@ -511,7 +512,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 unsupervised_ceiling_seconds=1800.0,
                 last_lease_activity_at=None,
             )
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
             runner._set_waiting_for_reply(
                 event_path,
                 payload,
@@ -698,7 +699,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 "last_lease_activity_at": None,
             }
         }
-        persistence = runner._RunPersistence(
+        persistence = run_persistence._RunPersistence(
             write_state=False,
             append_events=False,
         )
@@ -762,7 +763,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 question_id="00000000-0000-0000-0000-000000000012",
                 run_id="RUN-TEST",
                 settings=settings,
-                persistence=runner._RunPersistence(
+                persistence=run_persistence._RunPersistence(
                     write_state=False,
                     append_events=False,
                 ),

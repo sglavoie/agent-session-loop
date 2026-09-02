@@ -34,6 +34,7 @@ from agent_session_loop import (
     config,
     contracts,
     control_queue,
+    durability,
     events,
     harness_failures,
     harnesses,
@@ -43,6 +44,7 @@ from agent_session_loop import (
     progress_repair,
     review_session_body,
     run_control,
+    run_persistence,
     run_selection,
     runner,
     state,
@@ -638,7 +640,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner,
+                run_persistence,
                 "_notify_agent_mux_loop_started",
                 side_effect=notify_started,
             ),
@@ -648,7 +650,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 side_effect=notify_turn_started,
             ),
             mock.patch.object(
-                runner,
+                run_persistence,
                 "_notify_agent_mux_loop_finished",
                 side_effect=notify_finished,
             ),
@@ -820,7 +822,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             persistence: object = None,
         ) -> None:
             hook_payloads.append(
-                runner._agent_mux_loop_payload(
+                run_persistence._agent_mux_loop_payload(
                     payload,
                     reason=runner.AGENT_MUX_TURN_START_REASON,
                     active_turn=active_turn,
@@ -832,7 +834,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             persistence: object = None,
         ) -> None:
             finish_payloads.append(
-                runner._agent_mux_loop_payload(
+                run_persistence._agent_mux_loop_payload(
                     payload,
                     reason=runner.AGENT_MUX_FINISH_REASON,
                 )
@@ -845,7 +847,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 side_effect=notify_turn_started,
             ),
             mock.patch.object(
-                runner,
+                run_persistence,
                 "_notify_agent_mux_loop_finished",
                 side_effect=notify_finished,
             ),
@@ -4431,7 +4433,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 commit_mode=None,
                 mailbox_activation=mailbox_activation,
             )
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
 
             persistence.write_state(payload)
             initial_state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -4502,7 +4504,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "active_turn": None,
                 "active_verification": None,
             }
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
             progress = runner._ProgressReporter(enabled=True)
             stderr = io.StringIO()
 
@@ -4670,7 +4672,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "active_turn": None,
                 "active_verification": None,
             }
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
             live_verification = runner._LiveVerification(
                 event_path=event_path,
                 payload=payload,
@@ -4786,7 +4788,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 event_path=event_path,
                 payload=payload,
                 progress=runner._ProgressReporter(enabled=False),
-                persistence=runner._RunPersistence(),
+                persistence=run_persistence._RunPersistence(),
                 run_id="run-3",
                 turn_index=1,
                 session_id="1",
@@ -4882,7 +4884,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 event_path=event_path,
                 payload=payload,
                 progress=runner._ProgressReporter(enabled=False),
-                persistence=runner._RunPersistence(),
+                persistence=run_persistence._RunPersistence(),
                 run_id="run-5",
                 turn_index=1,
                 session_id="1",
@@ -4986,7 +4988,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 event_path=event_path,
                 payload=payload,
                 progress=progress,
-                persistence=runner._RunPersistence(),
+                persistence=run_persistence._RunPersistence(),
                 run_id="run-6",
                 turn_index=1,
                 session_id="1",
@@ -5072,7 +5074,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     "active_verification": None,
                 },
                 progress=progress,
-                persistence=runner._RunPersistence(),
+                persistence=run_persistence._RunPersistence(),
                 run_id="run-8",
                 turn_index=1,
                 session_id="1",
@@ -5178,7 +5180,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     "active_verification": None,
                 },
                 progress=progress,
-                persistence=runner._RunPersistence(),
+                persistence=run_persistence._RunPersistence(),
                 run_id="run-9",
                 turn_index=1,
                 session_id="1",
@@ -5321,7 +5323,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 event_path=event_path,
                 payload=payload,
                 progress=runner._ProgressReporter(enabled=False),
-                persistence=runner._RunPersistence(),
+                persistence=run_persistence._RunPersistence(),
                 run_id="run-7",
                 turn_index=1,
                 session_id="1",
@@ -5419,7 +5421,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     "active_verification": None,
                 },
                 progress=runner._ProgressReporter(enabled=False),
-                persistence=runner._RunPersistence(),
+                persistence=run_persistence._RunPersistence(),
                 run_id="run-4",
                 turn_index=1,
                 session_id="1",
@@ -5939,7 +5941,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr_chars": 0,
                 "action_required": None,
             }
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
             live_turn = runner._LiveTurn(
                 payload=payload,
                 event_path=event_path,
@@ -5954,7 +5956,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             release_preview = threading.Event()
             delayed_once = False
             thread_errors: list[BaseException] = []
-            original_write_json = runner._write_json_file
+            original_write_json = durability.write_json_file
             original_preview_text = turn_execution.preview_text
             state_write_count = 0
 
@@ -6020,8 +6022,8 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 return original_preview_text(text, limit=limit)
 
             with mock.patch.object(
-                runner,
-                "_write_json_file",
+                durability,
+                "write_json_file",
                 side_effect=delayed_write_json,
             ):
                 for index in range(5_000):
@@ -6107,7 +6109,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stdout_chars": 0,
                 "stderr_chars": 0,
             }
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
             live_turn = runner._LiveTurn(
                 payload=payload,
                 event_path=event_path,
@@ -6746,7 +6748,9 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
             "stdout_chars": 0,
             "stderr_chars": 0,
         }
-        persistence = runner._RunPersistence(write_state=False, append_events=False)
+        persistence = run_persistence._RunPersistence(
+            write_state=False, append_events=False
+        )
         live_turn = runner._LiveTurn(
             payload=payload,
             event_path=event_path,

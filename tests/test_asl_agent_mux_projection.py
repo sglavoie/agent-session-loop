@@ -24,7 +24,9 @@ from agent_session_loop import agent_mux_contract as contract
 from agent_session_loop import (
     agent_mux_delivery,
     agent_mux_projection,
+    durability,
     process_tree,
+    run_persistence,
     runner,
 )
 
@@ -468,7 +470,7 @@ class DurableStateWriteTests(unittest.TestCase):
         return json.loads(self.state_path.read_text(encoding="utf-8"))
 
     def test_write_state_payload_emits_a_valid_v3_record(self) -> None:
-        runner._write_state_payload(self._payload(active_turn=_turn()))
+        run_persistence._write_state_payload(self._payload(active_turn=_turn()))
         record = self._read()
         self.assertEqual(runner.STATE_SCHEMA_VERSION, record["version"])
         projection = record[agent_mux_projection.PROJECTION_KEY]
@@ -484,7 +486,7 @@ class DurableStateWriteTests(unittest.TestCase):
         payload = self._payload(
             waiting_for_reply={"question_id": "q-7", "session_id": "5"}
         )
-        runner._write_state_payload(payload)
+        run_persistence._write_state_payload(payload)
         record = self._read()
         projection = record[agent_mux_projection.PROJECTION_KEY]
         self.assertEqual(agent_mux_projection.PHASE_WAITING, projection["phase"])
@@ -497,7 +499,7 @@ class DurableStateWriteTests(unittest.TestCase):
 
     def test_a_payload_with_no_state_path_writes_nothing(self) -> None:
         payload = _base_payload()
-        runner._write_state_payload(payload)
+        run_persistence._write_state_payload(payload)
         self.assertFalse(self.state_path.exists())
         self.assertNotIn(agent_mux_projection.GENERATION_KEY, payload)
 
@@ -507,9 +509,9 @@ class DurableStateWriteTests(unittest.TestCase):
         # critical section, so the order generations reach disk must be the
         # order they were allocated in — no gaps, no repeats, no inversions.
         payload = self._payload(active_turn=_turn())
-        persistence = runner._RunPersistence(append_events=False)
+        persistence = run_persistence._RunPersistence(append_events=False)
         written: list[int] = []
-        original = runner._write_json_file
+        original = durability.write_json_file
 
         def recording_write(path: Path, record: dict[str, Any], **kwargs: Any) -> None:
             written.append(
@@ -517,8 +519,8 @@ class DurableStateWriteTests(unittest.TestCase):
             )
             original(path, record, **kwargs)
 
-        runner._write_json_file = recording_write
-        self.addCleanup(setattr, runner, "_write_json_file", original)
+        durability.write_json_file = recording_write
+        self.addCleanup(setattr, durability, "write_json_file", original)
 
         writers = 8
         per_writer = 25
@@ -545,9 +547,9 @@ class DurableStateWriteTests(unittest.TestCase):
 
     def test_the_lifecycle_sequence_advances_independently(self) -> None:
         payload = self._payload(active_turn=_turn())
-        persistence = runner._RunPersistence(append_events=False)
-        first = runner._allocate_agent_mux_sequence(payload, persistence)
-        second = runner._allocate_agent_mux_sequence(payload, persistence)
+        persistence = run_persistence._RunPersistence(append_events=False)
+        first = run_persistence._allocate_agent_mux_sequence(payload, persistence)
+        second = run_persistence._allocate_agent_mux_sequence(payload, persistence)
         persistence.write_state(payload)
         record = self._read()
         self.assertEqual([1, 2], [first, second])
@@ -646,12 +648,12 @@ class HookIdentityTests(unittest.TestCase):
             agent_mux_delivery.WAIT_START_EVENT,
             extra={
                 "question_id": "q-7",
-                "question_preview": runner._question_preview("x" * 500),
+                "question_preview": run_persistence._question_preview("x" * 500),
             },
         )
         self._validate(hook_payload)
         self.assertEqual(
-            runner.AGENT_MUX_QUESTION_PREVIEW_CHARS,
+            run_persistence.AGENT_MUX_QUESTION_PREVIEW_CHARS,
             len(hook_payload["question_preview"]),
         )
 

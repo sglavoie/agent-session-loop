@@ -34,6 +34,7 @@ from agent_session_loop import (
     review_session_body,
     review_session_contract,
     run_inputs,
+    run_persistence,
     runner,
     state,
     workbench,
@@ -4600,7 +4601,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         action, after = runner._advance_review_cycle(
             event_path=event_path,
             payload=payload,
-            persistence=runner._RunPersistence(),
+            persistence=run_persistence._RunPersistence(),
             args=argparse.Namespace(
                 state_dir=str(self.state_dir), allow_not_loop_ready=False
             ),
@@ -4684,7 +4685,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         action, after = runner._advance_review_cycle(
             event_path=event_path,
             payload=payload,
-            persistence=runner._RunPersistence(),
+            persistence=run_persistence._RunPersistence(),
             args=argparse.Namespace(
                 state_dir=str(self.state_dir), allow_not_loop_ready=False
             ),
@@ -4766,7 +4767,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             action, after = runner._advance_review_cycle(
                 event_path=event_path,
                 payload=payload,
-                persistence=runner._RunPersistence(),
+                persistence=run_persistence._RunPersistence(),
                 args=argparse.Namespace(
                     state_dir=str(self.state_dir),
                     allow_not_loop_ready=allow_not_loop_ready,

@@ -38,6 +38,7 @@ from agent_session_loop import (
     review_repair,
     review_session_body,
     review_session_contract,
+    run_persistence,
     run_selection,
     runner,
     state,
@@ -5127,7 +5128,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         action, _ = runner._advance_review_cycle(
             event_path=self.event_path,
             payload=payload,
-            persistence=runner._RunPersistence(),
+            persistence=run_persistence._RunPersistence(),
             args=argparse.Namespace(
                 state_dir=str(self.tmp_path / "state"),
                 allow_not_loop_ready=False,
@@ -5499,7 +5500,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
         action, after = runner._advance_review_cycle(
             event_path=self.event_path,
             payload=payload,
-            persistence=runner._RunPersistence(),
+            persistence=run_persistence._RunPersistence(),
             args=argparse.Namespace(
                 state_dir=str(self.tmp_path / "state"),
                 allow_not_loop_ready=False,

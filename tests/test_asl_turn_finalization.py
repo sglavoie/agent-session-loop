@@ -20,6 +20,7 @@ from agent_session_loop import (
     review_continuation,
     review_session_body,
     review_session_contract,
+    run_persistence,
     runner,
     supervisor_audit,
     verification,
@@ -880,7 +881,7 @@ class TerminalAdjudicationTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.event_path = Path(tmp.name) / "events.jsonl"
-        self.persistence = runner._RunPersistence(
+        self.persistence = run_persistence._RunPersistence(
             write_state=False, append_events=False
         )
 
@@ -1282,7 +1283,7 @@ class DegradedAssuranceTests(unittest.TestCase):
     """Optional assurance may fail to speak, but it may not fail silently."""
 
     def setUp(self) -> None:
-        self.persistence = runner._RunPersistence(
+        self.persistence = run_persistence._RunPersistence(
             write_state=False, append_events=False
         )
 

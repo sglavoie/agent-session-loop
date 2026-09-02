@@ -32,6 +32,7 @@ from agent_session_loop import (
     mailbox,
     plans,
     qna,
+    run_persistence,
     run_prompts,
     runner,
     state,
@@ -545,7 +546,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     side_effect=fake_run_harness,
                 ),
                 mock.patch.object(
-                    runner, "_notify_agent_mux_loop_paused"
+                    run_persistence, "_notify_agent_mux_loop_paused"
                 ) as notify_paused,
             ):
                 code, out, _err = self._run_capture(args)
@@ -842,7 +843,9 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual(
                 {
                     "question_id": question.id,
-                    "question_preview": runner._question_preview(question.text),
+                    "question_preview": run_persistence._question_preview(
+                        question.text
+                    ),
                 },
                 notified[start_index][1],
             )
@@ -1427,7 +1430,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     ),
                 ) as wait_for_reply,
                 mock.patch.object(
-                    runner, "_notify_agent_mux_loop_paused"
+                    run_persistence, "_notify_agent_mux_loop_paused"
                 ) as notify_paused,
             ):
                 code, out, _err = self._run_capture(args)
@@ -1570,7 +1573,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id=question_id,
                 run_id="RUN-TEST",
                 settings=settings,
-                persistence=runner._RunPersistence(
+                persistence=run_persistence._RunPersistence(
                     write_state=False,
                     append_events=False,
                 ),
@@ -1688,7 +1691,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     question_id=question_id,
                     run_id="RUN-TEST",
                     settings=settings,
-                    persistence=runner._RunPersistence(
+                    persistence=run_persistence._RunPersistence(
                         write_state=False,
                         append_events=False,
                     ),
@@ -1758,7 +1761,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 payload,
                 reason=stale_result.reason,
                 pending_outbox=stale_result.pending_outbox,
-                persistence=runner._RunPersistence(write_state=False),
+                persistence=run_persistence._RunPersistence(write_state=False),
             )
             [cleared_event] = read_jsonl(event_path)
 
@@ -1861,7 +1864,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     question_id=question_id,
                     run_id="RUN-TEST",
                     settings=settings,
-                    persistence=runner._RunPersistence(
+                    persistence=run_persistence._RunPersistence(
                         write_state=False,
                         append_events=False,
                     ),
@@ -1888,7 +1891,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     lease_updated_at=result.lease_updated_at,
                     lease_reason=result.lease_reason,
                     lease_supervisor_id=result.lease_supervisor_id,
-                    persistence=runner._RunPersistence(write_state=False),
+                    persistence=run_persistence._RunPersistence(write_state=False),
                 )
                 [event] = read_jsonl(event_path)
             return event["payload"]
@@ -2024,7 +2027,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     question_id=question_id,
                     run_id="RUN-TEST",
                     settings=settings,
-                    persistence=runner._RunPersistence(
+                    persistence=run_persistence._RunPersistence(
                         write_state=False,
                         append_events=False,
                     ),
@@ -2146,7 +2149,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id=question_id,
                 run_id="RUN-TEST",
                 settings=settings,
-                persistence=runner._RunPersistence(
+                persistence=run_persistence._RunPersistence(
                     write_state=False,
                     append_events=False,
                 ),
@@ -2225,7 +2228,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 lease_reason=result.lease_reason,
                 lease_supervisor_id=result.lease_supervisor_id,
                 suspend_skew_seconds=result.suspend_skew_seconds,
-                persistence=runner._RunPersistence(write_state=False),
+                persistence=run_persistence._RunPersistence(write_state=False),
             )
             [cleared_event] = read_jsonl(event_path)
         self.assertEqual(
@@ -2350,7 +2353,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id=question_id,
                 run_id="RUN-TEST",
                 settings=settings,
-                persistence=runner._RunPersistence(
+                persistence=run_persistence._RunPersistence(
                     write_state=False,
                     append_events=False,
                 ),
@@ -2447,7 +2450,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 lease_supervisor_id=result.lease_supervisor_id,
                 suspend_skew_seconds=result.suspend_skew_seconds,
                 suspend_lease_grace_seconds=(result.suspend_lease_grace_seconds),
-                persistence=runner._RunPersistence(write_state=False),
+                persistence=run_persistence._RunPersistence(write_state=False),
             )
             [cleared_event] = read_jsonl(event_path)
         self.assertEqual(
@@ -2685,7 +2688,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id=question_id,
                 run_id="RUN-TEST",
                 settings=settings,
-                persistence=runner._RunPersistence(
+                persistence=run_persistence._RunPersistence(
                     write_state=False,
                     append_events=False,
                 ),
@@ -2723,14 +2726,14 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 lease_reason=result.lease_reason,
                 lease_supervisor_id=result.lease_supervisor_id,
                 unsupervised_seconds=result.unsupervised_seconds,
-                persistence=runner._RunPersistence(write_state=False),
+                persistence=run_persistence._RunPersistence(write_state=False),
             )
             runner._clear_waiting_for_reply(
                 event_path,
                 {"run_id": "run-1", "waiting_for_reply": dict(waiting)},
                 reason="reply",
                 pending_outbox=0,
-                persistence=runner._RunPersistence(write_state=False),
+                persistence=run_persistence._RunPersistence(write_state=False),
             )
             tracked_event, untracked_event = read_jsonl(event_path)
 
@@ -2806,7 +2809,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 return_value=view,
             ),
             mock.patch.object(
-                runner,
+                run_persistence,
                 "_write_state_payload",
             ) as write_state,
         ):
@@ -2817,7 +2820,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id=question_id,
                 run_id="RUN-TEST",
                 settings=settings,
-                persistence=runner._RunPersistence(append_events=False),
+                persistence=run_persistence._RunPersistence(append_events=False),
                 started_monotonic=0.0,
                 monotonic=monotonic,
                 sleep=sleep,
@@ -2837,7 +2840,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 reason=result.reason,
                 pending_outbox=result.pending_outbox,
                 suspend_skew_seconds=result.suspend_skew_seconds,
-                persistence=runner._RunPersistence(write_state=False),
+                persistence=run_persistence._RunPersistence(write_state=False),
             )
             [cleared_event] = read_jsonl(event_path)
         self.assertNotIn(
@@ -2857,7 +2860,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         payload = {"waiting_for_reply": dict(waiting)}
 
         with mock.patch.object(
-            runner,
+            run_persistence,
             "_write_state_payload",
         ) as write_state:
             runner._rebase_waiting_deadlines(
@@ -2865,7 +2868,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id="question-this-wait-expected",
                 base_deadline=epoch + timedelta(hours=8, minutes=4),
                 unsupervised_deadline_at=epoch + timedelta(hours=8, minutes=20),
-                persistence=runner._RunPersistence(),
+                persistence=run_persistence._RunPersistence(),
             )
 
         self.assertEqual(waiting, payload["waiting_for_reply"])
@@ -2954,7 +2957,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id=question_id,
                 run_id="RUN-TEST",
                 settings=settings,
-                persistence=runner._RunPersistence(
+                persistence=run_persistence._RunPersistence(
                     write_state=False,
                     append_events=False,
                 ),
@@ -3018,7 +3021,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 question_id=question_id,
                 run_id="RUN-TEST",
                 settings=settings,
-                persistence=runner._RunPersistence(
+                persistence=run_persistence._RunPersistence(
                     write_state=False,
                     append_events=False,
                 ),
@@ -3111,7 +3114,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     question_id=question_id,
                     run_id="RUN-TEST",
                     settings=settings,
-                    persistence=runner._RunPersistence(
+                    persistence=run_persistence._RunPersistence(
                         write_state=False,
                         append_events=False,
                     ),
@@ -3599,17 +3602,19 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
     def test_question_preview_collapses_whitespace_and_caps_length(self) -> None:
         self.assertEqual(
             "Should we use 1a or 1b?",
-            runner._question_preview("  Should we use\n\t1a  or 1b?  \n"),
+            run_persistence._question_preview("  Should we use\n\t1a  or 1b?  \n"),
         )
-        self.assertIsNone(runner._question_preview(None))
-        self.assertIsNone(runner._question_preview("  \n\t "))
+        self.assertIsNone(run_persistence._question_preview(None))
+        self.assertIsNone(run_persistence._question_preview("  \n\t "))
 
-        capped = runner._question_preview("x" * 500)
-        self.assertEqual(runner.AGENT_MUX_QUESTION_PREVIEW_CHARS, len(capped))
-        self.assertEqual("x" * runner.AGENT_MUX_QUESTION_PREVIEW_CHARS, capped)
+        capped = run_persistence._question_preview("x" * 500)
+        self.assertEqual(run_persistence.AGENT_MUX_QUESTION_PREVIEW_CHARS, len(capped))
+        self.assertEqual("x" * run_persistence.AGENT_MUX_QUESTION_PREVIEW_CHARS, capped)
 
-        multiline = runner._question_preview("line\n" * 400)
-        self.assertLessEqual(len(multiline), runner.AGENT_MUX_QUESTION_PREVIEW_CHARS)
+        multiline = run_persistence._question_preview("line\n" * 400)
+        self.assertLessEqual(
+            len(multiline), run_persistence.AGENT_MUX_QUESTION_PREVIEW_CHARS
+        )
         self.assertNotIn("\n", multiline)
 
     def test_wait_started_delivers_bounded_question_identity(self) -> None:
@@ -3626,7 +3631,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
                     return_value=self._accepted_delivery(),
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_wait_started(
+                run_persistence._notify_agent_mux_loop_wait_started(
                     payload,
                     question_id="question-1",
                     question_text="Should we use\n\n1a or 1b? " + "detail " * 100,
@@ -3641,7 +3646,9 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
             self.assertEqual("question-1", hook_payload["question_id"])
             preview = hook_payload["question_preview"]
             self.assertTrue(preview.startswith("Should we use 1a or 1b? detail"))
-            self.assertLessEqual(len(preview), runner.AGENT_MUX_QUESTION_PREVIEW_CHARS)
+            self.assertLessEqual(
+                len(preview), run_persistence.AGENT_MUX_QUESTION_PREVIEW_CHARS
+            )
             self.assertNotIn("wait_reason", hook_payload)
 
     def test_wait_started_omits_preview_for_blank_question_text(self) -> None:
@@ -3658,7 +3665,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
                     return_value=self._accepted_delivery(),
                 ) as run,
             ):
-                runner._notify_agent_mux_loop_wait_started(
+                run_persistence._notify_agent_mux_loop_wait_started(
                     payload,
                     question_id="question-1",
                     question_text=None,
@@ -3693,7 +3700,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
                         return_value=self._accepted_delivery(),
                     ) as run,
                 ):
-                    runner._notify_agent_mux_loop_wait_ended(
+                    run_persistence._notify_agent_mux_loop_wait_ended(
                         payload,
                         question_id="question-1",
                         wait_reason=wait_reason,
@@ -3720,12 +3727,12 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
                 ),
                 mock.patch.object(runner.subprocess, "run") as run,
             ):
-                runner._notify_agent_mux_loop_wait_started(
+                run_persistence._notify_agent_mux_loop_wait_started(
                     payload,
                     question_id="question-1",
                     question_text="Should we use 1a or 1b?",
                 )
-                runner._notify_agent_mux_loop_wait_ended(
+                run_persistence._notify_agent_mux_loop_wait_ended(
                     payload,
                     question_id="question-1",
                     wait_reason="timeout",

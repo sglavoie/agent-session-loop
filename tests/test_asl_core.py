@@ -39,6 +39,7 @@ from agent_session_loop import (
     responses,
     review,
     run_inputs,
+    run_persistence,
     runner,
     state,
     tail,
@@ -5753,7 +5754,7 @@ class ParserAndStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "state.json"
             payload = self._base_state_payload(state_path)
-            runner._write_state_payload(payload)
+            run_persistence._write_state_payload(payload)
 
             persisted = json.loads(state_path.read_text(encoding="utf-8"))
 
@@ -5798,7 +5799,7 @@ class ParserAndStateTests(unittest.TestCase):
                 turn["after"] = self._snapshot_dict(50)
                 turns.append(turn)
             payload["turns"] = turns
-            runner._write_state_payload(payload)
+            run_persistence._write_state_payload(payload)
 
             size = state_path.stat().st_size
 
@@ -5809,7 +5810,7 @@ class ParserAndStateTests(unittest.TestCase):
             event_path = Path(tmp) / "events.jsonl"
             payload = self._base_state_payload(Path(tmp) / "state.json")
             payload["events_path"] = str(event_path)
-            persistence = runner._RunPersistence(write_state=False)
+            persistence = run_persistence._RunPersistence(write_state=False)
             runner._finish_run(event_path, payload, persistence=persistence)
 
             records = [
@@ -5843,7 +5844,7 @@ class ParserAndStateTests(unittest.TestCase):
             payload["model_source"] = "unresolved"
             payload["observed_model"] = "claude-opus-5"
             payload["observed_model_source"] = "harness_reported"
-            persistence = runner._RunPersistence(write_state=False)
+            persistence = run_persistence._RunPersistence(write_state=False)
             runner._finish_run(event_path, payload, persistence=persistence)
 
             records = [
@@ -5958,7 +5959,7 @@ class ParserAndStateTests(unittest.TestCase):
             payload = self._base_state_payload(Path(tmp) / "state.json")
             payload["events_path"] = str(event_path)
             payload["action_required"] = self._live_action_required()
-            persistence = runner._RunPersistence(write_state=False)
+            persistence = run_persistence._RunPersistence(write_state=False)
 
             runner._finish_run(event_path, payload, persistence=persistence)
 
@@ -5972,7 +5973,7 @@ class ParserAndStateTests(unittest.TestCase):
             payload["paused"] = True
             signal = self._live_action_required()
             payload["action_required"] = signal
-            persistence = runner._RunPersistence(write_state=False)
+            persistence = run_persistence._RunPersistence(write_state=False)
 
             runner._finish_run(event_path, payload, persistence=persistence)
 
@@ -6080,7 +6081,7 @@ class ParserAndStateTests(unittest.TestCase):
             payload["events_path"] = str(event_path)
             payload["review_fix_disposition"] = "exhausted"
             payload["review_verdict"] = {"outcome": "changes-requested"}
-            persistence = runner._RunPersistence(write_state=False)
+            persistence = run_persistence._RunPersistence(write_state=False)
 
             reason = runner._terminal_review_reason(payload)
             runner._finish_run(event_path, payload, persistence=persistence)
@@ -6096,7 +6097,7 @@ class ParserAndStateTests(unittest.TestCase):
             state_path = Path(tmp) / "state.json"
             event_path = Path(tmp) / "events.jsonl"
             payload = self._base_state_payload(state_path)
-            persistence = runner._RunPersistence()
+            persistence = run_persistence._RunPersistence()
             details = {
                 "session": "1",
                 "recipe": {"check_count": 1, "kinds": ["command"], "names": ["tests"]},
@@ -6112,7 +6113,7 @@ class ParserAndStateTests(unittest.TestCase):
                 details=details,
                 persistence=persistence,
             )
-            runner._write_state_payload(payload)
+            run_persistence._write_state_payload(payload)
 
             records = [
                 json.loads(line)

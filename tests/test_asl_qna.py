@@ -20,6 +20,7 @@ from agent_session_loop import (
     events,
     plans,
     qna,
+    run_persistence,
     runner,
     state,
 )
@@ -342,7 +343,7 @@ class QnAContextLoaderTests(unittest.TestCase):
                 question_id="question-1",
                 base_deadline=datetime(2999, 7, 24, 20, 3, 0, tzinfo=UTC),
                 unsupervised_deadline_at=datetime(2999, 7, 24, 20, 28, 0, tzinfo=UTC),
-                persistence=runner._RunPersistence(write_state=False),
+                persistence=run_persistence._RunPersistence(write_state=False),
             )
             waiting = raw_payload["waiting_for_reply"]
             self.assertEqual(

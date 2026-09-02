@@ -36,6 +36,7 @@ from agent_session_loop import (
     plans,
     review_guard,
     review_repair,
+    run_persistence,
     run_selection,
     runner,
     state,
@@ -132,7 +133,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
         commit = runner._commit_turn(
             event_path=self.tmp_path / "events.jsonl",
             payload=payload,
-            persistence=runner._RunPersistence(write_state=False),
+            persistence=run_persistence._RunPersistence(write_state=False),
             progress=runner._ProgressReporter(enabled=False),
             turn_payload=turn_payload,
             live_turn=dict(turn_payload),
@@ -148,7 +149,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
         commit = runner._commit_turn(
             event_path=self.tmp_path / "events.jsonl",
             payload=payload,
-            persistence=runner._RunPersistence(write_state=False),
+            persistence=run_persistence._RunPersistence(write_state=False),
             progress=runner._ProgressReporter(enabled=False),
             turn_payload=turn_payload,
             live_turn=dict(turn_payload),

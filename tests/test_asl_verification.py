@@ -32,6 +32,7 @@ from agent_session_loop import (
     process_tree,
     review_session_body,
     review_session_contract,
+    run_persistence,
     runner,
     verification,
 )
@@ -441,7 +442,9 @@ class VerificationExecutorTests(unittest.TestCase):
             self.assertIn("sweep", payload)
             self.assertEqual(result.sweep, payload["sweep"])
             # The compaction that strips raw output keeps the report.
-            self.assertEqual(result.sweep, runner._strip_check_output(payload)["sweep"])
+            self.assertEqual(
+                result.sweep, run_persistence._strip_check_output(payload)["sweep"]
+            )
 
     def test_command_check_reports_command_not_found(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1707,7 +1710,7 @@ class VerificationExecutorTests(unittest.TestCase):
 
             result = verification.run_check(check, repo_root=repo_root)
             payload = verification._check_result_payload(result)
-            compacted = runner._strip_check_output(payload)
+            compacted = run_persistence._strip_check_output(payload)
 
             self.assertEqual(result.failure_diagnostic, payload["failure_diagnostic"])
             # The compaction that drops the raw streams keeps the diagnostic:

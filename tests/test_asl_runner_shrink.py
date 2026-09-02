@@ -61,6 +61,7 @@ RUNNER_SHRINK_HISTORY: tuple[tuple[str, int, int], ...] = (
     ("7", 15309, 145),
     ("8", 14972, 142),
     ("9", 14396, 140),
+    ("10", 13885, 136),
 )
 
 #: Every ``X = <module>.Y`` assignment in the runner today, mapped to the
@@ -176,7 +177,6 @@ RUNNER_ALIAS_FLOOR: dict[str, str] = {
     "TurnIdentity": "turn_execution",
     "TurnLaunch": "turn_execution",
     "VERIFICATION_FINGERPRINT_PREFIX": "verification_transitions",
-    "_AGENT_MUX_EMIT_LOCK": "agent_mux_delivery",
     "_AUDITABLE_ASSURANCE_STATES": "run_coordination",
     "_DEGRADED_ASSURANCE_STATES": "run_coordination",
     "_HangAssessment": "turn_execution",
