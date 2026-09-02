@@ -35,7 +35,7 @@ from agent_session_loop import (
     turn_execution,
 )
 
-from .support import write_plan
+from .support import assert_no_runner_import, write_plan
 
 
 class RecordingPersistence:
@@ -251,9 +251,7 @@ class TurnExecutorBoundaryTests(unittest.TestCase):
         self.assertIsNotNone(progress)
 
     def test_turn_execution_does_not_import_the_runner(self) -> None:
-        source = Path(turn_execution.__file__).read_text(encoding="utf-8")
-        self.assertNotIn("import runner", source)
-        self.assertNotIn("from .runner", source)
+        assert_no_runner_import(self, turn_execution)
 
     def test_transition_records_are_frozen(self) -> None:
         for record in (

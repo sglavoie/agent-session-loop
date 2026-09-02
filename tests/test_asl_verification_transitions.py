@@ -32,6 +32,8 @@ from agent_session_loop import (
 )
 from agent_session_loop.transitions import IllegalTransitionError
 
+from .support import assert_no_runner_import
+
 MACHINE = verification_transitions.VERIFICATION_MACHINE
 DEFERRED_REASON = verification_transitions.REVIEW_BROAD_FAILURES_DEFERRED_REASON
 
@@ -84,6 +86,9 @@ def _contract(*names: str) -> contracts.CompletionContract:
 
 class VerificationMachineModelTests(unittest.TestCase):
     """The declared lifecycle, walked exhaustively in both directions."""
+
+    def test_verification_transitions_does_not_import_the_runner(self) -> None:
+        assert_no_runner_import(self, verification_transitions)
 
     def test_every_declared_transition_advances_to_its_target(self) -> None:
         for state, event, target in MACHINE.legal_transitions():

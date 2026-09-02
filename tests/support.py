@@ -6,6 +6,7 @@ tests/test_asl_*.py subsystem modules.
 
 from __future__ import annotations
 
+import ast
 import errno
 import importlib.util
 import io
@@ -22,6 +23,7 @@ import time
 import unittest
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from unittest import mock
 
@@ -57,6 +59,48 @@ def agent_mux_notify_enabled(mode: str = "auto"):
     """Re-enable AgentMux notification inside a notifier-specific test."""
     with patched_env(**{runner.AGENT_MUX_NOTIFY_ENV_VAR: mode}):
         yield
+
+
+#: How a module would name the runner in an import, however it is spelled:
+#: ``import runner``, ``from . import runner``, ``from .runner import x``,
+#: ``import agent_session_loop.runner``. Every form ends in this component.
+_RUNNER_MODULE_NAME = "runner"
+
+#: The dotted name an `importlib.import_module` call would pass as a string,
+#: which no AST import node would show. Matched by equality, so a docstring
+#: that merely mentions the module is not an import.
+_RUNNER_DOTTED_NAME = "agent_session_loop.runner"
+
+
+def assert_no_runner_import(case: unittest.TestCase, module: ModuleType) -> None:
+    """Assert an extracted boundary module never reaches back into the runner.
+
+    The extraction holds only while the dependency runs one way: what a module
+    needs from the loop arrives as a parameter, a ``Protocol`` seam, or a
+    callback. Each per-module test calls this in one line rather than copying
+    the assertion, so a new extraction adds a line instead of a paragraph.
+
+    The module's source is parsed rather than its namespace inspected, so an
+    import buried in a function body -- the lazy form that would satisfy a
+    namespace check -- is caught too, as is the dotted name passed to
+    ``importlib`` as a string.
+    """
+    source = Path(module.__file__ or "").read_text(encoding="utf-8")
+    offenders: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            imported = [alias.name for alias in node.names]
+            if isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported.append(node.module)
+            if any(name.split(".")[-1] == _RUNNER_MODULE_NAME for name in imported):
+                offenders.append(f"line {node.lineno}: {ast.unparse(node)}")
+        elif isinstance(node, ast.Constant) and node.value == _RUNNER_DOTTED_NAME:
+            offenders.append(f"line {node.lineno}: {_RUNNER_DOTTED_NAME!r}")
+    case.assertEqual(
+        offenders,
+        [],
+        f"{module.__name__} imports the runner: " + "; ".join(offenders),
+    )
 
 
 FAKE_CODEX_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake_codex.py"

@@ -43,6 +43,8 @@ from agent_session_loop import (
     supervisor_audit,
 )
 
+from .support import assert_no_runner_import
+
 RUN_ID = "run-coordination-1"
 SESSION_ID = "3"
 
@@ -244,6 +246,13 @@ class CoordinationTestCase(unittest.TestCase):
             turn_index=turn_index,
             waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
         )
+
+
+class CoordinationBoundaryTests(unittest.TestCase):
+    """The boundary's own shape, independent of any wait it coordinates."""
+
+    def test_run_coordination_does_not_import_the_runner(self) -> None:
+        assert_no_runner_import(self, run_coordination)
 
 
 class WaitStateStoreTests(CoordinationTestCase):
