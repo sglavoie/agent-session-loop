@@ -46,6 +46,7 @@ from agent_session_loop import (
     startup_context,
     state,
     supervisor_audit,
+    task_packet,
     verification,
     workbench,
 )
@@ -3413,8 +3414,8 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         self.assertIn(f"last {metrics.DEFAULT_SINCE_DAYS} days", self.docs)
 
     def test_packet_mode_and_rollback_are_documented(self) -> None:
-        self.assertEqual("packet", runner.WORKER_MODE_PACKET)
-        self.assertIn("runner.build_task_packet", self.docs)
+        self.assertEqual("packet", task_packet.WORKER_MODE_PACKET)
+        self.assertIn("task_packet.build_task_packet", self.docs)
         self.assertIn("ASL_WORKER_MODE=skill", self.docs)
 
     def test_docs_and_readme_never_reference_pytest(self) -> None:

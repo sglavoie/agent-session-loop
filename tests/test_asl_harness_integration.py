@@ -44,6 +44,7 @@ from agent_session_loop import (
     run_control,
     runner,
     state,
+    task_packet,
     turn_execution,
     verification,
 )
@@ -1861,11 +1862,13 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         # Autonomous turns default to packet mode, so the prompt is the
         # harness-neutral task packet, not the `session-run` skill invocation.
         codex_prompt = turns[0]["argv"][-1]
-        self.assertTrue(codex_prompt.startswith(runner.TASK_PACKET_HEADING_PREFIX))
+        self.assertTrue(codex_prompt.startswith(task_packet.TASK_PACKET_HEADING_PREFIX))
         self.assertNotIn("session-run", codex_prompt)
         self.assertIn("-p", turns[1]["argv"])
         copilot_prompt = turns[1]["argv"][turns[1]["argv"].index("-p") + 1]
-        self.assertTrue(copilot_prompt.startswith(runner.TASK_PACKET_HEADING_PREFIX))
+        self.assertTrue(
+            copilot_prompt.startswith(task_packet.TASK_PACKET_HEADING_PREFIX)
+        )
         self.assertNotIn("session-run", copilot_prompt)
 
         control_events = [
@@ -2624,10 +2627,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         # Packet mode is the default: both harnesses receive the harness-neutral
         # task packet rather than a `session-run` skill invocation.
         self.assertTrue(
-            str(calls[0]["prompt"]).startswith(runner.TASK_PACKET_HEADING_PREFIX)
+            str(calls[0]["prompt"]).startswith(task_packet.TASK_PACKET_HEADING_PREFIX)
         )
         self.assertTrue(
-            str(calls[1]["prompt"]).startswith(runner.TASK_PACKET_HEADING_PREFIX)
+            str(calls[1]["prompt"]).startswith(task_packet.TASK_PACKET_HEADING_PREFIX)
         )
         self.assertNotIn("session-run", str(calls[0]["prompt"]))
         self.assertNotIn("session-run", str(calls[1]["prompt"]))

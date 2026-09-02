@@ -48,6 +48,7 @@ from agent_session_loop import (
     runner,
     state,
     supervisor_guide,
+    task_packet,
     verification,
     workbench,
     workbench_server,
@@ -3612,7 +3613,7 @@ class JsonCliTests(unittest.TestCase):
                 payload["repositories"][0]["resolved_root"],
             )
             self.assertTrue(
-                payload["prompt"].startswith(runner.TASK_PACKET_HEADING_PREFIX)
+                payload["prompt"].startswith(task_packet.TASK_PACKET_HEADING_PREFIX)
             )
             self.assertEqual(
                 str(workspace_root.resolve()),
@@ -4965,7 +4966,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             self.assertEqual(root, invocation["cwd"])
             self.assertEqual(root, invocation["workspace_root"])
             prompt = payload["planned"]["prompt"]
-            self.assertTrue(prompt.startswith(runner.TASK_PACKET_HEADING_PREFIX))
+            self.assertTrue(prompt.startswith(task_packet.TASK_PACKET_HEADING_PREFIX))
             self.assertIn("Expected read aliases: SVC", prompt)
             self.assertIn("Writable aliases: SVC", prompt)
             self.assertIn("Alias:path/to/file", prompt)

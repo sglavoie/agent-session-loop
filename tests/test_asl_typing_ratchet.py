@@ -183,6 +183,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.supervisor_audit",
         "agent_session_loop.supervisor_guide",
         "agent_session_loop.tail",
+        "agent_session_loop.task_packet",
         "agent_session_loop.transitions",
         "agent_session_loop.turn_execution",
         "agent_session_loop.verification",

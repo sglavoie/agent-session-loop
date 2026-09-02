@@ -55,6 +55,7 @@ RUNNER_SHRINK_HISTORY: tuple[tuple[str, int, int], ...] = (
     # session, runner lines, public module-level names the runner defines
     ("2", 17906, 197),
     ("3", 17242, 176),
+    ("4", 16722, 170),
 )
 
 #: Every ``X = <module>.Y`` assignment in the runner today, mapped to the

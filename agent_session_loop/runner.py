@@ -28,7 +28,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -77,6 +77,7 @@ from . import (
     state,
     supervisor_audit,
     tail,
+    task_packet,
     turn_execution,
     verification,
     verification_transitions,
@@ -242,17 +243,6 @@ RESULT_SCHEMA_VERSION = turn_execution.RESULT_SCHEMA_VERSION
 # diagnostics remain recoverable from the referenced artifact.
 _VERIFICATION_OUTPUT_KEYS = ("stdout", "stderr")
 
-# Worker mode selects how autonomous ``asl run`` turns prompt the harness.
-# ``packet`` (the default) sends a compact Python-built task packet
-# (:func:`build_task_packet`) so autonomous runs never invoke the manual
-# ``session-run`` skill. ``skill`` is a temporary rollback that restores the
-# legacy ``session-run`` skill invocation
-# (:func:`agent_session_loop.run_prompts.build_session_prompt`). The
-# manual ``$session-run`` path is unaffected by this switch either way.
-WORKER_MODE_ENV_VAR = "ASL_WORKER_MODE"
-WORKER_MODE_PACKET = "packet"
-WORKER_MODE_SKILL = "skill"
-
 # Repo-relative paths the review mutation guard ignores, on top of any
 # ``--review-guard-exclude`` values. Stow packages whose files the harness
 # rewrites mid-turn (its own settings, caches) would otherwise revert a
@@ -403,21 +393,6 @@ _DELTA_DIFF_FLAGS: tuple[str, ...] = (
     "--no-textconv",
     "--no-ext-diff",
 )
-
-
-def _worker_mode() -> str:
-    """Return the active worker mode, defaulting to packet mode.
-
-    Any value other than a case-insensitive ``skill`` resolves to
-    :data:`WORKER_MODE_PACKET` so an unrecognized override fails safe onto the
-    new default rather than silently disabling packet mode.
-    """
-    raw = os.environ.get(WORKER_MODE_ENV_VAR)
-    if raw is None:
-        return WORKER_MODE_PACKET
-    if raw.strip().lower() == WORKER_MODE_SKILL:
-        return WORKER_MODE_SKILL
-    return WORKER_MODE_PACKET
 
 
 def contains_review_session_marker(text: str) -> bool:
@@ -1429,512 +1404,6 @@ class RepairCommitPreflightError(RunError):
 def _not_implemented(command: str) -> int:
     print(f"agent-session-loop {command}: not implemented yet", file=sys.stderr)
     return NOT_IMPLEMENTED_EXIT
-
-
-TASK_PACKET_HEADING_PREFIX = "# ASL session task packet"
-
-
-@dataclass(frozen=True)
-class SessionTaskPacket:
-    """Structured, harness-neutral packet for one runner-managed session.
-
-    The packet is a compact autonomous-worker prompt that stands in for the
-    large manual ``session-run`` skill: the Python runner owns readiness,
-    locking, session selection, and verification, so none of that policy is
-    embedded here. Plan contents are referenced as paths to read rather than
-    inlined. :meth:`render` produces the prompt string; the structured fields
-    let the runner (packet mode) reason about the selected session without
-    re-parsing the prompt.
-    """
-
-    harness: str
-    plan_dir: str
-    session_id: str
-    session_path: str
-    context_path: str
-    progress_path: str | None = None
-    expansion_path: str | None = None
-    predecessor_id: str | None = None
-    predecessor_path: str | None = None
-    repair_references: tuple[str, ...] = ()
-    mailbox_enabled: bool = False
-    mailbox_read_command: str | None = None
-    mailbox_notify_command: str | None = None
-    mailbox_ask_command: str | None = None
-    mailbox_resume_ask_command: str | None = None
-    pending_guidance: tuple[mailbox.MailboxMessage, ...] = ()
-    reply_block: tuple[str, ...] = field(default_factory=tuple)
-    resolution_block: tuple[str, ...] = field(default_factory=tuple)
-    workspace: workspaces.ResolvedWorkspace | None = None
-    session_scope: plans.SessionScope | None = None
-    session_kind: str = SESSION_KIND_IMPLEMENTATION
-
-    @property
-    def has_reply_context(self) -> bool:
-        return bool(self.reply_block)
-
-    @property
-    def has_resolution_context(self) -> bool:
-        return bool(self.resolution_block)
-
-    @property
-    def is_review(self) -> bool:
-        return self.session_kind == SESSION_KIND_REVIEW
-
-    def render(self) -> str:
-        lines: list[str] = [f"{TASK_PACKET_HEADING_PREFIX} — session {self.session_id}"]
-        lines.append("")
-        if self.is_review:
-            lines.append(
-                "You are an autonomous ASL reviewer. Review the work of this "
-                "plan's prior sessions exactly as this one review session "
-                "specifies, then stop. Do not implement anything and do not "
-                "modify any file in the repository under review. The Python "
-                "runner owns readiness, locking, and session selection. The "
-                "runner owns authoritative final verification of your review "
-                "artifacts; you own focused validation while writing them."
-            )
-        else:
-            lines.append(
-                "You are an autonomous ASL worker. Implement exactly this one "
-                "session, then stop. The Python runner owns readiness, locking, "
-                "and session selection. The runner owns authoritative final "
-                "verification; you own focused validation during implementation."
-            )
-        lines.append("")
-
-        lines.append("## Selected session (fixed — do not reinterpret)")
-        lines.append(f"- Session ID: {self.session_id}")
-        lines.append(f"- Session file: {self.session_path}")
-        if self.expansion_path is not None:
-            lines.append(
-                "- Expansion notes (authoritative factual corrections): "
-                f"{self.expansion_path}"
-            )
-        lines.append("")
-
-        lines.append(
-            "## Read before reviewing (open these paths; not embedded)"
-            if self.is_review
-            else "## Read before implementing (open these paths; not embedded)"
-        )
-        lines.append(f"- Shared context: {self.context_path}")
-        if self.progress_path is not None:
-            lines.append(
-                f"- Progress journal (cross-session digest): {self.progress_path}"
-            )
-        if self.predecessor_path is not None:
-            lines.append(
-                f"- Predecessor handoff: {self.predecessor_path} "
-                "(read its `## Handoff` section)"
-            )
-        lines.append("")
-
-        if self.workspace is not None and self.session_scope is not None:
-            lines.extend(
-                run_prompts._workspace_prompt_lines(self.workspace, self.session_scope)
-            )
-            lines.append("")
-
-        if self.repair_references:
-            lines.append("## Verification repair references")
-            for reference in self.repair_references:
-                lines.append(f"- {reference}")
-            lines.append("")
-
-        if self.mailbox_enabled:
-            assert self.mailbox_read_command is not None
-            assert self.mailbox_notify_command is not None
-            assert self.mailbox_ask_command is not None
-            assert self.mailbox_resume_ask_command is not None
-            lines.extend(
-                run_prompts._mailbox_protocol_lines(
-                    read_command=self.mailbox_read_command,
-                    notify_command=self.mailbox_notify_command,
-                    ask_command=self.mailbox_ask_command,
-                    resume_ask_command=self.mailbox_resume_ask_command,
-                    pending_guidance=self.pending_guidance,
-                )
-            )
-            lines.append("")
-
-        if self.is_review:
-            lines.append("## Review")
-            lines.append(
-                "Execute the instructions above the `## Handoff` section of "
-                f"{self.session_path}. Judge the work; do not repair it. "
-                "During the review, run focused read-only checks that help "
-                "you substantiate a finding. Do not rerun the full Completion "
-                "Contract solely as a final gate: after you signal "
-                "completion, the runner executes it authoritatively. If it "
-                "fails, the runner restores this session to pending and "
-                "supplies the failed-check evidence for repair."
-            )
-            lines.append("")
-
-            lines.append("## Allowed mutation (the only writes this session may make)")
-            lines.append(
-                f"- Write the review verdict `{FINAL_REVIEW_FILENAME}` and the "
-                f"structured artifact `{FINAL_REVIEW_ARTIFACT_FILENAME}` into "
-                f"{self.plan_dir}, exactly as the session file specifies."
-            )
-            lines.append(
-                f"- In {self.session_path}, set `- **Status**: complete` and "
-                "fill the `## Handoff` fields for this session only."
-            )
-            lines.append(
-                f"- Record new facts under `{plans.DISCOVERED_FACTS_HEADING}` "
-                f"and open uncertainties under `{plans.OPEN_QUESTIONS_HEADING}` "
-                "(flat, top-level bullets)."
-            )
-            lines.append(
-                "- Do not edit any file in the repository under review, any "
-                "other session file, progress.md, manifest readiness "
-                "metadata, or any lock file. A finding is how you report a "
-                "defect; a fix is not yours to write."
-            )
-            lines.append("")
-        else:
-            lines.append("## Implement")
-            lines.append(
-                "Execute the instructions above the `## Handoff` section of "
-                f"{self.session_path}. Make real changes. During implementation, "
-                "run focused checks that help you iterate. Do not rerun the full "
-                "Completion Contract solely as a final gate: after you signal "
-                "completion, the runner executes it authoritatively. If it fails, "
-                "the runner restores this session to pending and supplies the "
-                "failed-check evidence for repair."
-            )
-            lines.append("")
-
-            lines.append(
-                "## Allowed mutation (the only write that completes this session)"
-            )
-            lines.append(
-                f"- In {self.session_path}, set `- **Status**: complete` and fill "
-                "the `## Handoff` fields for this session only."
-            )
-            lines.append(
-                f"- Record new facts under `{plans.DISCOVERED_FACTS_HEADING}` and "
-                f"open uncertainties under `{plans.OPEN_QUESTIONS_HEADING}` "
-                "(flat, top-level bullets)."
-            )
-            lines.append(
-                "- Do not edit progress.md, manifest readiness metadata, or any "
-                "lock file."
-            )
-            lines.append(
-                "- Do not edit any other session's `session-<id>.md` or "
-                "`session-<id>.expand.md`; the runner hashes them before the "
-                "turn and pauses the run if any of them changes."
-            )
-            lines.append("")
-
-        if self.is_review:
-            lines.append("## Notes for future sessions")
-            lines.append(
-                "- Every defect worth acting on belongs in the review verdict "
-                "as a finding with its own repair group; do not write "
-                "guidance into another session's file and do not leave it "
-                "inline in chat."
-            )
-            lines.append("")
-        else:
-            lines.append("## Notes for future sessions")
-            lines.append(
-                "- Write guidance for a later session into this session's "
-                "`## Handoff`, which the next session reads as its predecessor "
-                "handoff; never inline in chat and never in another session's "
-                "file."
-            )
-            lines.append("")
-
-        lines.append("## Runner signal protocol")
-        lines.append(
-            "- Before printing either runner signal, wait for or explicitly stop "
-            "every background command you started, including commands the harness "
-            "auto-backgrounded. Reading a command's output file does not prove its "
-            "process exited."
-        )
-        lines.append(
-            "- After writing the `complete` handoff, print `Runner status: complete`."
-        )
-        lines.append(
-            "- To stop without completing, print `Runner status: paused` then "
-            "`RUNNER_PAUSE: <reason> - <detail>` reusing the existing "
-            "vocabulary (blocked, unsafe, verify-failed, malformed-plan, ...)."
-        )
-
-        if self.reply_block:
-            lines.append("")
-            lines.extend(self.reply_block)
-        elif self.resolution_block:
-            lines.append("")
-            lines.extend(self.resolution_block)
-
-        return "\n".join(lines)
-
-
-def build_task_packet(
-    harness: str,
-    plan_dir: str | Path,
-    *,
-    session_id: str | plans.SessionId,
-    predecessor_id: str | plans.SessionId | None = None,
-    has_expansion: bool = False,
-    has_progress: bool = True,
-    reply: str | None = None,
-    reply_context: qna.QnAContext | None = None,
-    resolution_action: mailbox.ResolutionAction | str | None = None,
-    resolution_note: str | None = None,
-    resolution_context: qna.QnAContext | None = None,
-    repair_references: Sequence[str] = (),
-    mailbox_enabled: bool = False,
-    state_dir: str | Path | None = None,
-    pending_guidance: Sequence[mailbox.MailboxMessage] = (),
-    workspace: workspaces.ResolvedWorkspace | None = None,
-    session_scope: plans.SessionScope | None = None,
-    session_kind: str = SESSION_KIND_IMPLEMENTATION,
-) -> SessionTaskPacket:
-    """Build the compact autonomous-worker packet for one selected session.
-
-    ``harness`` is validated (Codex, Claude, and Copilot all yield the same
-    harness-neutral body). The packet names the exact ``session_id`` and the
-    artifact paths to read; it embeds neither manual-mode readiness/lock
-    policy nor any session-selection logic. Optional inputs are included only
-    when applicable:
-
-    - ``predecessor_id`` adds the immediate predecessor handoff reference.
-    - ``has_expansion`` adds the ``session-<id>.expand.md`` correction path.
-    - ``has_progress`` adds the ``progress.md`` digest path (default on).
-    - ``repair_references`` add verification-repair references.
-    - ``mailbox_enabled`` adds the scoped live-guidance protocol, shell-safe
-      commands, and any ``pending_guidance`` captured for this turn.
-    - ``reply`` + ``reply_context`` append the operator-reply block; the
-      runner supplies these only on the first resumed turn, so reply context
-      never leaks onto later turns.
-    - ``resolution_action`` + ``resolution_context`` append a distinct
-      answerless-resolution block. ``resolution_note`` preserves omitted and
-      empty notes without ever sharing the operator-reply representation.
-    - ``session_kind`` selects the worker role: a ``review`` session renders
-      reviewer duties and read-only mutation rules instead of the
-      implementation-worker text.
-
-    The returned :class:`SessionTaskPacket` carries structured data and a
-    :meth:`~SessionTaskPacket.render` method producing the prompt string.
-    """
-    # Validate the harness even though the body is harness-neutral, so an
-    # unknown harness fails fast the same way the other prompt builders do.
-    harnesses.get_adapter(harness)
-
-    if session_kind not in SESSION_KINDS:
-        raise ValueError(f"unknown session kind: {session_kind!r}")
-    canonical_dir = plans.canonicalize_path(plan_dir)
-    selected = plans.parse_session_id(session_id)
-    if (workspace is None) != (session_scope is None):
-        raise ValueError("workspace and session_scope must be provided together")
-    pending_guidance_tuple = tuple(pending_guidance)
-    if pending_guidance_tuple and not mailbox_enabled:
-        raise ValueError("pending_guidance requires mailbox_enabled")
-
-    predecessor_value: str | None = None
-    predecessor_path: str | None = None
-    if predecessor_id is not None:
-        predecessor = plans.parse_session_id(predecessor_id)
-        predecessor_value = predecessor.value
-        predecessor_path = str(canonical_dir / predecessor.filename)
-
-    reply_block: tuple[str, ...] = ()
-    resolution_block: tuple[str, ...] = ()
-    if reply_context is not None or reply is not None:
-        if reply_context is None or reply is None:
-            raise ValueError("reply and reply_context must be provided together")
-        reply_text = reply.strip()
-        if not reply_text:
-            raise ValueError("reply must contain non-whitespace content")
-        reply_block = (
-            run_prompts.REPLY_CONTEXT_HEADING,
-            "",
-            *run_prompts._reply_context_body(reply_text, reply_context),
-        )
-    resolution_requested = (
-        resolution_action is not None
-        or resolution_context is not None
-        or resolution_note is not None
-    )
-    if resolution_requested:
-        if reply_block:
-            raise ValueError("reply and resolution contexts are mutually exclusive")
-        if resolution_action is None or resolution_context is None:
-            raise ValueError(
-                "resolution_action and resolution_context must be provided together"
-            )
-        resolution_block = (
-            run_prompts.RESOLUTION_CONTEXT_HEADING,
-            "",
-            *run_prompts._resolution_context_body(
-                resolution_action,
-                resolution_note,
-                resolution_context,
-            ),
-        )
-
-    return SessionTaskPacket(
-        harness=harnesses.get_adapter(harness).name,
-        plan_dir=run_prompts._prompt_plan_dir(canonical_dir),
-        session_id=selected.value,
-        session_path=str(canonical_dir / selected.filename),
-        context_path=str(canonical_dir / "context.md"),
-        progress_path=(
-            str(canonical_dir / plans.PROGRESS_FILE_NAME) if has_progress else None
-        ),
-        expansion_path=(
-            str(canonical_dir / selected.expansion_filename) if has_expansion else None
-        ),
-        predecessor_id=predecessor_value,
-        predecessor_path=predecessor_path,
-        repair_references=tuple(repair_references),
-        mailbox_enabled=mailbox_enabled,
-        mailbox_read_command=(
-            run_prompts._mailbox_read_command_text(canonical_dir, state_dir)
-            if mailbox_enabled
-            else None
-        ),
-        mailbox_notify_command=(
-            run_prompts._mailbox_notify_command_text(canonical_dir, state_dir)
-            if mailbox_enabled
-            else None
-        ),
-        mailbox_ask_command=(
-            run_prompts._mailbox_ask_command_text(
-                canonical_dir, state_dir, resume=False
-            )
-            if mailbox_enabled
-            else None
-        ),
-        mailbox_resume_ask_command=(
-            run_prompts._mailbox_ask_command_text(canonical_dir, state_dir, resume=True)
-            if mailbox_enabled
-            else None
-        ),
-        pending_guidance=pending_guidance_tuple,
-        reply_block=reply_block,
-        resolution_block=resolution_block,
-        workspace=workspace,
-        session_scope=session_scope,
-        session_kind=session_kind,
-    )
-
-
-def _predecessor_session_id(
-    snapshot: plans.PlanSnapshot, session_id: str
-) -> str | None:
-    """Return the id of the session immediately before ``session_id``.
-
-    Uses the plan's declared session order (not integer arithmetic) so dotted
-    ids resolve correctly. Returns ``None`` for the first session or when the
-    session is not found in the snapshot.
-    """
-    index = next(
-        (
-            position
-            for position, session in enumerate(snapshot.sessions)
-            if session.id == session_id
-        ),
-        None,
-    )
-    if index is None or index == 0:
-        return None
-    return snapshot.sessions[index - 1].id
-
-
-def _session_has_expansion(plan_dir: Path, session_id: str) -> bool:
-    """Return True when ``session-<id>.expand.md`` exists in ``plan_dir``."""
-    try:
-        selected = plans.parse_session_id(session_id)
-    except plans.PlanError:
-        return False
-    return (plan_dir / selected.expansion_filename).is_file()
-
-
-def _resolution_source_metadata(
-    pending: run_prompts._PendingResolution,
-) -> dict[str, Any]:
-    """Return fixed-shape, body-free identity for a pending resolution."""
-    if pending.action not in mailbox.RESOLUTION_ACTIONS:
-        raise ValueError("pending resolution has an invalid action")
-    if pending.note is not None and not isinstance(pending.note, str):
-        raise ValueError("pending resolution note must be a string or None")
-    return {
-        "run_id": pending.context.run_id,
-        "session_id": pending.context.session_id,
-        "turn_index": pending.context.turn_index,
-        "question_id": pending.question_id,
-        "resolution_message_id": pending.resolution_message_id,
-        "resolution_seq": pending.resolution_seq,
-        "action": pending.action,
-        "note_length": (len(pending.note) if pending.note is not None else None),
-    }
-
-
-def _questions_command_text(plan_dir: str, state_dir_arg: str | None) -> str:
-    parts = ["asl", "questions", plan_dir]
-    if state_dir_arg:
-        parts.extend(["--state-dir", state_dir_arg])
-    return shlex.join(parts)
-
-
-def _reply_command_text(plan_dir: str, state_dir_arg: str | None) -> str:
-    # ``--resume`` rehydrates harness/model/effort from the persisted
-    # run_config so a paused non-default-harness run never silently resumes on
-    # the ``codex`` default.
-    parts = ["asl", "run", plan_dir, "--resume"]
-    if state_dir_arg:
-        parts.extend(["--state-dir", state_dir_arg])
-    parts.extend(["--reply", "TEXT"])
-    return shlex.join(parts)
-
-
-def _build_interactive_help(
-    args: argparse.Namespace,
-    plan_dir: str,
-) -> dict[str, Any] | None:
-    """Return a payload describing how an operator can resume a paused run.
-
-    Returns ``None`` when paused-run Q&A context cannot be loaded (no paused
-    state, missing artifacts, or session advanced underneath the pause), so
-    the caller can keep its existing payload shape unchanged.
-    """
-    state_dir_arg = getattr(args, "state_dir", None)
-    try:
-        context = qna.load_qna_context(plan_dir, state_dir=state_dir_arg)
-    except qna.QnAError, plans.PlanError, OSError:
-        return None
-    return {
-        "questions_command": _questions_command_text(plan_dir, state_dir_arg),
-        "reply_command": _reply_command_text(plan_dir, state_dir_arg),
-        "session_id": context.session_id,
-        "next_pending_id": context.next_pending_id,
-        "turn_index": context.turn_index,
-        "artifact_paths": qna.artifact_paths_payload(context),
-        "rendered_prompt": qna.render_resolver_prompt(context),
-    }
-
-
-def _attach_interactive_help(
-    args: argparse.Namespace,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    """Attach ``interactive_help`` to a paused payload when Q&A context loads."""
-    if not payload.get("paused"):
-        return payload
-    plan_dir = payload.get("plan_dir") or getattr(args, "plan_dir", None)
-    if not plan_dir:
-        return payload
-    help_payload = _build_interactive_help(args, str(plan_dir))
-    if help_payload is not None:
-        payload["interactive_help"] = help_payload
-    return payload
 
 
 def _requested_model(
@@ -11928,7 +11397,8 @@ def _dry_run_payload(
         else None
     )
     use_registered_packet = (
-        workspace is not None and _worker_mode() == WORKER_MODE_PACKET
+        workspace is not None
+        and task_packet._worker_mode() == task_packet.WORKER_MODE_PACKET
     )
     packet_kwargs: dict[str, Any] = {}
     if use_registered_packet:
@@ -11951,8 +11421,12 @@ def _dry_run_payload(
                 if is_review_session
                 else SESSION_KIND_IMPLEMENTATION
             ),
-            "predecessor_id": _predecessor_session_id(snapshot, next_pending.id),
-            "has_expansion": _session_has_expansion(snapshot.plan_dir, next_pending.id),
+            "predecessor_id": task_packet._predecessor_session_id(
+                snapshot, next_pending.id
+            ),
+            "has_expansion": task_packet._session_has_expansion(
+                snapshot.plan_dir, next_pending.id
+            ),
             "has_progress": (snapshot.plan_dir / plans.PROGRESS_FILE_NAME).is_file(),
             "repair_references": repair_references,
             "mailbox_enabled": mailbox_enabled,
@@ -11963,7 +11437,7 @@ def _dry_run_payload(
         }
     if reply_context is not None and reply_text is not None:
         if use_registered_packet:
-            prompt = build_task_packet(
+            prompt = task_packet.build_task_packet(
                 turn_harness,
                 snapshot.plan_dir,
                 reply=reply_text,
@@ -11994,7 +11468,7 @@ def _dry_run_payload(
         }
     else:
         if use_registered_packet:
-            prompt = build_task_packet(
+            prompt = task_packet.build_task_packet(
                 turn_harness,
                 snapshot.plan_dir,
                 **packet_kwargs,
@@ -13827,9 +13301,11 @@ def _run_locked(
             # mode); ASL_WORKER_MODE=skill restores the legacy `session-run`
             # skill invocation as a temporary rollback. Either way the manual
             # `$session-run` path is unchanged.
-            worker_mode = _worker_mode()
-            predecessor_id = _predecessor_session_id(before, session_id)
-            has_expansion = _session_has_expansion(before.plan_dir, session_id)
+            worker_mode = task_packet._worker_mode()
+            predecessor_id = task_packet._predecessor_session_id(before, session_id)
+            has_expansion = task_packet._session_has_expansion(
+                before.plan_dir, session_id
+            )
             has_progress = (before.plan_dir / plans.PROGRESS_FILE_NAME).is_file()
             repair_references = _verification_repair_state(event_path, session_id)[
                 "references"
@@ -13970,7 +13446,7 @@ def _run_locked(
                 assert turn_reply is not None
                 turn_reply_context = turn_reply.context
                 turn_reply_text = turn_reply.text
-                if worker_mode == WORKER_MODE_SKILL:
+                if worker_mode == task_packet.WORKER_MODE_SKILL:
                     prompt = run_prompts.build_reply_prompt(
                         turn_harness,
                         before.plan_dir,
@@ -13983,7 +13459,7 @@ def _run_locked(
                         session_scope=session_scope,
                     )
                 else:
-                    prompt = build_task_packet(
+                    prompt = task_packet.build_task_packet(
                         turn_harness,
                         before.plan_dir,
                         session_id=session_id,
@@ -14020,7 +13496,7 @@ def _run_locked(
             elif use_resolution_prompt:
                 assert turn_resolution is not None
                 turn_resolution_context = turn_resolution.context
-                if worker_mode == WORKER_MODE_SKILL:
+                if worker_mode == task_packet.WORKER_MODE_SKILL:
                     prompt = run_prompts.build_resolution_prompt(
                         turn_harness,
                         before.plan_dir,
@@ -14034,7 +13510,7 @@ def _run_locked(
                         session_scope=session_scope,
                     )
                 else:
-                    prompt = build_task_packet(
+                    prompt = task_packet.build_task_packet(
                         turn_harness,
                         before.plan_dir,
                         session_id=session_id,
@@ -14054,13 +13530,15 @@ def _run_locked(
                     ).render()
                 prompt_kind = "resolution"
                 reply_source_meta = None
-                resolution_source_meta = _resolution_source_metadata(turn_resolution)
+                resolution_source_meta = task_packet._resolution_source_metadata(
+                    turn_resolution
+                )
                 persisted_prompt = _resolution_argv_placeholder(
                     turn_resolution.action,
                     resolution_source_meta["note_length"],
                 )
             else:
-                if worker_mode == WORKER_MODE_SKILL:
+                if worker_mode == task_packet.WORKER_MODE_SKILL:
                     prompt = run_prompts.build_session_prompt(
                         turn_harness,
                         before.plan_dir,
@@ -14071,7 +13549,7 @@ def _run_locked(
                         session_scope=session_scope,
                     )
                 else:
-                    prompt = build_task_packet(
+                    prompt = task_packet.build_task_packet(
                         turn_harness,
                         before.plan_dir,
                         session_id=session_id,
@@ -16474,7 +15952,7 @@ def _print_text_outcome(payload: dict[str, Any]) -> None:
 
 
 def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None:
-    _attach_interactive_help(args, payload)
+    task_packet._attach_interactive_help(args, payload)
     try:
         if args.json:
             responses.print_json(payload)
@@ -17070,10 +16548,10 @@ def doctor_from_args(args: argparse.Namespace) -> int:
     if (
         prompt_workspace is not None
         and prompt_scope is not None
-        and _worker_mode() == WORKER_MODE_PACKET
+        and task_packet._worker_mode() == task_packet.WORKER_MODE_PACKET
     ):
         assert snapshot.next_pending is not None
-        prompt = build_task_packet(
+        prompt = task_packet.build_task_packet(
             args.harness,
             snapshot.plan_dir,
             session_id=snapshot.next_pending.id,
@@ -17082,8 +16560,10 @@ def doctor_from_args(args: argparse.Namespace) -> int:
                 if is_generated_review_session_file(snapshot.next_pending.path)
                 else SESSION_KIND_IMPLEMENTATION
             ),
-            predecessor_id=_predecessor_session_id(snapshot, snapshot.next_pending.id),
-            has_expansion=_session_has_expansion(
+            predecessor_id=task_packet._predecessor_session_id(
+                snapshot, snapshot.next_pending.id
+            ),
+            has_expansion=task_packet._session_has_expansion(
                 snapshot.plan_dir, snapshot.next_pending.id
             ),
             has_progress=(snapshot.plan_dir / plans.PROGRESS_FILE_NAME).is_file(),

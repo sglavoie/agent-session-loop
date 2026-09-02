@@ -25,6 +25,7 @@ from agent_session_loop import (
     review,
     runner,
     state,
+    task_packet,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -2095,7 +2096,7 @@ class VerificationRepairLoopTests(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertTrue(payload["ok"])
         prompt = self._turn_prompt(payload)
-        self.assertTrue(prompt.startswith(runner.TASK_PACKET_HEADING_PREFIX))
+        self.assertTrue(prompt.startswith(task_packet.TASK_PACKET_HEADING_PREFIX))
         self.assertNotIn("session-run", prompt)
 
     def test_skill_worker_mode_restores_session_run_invocation(self) -> None:
@@ -2141,7 +2142,7 @@ class VerificationRepairLoopTests(unittest.TestCase):
         _second_completed, second_payload = self._run()
 
         prompt = self._turn_prompt(second_payload)
-        self.assertTrue(prompt.startswith(runner.TASK_PACKET_HEADING_PREFIX))
+        self.assertTrue(prompt.startswith(task_packet.TASK_PACKET_HEADING_PREFIX))
         self.assertIn("Verification repair references", prompt)
         self.assertIn("Prior verification attempt 1 failed", prompt)
         self.assertIn(fingerprint, prompt)

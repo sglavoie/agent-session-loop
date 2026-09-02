@@ -28,6 +28,7 @@ from agent_session_loop import (
     run_prompts,
     runner,
     state,
+    task_packet,
 )
 from tests.support import (
     init_git_repo,
@@ -894,29 +895,29 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
     def test_questions_command_text_includes_state_dir_when_provided(self) -> None:
         self.assertEqual(
             "asl questions /tmp/plan",
-            runner._questions_command_text("/tmp/plan", None),
+            task_packet._questions_command_text("/tmp/plan", None),
         )
         self.assertEqual(
             "asl questions /tmp/plan --state-dir /tmp/state",
-            runner._questions_command_text("/tmp/plan", "/tmp/state"),
+            task_packet._questions_command_text("/tmp/plan", "/tmp/state"),
         )
 
     def test_reply_command_text_includes_state_dir_when_provided(self) -> None:
         self.assertEqual(
             "asl run /tmp/plan --resume --reply TEXT",
-            runner._reply_command_text("/tmp/plan", None),
+            task_packet._reply_command_text("/tmp/plan", None),
         )
         self.assertEqual(
             "asl run /tmp/plan --resume --state-dir /tmp/state --reply TEXT",
-            runner._reply_command_text("/tmp/plan", "/tmp/state"),
+            task_packet._reply_command_text("/tmp/plan", "/tmp/state"),
         )
 
     def test_interactive_help_commands_shell_quote_dynamic_paths(self) -> None:
-        questions = runner._questions_command_text(
+        questions = task_packet._questions_command_text(
             "/tmp/plan dir",
             "/tmp/state dir",
         )
-        reply = runner._reply_command_text(
+        reply = task_packet._reply_command_text(
             "/tmp/plan dir",
             "/tmp/state dir",
         )
@@ -963,16 +964,16 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 "plan_dir": str(plan_dir),
             }
 
-            runner._attach_interactive_help(args, payload)
+            task_packet._attach_interactive_help(args, payload)
 
             help_payload = payload["interactive_help"]
             self.assertIsInstance(help_payload, dict)
             self.assertEqual(
-                runner._questions_command_text(str(plan_dir), str(state_dir)),
+                task_packet._questions_command_text(str(plan_dir), str(state_dir)),
                 help_payload["questions_command"],
             )
             self.assertEqual(
-                runner._reply_command_text(str(plan_dir), str(state_dir)),
+                task_packet._reply_command_text(str(plan_dir), str(state_dir)),
                 help_payload["reply_command"],
             )
             self.assertEqual("1", help_payload["session_id"])
@@ -1001,7 +1002,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 "plan_dir": str(plan_dir),
             }
 
-            runner._attach_interactive_help(args, payload)
+            task_packet._attach_interactive_help(args, payload)
 
             self.assertNotIn("interactive_help", payload)
 
@@ -1014,7 +1015,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 "plan_dir": str(plan_dir),
             }
 
-            runner._attach_interactive_help(args, payload)
+            task_packet._attach_interactive_help(args, payload)
 
             self.assertNotIn("interactive_help", payload)
 

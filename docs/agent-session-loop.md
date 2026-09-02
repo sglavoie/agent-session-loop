@@ -1352,7 +1352,7 @@ authoritative post-turn verification. On failure it restores the session to
 pending and supplies the captured evidence to the next repair turn.
 
 Autonomous `asl run` turns prompt the harness with a Python-built session task
-packet (`runner.build_task_packet`): a harness-neutral prompt that references
+packet (`task_packet.build_task_packet`): a harness-neutral prompt that references
 the session file, `context.md`, `progress.md`, expansion notes, and the
 predecessor handoff by absolute path and embeds no readiness, lock, or
 session-selection policy — the runner owns all of that. Packet turns do not

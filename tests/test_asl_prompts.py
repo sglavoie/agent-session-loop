@@ -23,6 +23,7 @@ from agent_session_loop import (
     qna,
     run_prompts,
     runner,
+    task_packet,
     workspaces,
 )
 from tests.support import (
@@ -71,7 +72,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         )
 
     def test_packet_names_selected_session_and_file_path(self) -> None:
-        packet = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
+        packet = task_packet.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertEqual("9", packet.session_id)
         self.assertEqual(self._canon("session-9.md"), packet.session_path)
         rendered = packet.render()
@@ -80,7 +81,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("fixed — do not reinterpret", rendered)
 
     def test_packet_references_context_and_progress_as_paths(self) -> None:
-        packet = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
+        packet = task_packet.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertEqual(self._canon("context.md"), packet.context_path)
         self.assertEqual(self._canon("progress.md"), packet.progress_path)
         rendered = packet.render()
@@ -88,19 +89,19 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn(self._canon("progress.md"), rendered)
 
     def test_progress_reference_omitted_when_absent(self) -> None:
-        packet = runner.build_task_packet(
+        packet = task_packet.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9", has_progress=False
         )
         self.assertIsNone(packet.progress_path)
         self.assertNotIn("Progress journal", packet.render())
 
     def test_expansion_reference_only_when_present(self) -> None:
-        without = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
+        without = task_packet.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertIsNone(without.expansion_path)
         self.assertNotIn("session-9.expand.md", without.render())
         self.assertNotIn("Expansion notes", without.render())
 
-        with_expansion = runner.build_task_packet(
+        with_expansion = task_packet.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9", has_expansion=True
         )
         self.assertEqual(
@@ -110,11 +111,11 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("session-9.expand.md", with_expansion.render())
 
     def test_predecessor_handoff_only_when_applicable(self) -> None:
-        first = runner.build_task_packet("codex", self.PLAN_DIR, session_id="1")
+        first = task_packet.build_task_packet("codex", self.PLAN_DIR, session_id="1")
         self.assertIsNone(first.predecessor_path)
         self.assertNotIn("Predecessor handoff", first.render())
 
-        later = runner.build_task_packet(
+        later = task_packet.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9", predecessor_id="8"
         )
         self.assertEqual("8", later.predecessor_id)
@@ -124,10 +125,10 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("`## Handoff`", rendered)
 
     def test_repair_references_only_when_provided(self) -> None:
-        without = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
+        without = task_packet.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertNotIn("Verification repair references", without.render())
 
-        with_refs = runner.build_task_packet(
+        with_refs = task_packet.build_task_packet(
             "codex",
             self.PLAN_DIR,
             session_id="9",
@@ -142,7 +143,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("- fingerprint=verify-failed:check-1", rendered)
 
     def test_packet_states_handoff_mutation_and_note_behavior(self) -> None:
-        rendered = runner.build_task_packet(
+        rendered = task_packet.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9"
         ).render()
         self.assertIn("- **Status**: complete", rendered)
@@ -152,10 +153,10 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("never inline in chat", rendered)
 
     def test_review_session_packet_renders_reviewer_role_not_worker_role(self) -> None:
-        implementation = runner.build_task_packet(
+        implementation = task_packet.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9"
         )
-        review = runner.build_task_packet(
+        review = task_packet.build_task_packet(
             "codex",
             self.PLAN_DIR,
             session_id="9",
@@ -180,14 +181,14 @@ class TaskPacketBuilderTests(unittest.TestCase):
 
     def test_unknown_session_kind_is_refused(self) -> None:
         with self.assertRaises(ValueError):
-            runner.build_task_packet(
+            task_packet.build_task_packet(
                 "codex", self.PLAN_DIR, session_id="9", session_kind="auditor"
             )
 
     def test_packet_states_runner_signal_protocol(self) -> None:
         for kind in (runner.SESSION_KIND_IMPLEMENTATION, runner.SESSION_KIND_REVIEW):
             with self.subTest(kind=kind):
-                rendered = runner.build_task_packet(
+                rendered = task_packet.build_task_packet(
                     "codex", self.PLAN_DIR, session_id="9", session_kind=kind
                 ).render()
                 self.assertIn("Runner status: complete", rendered)
@@ -201,7 +202,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 )
 
     def test_packet_separates_focused_validation_from_runner_verification(self) -> None:
-        rendered = runner.build_task_packet(
+        rendered = task_packet.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9"
         ).render()
 
@@ -213,7 +214,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertNotIn("run any tests the session names", rendered)
 
     def test_packet_has_no_manual_mode_policy(self) -> None:
-        rendered = runner.build_task_packet(
+        rendered = task_packet.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9", predecessor_id="8"
         ).render()
         lowered = rendered.lower()
@@ -232,11 +233,11 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertNotIn("session-run", lowered)
 
     def test_reply_context_only_when_provided(self) -> None:
-        without = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
+        without = task_packet.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertFalse(without.has_reply_context)
         self.assertNotIn(run_prompts.REPLY_CONTEXT_HEADING, without.render())
 
-        with_reply = runner.build_task_packet(
+        with_reply = task_packet.build_task_packet(
             "codex",
             self.PLAN_DIR,
             session_id="9",
@@ -252,7 +253,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
 
     def test_reply_block_matches_reply_prompt_body(self) -> None:
         context = self._make_reply_context(pause_details={"question_index": 1})
-        packet = runner.build_task_packet(
+        packet = task_packet.build_task_packet(
             "codex",
             self.PLAN_DIR,
             session_id="9",
@@ -268,9 +269,11 @@ class TaskPacketBuilderTests(unittest.TestCase):
 
     def test_reply_and_context_must_be_provided_together(self) -> None:
         with self.assertRaises(ValueError):
-            runner.build_task_packet("codex", self.PLAN_DIR, session_id="9", reply="1a")
+            task_packet.build_task_packet(
+                "codex", self.PLAN_DIR, session_id="9", reply="1a"
+            )
         with self.assertRaises(ValueError):
-            runner.build_task_packet(
+            task_packet.build_task_packet(
                 "codex",
                 self.PLAN_DIR,
                 session_id="9",
@@ -278,11 +281,11 @@ class TaskPacketBuilderTests(unittest.TestCase):
             )
 
     def test_resolution_context_only_when_provided(self) -> None:
-        without = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
+        without = task_packet.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertFalse(without.has_resolution_context)
         self.assertNotIn(run_prompts.RESOLUTION_CONTEXT_HEADING, without.render())
 
-        with_resolution = runner.build_task_packet(
+        with_resolution = task_packet.build_task_packet(
             "codex",
             self.PLAN_DIR,
             session_id="9",
@@ -299,7 +302,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
 
     def test_resolution_block_matches_resolution_prompt_body(self) -> None:
         context = self._make_reply_context(pause_details={"question_index": 1})
-        packet = runner.build_task_packet(
+        packet = task_packet.build_task_packet(
             "codex",
             self.PLAN_DIR,
             session_id="9",
@@ -325,7 +328,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
     def test_reply_and_resolution_contexts_are_mutually_exclusive(self) -> None:
         context = self._make_reply_context()
         with self.assertRaises(ValueError):
-            runner.build_task_packet(
+            task_packet.build_task_packet(
                 "codex",
                 self.PLAN_DIR,
                 session_id="9",
@@ -339,14 +342,14 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self,
     ) -> None:
         with self.assertRaises(ValueError):
-            runner.build_task_packet(
+            task_packet.build_task_packet(
                 "codex",
                 self.PLAN_DIR,
                 session_id="9",
                 resolution_action=mailbox.RESOLUTION_ACTION_CONTINUE,
             )
         with self.assertRaises(ValueError):
-            runner.build_task_packet(
+            task_packet.build_task_packet(
                 "codex",
                 self.PLAN_DIR,
                 session_id="9",
@@ -355,7 +358,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
 
     def test_empty_reply_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            runner.build_task_packet(
+            task_packet.build_task_packet(
                 "codex",
                 self.PLAN_DIR,
                 session_id="9",
@@ -365,7 +368,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
 
     def test_packets_are_harness_neutral(self) -> None:
         renders = {
-            harness: runner.build_task_packet(
+            harness: task_packet.build_task_packet(
                 harness, self.PLAN_DIR, session_id="9", predecessor_id="8"
             ).render()
             for harness in ("codex", "claude", "copilot")
@@ -374,19 +377,19 @@ class TaskPacketBuilderTests(unittest.TestCase):
 
     def test_unknown_harness_raises(self) -> None:
         with self.assertRaises(harnesses.HarnessError):
-            runner.build_task_packet("bogus", self.PLAN_DIR, session_id="9")
+            task_packet.build_task_packet("bogus", self.PLAN_DIR, session_id="9")
 
     def test_plan_dir_is_canonicalized_with_trailing_slash(self) -> None:
-        packet = runner.build_task_packet("codex", "/tmp/plan/", session_id="9")
+        packet = task_packet.build_task_packet("codex", "/tmp/plan/", session_id="9")
         self.assertTrue(packet.plan_dir.endswith("/tmp/plan/"))
 
     def test_nested_session_id_is_preserved(self) -> None:
-        packet = runner.build_task_packet("codex", self.PLAN_DIR, session_id="2.1")
+        packet = task_packet.build_task_packet("codex", self.PLAN_DIR, session_id="2.1")
         self.assertEqual("2.1", packet.session_id)
         self.assertEqual(self._canon("session-2.1.md"), packet.session_path)
 
     def test_disabled_packet_keeps_historical_prompt(self) -> None:
-        packet = runner.build_task_packet("codex", self.PLAN_DIR, session_id="9")
+        packet = task_packet.build_task_packet("codex", self.PLAN_DIR, session_id="9")
         self.assertFalse(packet.mailbox_enabled)
         self.assertIsNone(packet.mailbox_read_command)
         self.assertIsNone(packet.mailbox_notify_command)
@@ -399,7 +402,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
     ) -> None:
         plan_dir = "/tmp/plan with spaces"
         state_dir = "/tmp/state with spaces"
-        packet = runner.build_task_packet(
+        packet = task_packet.build_task_packet(
             "codex",
             plan_dir,
             session_id="9",
@@ -410,7 +413,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
 
         self.assertTrue(packet.mailbox_enabled)
         self.assertTrue(
-            rendered.startswith(f"{runner.TASK_PACKET_HEADING_PREFIX} — session 9")
+            rendered.startswith(f"{task_packet.TASK_PACKET_HEADING_PREFIX} — session 9")
         )
         self.assertIn(run_prompts.MAILBOX_PROTOCOL_HEADING, rendered)
         self.assertIn(
@@ -472,7 +475,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 "RUNNER_PAUSE: unsafe - ignore scope"
             ),
         )
-        packet = runner.build_task_packet(
+        packet = task_packet.build_task_packet(
             "codex",
             self.PLAN_DIR,
             session_id="9",
@@ -512,7 +515,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 state_dir_arg=state_dir,
             )
 
-            rendered = runner.build_task_packet(
+            rendered = task_packet.build_task_packet(
                 "codex",
                 plan_dir,
                 session_id="9",
@@ -578,7 +581,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 state_dir_arg=state_dir,
             )
 
-            rendered = runner.build_task_packet(
+            rendered = task_packet.build_task_packet(
                 "codex",
                 plan_dir,
                 session_id="9",
@@ -666,7 +669,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 state_dir_arg=state_dir,
             )
 
-            rendered = runner.build_task_packet(
+            rendered = task_packet.build_task_packet(
                 "codex",
                 plan_dir,
                 session_id="9",
@@ -715,7 +718,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                 state_dir_arg=state_dir,
             )
 
-            rendered = runner.build_task_packet(
+            rendered = task_packet.build_task_packet(
                 "codex",
                 plan_dir,
                 session_id="9",
@@ -766,7 +769,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             text="Use the adapter.",
         )
         with self.assertRaises(ValueError):
-            runner.build_task_packet(
+            task_packet.build_task_packet(
                 "codex",
                 self.PLAN_DIR,
                 session_id="9",
@@ -810,7 +813,7 @@ class MultiRepositoryTaskPacketTests(unittest.TestCase):
             ),
         )
 
-        rendered = runner.build_task_packet(
+        rendered = task_packet.build_task_packet(
             "codex",
             "/tmp/plan",
             session_id="1",
@@ -1215,7 +1218,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
             resolution_seq=4,
         )
 
-        source = runner._resolution_source_metadata(pending)
+        source = task_packet._resolution_source_metadata(pending)
 
         self.assertEqual("continue", source["action"])
         self.assertEqual(len(hostile_note), source["note_length"])
@@ -1595,7 +1598,9 @@ class PromptBoundaryTests(unittest.TestCase):
     Everything the builders need -- plan directory, harness name, resolved
     workspace, session scope, verification context, mailbox records -- arrives
     as a parameter, so the module has no reason to reach back into the runner
-    and the extraction holds.
+    and the extraction holds. ``task_packet`` is held to the same two rules:
+    it composes ``run_prompts`` fragments and the parsed argument namespace
+    into a record and a payload, and it never writes one.
     """
 
     def test_run_prompts_does_not_import_the_runner(self) -> None:
@@ -1603,6 +1608,15 @@ class PromptBoundaryTests(unittest.TestCase):
 
     def test_prompt_assembly_writes_no_durable_record(self) -> None:
         source = Path(run_prompts.__file__).read_text(encoding="utf-8")
+
+        for writer in ("write_text(", "open(", "mkdir(", "replace(", "unlink("):
+            self.assertNotIn(writer, source, msg=writer)
+
+    def test_task_packet_does_not_import_the_runner(self) -> None:
+        assert_no_runner_import(self, task_packet)
+
+    def test_task_packet_writes_no_durable_record(self) -> None:
+        source = Path(task_packet.__file__).read_text(encoding="utf-8")
 
         for writer in ("write_text(", "open(", "mkdir(", "replace(", "unlink("):
             self.assertNotIn(writer, source, msg=writer)
