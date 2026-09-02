@@ -86,9 +86,11 @@ from . import (
 class ReadinessStateWriter(Protocol):
     """Writes a plan's readiness metadata, reporting failure rather than raising.
 
-    Satisfied by the runner's ``_write_readiness_state`` today and by the
-    readiness-gate boundary once that is extracted. It is a seam rather than an
-    import because the readiness gate leaves the runner after this module does.
+    Satisfied by ``readiness_gate.write_readiness_state``. It stays a seam
+    rather than an import because the readiness gate left the runner *after*
+    this module did, and because the dependency has to run this way round: the
+    readiness gate pauses through :func:`_pause_run`, so an import back the
+    other way would be a cycle.
     """
 
     def __call__(
@@ -435,10 +437,10 @@ def _runtime_reason_remediation(
 ) -> dict[str, Any] | None:
     """The repair hint a stable pause reason resolves to, if it has one.
 
-    Shaped like ``_readiness_repair_hints`` entries so a consumer reads one
-    remediation vocabulary whichever source produced it. The plan directory and
-    repository root are substituted when the payload knows them, leaving the
-    placeholders intact rather than quoting them when it does not.
+    Shaped like ``readiness_gate._readiness_repair_hints`` entries so a consumer
+    reads one remediation vocabulary whichever source produced it. The plan
+    directory and repository root are substituted when the payload knows them,
+    leaving the placeholders intact rather than quoting them when it does not.
     """
 
     hint = preflight.runtime_repair_hint(reason)

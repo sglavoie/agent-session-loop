@@ -663,7 +663,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("manifest-readiness", repair["category"])
         # The fix: target_state is `complete`, not `loop-ready`. This is the
         # whole point of the review-only complete start branch in
-        # `_repair_readiness_gate`.
+        # `readiness_gate._repair_readiness_gate`.
         self.assertEqual("complete", repair["target_state"])
         metadata = plans.read_readiness_metadata(self.plan_dir)
         self.assertEqual("complete", metadata.state)

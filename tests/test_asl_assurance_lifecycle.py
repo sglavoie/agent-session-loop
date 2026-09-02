@@ -29,6 +29,7 @@ from agent_session_loop import (
     harnesses,
     live_verification,
     plans,
+    readiness_gate,
     run_control,
     run_persistence,
     run_selection,
@@ -1002,7 +1003,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                 exit_code=exit_code,
                 event_path=Path(str(payload["events_path"])),
                 payload=payload,
-                write_readiness_state=runner._write_readiness_state,
+                write_readiness_state=readiness_gate.write_readiness_state,
                 audit_context=self._context(payload),
             )
         return code, calls
@@ -1185,7 +1186,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                     exit_code=0,
                     event_path=event_path,
                     payload=payload,
-                    write_readiness_state=runner._write_readiness_state,
+                    write_readiness_state=readiness_gate.write_readiness_state,
                     audit_context=self._context(payload),
                 )
 
@@ -1262,7 +1263,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                     exit_code=runner.INTERRUPTED_EXIT,
                     event_path=Path(str(payload["events_path"])),
                     payload=payload,
-                    write_readiness_state=runner._write_readiness_state,
+                    write_readiness_state=readiness_gate.write_readiness_state,
                     audit_context=self._context(payload),
                 )
 
@@ -1287,7 +1288,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                     exit_code=1,
                     event_path=Path(str(payload["events_path"])),
                     payload=payload,
-                    write_readiness_state=runner._write_readiness_state,
+                    write_readiness_state=readiness_gate.write_readiness_state,
                     audit_context=self._context(payload),
                 )
 
@@ -1329,7 +1330,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                     exit_code=0,
                     event_path=event_path,
                     payload=payload,
-                    write_readiness_state=runner._write_readiness_state,
+                    write_readiness_state=readiness_gate.write_readiness_state,
                     audit_context=self._context(payload),
                 )
 
@@ -1402,7 +1403,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                     exit_code=0,
                     event_path=event_path,
                     payload=payload,
-                    write_readiness_state=runner._write_readiness_state,
+                    write_readiness_state=readiness_gate.write_readiness_state,
                     persistence=persistence,
                     audit_context=context,
                     cancel=abort,

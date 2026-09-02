@@ -32,6 +32,7 @@ from agent_session_loop import (
     intervention,
     plans,
     preflight,
+    readiness_gate,
     review,
     review_guard,
     review_repair,
@@ -1797,16 +1798,20 @@ class ResumeGateTests(unittest.TestCase):
         for readiness_state in preflight.RESUME_READINESS_STATES:
             with self.subTest(state=readiness_state):
                 self.assertTrue(
-                    runner._resume_gate_passed(self._report(state=readiness_state))
+                    readiness_gate._resume_gate_passed(
+                        self._report(state=readiness_state)
+                    )
                 )
 
     def test_resume_gate_rejects_other_states_and_findings(self) -> None:
         for readiness_state in ("draft", "reviewed", "complete"):
             with self.subTest(state=readiness_state):
                 self.assertFalse(
-                    runner._resume_gate_passed(self._report(state=readiness_state))
+                    readiness_gate._resume_gate_passed(
+                        self._report(state=readiness_state)
+                    )
                 )
-        self.assertFalse(runner._resume_gate_passed(self._report(state=None)))
+        self.assertFalse(readiness_gate._resume_gate_passed(self._report(state=None)))
         for severity in ("red", "yellow"):
             with self.subTest(severity=severity):
                 report = self._report(
@@ -1819,11 +1824,15 @@ class ResumeGateTests(unittest.TestCase):
                         ),
                     ),
                 )
-                self.assertFalse(runner._resume_gate_passed(report))
+                self.assertFalse(readiness_gate._resume_gate_passed(report))
 
     def test_readiness_gate_still_requires_loop_ready(self) -> None:
-        self.assertTrue(runner._readiness_gate_passed(self._report(state="loop-ready")))
-        self.assertFalse(runner._readiness_gate_passed(self._report(state="running")))
+        self.assertTrue(
+            readiness_gate._readiness_gate_passed(self._report(state="loop-ready"))
+        )
+        self.assertFalse(
+            readiness_gate._readiness_gate_passed(self._report(state="running"))
+        )
 
 
 class RunVerificationEnforcementTests(unittest.TestCase):

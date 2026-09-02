@@ -37,6 +37,7 @@ from agent_session_loop import (
     pause_policy,
     plans,
     preflight,
+    readiness_gate,
     responses,
     review,
     run_commit,
@@ -5819,7 +5820,7 @@ class ParserAndStateTests(unittest.TestCase):
                 payload,
                 persistence=persistence,
                 finalize_readiness=run_termination.readiness_finalizer(
-                    runner._write_readiness_state
+                    readiness_gate.write_readiness_state
                 ),
             )
 
@@ -5860,7 +5861,7 @@ class ParserAndStateTests(unittest.TestCase):
                 payload,
                 persistence=persistence,
                 finalize_readiness=run_termination.readiness_finalizer(
-                    runner._write_readiness_state
+                    readiness_gate.write_readiness_state
                 ),
             )
 
@@ -5983,7 +5984,7 @@ class ParserAndStateTests(unittest.TestCase):
                 payload,
                 persistence=persistence,
                 finalize_readiness=run_termination.readiness_finalizer(
-                    runner._write_readiness_state
+                    readiness_gate.write_readiness_state
                 ),
             )
 
@@ -6004,7 +6005,7 @@ class ParserAndStateTests(unittest.TestCase):
                 payload,
                 persistence=persistence,
                 finalize_readiness=run_termination.readiness_finalizer(
-                    runner._write_readiness_state
+                    readiness_gate.write_readiness_state
                 ),
             )
 
@@ -6023,7 +6024,7 @@ class ParserAndStateTests(unittest.TestCase):
                 ),
             ),
         )
-        return runner._readiness_gate_payload(report, cwd=cwd)
+        return readiness_gate._readiness_gate_payload(report, cwd=cwd)
 
     def test_a_blocking_pause_names_the_command_that_clears_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6120,7 +6121,7 @@ class ParserAndStateTests(unittest.TestCase):
                 payload,
                 persistence=persistence,
                 finalize_readiness=run_termination.readiness_finalizer(
-                    runner._write_readiness_state
+                    readiness_gate.write_readiness_state
                 ),
             )
 

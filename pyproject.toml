@@ -145,6 +145,7 @@ module = [
     "agent_session_loop.progress_cli",
     "agent_session_loop.progress_repair",
     "agent_session_loop.qna",
+    "agent_session_loop.readiness_gate",
     "agent_session_loop.repository_evidence",
     "agent_session_loop.repository_intent",
     "agent_session_loop.repository_registration",

@@ -46,6 +46,7 @@ from agent_session_loop import (
     mailbox_rendering,
     plans,
     process_tree,
+    readiness_gate,
     review_session_body,
     run_commit,
     run_control,
@@ -12818,7 +12819,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     event_path,
                     payload,
                     finalize_readiness=run_termination.readiness_finalizer(
-                        runner._write_readiness_state
+                        readiness_gate.write_readiness_state
                     ),
                 )
 
@@ -13219,7 +13220,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     payload,
                     persistence=persistence,
                     finalize_readiness=run_termination.readiness_finalizer(
-                        runner._write_readiness_state
+                        readiness_gate.write_readiness_state
                     ),
                 )
 
@@ -13256,7 +13257,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     payload,
                     persistence=persistence,
                     finalize_readiness=run_termination.readiness_finalizer(
-                        runner._write_readiness_state
+                        readiness_gate.write_readiness_state
                     ),
                 )
 
