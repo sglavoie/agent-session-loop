@@ -30,6 +30,7 @@ from agent_session_loop import (
     readiness_gate,
     review,
     review_continuation,
+    review_delta,
     review_guard,
     review_repair,
     review_session_body,
@@ -508,7 +509,7 @@ class StructuredReviewArtifactTests(unittest.TestCase):
             self.assertFalse(verdict["ok"])
             self.assertEqual(review.REVIEW_REASON_MALFORMED_ARTIFACT, verdict["reason"])
             self.assertIn("repository registry", verdict["error"])
-            self.assertEqual([], runner._prior_review_findings(plan_dir))
+            self.assertEqual([], review_delta._prior_review_findings(plan_dir))
 
     def test_runner_and_autopilot_report_same_verdict_payload(self) -> None:
         autopilot = _load_script_module(
@@ -1831,7 +1832,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             event_path,
             events.Event(events.REVIEW_REPAIR_REOPENED_EVENT, reopen),
         )
-        recovered = runner._last_repairs_materialized_cycle(event_path)
+        recovered = review_delta._last_repairs_materialized_cycle(event_path)
         assert recovered is not None
         self.assertEqual("SVC", recovered["findings"][0]["repo"])
         self.assertEqual(
@@ -2849,7 +2850,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         self.assertIsNone(pending.artifact_valid)
         self.assertIsNone(pending.artifact_error)
         self.assertEqual(
-            1, runner._review_cycle_state(event_path)["repairs_materialized"]
+            1, review_delta._review_cycle_state(event_path)["repairs_materialized"]
         )
 
         events.append_event(
@@ -2869,7 +2870,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         )
         self.assertEqual(1, deduped.historical_materializations)
         self.assertEqual(
-            1, runner._review_cycle_state(event_path)["repairs_materialized"]
+            1, review_delta._review_cycle_state(event_path)["repairs_materialized"]
         )
 
         event_path.unlink()
@@ -4118,7 +4119,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 "previous_fingerprints": (),
                 "previous_repeat_keys": (),
             },
-            runner._review_cycle_state(event_path),
+            review_delta._review_cycle_state(event_path),
         )
         records = [
             {
@@ -4144,7 +4145,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        state_payload = runner._review_cycle_state(event_path)
+        state_payload = review_delta._review_cycle_state(event_path)
         self.assertEqual(3, state_payload["cycle"])
         self.assertEqual(1, state_payload["repairs_materialized"])
         self.assertEqual((), state_payload["previous_fingerprints"])
@@ -4239,7 +4240,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        state_payload = runner._review_cycle_state(event_path)
+        state_payload = review_delta._review_cycle_state(event_path)
 
         self.assertEqual(
             review.finding_repeat_keys([finding]),
@@ -4285,7 +4286,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-                state_payload = runner._review_cycle_state(event_path)
+                state_payload = review_delta._review_cycle_state(event_path)
 
                 self.assertEqual(expected, state_payload["previous_fingerprints"])
 
@@ -4315,7 +4316,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         )
         self.assertEqual(
             ("finding:corrected",),
-            runner._review_cycle_state(legacy_path)["previous_fingerprints"],
+            review_delta._review_cycle_state(legacy_path)["previous_fingerprints"],
         )
 
     def test_post_reopen_baseline_resolves_lineage_less_cycle_source(
@@ -4366,23 +4367,29 @@ class ReviewRepairCycleTests(unittest.TestCase):
         newer_path = write_history("newer", reopen_source="4", reopen_cycle=None)
         self.assertEqual(
             ("finding:newer",),
-            runner._review_cycle_state(newer_path, snapshot)["previous_fingerprints"],
+            review_delta._review_cycle_state(newer_path, snapshot)[
+                "previous_fingerprints"
+            ],
         )
         self.assertEqual(
             ("finding:newer",),
-            runner._review_cycle_state(newer_path)["previous_fingerprints"],
+            review_delta._review_cycle_state(newer_path)["previous_fingerprints"],
         )
 
         same_path = write_history("same", reopen_source="3", reopen_cycle=None)
         self.assertEqual(
             ("finding:same",),
-            runner._review_cycle_state(same_path, snapshot)["previous_fingerprints"],
+            review_delta._review_cycle_state(same_path, snapshot)[
+                "previous_fingerprints"
+            ],
         )
 
         older_path = write_history("older", reopen_source="2", reopen_cycle=None)
         self.assertEqual(
             ("finding:legacy",),
-            runner._review_cycle_state(older_path, snapshot)["previous_fingerprints"],
+            review_delta._review_cycle_state(older_path, snapshot)[
+                "previous_fingerprints"
+            ],
         )
 
         mismatch_path = write_history(
@@ -4390,7 +4397,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         )
         self.assertEqual(
             ("finding:legacy",),
-            runner._review_cycle_state(mismatch_path, snapshot)[
+            review_delta._review_cycle_state(mismatch_path, snapshot)[
                 "previous_fingerprints"
             ],
         )
@@ -4444,7 +4451,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
 
                 self.assertEqual(
                     ("finding:source-4",),
-                    runner._review_cycle_state(event_path, snapshot)[
+                    review_delta._review_cycle_state(event_path, snapshot)[
                         "previous_fingerprints"
                     ],
                 )
@@ -4476,7 +4483,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-                state_payload = runner._review_cycle_state(event_path)
+                state_payload = review_delta._review_cycle_state(event_path)
 
                 self.assertEqual(1, state_payload["cycle"])
                 self.assertEqual(
@@ -4630,7 +4637,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
             payload["review_cycles"][0]["disposition"],
         )
-        enforced = runner._review_cycle_state(event_path, snapshot)
+        enforced = review_delta._review_cycle_state(event_path, snapshot)
         projected_after = review_continuation.evaluate_review_continuation(
             snapshot, event_path, max_review_fix_cycles=1
         )
@@ -5947,7 +5954,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 },
             ),
         )
-        before_rereview = runner._review_cycle_state(
+        before_rereview = review_delta._review_cycle_state(
             self._events_path(), plans.inspect_plan(self.plan_dir)
         )
         self.assertEqual(

@@ -23,6 +23,7 @@ from agent_session_loop import (
     plans,
     prepare,
     review,
+    review_delta,
     runner,
     state,
     task_packet,
@@ -2255,7 +2256,7 @@ class VerificationRepairLoopTests(unittest.TestCase):
             ["a", "d"], [p["failures"][0]["stdout_sha256"] for p in priors]
         )
 
-        state_info = runner._verification_repair_state(event_path, "1")
+        state_info = review_delta._verification_repair_state(event_path, "1")
         self.assertEqual(3, state_info["attempt"])
         self.assertEqual(2, len(state_info["prior_fingerprints"]))
         references = state_info["references"]

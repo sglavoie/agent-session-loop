@@ -171,6 +171,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.retry_hints",
         "agent_session_loop.review",
         "agent_session_loop.review_continuation",
+        "agent_session_loop.review_delta",
         "agent_session_loop.review_guard",
         "agent_session_loop.review_repair",
         "agent_session_loop.review_session_body",

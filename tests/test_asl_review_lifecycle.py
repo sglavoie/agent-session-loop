@@ -34,6 +34,7 @@ from agent_session_loop import (
     plans,
     review,
     review_continuation,
+    review_delta,
     review_guard,
     review_repair,
     review_session_body,
@@ -953,7 +954,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 },
             ),
         )
-        delta, fallback_reason = runner._compute_review_delta_context(
+        delta, fallback_reason = review_delta._compute_review_delta_context(
             event_path=self._events_path(),
             plan_dir=self.plan_dir,
             cwd=self.repo_root,
@@ -2414,7 +2415,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 },
             ),
         )
-        delta, fallback_reason = runner._compute_review_delta_context(
+        delta, fallback_reason = review_delta._compute_review_delta_context(
             event_path=self._events_path(),
             plan_dir=self.plan_dir,
             cwd=self.repo_root,
@@ -4665,7 +4666,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
     def _compute(
         self, cwd: Path | None = None
     ) -> tuple[dict[str, Any] | None, str | None]:
-        return runner._compute_review_delta_context(
+        return review_delta._compute_review_delta_context(
             event_path=self.event_path,
             plan_dir=self.plan_dir,
             cwd=self.repo_root if cwd is None else cwd,
@@ -5320,7 +5321,9 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         self.assertEqual(["scratch.txt"], cycle["dirty_paths"])
         self.assertEqual(["scratch.txt"], recorded["dirty_paths"])
         # The reader of that record agrees on the key it was written under.
-        self.assertEqual(["scratch.txt"], runner._reviewed_baseline_dirty_paths(cycle))
+        self.assertEqual(
+            ["scratch.txt"], review_delta._reviewed_baseline_dirty_paths(cycle)
+        )
 
 
 class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):

@@ -42,6 +42,7 @@ from agent_session_loop import (
     responses,
     retention,
     review,
+    review_delta,
     review_guard,
     review_repair,
     review_session_body,
@@ -5298,7 +5299,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                     f"{alias}\n", encoding="utf-8"
                 )
 
-            delta, fallback = runner._compute_registered_review_delta_context(
+            delta, fallback = review_delta._compute_registered_review_delta_context(
                 event_path=event_path,
                 plan_dir=plan_dir,
                 workspace=context.workspace,
@@ -5333,7 +5334,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             )
 
             recovered_delta, recovered_fallback = (
-                runner._compute_registered_review_delta_context(
+                review_delta._compute_registered_review_delta_context(
                     event_path=event_path,
                     plan_dir=plan_dir,
                     workspace=context.workspace,
