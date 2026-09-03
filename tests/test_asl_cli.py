@@ -49,6 +49,7 @@ from agent_session_loop import (
     review_repair,
     review_session_body,
     review_session_contract,
+    run_entry,
     run_flags,
     run_inputs,
     run_prompts,
@@ -784,7 +785,7 @@ class CommandAndConfigTests(unittest.TestCase):
 
         self.assertFalse(default_args.no_mailbox)
         self.assertTrue(disabled_args.no_mailbox)
-        self.assertIn("no_mailbox", runner._RESUME_OVERLAY_DESTS)
+        self.assertIn("no_mailbox", run_entry._RESUME_OVERLAY_DESTS)
 
     def test_notify_and_outbox_include_parser_contract(self) -> None:
         parser = cli.build_parser()
@@ -1176,7 +1177,7 @@ class CommandAndConfigTests(unittest.TestCase):
             ["claude/.claude-personal", "notes"],
             repeated_args.review_guard_exclude,
         )
-        self.assertIn("review_guard_exclude", runner._RESUME_OVERLAY_DESTS)
+        self.assertIn("review_guard_exclude", run_entry._RESUME_OVERLAY_DESTS)
 
     def test_review_guard_include_ignored_defaults_off_and_round_trips(
         self,
@@ -1192,7 +1193,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertFalse(review_guard._review_guard_include_ignored(default_args))
         self.assertTrue(enabled_args.review_guard_include_ignored)
         self.assertTrue(review_guard._review_guard_include_ignored(enabled_args))
-        self.assertIn("review_guard_include_ignored", runner._RESUME_OVERLAY_DESTS)
+        self.assertIn("review_guard_include_ignored", run_entry._RESUME_OVERLAY_DESTS)
 
     def test_review_guard_exclude_merges_env_and_flags(self) -> None:
         args = cli.build_parser().parse_args(
@@ -1276,7 +1277,7 @@ class CommandAndConfigTests(unittest.TestCase):
             ]
             args = cli.build_parser().parse_args(tokens)
 
-            overlaid = runner._apply_resume_config(args, tokens)
+            overlaid = run_entry._apply_resume_config(args, tokens)
 
             self.assertEqual(["claude"], overlaid.review_guard_exclude)
 
@@ -1301,7 +1302,7 @@ class CommandAndConfigTests(unittest.TestCase):
             ]
             args = cli.build_parser().parse_args(tokens)
 
-            overlaid = runner._apply_resume_config(args, tokens)
+            overlaid = run_entry._apply_resume_config(args, tokens)
 
             self.assertTrue(overlaid.no_mailbox)
 

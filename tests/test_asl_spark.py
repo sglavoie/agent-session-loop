@@ -21,6 +21,7 @@ from agent_session_loop import (
     plans,
     prepare,
     review_guard,
+    run_entry,
     run_flags,
     run_inputs,
     run_selection,
@@ -82,7 +83,7 @@ class SparkFlagTests(unittest.TestCase):
             restored = parser.parse_args(
                 ["run", str(plan_dir), "--state-dir", str(root / "state"), "--resume"]
             )
-            runner._apply_resume_config(
+            run_entry._apply_resume_config(
                 restored,
                 ["run", str(plan_dir), "--state-dir", str(root / "state"), "--resume"],
             )
@@ -97,7 +98,7 @@ class SparkFlagTests(unittest.TestCase):
                 "--no-spark",
             ]
             disabled = parser.parse_args(disabled_argv)
-            runner._apply_resume_config(disabled, disabled_argv)
+            run_entry._apply_resume_config(disabled, disabled_argv)
             self.assertFalse(disabled.spark)
 
     def test_spark_requires_resolved_distinct_baseline(self) -> None:

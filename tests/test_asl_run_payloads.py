@@ -15,7 +15,7 @@ Four contracts:
 * The seeded-key contract -- every key a later writer indexes without a presence
   check is present with its empty value of the right type, and the two keys the
   package deliberately reaches through `setdefault` are deliberately absent.
-* The resume contract -- every dest `runner._RESUME_OVERLAY_DESTS` restores has
+* The resume contract -- every dest `run_entry._RESUME_OVERLAY_DESTS` restores has
   a key in the `run_config` block, because the overlay skips a missing dest
   silently rather than failing.
 * The preview contract -- `_dry_run_payload` renders through the same builders a
@@ -43,6 +43,7 @@ from agent_session_loop import (
     commit_settlement,
     events,
     plans,
+    run_entry,
     run_flags,
     run_payloads,
     run_selection,
@@ -361,7 +362,7 @@ class ResumeConfigContractTests(unittest.TestCase):
         # flag silently reset to its default on `asl run --resume`. This is the
         # one containment that makes the block a contract rather than a summary.
         config = self._config()
-        missing = sorted(set(runner._RESUME_OVERLAY_DESTS) - set(config))
+        missing = sorted(set(run_entry._RESUME_OVERLAY_DESTS) - set(config))
         self.assertEqual([], missing)
 
     def test_every_overlay_dest_is_a_real_flag_dest(self) -> None:
@@ -369,7 +370,7 @@ class ResumeConfigContractTests(unittest.TestCase):
         # flag joins it automatically -- which is exactly why the containment
         # above has to be asserted rather than reviewed.
         spec_dests = {flag.dest for flag in run_flags.RUN_FLAG_SPEC}
-        self.assertTrue(set(runner._RESUME_OVERLAY_DESTS) <= spec_dests)
+        self.assertTrue(set(run_entry._RESUME_OVERLAY_DESTS) <= spec_dests)
 
     def test_the_block_carries_two_keys_that_are_not_flag_dests(self) -> None:
         # `state_dir_override` is persisted under a different key than its dest

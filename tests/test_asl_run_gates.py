@@ -40,6 +40,7 @@ from agent_session_loop import (
     review_repair,
     review_session_body,
     review_session_contract,
+    run_entry,
     run_inputs,
     runner,
     session_overview,
@@ -139,7 +140,7 @@ class RunFlagValidationTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            restored = runner._apply_resume_config(
+            restored = run_entry._apply_resume_config(
                 argparse.Namespace(
                     plan_dir=str(plan_dir),
                     state_dir=str(state_root),

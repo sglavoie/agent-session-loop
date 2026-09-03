@@ -185,6 +185,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.run_contention",
         "agent_session_loop.run_control",
         "agent_session_loop.run_coordination",
+        "agent_session_loop.run_entry",
         "agent_session_loop.run_errors",
         "agent_session_loop.run_flags",
         "agent_session_loop.run_inputs",
