@@ -208,6 +208,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.workbench_server",
         "agent_session_loop.workspace_evidence",
         "agent_session_loop.workspaces",
+        "agent_session_loop.write_guards",
     }
 )
 
