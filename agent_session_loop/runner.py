@@ -27,7 +27,6 @@ from typing import Any
 from . import (
     agent_mux_delivery,
     agent_mux_projection,
-    assurance_report,
     clock,
     commit_groups,
     commit_settlement,
@@ -45,7 +44,6 @@ from . import (
     mailbox,
     mailbox_rendering,
     model_availability,
-    pause_policy,
     plans,
     preflight,
     qna,
@@ -68,6 +66,7 @@ from . import (
     run_coordination,
     run_flags,
     run_inputs,
+    run_outcome,
     run_payloads,
     run_persistence,
     run_prompts,
@@ -584,7 +583,7 @@ def _run_locked(
         # The image could not be put back, so the plan on disk is neither the
         # state the publication started from nor a published one. Refuse to run
         # rather than select out of a half-published generation.
-        payload = _error_payload(
+        payload = run_outcome._error_payload(
             args,
             reason="malformed-plan",
             message=(
@@ -680,7 +679,7 @@ def _run_locked(
                 state_dir=args.state_dir,
             )
         except qna.QnAError as error:
-            payload = _error_payload(
+            payload = run_outcome._error_payload(
                 args,
                 reason=error.reason,
                 message=error.error,
@@ -4790,359 +4789,6 @@ def _run_locked(
         inline_tail.stop()
 
 
-def _state_error_reason(error: state.StateError) -> tuple[str, bool]:
-    message = str(error).lower()
-    if "plan is locked" in message or "could not acquire lock" in message:
-        return "lock-contention", True
-    return "state-error", False
-
-
-def _error_payload(
-    args: argparse.Namespace,
-    *,
-    reason: str,
-    message: str,
-    paused: bool,
-    cwd: Path | None = None,
-    snapshot: plans.PlanSnapshot | None = None,
-) -> dict[str, Any]:
-    try:
-        plan_dir = str(
-            snapshot.plan_dir
-            if snapshot is not None
-            else plans.canonicalize_path(args.plan_dir)
-        )
-    except OSError:
-        plan_dir = str(args.plan_dir)
-
-    review_harness = getattr(args, "review_harness", None)
-    review_requested = review_harness is not None
-    payload = responses.error_payload(
-        "run",
-        reason=reason,
-        error=message,
-        paused=paused,
-        details={},
-        dry_run=getattr(args, "dry_run", False),
-        pause_reason=reason if paused else None,
-        pause_message=message if paused else "",
-        pause_details={},
-        commit_mode=run_selection._commit_mode_payload(args),
-        note=getattr(args, "note", None),
-        commits=[],
-        commit_groups=[],
-        plan_dir=plan_dir,
-        cwd=str(cwd) if cwd is not None else str(getattr(args, "cwd", "")),
-        harness=getattr(args, "harness", None),
-        completed_sessions=[],
-        completed_session_ids=[],
-        turns=[],
-        review_requested=review_requested,
-        review_harness=review_harness,
-        review_session_id=None,
-        review_output_path=(
-            str(review_session_contract.final_review_output_path(plan_dir))
-            if review_requested
-            else None
-        ),
-        review_completed=False,
-        review_verdict=None,
-        review_skipped_reason=reason if review_requested else None,
-    )
-    payload.update(run_selection._selected_model_effort_payload(args))
-    payload["spark"] = run_selection._safe_initial_spark_payload(args)
-    if paused:
-        # Match `run_termination.set_pause`: a paused error payload carries the same
-        # single-source-of-truth pause classification block.
-        payload["pause_policy"] = pause_policy.classify_pause(reason)
-    if snapshot is not None:
-        state_dir = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
-        payload["state_dir"] = str(state_dir)
-        payload["state_path"] = str(state_dir / events.STATE_FILE_NAME)
-        payload["event_path"] = str(state_dir / events.EVENTS_FILE_NAME)
-        payload["events_path"] = str(state_dir / events.EVENTS_FILE_NAME)
-        payload["lock_path"] = str(
-            state.lock_path_for_plan(snapshot.plan_dir, args.state_dir)
-        )
-        payload["initial_snapshot"] = _snapshot_payload(snapshot)
-        payload["final_snapshot"] = _snapshot_payload(snapshot)
-        try:
-            registry = plans.read_repository_registry(snapshot.plan_dir)
-            metadata = plans.load_plan_metadata(snapshot.plan_dir)
-        except plans.PlanError:
-            registry = None
-            metadata = None
-        if registry is not None and isinstance(metadata, plans.WorkspacePlanMetadata):
-            workspace_root = plans.canonicalize_path(metadata.workspace_root)
-            payload.update(
-                {
-                    "cwd": str(workspace_root),
-                    "workspace_root": str(workspace_root),
-                    "registry_digest": metadata.registry_digest,
-                    "repositories": [
-                        {
-                            "alias": repository.alias,
-                            "path": repository.path,
-                            "origin": repository.origin,
-                            "resolved_root": str(
-                                plans.canonicalize_path(
-                                    workspace_root / repository.path
-                                )
-                            ),
-                        }
-                        for repository in registry.repositories
-                    ],
-                }
-            )
-    return payload
-
-
-def _print_model_effort_lines(payload: dict[str, Any]) -> None:
-    model = payload.get("model")
-    model_source = payload.get("model_source")
-    if model is not None and model_source is not None:
-        print(f"Model: {model} ({model_source})")
-
-    effort = payload.get("effort")
-    if effort is not None:
-        effort_source = payload.get("effort_source")
-        if effort_source is None:
-            print(f"Effort: {effort}")
-        else:
-            print(f"Effort: {effort} ({effort_source})")
-
-
-def _commit_scope_label(commit: dict[str, Any]) -> str:
-    scope = commit.get("scope")
-    session = commit.get("session_id") or commit.get("session")
-    if scope == "session" and session is not None:
-        label = f"session {session}"
-    elif scope == "end":
-        label = "end"
-    else:
-        label = str(scope or "unknown")
-    alias = commit.get("repository_alias") or commit.get("repo")
-    return f"{label}, repository {alias}" if alias else label
-
-
-def _print_commit_outcome_lines(payload: dict[str, Any]) -> None:
-    commits = payload.get("commits")
-    if not isinstance(commits, list):
-        return
-    for commit in commits:
-        if not isinstance(commit, dict):
-            continue
-        label = _commit_scope_label(commit)
-        index = commit.get("commit_index", "?")
-        if commit.get("success"):
-            sha = commit.get("commit_sha") or "unknown"
-            print(f"Created commit {sha} ({label})")
-        else:
-            status = commit.get("status_result", "unknown")
-            print(f"Commit {index} failed ({label}): {status}")
-
-
-def _last_commit(payload: dict[str, Any]) -> dict[str, Any] | None:
-    commits = payload.get("commits")
-    if not isinstance(commits, list) or not commits:
-        return None
-    commit = commits[-1]
-    return commit if isinstance(commit, dict) else None
-
-
-def _print_text_outcome(payload: dict[str, Any]) -> None:
-    print(f"Plan: {payload['plan_dir']}")
-    workspace_root = payload.get("workspace_root")
-    if workspace_root is not None:
-        print(f"Workspace root: {workspace_root}")
-        repositories = payload.get("repositories")
-        if isinstance(repositories, list):
-            visible, omitted = workspaces.bounded_repository_rows(repositories)
-            aliases = [
-                str(row.get("alias"))
-                for row in visible
-                if isinstance(row, Mapping) and row.get("alias")
-            ]
-            if aliases:
-                suffix = f" (+{omitted} more)" if omitted else ""
-                print(f"Repositories: {', '.join(aliases)}{suffix}")
-    if payload.get("harness") is not None:
-        print(f"Harness: {payload['harness']}")
-        _print_model_effort_lines(payload)
-    spark = payload.get("spark")
-    if isinstance(spark, Mapping):
-        route = spark.get("active_route")
-        route_decision = route.get("decision") if isinstance(route, Mapping) else None
-        print(
-            "Spark: "
-            f"{'enabled' if spark.get('enabled') else 'disabled'}; "
-            f"route {route_decision or 'none'}; {spark.get('reason', 'unknown')}"
-        )
-        if spark.get("retry_at"):
-            print(f"Spark retry: {spark['retry_at']}")
-        if isinstance(route, Mapping) and route.get("fallback_reason"):
-            print(f"Spark fallback: {route['fallback_reason']}")
-        if isinstance(route, Mapping) and route.get("suppression_cause"):
-            print(f"Spark suppression: {route['suppression_cause']}")
-        if spark.get("warning"):
-            print(f"Spark warning: {spark['warning']}")
-    if "commit_mode" in payload:
-        print(f"Commit mode: {payload.get('commit_mode') or 'none'}")
-    if payload.get("run_dir") is not None:
-        print(f"Run dir: {payload['run_dir']}")
-    if payload.get("state_path") is not None:
-        print(f"State file: {payload['state_path']}")
-    if payload.get("events_path") is not None:
-        print(f"Events: {payload['events_path']}")
-    for line in run_reporting._note_lines(payload, prefix="Note"):
-        print(line)
-
-    if payload.get("dry_run") and payload["ok"]:
-        planned = payload.get("planned", {})
-        planned_audit_line = supervisor_audit.status_line(planned.get("audit"))
-        if planned_audit_line:
-            print(planned_audit_line)
-        next_pending = planned.get("next_pending")
-        if next_pending is None:
-            print("Next pending: none")
-            print("Dry run: nothing to invoke")
-            return
-        print(f"Next pending: session {next_pending}")
-        resolver_prompt = planned.get("resolver_prompt")
-        if resolver_prompt:
-            print("Resolver prompt:")
-            print(resolver_prompt)
-        print(f"Prompt: {planned['prompt']}")
-        invocation = planned["invocation"]
-        print(f"Transport: {invocation.get('transport', harnesses.TRANSPORT_EXEC)}")
-        print("Argv:")
-        for arg in invocation["argv"]:
-            print(f"  {arg}")
-        turn_plan = invocation.get("turn_plan")
-        if turn_plan is not None:
-            # Argv no longer states the access profile under this transport, so
-            # a dry run that printed only argv would no longer show the
-            # operator what the turn is actually allowed to do.
-            print("Turn plan:")
-            for line in json.dumps(turn_plan, indent=2, sort_keys=True).splitlines():
-                print(f"  {line}")
-        return
-
-    audit_line = supervisor_audit.status_line(
-        payload.get("assurance"), report=payload.get("assurance_report")
-    )
-    if audit_line:
-        print(audit_line)
-    for line in assurance_report.report_lines(payload.get("assurance_report")):
-        print(line)
-
-    for session_number in payload["completed_sessions"]:
-        print(f"Completed session {session_number}")
-    _print_commit_outcome_lines(payload)
-    commit_groups_payload = payload.get("commit_groups")
-    if isinstance(commit_groups_payload, list):
-        unresolved = [
-            group
-            for group in commit_groups_payload
-            if isinstance(group, Mapping) and group.get("status") != "complete"
-        ]
-        for group in unresolved[:3]:
-            successful = group.get("successful_repositories")
-            partial = (
-                [
-                    f"{row.get('alias') or row.get('key')}={row.get('commit_sha')}"
-                    for row in successful
-                    if isinstance(row, Mapping) and row.get("commit_sha")
-                ]
-                if isinstance(successful, list)
-                else []
-            )
-            print(
-                "Pending commit group: "
-                f"failed {group.get('failed_alias') or 'none'}; "
-                f"remaining "
-                f"{', '.join(group.get('remaining_aliases') or []) or 'none'}; "
-                f"partial SHAs {', '.join(partial) or 'none'}"
-            )
-        if len(unresolved) > 3:
-            print(f"Pending commit groups: +{len(unresolved) - 3} more")
-
-    if not payload["ok"]:
-        if payload.get("paused"):
-            print(f"Run paused: {payload['pause_reason']}", file=sys.stderr)
-            if payload.get("pause_message"):
-                print(f"Pause detail: {payload['pause_message']}", file=sys.stderr)
-            details = payload.get("pause_details") or payload.get("details")
-            guard = (
-                details.get("workspace_write_guard")
-                if isinstance(details, Mapping)
-                else None
-            )
-            if isinstance(guard, Mapping):
-                violations = guard.get("violations")
-                unavailable = guard.get("unavailable")
-                if violations:
-                    print(
-                        "Workspace scope violations retained; edit durable scope and "
-                        "rerun expansion/preflight.",
-                        file=sys.stderr,
-                    )
-                if unavailable:
-                    print(
-                        "Repository evidence unavailable; repair Git evidence before "
-                        "retrying.",
-                        file=sys.stderr,
-                    )
-        else:
-            print(f"Run failed: {payload['reason']}", file=sys.stderr)
-        if payload["turns"]:
-            turn = payload["turns"][-1]
-            print(f"Stdout: {turn['stdout_path']}", file=sys.stderr)
-            print(f"Stderr: {turn['stderr_path']}", file=sys.stderr)
-            print(f"Last message: {turn['last_message_path']}", file=sys.stderr)
-        interactive_help = payload.get("interactive_help")
-        if isinstance(interactive_help, dict):
-            questions_command = interactive_help.get("questions_command")
-            if questions_command:
-                print(f"Questions: {questions_command}", file=sys.stderr)
-        commit = _last_commit(payload)
-        if commit is not None:
-            print(f"Commit stdout: {commit['stdout_path']}", file=sys.stderr)
-            print(f"Commit stderr: {commit['stderr_path']}", file=sys.stderr)
-            print(f"Commit result: {commit['result_path']}", file=sys.stderr)
-        return
-
-    final_snapshot = payload["final_snapshot"]
-    next_pending = final_snapshot["next_pending"]
-    print(f"Run complete: {len(payload['completed_sessions'])} session(s) completed")
-    if next_pending is None:
-        print("Next pending: none")
-    else:
-        print(f"Next pending: session {next_pending}")
-    review_output_path = payload.get("review_output_path")
-    if payload.get("review_completed") and review_output_path:
-        print(f"Review: {review_output_path}")
-        review_verdict = payload.get("review_verdict")
-        if isinstance(review_verdict, dict):
-            status_line = review_verdict.get("status_line")
-            if status_line:
-                print(status_line)
-
-
-def _emit_run_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None:
-    task_packet._attach_interactive_help(args, payload)
-    try:
-        if args.json:
-            responses.print_json(payload)
-        else:
-            _print_text_outcome(payload)
-    except BrokenPipeError, OSError:
-        # A recovered run whose original pipe reader exited (helper
-        # early-exit) must not crash on its final emission; the same payload
-        # is already durable in state.json / result.json.
-        pass
-
-
 # Flag dests rehydrated from a persisted ``run_config`` by ``asl run --resume``.
 # Derived from ``RUN_FLAG_SPEC`` so new ordinary run flags join the overlay
 # automatically. Exclusions are flags that are positional, helper-owned, or
@@ -5377,7 +5023,7 @@ def run_from_args(
         try:
             args = _apply_resume_config(args, run_argv)
         except _ResumeUnavailable as error:
-            payload = _error_payload(
+            payload = run_outcome._error_payload(
                 args,
                 reason="resume-unavailable",
                 message=str(error),
@@ -5385,7 +5031,7 @@ def run_from_args(
             )
             payload["resume_command"] = error.command
             payload["details"] = {"resume_command": error.command}
-            _emit_run_payload(args, payload)
+            run_outcome._emit_run_payload(args, payload)
             return 1
 
     try:
@@ -5394,13 +5040,13 @@ def run_from_args(
             resolve_review_guard_excludes=review_guard._review_guard_excludes,
         )
     except (plans.PlanError, RunError) as error:
-        payload = _error_payload(
+        payload = run_outcome._error_payload(
             args,
             reason="input-error",
             message=str(error),
             paused=False,
         )
-        _emit_run_payload(args, payload)
+        run_outcome._emit_run_payload(args, payload)
         return 1
 
     reply_text = getattr(args, "reply", None)
@@ -5408,51 +5054,51 @@ def run_from_args(
     reply_origin = run_prompts.REPLY_ORIGIN_ARGV
     if reply_via_stdin:
         if reply_text is not None:
-            payload = _error_payload(
+            payload = run_outcome._error_payload(
                 args,
                 reason="conflicting-reply",
                 message="--reply and --reply-stdin are mutually exclusive",
                 paused=False,
                 cwd=cwd,
             )
-            _emit_run_payload(args, payload)
+            run_outcome._emit_run_payload(args, payload)
             return 1
         try:
             reply_text = run_prompts.read_reply_from_stdin()
         except OSError as error:
-            payload = _error_payload(
+            payload = run_outcome._error_payload(
                 args,
                 reason="reply-read-error",
                 message=str(error),
                 paused=False,
                 cwd=cwd,
             )
-            _emit_run_payload(args, payload)
+            run_outcome._emit_run_payload(args, payload)
             return 1
         reply_origin = run_prompts.REPLY_ORIGIN_STDIN
     if reply_text is not None and not reply_text.strip():
         flag = "--reply-stdin" if reply_via_stdin else "--reply"
-        payload = _error_payload(
+        payload = run_outcome._error_payload(
             args,
             reason="empty-reply",
             message=f"{flag} requires non-whitespace content",
             paused=False,
             cwd=cwd,
         )
-        _emit_run_payload(args, payload)
+        run_outcome._emit_run_payload(args, payload)
         return 1
 
     try:
         initial_snapshot = plans.inspect_plan(args.plan_dir)
     except plans.PlanError as error:
-        payload = _error_payload(
+        payload = run_outcome._error_payload(
             args,
             reason="malformed-plan",
             message=str(error),
             paused=True,
             cwd=cwd,
         )
-        _emit_run_payload(args, payload)
+        run_outcome._emit_run_payload(args, payload)
         return 1
 
     try:
@@ -5462,7 +5108,7 @@ def run_from_args(
         )
         run_inputs._validate_resume_workspace_binding(args, verification_context)
     except plans.PlanError as error:
-        payload = _error_payload(
+        payload = run_outcome._error_payload(
             args,
             reason="workspace-error",
             message=str(error),
@@ -5470,7 +5116,7 @@ def run_from_args(
             cwd=cwd,
             snapshot=initial_snapshot,
         )
-        _emit_run_payload(args, payload)
+        run_outcome._emit_run_payload(args, payload)
         return 1
 
     # After root/workspace resolution and before anything this run launches.
@@ -5487,7 +5133,7 @@ def run_from_args(
             initial_snapshot,
             cwd=verification_context.root,
         )
-        payload = _error_payload(
+        payload = run_outcome._error_payload(
             args,
             reason=events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
             message=run_inputs._repository_intent_message(
@@ -5519,7 +5165,7 @@ def run_from_args(
             details["repository_registration_error"] = registration_error
         payload["details"] = details
         payload["pause_details"] = dict(details)
-        _emit_run_payload(args, payload)
+        run_outcome._emit_run_payload(args, payload)
         return 1
 
     run_id = _utc_run_id()
@@ -5545,8 +5191,8 @@ def run_from_args(
                 wakeup_endpoint=wakeup_endpoint,
             )
         except state.StateError as error:
-            reason, paused = _state_error_reason(error)
-            payload = _error_payload(
+            reason, paused = run_outcome._state_error_reason(error)
+            payload = run_outcome._error_payload(
                 args,
                 reason=reason,
                 message=str(error),
@@ -5554,7 +5200,7 @@ def run_from_args(
                 cwd=cwd,
                 snapshot=initial_snapshot,
             )
-            _emit_run_payload(args, payload)
+            run_outcome._emit_run_payload(args, payload)
             return 1
 
         try:
@@ -5571,7 +5217,7 @@ def run_from_args(
                         state_dir=args.state_dir,
                     )
                     if conflicts:
-                        payload = _error_payload(
+                        payload = run_outcome._error_payload(
                             args,
                             reason=(
                                 events.PAUSE_REASON_WORKSPACE_REPOSITORY_CONTENTION
@@ -5586,7 +5232,7 @@ def run_from_args(
                         contention_details = run_contention.conflict_details(conflicts)
                         payload["details"] = contention_details
                         payload["pause_details"] = dict(contention_details)
-                        _emit_run_payload(args, payload)
+                        run_outcome._emit_run_payload(args, payload)
                         return 1
                 exit_code, payload = _run_locked(
                     args=args,
@@ -5604,7 +5250,7 @@ def run_from_args(
             finally:
                 state.release_lock(initial_snapshot.plan_dir, args.state_dir)
         except KeyboardInterrupt:
-            payload = _error_payload(
+            payload = run_outcome._error_payload(
                 args,
                 reason="interrupted",
                 message="run interrupted by user",
@@ -5612,7 +5258,7 @@ def run_from_args(
                 cwd=cwd,
                 snapshot=initial_snapshot,
             )
-            _emit_run_payload(args, payload)
+            run_outcome._emit_run_payload(args, payload)
             return INTERRUPTED_EXIT
         except (
             config.ConfigError,
@@ -5622,7 +5268,7 @@ def run_from_args(
             state.StateError,
             OSError,
         ) as error:
-            payload = _error_payload(
+            payload = run_outcome._error_payload(
                 args,
                 reason="run-error",
                 message=str(error),
@@ -5630,10 +5276,10 @@ def run_from_args(
                 cwd=cwd,
                 snapshot=initial_snapshot,
             )
-            _emit_run_payload(args, payload)
+            run_outcome._emit_run_payload(args, payload)
             return 1
 
-    _emit_run_payload(args, payload)
+    run_outcome._emit_run_payload(args, payload)
     return exit_code
 
 
@@ -5860,7 +5506,7 @@ def doctor_from_args(args: argparse.Namespace) -> int:
         return 0
 
     print(f"Harness: {adapter.name}")
-    _print_model_effort_lines(model_effort)
+    run_outcome._print_model_effort_lines(model_effort)
     print(f"Harness config: {harness_config['path']}")
     configured_harnesses = harness_config["configured_harnesses"]
     if configured_harnesses:

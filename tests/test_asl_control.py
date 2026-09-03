@@ -4919,7 +4919,7 @@ import sys
 import time
 
 sys.path.insert(0, sys.argv[1])
-from agent_session_loop import cli, runner, state
+from agent_session_loop import cli, run_outcome, state
 
 WATCHED = (signal.SIGUSR1, signal.SIGUSR2, signal.SIGINT, signal.SIGTERM)
 before = {number: signal.getsignal(number) for number in WATCHED}
@@ -4929,7 +4929,7 @@ window = float(sys.argv[3])
 emitting = pathlib.Path(sys.argv[4])
 emit_delay = float(sys.argv[5])
 real_acquire = state.acquire_lock
-real_emit = runner._emit_run_payload
+real_emit = run_outcome._emit_run_payload
 
 
 def widened_acquire(*args, **kwargs):
@@ -4947,7 +4947,7 @@ def delayed_emit(*args, **kwargs):
 
 state.acquire_lock = widened_acquire
 if emit_delay:
-    runner._emit_run_payload = delayed_emit
+    run_outcome._emit_run_payload = delayed_emit
 code = cli.main(sys.argv[6:])
 if {number: signal.getsignal(number) for number in WATCHED} != before:
     sys.exit(97)

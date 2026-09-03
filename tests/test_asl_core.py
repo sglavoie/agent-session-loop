@@ -6614,7 +6614,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
             state.acquire_lock(self.plan_dir, self.state_dir)
 
         message = str(raised.exception)
-        # The prefix is what `runner._state_error_reason` reads as
+        # The prefix is what `run_outcome._state_error_reason` reads as
         # lock-contention rather than an unrecoverable state error.
         self.assertIn("plan is locked", message)
         self.assertIn("some-other-host", message)

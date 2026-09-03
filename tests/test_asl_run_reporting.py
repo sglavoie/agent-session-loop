@@ -37,16 +37,16 @@ from agent_session_loop import commit_settlement, run_reporting, runner, turn_ex
 from tests.support import assert_no_runner_import
 
 #: The runner functions that still write ``sys.stderr`` directly after the
-#: move, and why none of them is the run's live output. All three run where no
-#: coordinator exists: ``_not_implemented`` answers an unimplemented
-#: subcommand, ``_print_text_outcome`` prints the after-the-fact summary once
-#: the run has already ended, and ``_print_doctor_error`` belongs to a separate
-#: command. Anything else appearing here is a second writer racing the
-#: coordinator for the terminal while a run is live.
+#: move, and why neither of them is the run's live output. Both run where no
+#: coordinator exists: ``_not_implemented`` answers an unimplemented subcommand
+#: and ``_print_doctor_error`` belongs to a separate command. The third writer
+#: of this kind, ``_print_text_outcome``, left for ``run_outcome`` in session
+#: 26 and is pinned there by ``tests/test_asl_run_outcome.py`` under the same
+#: rule. Anything else appearing here is a second writer racing the coordinator
+#: for the terminal while a run is live.
 RUNNER_STDERR_WRITERS = frozenset(
     {
         "_not_implemented",
-        "_print_text_outcome",
         "_print_doctor_error",
     }
 )

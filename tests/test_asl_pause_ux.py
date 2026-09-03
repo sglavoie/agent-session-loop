@@ -25,6 +25,7 @@ from agent_session_loop import (
     mailbox,
     pause_policy,
     qna,
+    run_outcome,
     run_persistence,
     run_prompts,
     run_termination,
@@ -1050,7 +1051,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         }
         err = io.StringIO()
         with redirect_stderr(err), redirect_stdout(io.StringIO()):
-            runner._print_text_outcome(payload)
+            run_outcome._print_text_outcome(payload)
 
         err_text = err.getvalue()
         self.assertIn("Last message: /tmp/plan/.state/last-message.txt", err_text)
@@ -1082,7 +1083,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         }
         err = io.StringIO()
         with redirect_stderr(err), redirect_stdout(io.StringIO()):
-            runner._print_text_outcome(payload)
+            run_outcome._print_text_outcome(payload)
 
         self.assertNotIn("Questions:", err.getvalue())
 
