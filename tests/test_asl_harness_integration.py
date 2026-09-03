@@ -89,6 +89,13 @@ RUN_EXIT_TIMEOUT_SECONDS = 120
 # out the suite's own clock.
 LOOP_RUN_TIMEOUT_SECONDS = 120
 
+# How long the fake harness parks at ``FAKE_CODEX_STREAM_GATE_DIR`` waiting for
+# the test to release it, and how long a test waits for it to arrive there. A
+# test that holds the gate is asserting on a turn that is still in flight, so
+# the bound is a hang backstop on the observer, not a window the observation has
+# to fit inside: the turn cannot end early no matter how loaded the machine is.
+STREAM_GATE_TIMEOUT_SECONDS = 120
+
 # The exact message the harness returned in run 20260814T210616107741Z-55923,
 # which fell through to a fail-closed ``nonzero-exit`` and paused the run with
 # four sessions still pending (ASI-125).
@@ -1661,7 +1668,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             fake_step_sleep="0",
             extra_env={
                 "FAKE_CODEX_STREAM_GATE_DIR": str(gate_dir),
-                "FAKE_CODEX_STREAM_GATE_TIMEOUT": "20",
+                "FAKE_CODEX_STREAM_GATE_TIMEOUT": str(STREAM_GATE_TIMEOUT_SECONDS),
             },
         )
 
@@ -1686,7 +1693,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 return active_turn
             return None
 
-        wait_until(harness_started, timeout=30)
+        wait_until(harness_started, timeout=STREAM_GATE_TIMEOUT_SECONDS)
         process.send_signal(signal.SIGINT)
         output = self.finish_run_pty(
             process=process,
@@ -1921,7 +1928,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             fake_step_sleep="0",
             extra_env={
                 "FAKE_CODEX_STREAM_GATE_DIR": str(gate_dir),
-                "FAKE_CODEX_STREAM_GATE_TIMEOUT": "20",
+                "FAKE_CODEX_STREAM_GATE_TIMEOUT": str(STREAM_GATE_TIMEOUT_SECONDS),
             },
         )
 
@@ -1953,7 +1960,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 return active_turn
             return None
 
-        wait_until(first_turn_logs_ready, timeout=30)
+        wait_until(first_turn_logs_ready, timeout=STREAM_GATE_TIMEOUT_SECONDS)
         os.write(master_fd, b"t")
         output = self.read_run_pty_until(
             master_fd,
@@ -4127,24 +4134,36 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
             statuses=("pending",)
         )
+        gate_dir = state_dir / "active-turn-stream-gates"
         run_process = subprocess.Popen(
             self.run_command(plan_dir=plan_dir, state_dir=state_dir, json_output=True),
             cwd=REPO_ROOT,
             env=self.loop_env(
                 config_home=config_home,
                 mode="streaming-success",
-                # The window this holds open has to cover two cold
-                # `python -m agent_session_loop status` subprocesses, which is
-                # far more than interpreter startup alone under a loaded
-                # parallel suite.
-                extra={"FAKE_CODEX_STEP_SLEEP": "8.0"},
+                # Two cold `python -m agent_session_loop status` subprocesses
+                # have to observe the turn while it is still in flight. Holding
+                # the harness at the stream gate makes that window explicit
+                # rather than racing a step sleep, which a machine saturated by
+                # the parallel shards can outlast at any value.
+                extra={
+                    "FAKE_CODEX_STEP_SLEEP": "0",
+                    "FAKE_CODEX_STREAM_GATE_DIR": str(gate_dir),
+                    "FAKE_CODEX_STREAM_GATE_TIMEOUT": str(STREAM_GATE_TIMEOUT_SECONDS),
+                },
             ),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        gate_continue_path = gate_dir / "session-1.continue"
 
         def cleanup_run_process() -> None:
+            # Release the gate first: a failed assertion above leaves the
+            # harness parked there, and killing the run while it waits would
+            # report a wedged child instead of the assertion that failed.
+            gate_dir.mkdir(parents=True, exist_ok=True)
+            gate_continue_path.write_text("continue\n", encoding="utf-8")
             if run_process.poll() is None:
                 run_process.kill()
             try:
@@ -4158,13 +4177,17 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         state_path = state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
 
         def active_turn_payload():
+            if not (gate_dir / "session-1.ready").exists():
+                return None
             if not state_path.exists():
                 return None
             raw = json.loads(state_path.read_text(encoding="utf-8"))
             active_turn = raw.get("active_turn")
             return active_turn if isinstance(active_turn, dict) else None
 
-        active_turn = wait_until(active_turn_payload)
+        active_turn = wait_until(
+            active_turn_payload, timeout=STREAM_GATE_TIMEOUT_SECONDS
+        )
         self.assertEqual(1, active_turn["session"])
         self.assertEqual(1, active_turn["turn_index"])
         self.assertTrue(active_turn["stdout_path"].endswith("/stdout.log"))
@@ -4211,6 +4234,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.assertIn("Stdout:", status_text.stdout)
         self.assertIn("Stderr:", status_text.stdout)
 
+        gate_continue_path.write_text("continue\n", encoding="utf-8")
         run_stdout, run_stderr = run_process.communicate(
             timeout=RUN_EXIT_TIMEOUT_SECONDS
         )
