@@ -80,6 +80,7 @@ RUNNER_SHRINK_HISTORY: tuple[tuple[str, int, int], ...] = (
     ("26", 5552, 114),
     ("27", 5070, 114),
     ("28", 4804, 113),
+    ("30", 4733, 113),
 )
 
 #: Every ``X = <module>.Y`` assignment in the runner today, mapped to the
@@ -94,7 +95,6 @@ RUNNER_ALIAS_FLOOR: dict[str, str] = {
     "AGENT_MUX_NOTIFY_TIMEOUT_ENV_VAR": "agent_mux_delivery",
     "AGENT_MUX_NOTIFY_TIMEOUT_SECONDS": "agent_mux_delivery",
     "AGENT_MUX_PAUSE_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_PAUSE_REASON": "agent_mux_delivery",
     "AGENT_MUX_PHASE_BY_EVENT": "agent_mux_delivery",
     "AGENT_MUX_SOURCE": "agent_mux_delivery",
     "AGENT_MUX_START_EVENT": "agent_mux_delivery",

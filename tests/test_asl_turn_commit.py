@@ -1523,15 +1523,25 @@ class UnregisteredCommitTargetTests(unittest.TestCase):
         # with its owning module made the line long enough for the formatter to
         # wrap the argument, and a text match reads that as a behaviour change.
         tree = ast.parse(inspect.getsource(runner._run_locked))
+
+        def names_the_context(node: ast.expr) -> bool:
+            # The verification context is reached through the run context now,
+            # so the argument is an attribute rather than a bare local.
+            if isinstance(node, ast.Name):
+                return node.id == "verification_context"
+            return (
+                isinstance(node, ast.Attribute)
+                and node.attr == "verification_context"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "ctx"
+            )
+
         selectors = {
             call.func.attr if isinstance(call.func, ast.Attribute) else call.func.id
             for call in ast.walk(tree)
             if isinstance(call, ast.Call)
             and isinstance(call.func, ast.Attribute | ast.Name)
-            and any(
-                isinstance(arg, ast.Name) and arg.id == "verification_context"
-                for arg in call.args
-            )
+            and any(names_the_context(arg) for arg in call.args)
         }
         self.assertIn("_dirty_commit_targets", selectors)
         self.assertNotIn("_commit_targets", selectors)

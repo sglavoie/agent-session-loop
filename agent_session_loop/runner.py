@@ -12,6 +12,7 @@ happens before the ledger re-inspect.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import functools
 import json
 import sys
@@ -160,7 +161,6 @@ AGENT_MUX_VERIFICATION_HEARTBEAT_REASON = (
 AGENT_MUX_VERIFICATION_FINISH_REASON = agent_mux_delivery.VERIFICATION_FINISH_REASON
 AGENT_MUX_WAIT_START_REASON = agent_mux_delivery.WAIT_START_REASON
 AGENT_MUX_WAIT_END_REASON = agent_mux_delivery.WAIT_END_REASON
-AGENT_MUX_PAUSE_REASON = agent_mux_delivery.PAUSE_REASON
 AGENT_MUX_FINISH_REASON = agent_mux_delivery.FINISH_REASON
 # Phase vocabulary must match the AgentMux daemon's event mapping
 # (internal/daemon/normalize.go::aslPhaseForEvent).
@@ -522,6 +522,358 @@ _review_verdict_repair_references = review_transitions.review_verdict_repair_ref
 REVIEW_FINDINGS_UNRESOLVED_REASON = review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON
 
 
+@dataclasses.dataclass(kw_only=True)
+class RunContext:
+    """One locked run's own state, grouped by how long each value lives.
+
+    ``_run_locked`` is a single function with roughly eighty locals, and the
+    helpers it owns used to reach them as closure captures. A capture is
+    invisible at the call site and unsliceable: a helper that reads a loop
+    local cannot leave the function that binds it. This object makes that
+    dependency explicit so each helper states what it needs.
+
+    The groups below are the run's three clocks. Run-start fields are bound
+    before the first helper runs and never rebound; loop-pass fields advance
+    once per pass around the session loop; turn fields advance once per
+    harness turn. Nothing here is durable on its own: every write still goes
+    through :attr:`persistence`, and the object never outlives the run lock.
+    """
+
+    # Fixed at run start. `plan_dir` is the canonicalized directory every
+    # snapshot of this run shares, so it stays here rather than being re-read
+    # off whichever snapshot the loop currently holds.
+    run_id: str
+    plan_dir: Path
+    run_dir: Path
+    event_path: Path
+    payload: dict[str, Any]
+    persistence: run_persistence._RunPersistence
+    progress: run_reporting._ProgressReporter
+    inline_tail: run_reporting._InlineTailController
+    reply_state_preserver: run_coordination.ReplyStatePreserver
+    audit_context: run_coordination.TerminalAuditContext
+    guard_controller: guards.GuardController
+    plan_cache: plans.PlanSnapshotCache
+    verification_context: verification.VerificationContext
+    commit_generation: run_commit._CommitGeneration
+    #: Read off the payload once the readiness gate has passed, because the
+    #: gate is what settles which control block the rest of the run answers to.
+    control_payload: dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: Wired once the control listener exists, because the listener is built
+    #: from the two handlers that already take this context.
+    run_controls: run_control.RunControlListener | None = None
+
+    # Updated once per loop pass: the counters and flags that decide whether
+    # the next pass runs, and the readiness gate's latest verdict.
+    completed_count: int = 0
+    #: Stamped when the runner stops working on a turn, not when the harness
+    #: exits: verification and finalization are runner-owned work, so counting
+    #: them as idle time would report the previous turn's own cost as a gap.
+    runner_work_finished_at: datetime | None = None
+    first_loop_pass: bool = True
+    idle_baseline_pinned: bool = False
+    commit_at_end_attempted: bool = False
+    review_appended: bool = False
+    gate_payload: dict[str, Any] = dataclasses.field(default_factory=dict)
+    gate_passed: bool = False
+    core_skipped: bool = False
+
+    # Updated once per turn.
+    run_control_context: dict[str, Any] | None = None
+    last_session_details: dict[str, Any] = dataclasses.field(default_factory=dict)
+    seen_external_command_ids: set[str] = dataclasses.field(default_factory=set)
+    #: The group this run still owes, carried between commit boundaries. A
+    #: commit failure soft-fails, so this is what makes the failure retryable
+    #: inside the same run instead of only after a restart.
+    owed_commit_group: dict[str, Any] | None = None
+    #: Retries already spent per group, so a repository that fails the same way
+    #: every time cannot turn the run loop into a commit loop.
+    owed_commit_group_attempts: dict[str, int] = dataclasses.field(default_factory=dict)
+
+    def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None:
+        """Publish the plan image this run ends on, under the write lock."""
+        with self.persistence.lock:
+            self.payload["final_snapshot"] = plans.snapshot_payload(snapshot)
+
+    def pause(
+        self,
+        *,
+        reason: str,
+        message: str,
+        details: dict[str, Any] | None,
+    ) -> None:
+        """Stop this run with a reason, through the one pause coordinator.
+
+        Every pause site named the same three run-start values -- the event
+        path, the payload, the persistence seam -- and differed only in the
+        reason it was pausing for. Those three now live here, so a caller
+        states its reason and nothing else.
+        """
+        run_termination._pause_run(
+            self.event_path,
+            self.payload,
+            reason=reason,
+            message=message,
+            details=details,
+            persistence=self.persistence,
+        )
+
+
+def _finish_run_locked(
+    ctx: RunContext,
+    exit_code: int,
+    result_payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    ctx.reply_state_preserver.restore_if_unconsumed()
+    return exit_code, result_payload
+
+
+def _terminalize(
+    ctx: RunContext,
+    exit_code: int,
+    *,
+    cancel: harnesses.AbortSignal | None = None,
+    poll: Callable[[], None] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Close this run through the one coordinator every ending shares.
+
+    The refusals above the loop end runs as truly as the loop's own exits
+    do, so they terminalize here rather than finalizing on their own; the
+    exit code each one already decided passes through untouched. Those
+    refusals run before the control queue has a poller, so only the loop's
+    own exit supplies ``cancel`` and ``poll``.
+
+    A commit failure no longer stops the run, so the last thing decided
+    before the audit runs is whether any group is still owed. The answer is
+    written into the payload here, ahead of
+    ``run_termination._terminalize_run``, because every reader that must not
+    miss it — terminal adjudication, the assurance audit, and the final
+    summary — is downstream of this point.
+
+    The exit code each caller passes is a proposal, not a verdict: the
+    adjudicator inside ``run_termination._terminalize_run`` may refuse a
+    success and return a failing code instead, which is why the returned
+    value is used rather than the one passed in.
+    """
+    with ctx.persistence.lock:
+        ctx.payload[commit_settlement.UNRESOLVED_COMMIT_GROUPS_KEY] = (
+            commit_settlement._unresolved_commit_groups(ctx.payload)
+        )
+    return _finish_run_locked(
+        ctx,
+        run_termination._terminalize_run(
+            exit_code=exit_code,
+            event_path=ctx.event_path,
+            payload=ctx.payload,
+            write_readiness_state=readiness_gate.write_readiness_state,
+            progress=ctx.progress,
+            persistence=ctx.persistence,
+            audit_context=ctx.audit_context,
+            cancel=cancel,
+            poll=poll,
+        ),
+        ctx.payload,
+    )
+
+
+def _soft_fail_commit(
+    ctx: RunContext,
+    *,
+    scope: str,
+    session_id: str | None,
+    group: Mapping[str, Any] | None,
+    commit: Mapping[str, Any] | None,
+    error: str | None,
+    message: str,
+) -> None:
+    """Absorb a commit failure: record it, warn, and keep the run going.
+
+    The group is already marked ``failed`` in ``commit_groups`` by the
+    coordinator, and the commit's own ``commit_finished`` record already
+    carries the outcome that classified it. What is added here is the
+    run-level admission — durable in state, visible in the progress output,
+    and retried at the next commit boundary.
+
+    The retry is bounded. An attempt that never built a group has nothing
+    durable to retry, and a group that has already spent its retries is
+    left owed rather than attempted forever; either way the group stays
+    ``failed`` in ``commit_groups``, so ``terminalize`` reports it and a
+    later run can still recover it.
+    """
+    record = commit_settlement._commit_failure_record(
+        scope=scope,
+        session_id=session_id,
+        group=group,
+        commit=commit,
+        error=error,
+        message=message,
+    )
+    group_id = record["group_id"]
+    spent = (
+        ctx.owed_commit_group_attempts.get(group_id, 0)
+        if isinstance(group_id, str)
+        else commit_settlement.MAX_COMMIT_GROUP_RETRIES
+    )
+    retrying = group is not None and spent < commit_settlement.MAX_COMMIT_GROUP_RETRIES
+    record["retrying"] = retrying
+    with ctx.persistence.lock:
+        commit_settlement._append_commit_failure(ctx.payload, record)
+        ctx.persistence.write_state(ctx.payload)
+    ctx.progress.commit_failed(record)
+    if not retrying:
+        ctx.owed_commit_group = None
+        return
+    ctx.owed_commit_group_attempts[str(group_id)] = spent + 1
+    ctx.owed_commit_group = dict(group) if group is not None else None
+
+
+def _settle_owed_commit_group(ctx: RunContext) -> None:
+    """Complete the group this run still owes before it commits anything else.
+
+    This is the restart invariant applied inside a single run: an
+    unresolved group is finished at the next commit boundary, ahead of the
+    next worker and ahead of the end-of-run commit, so a transient failure
+    heals without a human. A second failure re-arms the same retry rather
+    than escalating.
+    """
+    group = ctx.owed_commit_group
+    if group is None:
+        return
+    ctx.owed_commit_group = None
+    session_id = (
+        str(group["session_id"]) if group.get("session_id") is not None else None
+    )
+    recovered_group: dict[str, Any] = dict(group)
+    failed_commit: dict[str, Any] | None = None
+    recovery_error: str | None = None
+    try:
+        recovered_group, failed_commit = commit_settlement._run_commit_group(
+            event_path=ctx.event_path,
+            payload=ctx.payload,
+            progress=ctx.progress,
+            verification_context=ctx.verification_context,
+            run_dir=ctx.run_dir,
+            run_id=ctx.run_id,
+            session_id=session_id,
+            targets=commit_settlement._resolve_recovered_commit_targets(
+                group, ctx.verification_context
+            ),
+            generation=ctx.commit_generation,
+            recovered_group=group,
+            persistence=ctx.persistence,
+        )
+    except (RunError, commit_groups.CommitGroupError) as error:
+        recovery_error = str(error)
+    resolved = recovery_error is None and failed_commit is None
+    with ctx.persistence.lock:
+        ctx.payload["commit_group_recovery"] = {
+            "group_id": group.get("group_id"),
+            "success": resolved,
+            "error": recovery_error,
+            "group": recovered_group,
+        }
+        ctx.persistence.write_state(ctx.payload)
+    if resolved:
+        ctx.progress.commit_group_recovered(recovered_group)
+        return
+    _soft_fail_commit(
+        ctx,
+        scope=str(group.get("scope") or "session"),
+        session_id=session_id,
+        group=recovered_group,
+        commit=failed_commit,
+        error=recovery_error,
+        message=(
+            "unresolved auto-commit group could not be completed "
+            "before the next session"
+        ),
+    )
+
+
+def _handle_run_control_action(
+    ctx: RunContext, action: run_control.RunControlAction
+) -> None:
+    if action.action in ("consumed", "abort-consumed"):
+        # Both consumptions are recorded by the site that acts on them, and
+        # an abort's consumption has three distinct outcomes this callback
+        # cannot tell apart.
+        return
+    if action.action == "tail-disabled":
+        ctx.inline_tail.disable()
+    with ctx.persistence.lock:
+        context = (
+            None if ctx.run_control_context is None else dict(ctx.run_control_context)
+        )
+        _record_run_control_action(
+            event_path=ctx.event_path,
+            payload=ctx.payload,
+            control_payload=ctx.control_payload,
+            action=action,
+            context=context,
+            persistence=ctx.persistence,
+        )
+    if action.action == "tail-enabled":
+        ctx.inline_tail.enable()
+
+
+def _handle_run_control_status(
+    ctx: RunContext, action: run_control.RunControlAction
+) -> None:
+    with ctx.persistence.lock:
+        context = (
+            None if ctx.run_control_context is None else dict(ctx.run_control_context)
+        )
+        status_control = dict(ctx.control_payload)
+        status_control["stop_after_current"] = action.stop_after_current
+        status_control["tail_enabled"] = action.tail_enabled
+        status_control["next_harness"] = action.next_harness
+        status_payload = dict(ctx.payload)
+        active_turn = ctx.payload.get("active_turn")
+        if isinstance(active_turn, dict):
+            status_payload["active_turn"] = dict(active_turn)
+        elif context is not None:
+            status_payload["active_turn"] = dict(context)
+        turns = ctx.payload.get("turns")
+        if isinstance(turns, list):
+            status_payload["turns"] = [
+                dict(turn) if isinstance(turn, dict) else turn for turn in turns
+            ]
+
+    try:
+        status_snapshot = ctx.plan_cache.get(ctx.plan_dir)
+        plan_error = None
+    except plans.PlanError as error:
+        status_snapshot = None
+        plan_error = str(error)
+
+    ctx.progress.status_snapshot(
+        run_reporting._compact_status_lines(
+            payload=status_payload,
+            control=status_control,
+            snapshot=status_snapshot,
+            plan_error=plan_error,
+        )
+    )
+
+
+def _expire_run_guards(ctx: RunContext) -> None:
+    """Disable this run's command gate on every exit path."""
+    run_coordination.expire_run_guards(
+        controller=ctx.guard_controller,
+        event_path=ctx.event_path,
+        payload=ctx.payload,
+        control_payload=ctx.control_payload,
+        persistence=ctx.persistence,
+    )
+
+
+def _abandon_turn(ctx: RunContext) -> None:
+    """Drop this run's interactive surfaces when a turn cannot be launched."""
+    if ctx.run_controls is not None:
+        ctx.run_controls.stop()
+    ctx.inline_tail.stop()
+
+
 def _run_locked(
     *,
     args: argparse.Namespace,
@@ -721,272 +1073,103 @@ def _run_locked(
     # inheriting reply semantics or leaking into a later turn.
     pending_resolution: run_prompts._PendingResolution | None = None
 
-    def finish_run_locked(
-        exit_code: int,
-        result_payload: dict[str, Any],
-    ) -> tuple[int, dict[str, Any]]:
-        reply_state_preserver.restore_if_unconsumed()
-        return exit_code, result_payload
-
     persist_run_state = not (args.dry_run and reply_text is not None)
-    persistence = run_persistence._RunPersistence(
-        write_state=persist_run_state,
-        append_events=persist_run_state,
-    )
     output = run_reporting._StderrOutputCoordinator(enabled=not args.json)
-    # The reporter renders commit failures but owns none of the commit
-    # lifecycle's vocabulary, so the run hands it the key terminalization
-    # writes owed groups under and the labeller that names one.
-    progress = run_reporting._ProgressReporter(
-        enabled=not args.json,
-        output=output,
-        commit_group_label=commit_settlement._unresolved_commit_group_label,
-        unresolved_groups_key=commit_settlement.UNRESOLVED_COMMIT_GROUPS_KEY,
-    )
-    inline_tail = run_reporting._InlineTailController(
+    ctx = RunContext(
+        run_id=run_id,
         plan_dir=snapshot.plan_dir,
-        state_dir=args.state_dir,
-        output=output,
+        run_dir=run_dir,
+        event_path=event_path,
+        payload=payload,
+        persistence=run_persistence._RunPersistence(
+            write_state=persist_run_state,
+            append_events=persist_run_state,
+        ),
+        # The reporter renders commit failures but owns none of the commit
+        # lifecycle's vocabulary, so the run hands it the key terminalization
+        # writes owed groups under and the labeller that names one.
+        progress=run_reporting._ProgressReporter(
+            enabled=not args.json,
+            output=output,
+            commit_group_label=commit_settlement._unresolved_commit_group_label,
+            unresolved_groups_key=commit_settlement.UNRESOLVED_COMMIT_GROUPS_KEY,
+        ),
+        inline_tail=run_reporting._InlineTailController(
+            plan_dir=snapshot.plan_dir,
+            state_dir=args.state_dir,
+            output=output,
+        ),
+        reply_state_preserver=reply_state_preserver,
+        audit_context=audit_context,
+        guard_controller=guard_controller,
+        plan_cache=plan_cache,
+        verification_context=verification_context,
+        commit_generation=commit_generation,
     )
 
-    def terminalize(
-        exit_code: int,
-        *,
-        cancel: harnesses.AbortSignal | None = None,
-        poll: Callable[[], None] | None = None,
-    ) -> tuple[int, dict[str, Any]]:
-        """Close this run through the one coordinator every ending shares.
-
-        The refusals above the loop end runs as truly as the loop's own exits
-        do, so they terminalize here rather than finalizing on their own; the
-        exit code each one already decided passes through untouched. Those
-        refusals run before the control queue has a poller, so only the loop's
-        own exit supplies ``cancel`` and ``poll``.
-
-        A commit failure no longer stops the run, so the last thing decided
-        before the audit runs is whether any group is still owed. The answer is
-        written into the payload here, ahead of
-        ``run_termination._terminalize_run``, because every reader that must not
-        miss it — terminal adjudication, the assurance audit, and the final
-        summary — is downstream of this point.
-
-        The exit code each caller passes is a proposal, not a verdict: the
-        adjudicator inside ``run_termination._terminalize_run`` may refuse a
-        success and return a failing code instead, which is why the returned
-        value is used rather than the one passed in.
-        """
-        with persistence.lock:
-            payload[commit_settlement.UNRESOLVED_COMMIT_GROUPS_KEY] = (
-                commit_settlement._unresolved_commit_groups(payload)
-            )
-        return finish_run_locked(
-            run_termination._terminalize_run(
-                exit_code=exit_code,
-                event_path=event_path,
-                payload=payload,
-                write_readiness_state=readiness_gate.write_readiness_state,
-                progress=progress,
-                persistence=persistence,
-                audit_context=audit_context,
-                cancel=cancel,
-                poll=poll,
-            ),
-            payload,
-        )
-
-    #: The group this run still owes, carried between commit boundaries. A
-    #: commit failure soft-fails, so this is what makes the failure retryable
-    #: inside the same run instead of only after a restart.
-    owed_commit_group: dict[str, Any] | None = None
-    #: Retries already spent per group, so a repository that fails the same way
-    #: every time cannot turn the run loop into a commit loop.
-    owed_commit_group_attempts: dict[str, int] = {}
-
-    def soft_fail_commit(
-        *,
-        scope: str,
-        session_id: str | None,
-        group: Mapping[str, Any] | None,
-        commit: Mapping[str, Any] | None,
-        error: str | None,
-        message: str,
-    ) -> None:
-        """Absorb a commit failure: record it, warn, and keep the run going.
-
-        The group is already marked ``failed`` in ``commit_groups`` by the
-        coordinator, and the commit's own ``commit_finished`` record already
-        carries the outcome that classified it. What is added here is the
-        run-level admission — durable in state, visible in the progress output,
-        and retried at the next commit boundary.
-
-        The retry is bounded. An attempt that never built a group has nothing
-        durable to retry, and a group that has already spent its retries is
-        left owed rather than attempted forever; either way the group stays
-        ``failed`` in ``commit_groups``, so ``terminalize`` reports it and a
-        later run can still recover it.
-        """
-        nonlocal owed_commit_group
-        record = commit_settlement._commit_failure_record(
-            scope=scope,
-            session_id=session_id,
-            group=group,
-            commit=commit,
-            error=error,
-            message=message,
-        )
-        group_id = record["group_id"]
-        spent = (
-            owed_commit_group_attempts.get(group_id, 0)
-            if isinstance(group_id, str)
-            else commit_settlement.MAX_COMMIT_GROUP_RETRIES
-        )
-        retrying = (
-            group is not None and spent < commit_settlement.MAX_COMMIT_GROUP_RETRIES
-        )
-        record["retrying"] = retrying
-        with persistence.lock:
-            commit_settlement._append_commit_failure(payload, record)
-            persistence.write_state(payload)
-        progress.commit_failed(record)
-        if not retrying:
-            owed_commit_group = None
-            return
-        owed_commit_group_attempts[str(group_id)] = spent + 1
-        owed_commit_group = dict(group) if group is not None else None
-
-    def settle_owed_commit_group() -> None:
-        """Complete the group this run still owes before it commits anything else.
-
-        This is the restart invariant applied inside a single run: an
-        unresolved group is finished at the next commit boundary, ahead of the
-        next worker and ahead of the end-of-run commit, so a transient failure
-        heals without a human. A second failure re-arms the same retry rather
-        than escalating.
-        """
-        nonlocal owed_commit_group
-        group = owed_commit_group
-        if group is None:
-            return
-        owed_commit_group = None
-        session_id = (
-            str(group["session_id"]) if group.get("session_id") is not None else None
-        )
-        recovered_group: dict[str, Any] = dict(group)
-        failed_commit: dict[str, Any] | None = None
-        recovery_error: str | None = None
-        try:
-            recovered_group, failed_commit = commit_settlement._run_commit_group(
-                event_path=event_path,
-                payload=payload,
-                progress=progress,
-                verification_context=verification_context,
-                run_dir=run_dir,
-                run_id=run_id,
-                session_id=session_id,
-                targets=commit_settlement._resolve_recovered_commit_targets(
-                    group, verification_context
-                ),
-                generation=commit_generation,
-                recovered_group=group,
-                persistence=persistence,
-            )
-        except (RunError, commit_groups.CommitGroupError) as error:
-            recovery_error = str(error)
-        resolved = recovery_error is None and failed_commit is None
-        with persistence.lock:
-            payload["commit_group_recovery"] = {
-                "group_id": group.get("group_id"),
-                "success": resolved,
-                "error": recovery_error,
-                "group": recovered_group,
-            }
-            persistence.write_state(payload)
-        if resolved:
-            progress.commit_group_recovered(recovered_group)
-            return
-        soft_fail_commit(
-            scope=str(group.get("scope") or "session"),
-            session_id=session_id,
-            group=recovered_group,
-            commit=failed_commit,
-            error=recovery_error,
-            message=(
-                "unresolved auto-commit group could not be completed "
-                "before the next session"
-            ),
-        )
-
-    persistence.append_event(
-        event_path,
+    ctx.persistence.append_event(
+        ctx.event_path,
         events.RUN_STARTED_EVENT,
         {
             "plan_dir": str(snapshot.plan_dir),
             "harness": args.harness,
-            "model": payload["model"],
-            "model_source": payload["model_source"],
-            "effort": payload["effort"],
-            "effort_source": payload["effort_source"],
-            "spark": payload["spark"],
+            "model": ctx.payload["model"],
+            "model_source": ctx.payload["model_source"],
+            "effort": ctx.payload["effort"],
+            "effort_source": ctx.payload["effort_source"],
+            "spark": ctx.payload["spark"],
             "dry_run": args.dry_run,
             "max_sessions": max_sessions,
             "max_pending_sessions": getattr(args, "max_pending_sessions", None),
             "commit_mode": commit_mode,
             "repair_commit_mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
-            "note": payload.get("note"),
-            "run_id": run_id,
-            "run_dir": str(run_dir),
-            "run_started_at": payload["run_started_at"],
-            "approval_mode": payload["approval_mode"],
+            "note": ctx.payload.get("note"),
+            "run_id": ctx.run_id,
+            "run_dir": str(ctx.run_dir),
+            "run_started_at": ctx.payload["run_started_at"],
+            "approval_mode": ctx.payload["approval_mode"],
             "no_mailbox": run_selection._no_mailbox(args),
             "mailbox_enabled": mailbox_enabled,
-            "counts": payload["initial_snapshot"]["counts"],
-            "next_pending": payload["initial_snapshot"]["next_pending"],
+            "counts": ctx.payload["initial_snapshot"]["counts"],
+            "next_pending": ctx.payload["initial_snapshot"]["next_pending"],
             **(
                 {
                     "cwd": str(cwd),
-                    **run_prompts._workspace_payload_fields(verification_context),
+                    **run_prompts._workspace_payload_fields(ctx.verification_context),
                 }
-                if verification_context.workspace is not None
+                if ctx.verification_context.workspace is not None
                 else {}
             ),
         },
     )
-    persistence.write_state(payload)
-    run_persistence._notify_agent_mux_loop_started(payload, persistence)
-    progress.run_started(payload)
-    progress.orphaned_state(orphan_candidates)
+    ctx.persistence.write_state(ctx.payload)
+    run_persistence._notify_agent_mux_loop_started(ctx.payload, ctx.persistence)
+    ctx.progress.run_started(ctx.payload)
+    ctx.progress.orphaned_state(orphan_candidates)
 
     invalid_pause = run_inputs._invalid_status_pause(snapshot)
     if invalid_pause is not None:
         reason, message, details = invalid_pause
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
-        run_termination._pause_run(
-            event_path,
-            payload,
+        ctx.record_final_snapshot(snapshot)
+        ctx.pause(
             reason=reason,
             message=message,
             details=details,
-            persistence=persistence,
         )
-        return terminalize(1)
+        return _terminalize(ctx, 1)
 
     if commit_group_load_error is not None:
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
-        run_termination._pause_run(
-            event_path,
-            payload,
+        ctx.record_final_snapshot(snapshot)
+        ctx.pause(
             reason="commit-failed",
             message="durable commit-group evidence could not be reconstructed",
             details={"error": commit_group_load_error},
-            persistence=persistence,
         )
-        return terminalize(1)
+        return _terminalize(ctx, 1)
 
     if unresolved_commit_group is not None and args.dry_run:
-        with persistence.lock:
-            payload["commit_group_recovery"] = {
+        with ctx.persistence.lock:
+            ctx.payload["commit_group_recovery"] = {
                 "group_id": unresolved_commit_group.get("group_id"),
                 "success": False,
                 "pending": True,
@@ -998,8 +1181,8 @@ def _run_locked(
         # completed here, before this run launches a worker of its own. A
         # second failure soft-fails like any other, so the group is retried
         # again at this run's next commit boundary.
-        owed_commit_group = dict(unresolved_commit_group)
-        settle_owed_commit_group()
+        ctx.owed_commit_group = dict(unresolved_commit_group)
+        _settle_owed_commit_group(ctx)
 
     review_requested = getattr(args, "review_harness", None) is not None
     max_review_fix_cycles = run_inputs._max_review_fix_cycles(args)
@@ -1007,9 +1190,9 @@ def _run_locked(
     if review_requested:
         review_resume = review_cycle._set_review_resume(
             snapshot=snapshot,
-            event_path=event_path,
-            payload=payload,
-            persistence=persistence,
+            event_path=ctx.event_path,
+            payload=ctx.payload,
+            persistence=ctx.persistence,
             max_repair_group_attempts=run_inputs._max_repair_group_attempts(args),
             max_review_fix_cycles=max_review_fix_cycles,
             review_requested=True,
@@ -1017,81 +1200,66 @@ def _run_locked(
 
     if snapshot.next_pending is None:
         if not run_inputs._all_sessions_complete(snapshot):
-            run_termination._pause_run(
-                event_path,
-                payload,
+            ctx.pause(
                 reason="no-pending-but-incomplete",
                 message="no pending session was found, but not every session is "
                 "complete",
                 details={"snapshot": _snapshot_payload(snapshot)},
-                persistence=persistence,
             )
-            return terminalize(1)
+            return _terminalize(ctx, 1)
         if not review_requested:
-            with persistence.lock:
-                payload["reason"] = "all-complete"
-            return terminalize(0)
+            with ctx.persistence.lock:
+                ctx.payload["reason"] = "all-complete"
+            return _terminalize(ctx, 0)
 
     if not review_requested:
         pending_review = review_session_body.find_pending_generated_review_session(
             snapshot.plan_dir
         )
         if pending_review is not None:
-            with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(snapshot)
-            run_termination._pause_run(
-                event_path,
-                payload,
+            ctx.record_final_snapshot(snapshot)
+            ctx.pause(
                 reason="review-harness-required",
-                message=(
-                    "a pending generated review session is present; "
-                    "rerun with --review-harness to execute it"
-                ),
+                message="a pending generated review session is present; "
+                "rerun with --review-harness to execute it",
                 details={
                     "session_id": pending_review.session_id.value,
                     "session_path": str(pending_review.path),
                 },
-                persistence=persistence,
             )
-            return terminalize(1)
+            return _terminalize(ctx, 1)
 
     if args.dry_run:
-        with persistence.lock:
-            payload["reason"] = "dry-run"
-            payload["planned"] = run_payloads._dry_run_payload(
+        with ctx.persistence.lock:
+            ctx.payload["reason"] = "dry-run"
+            ctx.payload["planned"] = run_payloads._dry_run_payload(
                 args=args,
                 snapshot=snapshot,
                 cwd=cwd,
-                run_dir=run_dir,
+                run_dir=ctx.run_dir,
                 mailbox_activation=mailbox_activation,
                 reply_text=reply_text,
                 reply_context=reply_context,
                 reply_origin=reply_origin,
-                verification_context=verification_context,
+                verification_context=ctx.verification_context,
             )
-        return terminalize(0)
+        return _terminalize(ctx, 0)
 
     if (
-        verification_context.workspace is not None
+        ctx.verification_context.workspace is not None
         and not MULTI_REPO_IMPLEMENTATION_TURNS_ENABLED
     ):
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
-        run_termination._pause_run(
-            event_path,
-            payload,
+        ctx.record_final_snapshot(snapshot)
+        ctx.pause(
             reason=MULTI_REPO_CAPABILITY_PAUSE_REASON,
-            message=(
-                "multi-repository harness turns are disabled until the "
-                "authoritative workspace write guard is installed"
-            ),
+            message="multi-repository harness turns are disabled until the "
+            "authoritative workspace write guard is installed",
             details={
-                "workspace_root": str(verification_context.root),
-                "registry_digest": verification_context.registry_digest,
+                "workspace_root": str(ctx.verification_context.root),
+                "registry_digest": ctx.verification_context.registry_digest,
             },
-            persistence=persistence,
         )
-        return terminalize(1)
+        return _terminalize(ctx, 1)
 
     if (
         review_resume is not None
@@ -1106,7 +1274,7 @@ def _run_locked(
         )
         and review_resume.repair_session_ids
         and not review_cycle._has_successful_review_reopen(
-            event_path, review_resume.review_session_id
+            ctx.event_path, review_resume.review_session_id
         )
     ):
         # The atomic child write can win a crash race against event append.
@@ -1114,8 +1282,8 @@ def _run_locked(
         # eventless findings review whose cycle record was lost, preserving
         # its fingerprints before the next review overwrites the artifact.
         recovered_record = review_cycle._review_reopen_record(
-            event_path=event_path,
-            payload=payload,
+            event_path=ctx.event_path,
+            payload=ctx.payload,
             resume=review_resume,
             max_review_fix_cycles=max_review_fix_cycles,
             materialized=True,
@@ -1124,16 +1292,16 @@ def _run_locked(
             recovered=True,
         )
         review_cycle._record_review_reopen(
-            event_path=event_path,
-            payload=payload,
-            persistence=persistence,
+            event_path=ctx.event_path,
+            payload=ctx.payload,
+            persistence=ctx.persistence,
             record=recovered_record,
         )
         review_resume = review_cycle._set_review_resume(
             snapshot=snapshot,
-            event_path=event_path,
-            payload=payload,
-            persistence=persistence,
+            event_path=ctx.event_path,
+            payload=ctx.payload,
+            persistence=ctx.persistence,
             max_repair_group_attempts=run_inputs._max_repair_group_attempts(args),
             max_review_fix_cycles=max_review_fix_cycles,
             review_requested=True,
@@ -1154,11 +1322,11 @@ def _run_locked(
         lock_info=lock_info,
         preflight_kwargs=preflight_kwargs,
     )
-    core_skipped = resume_report is not None
-    if core_skipped:
+    ctx.core_skipped = resume_report is not None
+    if ctx.core_skipped:
         preflight_report = resume_report
-        persistence.append_event(
-            event_path,
+        ctx.persistence.append_event(
+            ctx.event_path,
             events.PREFLIGHT_SKIPPED_EVENT,
             {
                 "readiness_state": preflight_report.readiness.state,
@@ -1170,67 +1338,61 @@ def _run_locked(
             preflight.run_preflight(snapshot.plan_dir, **preflight_kwargs),
             lock_info=lock_info,
         )
-    gate_payload = readiness_gate._readiness_gate_payload(preflight_report, cwd=cwd)
-    if core_skipped:
-        gate_payload["core_skipped"] = True
-    gate_passed = gate_payload["ok"]
+    ctx.gate_payload = readiness_gate._readiness_gate_payload(preflight_report, cwd=cwd)
+    if ctx.core_skipped:
+        ctx.gate_payload["core_skipped"] = True
+    ctx.gate_passed = ctx.gate_payload["ok"]
     review_only_complete_start = readiness_gate._review_only_complete_start(
         preflight_report,
         review_requested=review_requested,
         snapshot=snapshot,
     )
-    with persistence.lock:
-        payload["readiness_gate"] = gate_payload
+    with ctx.persistence.lock:
+        ctx.payload["readiness_gate"] = ctx.gate_payload
         if preflight_report.readiness is not None:
-            payload["readiness_state_initial"] = preflight_report.readiness.state
+            ctx.payload["readiness_state_initial"] = preflight_report.readiness.state
 
     initial_workspace_scope_repair = (
         workspace_evidence._latest_workspace_scope_repair_requirement(
-            event_path, snapshot.next_pending.id
+            ctx.event_path, snapshot.next_pending.id
         )
-        if verification_context.workspace is not None
+        if ctx.verification_context.workspace is not None
         and snapshot.next_pending is not None
         else None
     )
-    if initial_workspace_scope_repair is not None and not gate_passed:
+    if initial_workspace_scope_repair is not None and not ctx.gate_passed:
         session_id = snapshot.next_pending.id
         details = {
             **_session_details_payload(session_id),
-            "readiness_gate": gate_payload,
+            "readiness_gate": ctx.gate_payload,
             "workspace_write_guard": initial_workspace_scope_repair,
         }
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
-        run_termination._pause_run(
-            event_path,
-            payload,
+        ctx.record_final_snapshot(snapshot)
+        ctx.pause(
             reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
-            message=(
-                f"{_session_label(session_id)} has retained changes to "
-                "registered repositories outside its write aliases; repair "
-                "its durable repository scope and rerun expansion plus "
-                "preflight before continuing"
-            ),
+            message=f"{_session_label(session_id)} has retained changes to "
+            "registered repositories outside its write aliases; repair "
+            "its durable repository scope and rerun expansion plus "
+            "preflight before continuing",
             details=details,
-            persistence=persistence,
         )
-        return terminalize(1)
+        return _terminalize(ctx, 1)
 
     non_bypassable = readiness_gate._non_bypassable_blockers(preflight_report)
     if non_bypassable:
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
-        run_termination._pause_run(
-            event_path,
-            payload,
+        ctx.record_final_snapshot(snapshot)
+        ctx.pause(
             reason="not-loop-ready",
             message=readiness_gate._readiness_gate_failure_message(preflight_report),
-            details={**gate_payload, "blocker": list(non_bypassable)},
-            persistence=persistence,
+            details={**ctx.gate_payload, "blocker": list(non_bypassable)},
         )
-        return terminalize(1)
+        return _terminalize(ctx, 1)
 
-    if not gate_passed and not allow_not_loop_ready and not review_only_complete_start:
+    if (
+        not ctx.gate_passed
+        and not allow_not_loop_ready
+        and not review_only_complete_start
+    ):
         preflight_report, repair_payload = readiness_gate._repair_readiness_gate(
             preflight_report,
             plan_dir=snapshot.plan_dir,
@@ -1240,41 +1402,39 @@ def _run_locked(
             commit_mode=commit_mode,
             state_dir=args.state_dir,
             max_pending_sessions=max_pending_sessions,
-            event_path=event_path,
-            persistence=persistence,
+            event_path=ctx.event_path,
+            persistence=ctx.persistence,
             snapshot=snapshot,
             review_requested=review_requested,
-            core_skipped=core_skipped,
+            core_skipped=ctx.core_skipped,
         )
-        core_skipped = bool(repair_payload["core_skipped"])
-        gate_payload = readiness_gate._readiness_gate_payload(preflight_report, cwd=cwd)
-        if core_skipped:
-            gate_payload["core_skipped"] = True
-        gate_passed = gate_payload["ok"]
+        ctx.core_skipped = bool(repair_payload["core_skipped"])
+        ctx.gate_payload = readiness_gate._readiness_gate_payload(
+            preflight_report, cwd=cwd
+        )
+        if ctx.core_skipped:
+            ctx.gate_payload["core_skipped"] = True
+        ctx.gate_passed = ctx.gate_payload["ok"]
         review_only_complete_start = readiness_gate._review_only_complete_start(
             preflight_report,
             review_requested=review_requested,
             snapshot=snapshot,
         )
-        with persistence.lock:
-            payload["readiness_gate"] = gate_payload
-            payload["readiness_gate_repair"] = repair_payload
+        with ctx.persistence.lock:
+            ctx.payload["readiness_gate"] = ctx.gate_payload
+            ctx.payload["readiness_gate_repair"] = repair_payload
 
-        if not gate_passed and not review_only_complete_start:
+        if not ctx.gate_passed and not review_only_complete_start:
             gate_message = readiness_gate._readiness_gate_failure_message(
                 preflight_report
             )
-            with persistence.lock:
-                payload["final_snapshot"] = _snapshot_payload(snapshot)
-            run_termination._pause_run(
-                event_path,
-                payload,
+            ctx.record_final_snapshot(snapshot)
+            ctx.pause(
                 reason="not-loop-ready",
                 message=gate_message,
-                details=gate_payload,
-                persistence=persistence,
+                details=ctx.gate_payload,
             )
-            return terminalize(1)
+            return _terminalize(ctx, 1)
 
     try:
         if commit_mode == run_selection.COMMIT_MODE_END:
@@ -1285,16 +1445,13 @@ def _run_locked(
         if commit_mode is not None:
             commit_preflight = review_guard._validate_commit_preflight(
                 cwd,
-                verification_context=verification_context,
+                verification_context=ctx.verification_context,
             )
-            with persistence.lock:
-                payload["commit_preflight"] = commit_preflight
+            with ctx.persistence.lock:
+                ctx.payload["commit_preflight"] = commit_preflight
     except RunError as error:
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot)
-        run_termination._pause_run(
-            event_path,
-            payload,
+        ctx.record_final_snapshot(snapshot)
+        ctx.pause(
             reason="commit-preflight",
             message=str(error),
             details={
@@ -1302,11 +1459,10 @@ def _run_locked(
                 "max_sessions": max_sessions,
                 "pending_sessions": _status_counts(snapshot)["pending"],
             },
-            persistence=persistence,
         )
-        return terminalize(1)
+        return _terminalize(ctx, 1)
 
-    should_transition = gate_passed or (
+    should_transition = ctx.gate_passed or (
         allow_not_loop_ready and preflight_report.readiness is not None
     )
     if should_transition:
@@ -1315,83 +1471,26 @@ def _run_locked(
             "running",
             expected_sha256=preflight_report.expected_readiness_sha256,
         )
-        with persistence.lock:
+        with ctx.persistence.lock:
             if running_success:
-                payload["readiness_state_active"] = True
-                payload["readiness_state_current"] = "running"
+                ctx.payload["readiness_state_active"] = True
+                ctx.payload["readiness_state_current"] = "running"
             else:
-                payload["readiness_state_active"] = False
-                payload["readiness_state_write_error"] = running_error
+                ctx.payload["readiness_state_active"] = False
+                ctx.payload["readiness_state_write_error"] = running_error
 
-    run_control_lock = persistence.lock
-    run_control_context: dict[str, Any] | None = None
-    control_payload = dict(payload["control"])
+    run_control_lock = ctx.persistence.lock
+    ctx.control_payload = dict(ctx.payload["control"])
 
-    def handle_run_control_action(action: run_control.RunControlAction) -> None:
-        if action.action in ("consumed", "abort-consumed"):
-            # Both consumptions are recorded by the site that acts on them, and
-            # an abort's consumption has three distinct outcomes this callback
-            # cannot tell apart.
-            return
-        if action.action == "tail-disabled":
-            inline_tail.disable()
-        with run_control_lock:
-            context = None if run_control_context is None else dict(run_control_context)
-            _record_run_control_action(
-                event_path=event_path,
-                payload=payload,
-                control_payload=control_payload,
-                action=action,
-                context=context,
-                persistence=persistence,
-            )
-        if action.action == "tail-enabled":
-            inline_tail.enable()
-
-    def handle_run_control_status(action: run_control.RunControlAction) -> None:
-        with run_control_lock:
-            context = None if run_control_context is None else dict(run_control_context)
-            status_control = dict(control_payload)
-            status_control["stop_after_current"] = action.stop_after_current
-            status_control["tail_enabled"] = action.tail_enabled
-            status_control["next_harness"] = action.next_harness
-            status_payload = dict(payload)
-            active_turn = payload.get("active_turn")
-            if isinstance(active_turn, dict):
-                status_payload["active_turn"] = dict(active_turn)
-            elif context is not None:
-                status_payload["active_turn"] = dict(context)
-            turns = payload.get("turns")
-            if isinstance(turns, list):
-                status_payload["turns"] = [
-                    dict(turn) if isinstance(turn, dict) else turn for turn in turns
-                ]
-
-        try:
-            status_snapshot = plan_cache.get(snapshot.plan_dir)
-            plan_error = None
-        except plans.PlanError as error:
-            status_snapshot = None
-            plan_error = str(error)
-
-        progress.status_snapshot(
-            run_reporting._compact_status_lines(
-                payload=status_payload,
-                control=status_control,
-                snapshot=status_snapshot,
-                plan_error=plan_error,
-            )
-        )
-
-    run_controls = run_control.RunControlListener.for_run(
+    ctx.run_controls = run_control.RunControlListener.for_run(
         args,
         state=run_control.RunControlState(current_harness=args.harness),
         stdin=sys.stdin,
         stderr=output.stream,
-        on_action=handle_run_control_action,
-        on_status=handle_run_control_status,
+        on_action=functools.partial(_handle_run_control_action, ctx),
+        on_status=functools.partial(_handle_run_control_status, ctx),
     )
-    run_controls.start()
+    ctx.run_controls.start()
 
     # Served unconditionally, unlike the keyboard listener: a `--json`
     # supervised run is precisely the case with no interactive control surface,
@@ -1401,41 +1500,19 @@ def _run_locked(
     if wakeup is None:
         wakeup = threading.Event()
 
-    completed_count = 0
-    # Stamped when the runner stops working on a turn, not when the harness
-    # exits: verification and finalization are runner-owned work, so counting
-    # them as idle time would report the previous turn's own cost as a gap.
-    runner_work_finished_at: datetime | None = None
-    first_loop_pass = True
-    idle_baseline_pinned = False
-    commit_at_end_attempted = False
-    review_appended = False
-    last_session_details: dict[str, Any] = {}
-    seen_external_command_ids: set[str] = set()
-
-    def _expire_run_guards() -> None:
-        """Disable this run's command gate on every exit path."""
-        run_coordination.expire_run_guards(
-            controller=guard_controller,
-            event_path=event_path,
-            payload=payload,
-            control_payload=control_payload,
-            persistence=persistence,
-        )
-
     mailbox_poll = _MailboxPoll(
         plan_dir=snapshot.plan_dir,
         state_dir_arg=args.state_dir,
-        control_state=run_controls.state,
-        seen_control_ids=seen_external_command_ids,
-        payload=payload,
-        event_path=event_path,
-        control_payload=control_payload,
-        persistence=persistence,
+        control_state=ctx.run_controls.state,
+        seen_control_ids=ctx.seen_external_command_ids,
+        payload=ctx.payload,
+        event_path=ctx.event_path,
+        control_payload=ctx.control_payload,
+        persistence=ctx.persistence,
         run_control_lock=run_control_lock,
         enabled=mailbox_enabled,
         wakeup=wakeup,
-        guard_controller=guard_controller,
+        guard_controller=ctx.guard_controller,
     )
 
     # Drain any commands that were queued before the run started so the
@@ -1443,85 +1520,78 @@ def _run_locked(
     _drain_external_control_queue(
         plan_dir=snapshot.plan_dir,
         state_dir_arg=args.state_dir,
-        control_state=run_controls.state,
-        seen_ids=seen_external_command_ids,
-        payload=payload,
-        event_path=event_path,
-        control_payload=control_payload,
+        control_state=ctx.run_controls.state,
+        seen_ids=ctx.seen_external_command_ids,
+        payload=ctx.payload,
+        event_path=ctx.event_path,
+        control_payload=ctx.control_payload,
         context=None,
-        persistence=persistence,
+        persistence=ctx.persistence,
         run_control_lock=run_control_lock,
         wakeup=wakeup,
-        guard_controller=guard_controller,
+        guard_controller=ctx.guard_controller,
     )
     pending_exception_guard: dict[str, Any] | None = None
     try:
         while True:
-            if idle_baseline_pinned:
+            if ctx.idle_baseline_pinned:
                 # A path that reached here after deliberately establishing its
                 # own baseline opts out by pinning it. Refreshing would
                 # overwrite that earlier instant with this one and charge the
                 # gap it was measuring to the runner.
-                idle_baseline_pinned = False
-            elif not first_loop_pass:
+                ctx.idle_baseline_pinned = False
+            elif not ctx.first_loop_pass:
                 # Every path back to the top got here by finishing
                 # runner-owned work — a turn and its verification and
                 # finalization, or the all-complete branch's final commit,
                 # repair materialization, re-gating, readiness writes and
                 # review creation. Refreshing the baseline in this one place
                 # covers every path, including ones added later.
-                runner_work_finished_at = _utc_now()
-            entering_first_pass = first_loop_pass
-            first_loop_pass = False
+                ctx.runner_work_finished_at = _utc_now()
+            entering_first_pass = ctx.first_loop_pass
+            ctx.first_loop_pass = False
             if not entering_first_pass:
                 # One place covers both boundaries a still-owed group must be
                 # settled at: ahead of the next worker, and ahead of the
                 # end-of-run commit the all-complete branch below runs. The
                 # first pass is excluded because the recovery above the loop
                 # is that pass's boundary and has just run.
-                settle_owed_commit_group()
+                _settle_owed_commit_group(ctx)
             pending_session = snapshot.next_pending
 
             if pending_session is None:
                 if not run_inputs._all_sessions_complete(snapshot):
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(snapshot)
-                    run_termination._pause_run(
-                        event_path,
-                        payload,
+                    ctx.record_final_snapshot(snapshot)
+                    ctx.pause(
                         reason="no-pending-but-incomplete",
-                        message=(
-                            "no pending session was found, but not every "
-                            "session is complete"
-                        ),
+                        message="no pending session was found, but not every "
+                        "session is complete",
                         details={"snapshot": _snapshot_payload(snapshot)},
-                        persistence=persistence,
                     )
                     break
 
                 if (
                     commit_mode == run_selection.COMMIT_MODE_END
-                    and not commit_at_end_attempted
+                    and not ctx.commit_at_end_attempted
                 ):
-                    commit_at_end_attempted = True
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(snapshot)
+                    ctx.commit_at_end_attempted = True
+                    ctx.record_final_snapshot(snapshot)
                     try:
                         end_targets = commit_settlement._registered_end_commit_targets(
-                            verification_context
+                            ctx.verification_context
                         )
                         commit_group, failed_commit = (
                             commit_settlement._run_commit_group(
-                                event_path=event_path,
-                                payload=payload,
-                                progress=progress,
-                                verification_context=verification_context,
-                                run_dir=run_dir,
-                                run_id=run_id,
+                                event_path=ctx.event_path,
+                                payload=ctx.payload,
+                                progress=ctx.progress,
+                                verification_context=ctx.verification_context,
+                                run_dir=ctx.run_dir,
+                                run_id=ctx.run_id,
                                 session_id=None,
                                 targets=end_targets,
-                                generation=commit_generation,
-                                persistence=persistence,
+                                generation=ctx.commit_generation,
+                                persistence=ctx.persistence,
                             )
                         )
                     except RunError as error:
@@ -1531,7 +1601,8 @@ def _run_locked(
                     else:
                         commit_error = None
                     if failed_commit is not None or commit_error is not None:
-                        soft_fail_commit(
+                        _soft_fail_commit(
+                            ctx,
                             scope="end",
                             session_id=None,
                             group=commit_group,
@@ -1543,31 +1614,31 @@ def _run_locked(
                         )
                     continue
 
-                if review_requested and not review_appended:
+                if review_requested and not ctx.review_appended:
                     # The review and its repair children are work that starts
                     # *after* the session the operator asked to stop after, so
                     # the request has to be visible before either begins.
                     _drain_external_control_queue(
                         plan_dir=snapshot.plan_dir,
                         state_dir_arg=args.state_dir,
-                        control_state=run_controls.state,
-                        seen_ids=seen_external_command_ids,
-                        payload=payload,
-                        event_path=event_path,
-                        control_payload=control_payload,
+                        control_state=ctx.run_controls.state,
+                        seen_ids=ctx.seen_external_command_ids,
+                        payload=ctx.payload,
+                        event_path=ctx.event_path,
+                        control_payload=ctx.control_payload,
                         context=None,
-                        persistence=persistence,
+                        persistence=ctx.persistence,
                         run_control_lock=run_control_lock,
                         wakeup=wakeup,
-                        guard_controller=guard_controller,
+                        guard_controller=ctx.guard_controller,
                     )
                     with run_control_lock:
-                        stop_before_review = run_controls.state.stop_after_current
+                        stop_before_review = ctx.run_controls.state.stop_after_current
                     review_resume = review_cycle._set_review_resume(
                         snapshot=snapshot,
-                        event_path=event_path,
-                        payload=payload,
-                        persistence=persistence,
+                        event_path=ctx.event_path,
+                        payload=ctx.payload,
+                        persistence=ctx.persistence,
                         max_repair_group_attempts=run_inputs._max_repair_group_attempts(
                             args
                         ),
@@ -1580,54 +1651,53 @@ def _run_locked(
                             review_resume.blocker
                             in review_continuation.TERMINAL_REVIEW_DISPOSITIONS
                         )
-                        with persistence.lock:
+                        with ctx.persistence.lock:
                             review_cycle._set_existing_review_verdict(
-                                payload,
+                                ctx.payload,
                                 snapshot.plan_dir,
                                 read_review_verdict=handoff_guards._read_review_verdict,
                             )
-                            payload["review_fix_disposition"] = (
+                            ctx.payload["review_fix_disposition"] = (
                                 review_resume.source_disposition
                                 if terminal_disposition
                                 else None
                             )
-                            payload["final_snapshot"] = _snapshot_payload(snapshot)
+                            ctx.payload["final_snapshot"] = _snapshot_payload(snapshot)
                         if terminal_disposition:
-                            with persistence.lock:
-                                payload["reason"] = (
-                                    review_cycle._terminal_review_reason(payload)
+                            with ctx.persistence.lock:
+                                ctx.payload["reason"] = (
+                                    review_cycle._terminal_review_reason(ctx.payload)
                                 )
                         else:
                             blocker = review_resume.blocker or "unknown blocker"
-                            run_termination._pause_run(
-                                event_path,
-                                payload,
-                                reason=(events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR),
-                                message=(
-                                    "Recorded review repair history cannot be "
-                                    f"resumed safely: {blocker}."
-                                ),
+                            ctx.pause(
+                                reason=events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+                                message="Recorded review repair history cannot be "
+                                f"resumed safely: {blocker}.",
                                 details={"review_resume": review_resume.to_payload()},
-                                persistence=persistence,
                             )
                         break
 
                     if review_resume.action == "materialize-repairs":
                         if not review_resume.eligible:
-                            with persistence.lock:
+                            with ctx.persistence.lock:
                                 review_cycle._set_existing_review_verdict(
-                                    payload,
+                                    ctx.payload,
                                     snapshot.plan_dir,
                                     read_review_verdict=handoff_guards._read_review_verdict,
                                 )
-                                payload["review_fix_disposition"] = (
+                                ctx.payload["review_fix_disposition"] = (
                                     review_resume.source_disposition
                                 )
-                                payload["final_snapshot"] = _snapshot_payload(snapshot)
+                                ctx.payload["final_snapshot"] = _snapshot_payload(
+                                    snapshot
+                                )
                             if review_resume.blocker == "higher-cap-required":
-                                with persistence.lock:
-                                    payload["reason"] = (
-                                        review_cycle._terminal_review_reason(payload)
+                                with ctx.persistence.lock:
+                                    ctx.payload["reason"] = (
+                                        review_cycle._terminal_review_reason(
+                                            ctx.payload
+                                        )
                                     )
                                 break
 
@@ -1636,8 +1706,8 @@ def _run_locked(
                                 or "review repair artifact is not materializable"
                             )
                             failed_record = review_cycle._review_reopen_record(
-                                event_path=event_path,
-                                payload=payload,
+                                event_path=ctx.event_path,
+                                payload=ctx.payload,
                                 resume=review_resume,
                                 max_review_fix_cycles=max_review_fix_cycles,
                                 materialized=False,
@@ -1645,41 +1715,36 @@ def _run_locked(
                                 error=reopen_error,
                             )
                             review_cycle._record_review_reopen(
-                                event_path=event_path,
-                                payload=payload,
-                                persistence=persistence,
+                                event_path=ctx.event_path,
+                                payload=ctx.payload,
+                                persistence=ctx.persistence,
                                 record=failed_record,
                             )
-                            run_termination._pause_run(
-                                event_path,
-                                payload,
-                                reason=(events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR),
-                                message=(
-                                    "review repair reopening failed for "
-                                    f"session {review_resume.review_session_id}: "
-                                    f"{reopen_error}"
-                                ),
+                            ctx.pause(
+                                reason=events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+                                message="review repair reopening failed for "
+                                f"session {review_resume.review_session_id}: "
+                                f"{reopen_error}",
                                 details={
                                     "review_resume": review_resume.to_payload(),
                                     "error": reopen_error,
                                 },
-                                persistence=persistence,
                             )
                             break
 
                         if stop_before_review:
                             run_termination._stop_before_review_work(
-                                run_controls,
+                                ctx.run_controls,
                                 snapshot=snapshot,
-                                payload=payload,
-                                event_path=event_path,
-                                control_payload=control_payload,
+                                payload=ctx.payload,
+                                event_path=ctx.event_path,
+                                control_payload=ctx.control_payload,
                                 record_existing_review_verdict=(
                                     review_cycle.existing_review_verdict_recorder(
                                         handoff_guards._read_review_verdict
                                     )
                                 ),
-                                persistence=persistence,
+                                persistence=ctx.persistence,
                             )
                             break
 
@@ -1698,8 +1763,8 @@ def _run_locked(
                         )
                         materialized = bool(repair_result.ok and repair_session_ids)
                         reopen_record = review_cycle._review_reopen_record(
-                            event_path=event_path,
-                            payload=payload,
+                            event_path=ctx.event_path,
+                            payload=ctx.payload,
                             resume=review_resume,
                             max_review_fix_cycles=max_review_fix_cycles,
                             materialized=materialized,
@@ -1708,9 +1773,9 @@ def _run_locked(
                             error=repair_result.error,
                         )
                         review_cycle._record_review_reopen(
-                            event_path=event_path,
-                            payload=payload,
-                            persistence=persistence,
+                            event_path=ctx.event_path,
+                            payload=ctx.payload,
+                            persistence=ctx.persistence,
                             record=reopen_record,
                         )
 
@@ -1724,18 +1789,13 @@ def _run_locked(
                             # them (ASI-136). Either way the plan is the one this
                             # cycle started from, so there is nothing to proceed
                             # into even with --allow-not-loop-ready.
-                            with persistence.lock:
-                                payload["final_snapshot"] = _snapshot_payload(snapshot)
-                            run_termination._pause_run(
-                                event_path,
-                                payload,
+                            ctx.record_final_snapshot(snapshot)
+                            ctx.pause(
                                 reason="not-loop-ready",
-                                message=(
-                                    "no review repair children survived "
-                                    "materialization for session "
-                                    f"{repair_result.review_session_id}: "
-                                    f"{repair_result.error}"
-                                ),
+                                message="no review repair children survived "
+                                "materialization for session "
+                                f"{repair_result.review_session_id}: "
+                                f"{repair_result.error}",
                                 details={
                                     "review_resume": review_resume.to_payload(),
                                     "blockers": list(repair_result.blockers),
@@ -1751,7 +1811,6 @@ def _run_locked(
                                         else {}
                                     ),
                                 },
-                                persistence=persistence,
                             )
                             break
 
@@ -1760,86 +1819,70 @@ def _run_locked(
                                 repair_result.error
                                 or "review repair reopening produced no children"
                             )
-                            with persistence.lock:
-                                payload["final_snapshot"] = _snapshot_payload(snapshot)
-                            run_termination._pause_run(
-                                event_path,
-                                payload,
-                                reason=(events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR),
-                                message=(
-                                    "review repair reopening failed for "
-                                    f"session {review_resume.review_session_id}: "
-                                    f"{reopen_error}"
-                                ),
+                            ctx.record_final_snapshot(snapshot)
+                            ctx.pause(
+                                reason=events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+                                message="review repair reopening failed for "
+                                f"session {review_resume.review_session_id}: "
+                                f"{reopen_error}",
                                 details={
                                     "review_resume": review_resume.to_payload(),
                                     "error": reopen_error,
                                     "detail": repair_result.detail,
                                 },
-                                persistence=persistence,
                             )
                             break
 
                         try:
-                            snapshot = plan_cache.get_fresh(snapshot.plan_dir)
+                            snapshot = ctx.plan_cache.get_fresh(snapshot.plan_dir)
                         except plans.PlanError as error:
-                            run_termination._pause_run(
-                                event_path,
-                                payload,
+                            ctx.pause(
                                 reason="malformed-plan",
-                                message=(
-                                    "plan could not be inspected after "
-                                    f"reopening review repairs: {error}"
-                                ),
+                                message="plan could not be inspected after "
+                                f"reopening review repairs: {error}",
                                 details={"error": str(error)},
-                                persistence=persistence,
                             )
                             break
 
                         review_resume = review_cycle._set_review_resume(
                             snapshot=snapshot,
-                            event_path=event_path,
-                            payload=payload,
-                            persistence=persistence,
+                            event_path=ctx.event_path,
+                            payload=ctx.payload,
+                            persistence=ctx.persistence,
                             max_repair_group_attempts=(
                                 run_inputs._max_repair_group_attempts(args)
                             ),
                             max_review_fix_cycles=max_review_fix_cycles,
                             review_requested=True,
                         )
-                        with persistence.lock:
-                            payload["review_fix_disposition"] = (
+                        with ctx.persistence.lock:
+                            ctx.payload["review_fix_disposition"] = (
                                 review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS
                             )
-                            payload["final_snapshot"] = _snapshot_payload(snapshot)
+                            ctx.payload["final_snapshot"] = _snapshot_payload(snapshot)
 
                         if (
                             repair_result.reason
                             == review_repair.REVIEW_REPAIR_REASON_NOT_LOOP_READY
                             and not allow_not_loop_ready
                         ):
-                            run_termination._pause_run(
-                                event_path,
-                                payload,
+                            ctx.pause(
                                 reason="not-loop-ready",
-                                message=(
-                                    "repair sessions were reopened from review "
-                                    f"session {repair_result.review_session_id} "
-                                    "but the plan could not be marked loop-ready"
-                                ),
+                                message="repair sessions were reopened from review "
+                                f"session {repair_result.review_session_id} "
+                                "but the plan could not be marked loop-ready",
                                 details={
                                     "review_resume": review_resume.to_payload(),
                                     "blockers": list(repair_result.blockers),
                                     "repair_session_ids": list(repair_session_ids),
                                 },
-                                persistence=persistence,
                             )
                             break
 
                         if not readiness_gate._regate_reopened_plan(
-                            event_path=event_path,
-                            payload=payload,
-                            persistence=persistence,
+                            event_path=ctx.event_path,
+                            payload=ctx.payload,
+                            persistence=ctx.persistence,
                             args=args,
                             snapshot=snapshot,
                             repair_session_ids=repair_session_ids,
@@ -1852,17 +1895,19 @@ def _run_locked(
                                 snapshot.plan_dir, "running"
                             )
                         )
-                        with persistence.lock:
+                        with ctx.persistence.lock:
                             if running_success:
-                                payload["readiness_state_active"] = True
-                                payload["readiness_state_current"] = "running"
-                                payload["readiness_state_refreshed_at"] = _isoformat(
-                                    _utc_now()
+                                ctx.payload["readiness_state_active"] = True
+                                ctx.payload["readiness_state_current"] = "running"
+                                ctx.payload["readiness_state_refreshed_at"] = (
+                                    _isoformat(_utc_now())
                                 )
-                                payload["readiness_state_refresh_error"] = None
+                                ctx.payload["readiness_state_refresh_error"] = None
                             else:
-                                payload["readiness_state_refresh_error"] = running_error
-                            persistence.write_state(payload)
+                                ctx.payload["readiness_state_refresh_error"] = (
+                                    running_error
+                                )
+                            ctx.persistence.write_state(ctx.payload)
                         # Execute the exact children just materialized. Once
                         # they complete, the next all-complete pass evaluates
                         # to ``rereview`` and creates a fresh review.
@@ -1870,26 +1915,26 @@ def _run_locked(
 
                     if stop_before_review:
                         run_termination._stop_before_review_work(
-                            run_controls,
+                            ctx.run_controls,
                             snapshot=snapshot,
-                            payload=payload,
-                            event_path=event_path,
-                            control_payload=control_payload,
+                            payload=ctx.payload,
+                            event_path=ctx.event_path,
+                            control_payload=ctx.control_payload,
                             record_existing_review_verdict=(
                                 review_cycle.existing_review_verdict_recorder(
                                     handoff_guards._read_review_verdict
                                 )
                             ),
-                            persistence=persistence,
+                            persistence=ctx.persistence,
                         )
                         break
 
-                    review_workspace = verification_context.workspace
+                    review_workspace = ctx.verification_context.workspace
                     review_bases: list[dict[str, Any]] = []
                     if review_workspace is None:
                         review_scope_delta, review_scope_fallback = (
                             review_delta._compute_review_delta_context(
-                                event_path=event_path,
+                                event_path=ctx.event_path,
                                 plan_dir=snapshot.plan_dir,
                                 cwd=cwd,
                             )
@@ -1928,22 +1973,16 @@ def _run_locked(
                                     workspace=review_workspace,
                                 )
                             )
-                            with persistence.lock:
-                                payload["final_snapshot"] = _snapshot_payload(snapshot)
-                            run_termination._pause_run(
-                                event_path,
-                                payload,
-                                reason=(events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE),
-                                message=(
-                                    "combined workspace review base could not "
-                                    "be captured safely"
-                                    f"{unavailable_summary}"
-                                ),
+                            ctx.record_final_snapshot(snapshot)
+                            ctx.pause(
+                                reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
+                                message="combined workspace review base could not "
+                                "be captured safely"
+                                f"{unavailable_summary}",
                                 details={
                                     "workspace_root": str(review_workspace.root),
                                     "unavailable": unavailable,
                                 },
-                                persistence=persistence,
                             )
                             break
                         try:
@@ -1951,20 +1990,16 @@ def _run_locked(
                                 review_workspace, review_base_snapshot
                             )
                         except RunError as error:
-                            with persistence.lock:
-                                payload["final_snapshot"] = _snapshot_payload(snapshot)
-                            run_termination._pause_run(
-                                event_path,
-                                payload,
-                                reason=(events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE),
+                            ctx.record_final_snapshot(snapshot)
+                            ctx.pause(
+                                reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
                                 message=str(error),
                                 details={"error": str(error)},
-                                persistence=persistence,
                             )
                             break
                         review_scope_delta, review_scope_fallback = (
                             review_delta._compute_registered_review_delta_context(
-                                event_path=event_path,
+                                event_path=ctx.event_path,
                                 plan_dir=snapshot.plan_dir,
                                 workspace=review_workspace,
                             )
@@ -1990,29 +2025,23 @@ def _run_locked(
                             )
                         )
                     except (plans.PlanError, OSError) as error:
-                        with persistence.lock:
-                            payload["final_snapshot"] = _snapshot_payload(snapshot)
-                        run_termination._pause_run(
-                            event_path,
-                            payload,
+                        ctx.record_final_snapshot(snapshot)
+                        ctx.pause(
                             reason="malformed-plan",
-                            message=(
-                                "could not create or reuse a generated review "
-                                f"session: {error}"
-                            ),
+                            message="could not create or reuse a generated review "
+                            f"session: {error}",
                             details={"error": str(error)},
-                            persistence=persistence,
                         )
                         break
-                    review_appended = True
-                    with persistence.lock:
-                        payload["review_session_id"] = review_file.session_id.value
+                    ctx.review_appended = True
+                    with ctx.persistence.lock:
+                        ctx.payload["review_session_id"] = review_file.session_id.value
                     if review_created:
-                        persistence.append_event(
-                            event_path,
+                        ctx.persistence.append_event(
+                            ctx.event_path,
                             events.REVIEW_SCOPE_EVENT,
                             {
-                                "run_id": run_id,
+                                "run_id": ctx.run_id,
                                 "session_id": review_file.session_id.value,
                                 "scope": review_scope,
                                 "base_sha": review_base_sha,
@@ -2030,17 +2059,17 @@ def _run_locked(
                                 "refreshed": False,
                             },
                         )
-                        persistence.append_event(
-                            event_path,
+                        ctx.persistence.append_event(
+                            ctx.event_path,
                             events.REVIEW_SESSION_CREATED_EVENT,
                             {
-                                "run_id": run_id,
+                                "run_id": ctx.run_id,
                                 "session_id": review_file.session_id.value,
                                 "session": review_file.session_id.value,
                                 "review_harness": args.review_harness,
                                 "review_session_path": str(review_file.path),
                                 "review_output_path": (
-                                    payload.get("review_output_path")
+                                    ctx.payload.get("review_output_path")
                                     or str(
                                         review_session_contract.final_review_output_path(
                                             snapshot.plan_dir
@@ -2057,22 +2086,16 @@ def _run_locked(
                             },
                         )
                     try:
-                        snapshot = plan_cache.get_fresh(snapshot.plan_dir)
+                        snapshot = ctx.plan_cache.get_fresh(snapshot.plan_dir)
                     except plans.PlanError as error:
-                        run_termination._pause_run(
-                            event_path,
-                            payload,
+                        ctx.pause(
                             reason="malformed-plan",
-                            message=(
-                                "plan could not be inspected after appending the "
-                                f"review session: {error}"
-                            ),
+                            message="plan could not be inspected after appending the "
+                            f"review session: {error}",
                             details={"error": str(error)},
-                            persistence=persistence,
                         )
                         break
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(snapshot)
+                    ctx.record_final_snapshot(snapshot)
                     # Appending the review session grows the plan exactly the way
                     # materializing repair children does, and reaches here under
                     # the same reused readiness report -- the one that said every
@@ -2083,9 +2106,9 @@ def _run_locked(
                     # session was already authorized when it was created, so only
                     # a fresh append is re-gated.
                     if review_created and not readiness_gate._regate_reopened_plan(
-                        event_path=event_path,
-                        payload=payload,
-                        persistence=persistence,
+                        event_path=ctx.event_path,
+                        payload=ctx.payload,
+                        persistence=ctx.persistence,
                         args=args,
                         snapshot=snapshot,
                         repair_session_ids=[],
@@ -2105,22 +2128,22 @@ def _run_locked(
                             snapshot.plan_dir, "running"
                         )
                     )
-                    with persistence.lock:
+                    with ctx.persistence.lock:
                         if running_success:
-                            payload["readiness_state_active"] = True
-                            payload["readiness_state_current"] = "running"
-                            payload["readiness_state_refreshed_at"] = _isoformat(
+                            ctx.payload["readiness_state_active"] = True
+                            ctx.payload["readiness_state_current"] = "running"
+                            ctx.payload["readiness_state_refreshed_at"] = _isoformat(
                                 _utc_now()
                             )
-                            payload["readiness_state_refresh_error"] = None
+                            ctx.payload["readiness_state_refresh_error"] = None
                         else:
-                            payload["readiness_state_refresh_error"] = running_error
-                        persistence.write_state(payload)
+                            ctx.payload["readiness_state_refresh_error"] = running_error
+                        ctx.persistence.write_state(ctx.payload)
                     continue
 
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(snapshot)
-                    payload["reason"] = "all-complete"
+                with ctx.persistence.lock:
+                    ctx.payload["final_snapshot"] = _snapshot_payload(snapshot)
+                    ctx.payload["reason"] = "all-complete"
                 break
 
             is_review_session = (
@@ -2141,7 +2164,7 @@ def _run_locked(
             ) = None
             if is_review_session:
                 try:
-                    review_workspace = verification_context.workspace
+                    review_workspace = ctx.verification_context.workspace
                     review_text = pending_session.path.read_text(encoding="utf-8")
                     refreshed_text = (
                         review_session_contract.refreshed_generated_review_contract(
@@ -2162,12 +2185,12 @@ def _run_locked(
                         )
                     rescoped = review_delta._refresh_pending_review_scope(
                         session=pending_session,
-                        event_path=event_path,
+                        event_path=ctx.event_path,
                         plan_dir=snapshot.plan_dir,
                         cwd=cwd,
-                        workspace=verification_context.workspace,
-                        run_id=run_id,
-                        persistence=persistence,
+                        workspace=ctx.verification_context.workspace,
+                        run_id=ctx.run_id,
+                        persistence=ctx.persistence,
                     )
                     base_refreshed = False
                     if review_workspace is not None:
@@ -2216,25 +2239,19 @@ def _run_locked(
                             base_refreshed = True
                     if contract_refreshed or rescoped or base_refreshed:
                         readiness_gate._refresh_active_readiness_state(
-                            payload, snapshot.plan_dir, persistence
+                            ctx.payload, snapshot.plan_dir, ctx.persistence
                         )
-                        snapshot = plan_cache.get_fresh(snapshot.plan_dir)
+                        snapshot = ctx.plan_cache.get_fresh(snapshot.plan_dir)
                 except (plans.PlanError, OSError) as error:
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(snapshot)
-                    run_termination._pause_run(
-                        event_path,
-                        payload,
+                    ctx.record_final_snapshot(snapshot)
+                    ctx.pause(
                         reason="malformed-plan",
-                        message=(
-                            "the pending review session's scope could not be "
-                            f"re-derived from current Git evidence: {error}"
-                        ),
+                        message="the pending review session's scope could not be "
+                        f"re-derived from current Git evidence: {error}",
                         details={
                             **_session_details_payload(pending_session.id),
                             "error": str(error),
                         },
-                        persistence=persistence,
                     )
                     break
             review_session_version = (
@@ -2248,10 +2265,10 @@ def _run_locked(
             if (
                 not is_review_session
                 and max_sessions is not None
-                and completed_count >= max_sessions
+                and ctx.completed_count >= max_sessions
             ):
-                with persistence.lock:
-                    payload["reason"] = "max-sessions"
+                with ctx.persistence.lock:
+                    ctx.payload["reason"] = "max-sessions"
                 break
 
             before = snapshot
@@ -2259,18 +2276,18 @@ def _run_locked(
             session_label = _session_label(session_id)
             session_identity = _session_identity_payload(session_id)
             session_details = _session_details_payload(session_id)
-            last_session_details = session_details
+            ctx.last_session_details = session_details
 
             if is_review_session:
-                with persistence.lock:
-                    if payload.get("review_session_id") != session_id:
-                        payload["review_session_id"] = session_id
+                with ctx.persistence.lock:
+                    if ctx.payload.get("review_session_id") != session_id:
+                        ctx.payload["review_session_id"] = session_id
 
-            with persistence.lock:
-                turn_index = len(payload["turns"]) + 1
-                turns_already_run = bool(payload["turns"])
+            with ctx.persistence.lock:
+                turn_index = len(ctx.payload["turns"]) + 1
+                turns_already_run = bool(ctx.payload["turns"])
             paths = _turn_paths(
-                run_dir,
+                ctx.run_dir,
                 turn_index=turn_index,
                 session_id=session_id,
             )
@@ -2283,16 +2300,16 @@ def _run_locked(
             _drain_external_control_queue(
                 plan_dir=before.plan_dir,
                 state_dir_arg=args.state_dir,
-                control_state=run_controls.state,
-                seen_ids=seen_external_command_ids,
-                payload=payload,
-                event_path=event_path,
-                control_payload=control_payload,
+                control_state=ctx.run_controls.state,
+                seen_ids=ctx.seen_external_command_ids,
+                payload=ctx.payload,
+                event_path=ctx.event_path,
+                control_payload=ctx.control_payload,
                 context=pre_turn_control_context,
-                persistence=persistence,
+                persistence=ctx.persistence,
                 run_control_lock=run_control_lock,
                 wakeup=wakeup,
-                guard_controller=guard_controller,
+                guard_controller=ctx.guard_controller,
             )
             with run_control_lock:
                 # A stop observed here must never let another turn start. Only
@@ -2305,17 +2322,17 @@ def _run_locked(
                     turns_already_run
                     and pending_reply is None
                     and pending_resolution is None
-                    and run_controls.state.stop_after_current
+                    and ctx.run_controls.state.stop_after_current
                 )
                 if stop_before_turn:
                     run_termination._honor_stop_after_current(
-                        run_controls,
+                        ctx.run_controls,
                         snapshot=before,
-                        payload=payload,
-                        event_path=event_path,
-                        control_payload=control_payload,
+                        payload=ctx.payload,
+                        event_path=ctx.event_path,
+                        control_payload=ctx.control_payload,
                         context=pre_turn_control_context,
-                        persistence=persistence,
+                        persistence=ctx.persistence,
                     )
             if stop_before_turn:
                 break
@@ -2324,10 +2341,10 @@ def _run_locked(
             else:
                 with run_control_lock:
                     turn_harness = run_selection._selected_future_harness(
-                        args, control_payload
+                        args, ctx.control_payload
                     )
                     implementation_overrides = (
-                        run_controls.state.implementation_overrides
+                        ctx.run_controls.state.implementation_overrides
                     )
             if turn_harness is None:
                 raise RunError("--review-harness is required for a review session")
@@ -2342,8 +2359,8 @@ def _run_locked(
                         "ledger-unreadable",
                         warning=f"model availability ledger is unreadable: {error}",
                     )
-                with persistence.lock:
-                    payload["spark"].update(refreshed_availability.to_dict())
+                with ctx.persistence.lock:
+                    ctx.payload["spark"].update(refreshed_availability.to_dict())
             requested_model, turn_model_effort, spark_route = (
                 run_selection._spark_turn_route(
                     args,
@@ -2353,14 +2370,14 @@ def _run_locked(
                     harness=turn_harness,
                     is_review_turn=is_review_session,
                     implementation_overrides=implementation_overrides,
-                    spark_state=payload["spark"],
+                    spark_state=ctx.payload["spark"],
                     run_suppression=spark_run_suppression,
                     fallback_reason=spark_fallback_reason,
                 )
             )
             spark_fallback_reason = None
-            with persistence.lock:
-                payload["spark"]["active_route"] = spark_route
+            with ctx.persistence.lock:
+                ctx.payload["spark"]["active_route"] = spark_route
             requested_effort = run_selection._requested_effort(
                 args,
                 harness=turn_harness,
@@ -2373,15 +2390,11 @@ def _run_locked(
             )
             if preflight_failure is not None:
                 message, details = preflight_failure
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(before)
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.record_final_snapshot(before)
+                ctx.pause(
                     reason="harness-unavailable",
-                    message=(f"harness unavailable before {session_label}: {message}"),
+                    message=f"harness unavailable before {session_label}: {message}",
                     details=details,
-                    persistence=persistence,
                 )
                 break
             # Autonomous turns default to Python-built task packets (packet
@@ -2395,18 +2408,18 @@ def _run_locked(
             )
             has_progress = (before.plan_dir / plans.PROGRESS_FILE_NAME).is_file()
             repair_references = review_delta._verification_repair_state(
-                event_path, session_id
+                ctx.event_path, session_id
             )["references"]
             if is_review_session:
                 repair_references = repair_references + (
-                    _review_verdict_repair_references(event_path, session_id)
+                    _review_verdict_repair_references(ctx.event_path, session_id)
                 )
             pending_guidance = run_selection._pending_guidance_snapshot(
                 enabled=mailbox_enabled,
                 plan_dir=before.plan_dir,
                 state_dir_arg=args.state_dir,
             )
-            workspace = verification_context.workspace
+            workspace = ctx.verification_context.workspace
             session_scope = (
                 run_prompts._session_scope(pending_session, workspace)
                 if workspace is not None
@@ -2414,7 +2427,7 @@ def _run_locked(
             )
             retained_scope_repair = (
                 workspace_evidence._latest_workspace_scope_repair_requirement(
-                    event_path, session_id
+                    ctx.event_path, session_id
                 )
                 if workspace is not None
                 else None
@@ -2446,16 +2459,16 @@ def _run_locked(
                     )
                     if regenerated_write_scope is not None:
                         readiness_gate._refresh_active_readiness_state(
-                            payload, before.plan_dir, persistence
+                            ctx.payload, before.plan_dir, ctx.persistence
                         )
                         session_scope = run_prompts._session_scope(
                             pending_session, workspace
                         )
                 repair_resume = write_guards._pending_repair_child_continuation(
                     snapshot=before,
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     workspace=workspace,
                     max_repair_group_attempts=run_inputs._max_repair_group_attempts(
                         args
@@ -2469,28 +2482,22 @@ def _run_locked(
                     # child it refuses is not launched under the scope that
                     # refusal describes.
                     repair_blocker = repair_resume.blocker or "unknown blocker"
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(before)
-                    run_termination._pause_run(
-                        event_path,
-                        payload,
+                    ctx.record_final_snapshot(before)
+                    ctx.pause(
                         reason=events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
-                        message=(
-                            "generated repair child "
-                            f"{session_label} cannot be run safely: "
-                            f"{repair_blocker}."
-                        ),
+                        message="generated repair child "
+                        f"{session_label} cannot be run safely: "
+                        f"{repair_blocker}.",
                         details={
                             **session_details,
                             "review_resume": repair_resume.to_payload(),
                         },
-                        persistence=persistence,
                     )
                     break
                 try:
                     repair_commit_preflight = review_guard._repair_commit_preflight(
                         cwd,
-                        verification_context=verification_context,
+                        verification_context=ctx.verification_context,
                         session_scope=session_scope,
                         workspace_evidence=(
                             workspace_evidence._workspace_write_guard_evidence
@@ -2499,37 +2506,31 @@ def _run_locked(
                         retained_scope_repair=retained_scope_repair,
                     )
                 except RepairCommitPreflightError as error:
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(before)
-                    run_termination._pause_run(
-                        event_path,
-                        payload,
+                    ctx.record_final_snapshot(before)
+                    ctx.pause(
                         reason="commit-preflight",
-                        message=(
-                            f"repair commit preflight failed before "
-                            f"{session_label}: {error}"
-                        ),
+                        message=f"repair commit preflight failed before "
+                        f"{session_label}: {error}",
                         details={**session_details, **error.details},
-                        persistence=persistence,
                     )
                     break
-                with persistence.lock:
-                    payload.setdefault("repair_commit_preflights", []).append(
+                with ctx.persistence.lock:
+                    ctx.payload.setdefault("repair_commit_preflights", []).append(
                         {
                             **session_identity,
                             **repair_commit_preflight,
                         }
                     )
-                    persistence.append_event(
-                        event_path,
+                    ctx.persistence.append_event(
+                        ctx.event_path,
                         events.REPAIR_COMMIT_PREFLIGHT_EVENT,
                         {
-                            "run_id": run_id,
+                            "run_id": ctx.run_id,
                             **session_identity,
                             **repair_commit_preflight,
                         },
                     )
-                    persistence.write_state(payload)
+                    ctx.persistence.write_state(ctx.payload)
             turn_reply = pending_reply
             turn_resolution = pending_resolution
             if turn_reply is not None and turn_resolution is not None:
@@ -2674,7 +2675,7 @@ def _run_locked(
                         before.plan_dir, session_id, predecessor_id
                     ),
                     exempt_roots=run_inputs._runner_owned_roots(
-                        before.plan_dir, args.state_dir, run_dir=run_dir
+                        before.plan_dir, args.state_dir, run_dir=ctx.run_dir
                     ),
                     provenance_roots=preflight.plan_provenance_exempt_roots(
                         before.plan_dir
@@ -2682,12 +2683,9 @@ def _run_locked(
                 )
             )
             if packet_intent_report is not None:
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(before)
-                run_termination._pause_run(
-                    event_path,
-                    payload,
-                    reason=(events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED),
+                ctx.record_final_snapshot(before)
+                ctx.pause(
+                    reason=events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
                     message=run_inputs._repository_intent_message(
                         packet_intent_report,
                         subject=f"task packet for {session_label}",
@@ -2696,19 +2694,18 @@ def _run_locked(
                         **session_details,
                         "repository_intent": packet_intent_report,
                     },
-                    persistence=persistence,
                 )
                 break
             turn_started_at = _utc_now()
             turn_started_at_text = _isoformat(turn_started_at)
             idle_seconds_since_previous_turn = (
                 0.0
-                if runner_work_finished_at is None
-                else _duration_seconds(runner_work_finished_at, turn_started_at)
+                if ctx.runner_work_finished_at is None
+                else _duration_seconds(ctx.runner_work_finished_at, turn_started_at)
             )
             total_sessions = sum(_status_counts(before).values())
             active_turn = {
-                "run_id": run_id,
+                "run_id": ctx.run_id,
                 "turn_index": turn_index,
                 **session_identity,
                 "session_kind": session_kind,
@@ -2751,9 +2748,11 @@ def _run_locked(
                 **(
                     {
                         "cwd": str(cwd),
-                        **run_prompts._workspace_payload_fields(verification_context),
+                        **run_prompts._workspace_payload_fields(
+                            ctx.verification_context
+                        ),
                     }
-                    if verification_context.workspace is not None
+                    if ctx.verification_context.workspace is not None
                     else {}
                 ),
             }
@@ -2771,7 +2770,7 @@ def _run_locked(
             # inert until the harness opens it around the live process.
             delivery_endpoint = guidance_delivery.LiveDeliveryEndpoint(
                 guidance_delivery.TurnIdentity(
-                    run_id=run_id,
+                    run_id=ctx.run_id,
                     session_id=session_id,
                     turn_index=turn_index,
                     harness=turn_harness,
@@ -2780,11 +2779,11 @@ def _run_locked(
             mailbox_poll.set_live_delivery(delivery_endpoint)
 
             live_turn = run_commit._LiveTurn(
-                payload=payload,
-                event_path=event_path,
-                progress=progress,
+                payload=ctx.payload,
+                event_path=ctx.event_path,
+                progress=ctx.progress,
                 active_turn=active_turn,
-                persistence=persistence,
+                persistence=ctx.persistence,
                 poll_callback=mailbox_poll,
                 poll_interval=LIVE_CONTROL_POLL_INTERVAL_SECONDS,
                 wakeup=wakeup,
@@ -2794,21 +2793,21 @@ def _run_locked(
             # rather than repeated at each of the three transitions below.
             turn_executor = turn_execution.TurnExecutor(
                 identity=turn_execution.TurnIdentity(
-                    run_id=run_id,
+                    run_id=ctx.run_id,
                     turn_index=turn_index,
                     session_id=session_id,
                 ),
                 paths=paths,
-                event_path=event_path,
-                persistence=persistence,
-                progress=progress,
-                plan_cache=plan_cache,
+                event_path=ctx.event_path,
+                persistence=ctx.persistence,
+                progress=ctx.progress,
+                plan_cache=ctx.plan_cache,
             )
 
             stream_callback = _live_stream_callback(log_stream_callback, live_turn)
 
             with run_control_lock:
-                run_control_context = dict(active_turn)
+                ctx.run_control_context = dict(active_turn)
             # Captured before the reply is consumed and before `turn_started`:
             # an unusable guard has to stop the run without spending the turn.
             workspace_snapshot_before: repository_evidence.WorkspaceSnapshot | None = (
@@ -2822,7 +2821,7 @@ def _run_locked(
             external_digests_before = (
                 external_write_evidence._capture_external_write_digests(
                     external_write_evidence._control_plane_digest_roots(
-                        before.plan_dir, args.state_dir, run_dir=run_dir
+                        before.plan_dir, args.state_dir, run_dir=ctx.run_dir
                     ),
                     shallow_roots=(
                         external_write_evidence._control_plane_shallow_digest_roots(
@@ -2888,23 +2887,17 @@ def _run_locked(
                         "excluded": list(review_guard_excludes),
                         "include_ignored": review_guard_include_ignored,
                     }
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(before)
-                    run_termination._pause_run(
-                        event_path,
-                        payload,
-                        reason=(events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE),
-                        message=(
-                            "workspace write guard unavailable before "
-                            f"{session_label}; evidence for a registered "
-                            "repository could not be captured safely"
-                            f"{unavailable_summary}"
-                        ),
+                    ctx.record_final_snapshot(before)
+                    ctx.pause(
+                        reason=events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+                        message="workspace write guard unavailable before "
+                        f"{session_label}; evidence for a registered "
+                        "repository could not be captured safely"
+                        f"{unavailable_summary}",
                         details={
                             **session_details,
                             "workspace_write_guard": guard_record,
                         },
-                        persistence=persistence,
                     )
                     break
                 if retained_scope_repair is not None:
@@ -2968,32 +2961,24 @@ def _run_locked(
                             "current_expansion": current_expansion,
                             "expansion_fresh": expansion_fresh,
                         }
-                        with persistence.lock:
-                            payload["final_snapshot"] = _snapshot_payload(before)
-                        run_termination._pause_run(
-                            event_path,
-                            payload,
-                            reason=(
-                                events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
-                            ),
-                            message=(
-                                f"{session_label} still has retained changes "
-                                "outside its durable write scope or lacks a "
-                                "fresh expansion; repair scope and rerun "
-                                "expansion/preflight before continuing"
-                            ),
+                        ctx.record_final_snapshot(before)
+                        ctx.pause(
+                            reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+                            message=f"{session_label} still has retained changes "
+                            "outside its durable write scope or lacks a "
+                            "fresh expansion; repair scope and rerun "
+                            "expansion/preflight before continuing",
                             details={
                                 **session_details,
                                 "workspace_write_guard": repair_record,
                             },
-                            persistence=persistence,
                         )
                         break
-                    persistence.append_event(
-                        event_path,
+                    ctx.persistence.append_event(
+                        ctx.event_path,
                         events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
                         {
-                            "run_id": run_id,
+                            "run_id": ctx.run_id,
                             "details": {
                                 **session_details,
                                 "session_id": session_id,
@@ -3030,22 +3015,16 @@ def _run_locked(
                         "excluded": list(review_guard_excludes),
                         "include_ignored": review_guard_include_ignored,
                     }
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(before)
-                    run_termination._pause_run(
-                        event_path,
-                        payload,
-                        reason=(events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE),
-                        message=(
-                            "implementation write guard unavailable before "
-                            f"{session_label}; the legacy Git repository scope "
-                            "could not be established safely"
-                        ),
+                    ctx.record_final_snapshot(before)
+                    ctx.pause(
+                        reason=events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+                        message="implementation write guard unavailable before "
+                        f"{session_label}; the legacy Git repository scope "
+                        "could not be established safely",
                         details={
                             **session_details,
                             "workspace_write_guard": guard_record,
                         },
-                        persistence=persistence,
                     )
                     break
             # Captured before the exception-guard context below, because a
@@ -3066,16 +3045,11 @@ def _run_locked(
                     review_fingerprint_before
                 )
                 if unavailable is not None:
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(before)
-                    run_termination._pause_run(
-                        event_path,
-                        payload,
+                    ctx.record_final_snapshot(before)
+                    ctx.pause(
                         reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
-                        message=(
-                            "review mutation guard unavailable before "
-                            f"{session_label}: {unavailable['reason']}"
-                        ),
+                        message="review mutation guard unavailable before "
+                        f"{session_label}: {unavailable['reason']}",
                         details={
                             **session_details,
                             "review_mutation_guard": {
@@ -3087,7 +3061,6 @@ def _run_locked(
                                 "include_ignored": review_guard_include_ignored,
                             },
                         },
-                        persistence=persistence,
                     )
                     break
             if workspace is not None:
@@ -3170,9 +3143,9 @@ def _run_locked(
                 # may leak into a subsequent session prompt.
                 pending_reply = None
                 if turn_reply.process_start:
-                    reply_state_preserver.mark_consumed()
+                    ctx.reply_state_preserver.mark_consumed()
                 reply_event_payload = {
-                    "run_id": run_id,
+                    "run_id": ctx.run_id,
                     "turn_index": turn_index,
                     "session_id": session_id,
                     "reply_length": len(turn_reply.text),
@@ -3185,8 +3158,8 @@ def _run_locked(
                             "question_id": turn_reply.question_id,
                         }
                     )
-                persistence.append_event(
-                    event_path,
+                ctx.persistence.append_event(
+                    ctx.event_path,
                     events.REPLY_PROVIDED_EVENT,
                     reply_event_payload,
                 )
@@ -3198,11 +3171,11 @@ def _run_locked(
                 # successful start therefore consumes this exact resolution
                 # once, even when the same session needs another turn later.
                 pending_resolution = None
-                persistence.append_event(
-                    event_path,
+                ctx.persistence.append_event(
+                    ctx.event_path,
                     events.RESOLUTION_CONSUMED_EVENT,
                     {
-                        "run_id": run_id,
+                        "run_id": ctx.run_id,
                         "turn_index": turn_index,
                         "session_id": session_id,
                         "question_id": turn_resolution.question_id,
@@ -3216,10 +3189,6 @@ def _run_locked(
                     },
                 )
 
-            def _abandon_turn() -> None:
-                run_controls.stop()
-                inline_tail.stop()
-
             # Materialized per turn, not once per run: the guard-bin directory
             # must exist before the child's PATH names it, and a guard added
             # during the previous turn has to be armed for this one. The
@@ -3227,7 +3196,7 @@ def _run_locked(
             # the absolute path a tool call carries into the `alias:path` a
             # rule is written in, and a run can change harness mid-flight.
             with run_control_lock:
-                guard_controller.set_workspace_aliases(
+                ctx.guard_controller.set_workspace_aliases(
                     {
                         repository.alias: str(repository.root)
                         for repository in workspace.repositories
@@ -3235,8 +3204,8 @@ def _run_locked(
                     if workspace is not None
                     else {guards.LEGACY_PATH_QUALIFIER: str(cwd)}
                 )
-                guard_controller.mark_turn_snapshot(protected_path_baseline)
-                turn_env = guard_controller.prepare_turn(
+                ctx.guard_controller.mark_turn_snapshot(protected_path_baseline)
+                turn_env = ctx.guard_controller.prepare_turn(
                     harness=turn_harness,
                     pretool_armed=harnesses.get_adapter(
                         turn_harness
@@ -3262,11 +3231,11 @@ def _run_locked(
                             run_selection._record_next_turn_guidance_delivery,
                             plan_dir=before.plan_dir,
                             state_dir_arg=args.state_dir,
-                            event_path=event_path,
-                            append_event=persistence.append_event,
+                            event_path=ctx.event_path,
+                            append_event=ctx.persistence.append_event,
                             pending_guidance=pending_guidance,
                             harness=turn_harness,
-                            run_id=run_id,
+                            run_id=ctx.run_id,
                             session_id=session_id,
                             turn_index=turn_index,
                         )
@@ -3289,14 +3258,16 @@ def _run_locked(
                 ),
                 live_turn=live_turn,
                 active_turn=active_turn,
-                payload=payload,
-                after_stop=lambda: run_termination._detach_turn_controls(mailbox_poll),
-                on_failure=_abandon_turn,
+                payload=ctx.payload,
+                after_stop=functools.partial(
+                    run_termination._detach_turn_controls, mailbox_poll
+                ),
+                on_failure=functools.partial(_abandon_turn, ctx),
             )
             result = execution.result
             live_turn_payload = execution.live_turn
             with run_control_lock:
-                run_control_context = None
+                ctx.run_control_context = None
             plan_artifacts_written_by_runner: tuple[str, ...] = ()
             if is_review_session:
                 # Stamped from the turn's own completion rather than from the
@@ -3307,8 +3278,8 @@ def _run_locked(
                     review_session_version is not None
                     and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
                 )
-                with persistence.lock:
-                    payload["review_session_executed"] = session_id
+                with ctx.persistence.lock:
+                    ctx.payload["review_session_executed"] = session_id
                 normalized_after_review = (
                     plans.normalize_generated_review_handoff_artifacts(before.plan_dir)
                 )
@@ -3317,8 +3288,8 @@ def _run_locked(
                     plan_artifacts_written_by_runner = tuple(
                         path.name for path in normalized_after_review
                     )
-                    with persistence.lock:
-                        payload["normalized_review_handoffs"] = [
+                    with ctx.persistence.lock:
+                        ctx.payload["normalized_review_handoffs"] = [
                             str(path) for path in normalized_review_handoffs
                         ]
             finalization = turn_executor.finalize(
@@ -3335,36 +3306,36 @@ def _run_locked(
             # The turn enters run state as executed-but-unaccepted. Every guard
             # below may still amend or refuse it; `_commit_turn` is what
             # replaces this record with the published one.
-            with persistence.lock:
-                payload["turns"].append(turn_payload)
+            with ctx.persistence.lock:
+                ctx.payload["turns"].append(turn_payload)
                 # A harness that reports no model leaves the last observation
                 # standing rather than erasing it.
                 if turn_payload.get("observed_model") is not None:
-                    payload.update(
+                    ctx.payload.update(
                         _observed_model_payload(turn_payload["observed_model"])
                     )
-                payload["model_projection"] = run_commit._merged_model_projection(
-                    payload.get("model_projection"), turn_payload
+                ctx.payload["model_projection"] = run_commit._merged_model_projection(
+                    ctx.payload.get("model_projection"), turn_payload
                 )
                 turn_identity = {
-                    "run_id": run_id,
+                    "run_id": ctx.run_id,
                     "turn_index": turn_index,
                     **_session_identity_payload(session_id),
                 }
                 run_persistence._append_process_sweep_event(
-                    event_path=event_path,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    persistence=ctx.persistence,
                     report=result.process_sweep,
                     phase="turn",
                     identity=turn_identity,
                 )
                 run_persistence._append_harness_degradation_event(
-                    event_path=event_path,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    persistence=ctx.persistence,
                     degradation=turn_payload.get("harness_degradation"),
                     identity=turn_identity,
                 )
-                persistence.write_state(payload)
+                ctx.persistence.write_state(ctx.payload)
 
             if abort_signal.armed and not result.aborted:
                 # The worker ended the turn inside the grace window, so nothing
@@ -3372,12 +3343,12 @@ def _run_locked(
                 # completion path below owns the outcome from here.
                 with run_control_lock:
                     run_termination._record_abort_satisfied_by_worker(
-                        run_controls,
-                        payload=payload,
-                        event_path=event_path,
-                        control_payload=control_payload,
+                        ctx.run_controls,
+                        payload=ctx.payload,
+                        event_path=ctx.event_path,
+                        control_payload=ctx.control_payload,
                         context=turn_payload,
-                        persistence=persistence,
+                        persistence=ctx.persistence,
                     )
 
             # Ahead of every result branch: a retryable pause (timeout,
@@ -3396,9 +3367,9 @@ def _run_locked(
                 assert workspace_snapshot_before is not None
                 pending_exception_guard = None
                 if write_guards._enforce_workspace_write_guard(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     workspace=workspace,
                     scope=session_scope,
                     before=before,
@@ -3411,11 +3382,11 @@ def _run_locked(
                     session_details=session_details,
                     turn_payload=turn_payload,
                     paths=paths,
-                    plan_cache=plan_cache,
+                    plan_cache=ctx.plan_cache,
                     append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                     state_dir_arg=args.state_dir,
-                    run_dir=run_dir,
+                    run_dir=ctx.run_dir,
                     external_digests_before=external_digests_before,
                     turn_started_ns=turn_started_ns,
                 ):
@@ -3426,31 +3397,28 @@ def _run_locked(
                             workspace, workspace_snapshot_before
                         )
                     except RunError as error:
-                        with persistence.lock:
-                            payload["final_snapshot"] = (
+                        with ctx.persistence.lock:
+                            ctx.payload["final_snapshot"] = (
                                 _snapshot_payload(after)
                                 if after is not None
                                 else _snapshot_payload(before)
                             )
-                        run_termination._pause_run(
-                            event_path,
-                            payload,
+                        ctx.pause(
                             reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
                             message=str(error),
                             details={**session_details, "error": str(error)},
-                            persistence=persistence,
                         )
                         finalization_paused = True
                     else:
-                        with persistence.lock:
+                        with ctx.persistence.lock:
                             turn_payload["review_repository_bases"] = review_bases
                             _write_json_file(paths["result"], turn_payload)
             elif legacy_snapshot_before is not None:
                 pending_exception_guard = None
                 if write_guards._enforce_legacy_implementation_write_guard(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     cwd=cwd,
                     before=before,
                     after=after,
@@ -3462,11 +3430,11 @@ def _run_locked(
                     session_details=session_details,
                     turn_payload=turn_payload,
                     paths=paths,
-                    plan_cache=plan_cache,
+                    plan_cache=ctx.plan_cache,
                     append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                     state_dir_arg=args.state_dir,
-                    run_dir=run_dir,
+                    run_dir=ctx.run_dir,
                     external_digests_before=external_digests_before,
                     turn_started_ns=turn_started_ns,
                 ):
@@ -3482,9 +3450,9 @@ def _run_locked(
                 and is_review_session
                 and review_fingerprint_before is not None
                 and handoff_guards._enforce_review_mutation_guard(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     cwd=cwd,
                     before=before,
                     after=after,
@@ -3496,7 +3464,7 @@ def _run_locked(
                     session_details=session_details,
                     turn_payload=turn_payload,
                     paths=paths,
-                    plan_cache=plan_cache,
+                    plan_cache=ctx.plan_cache,
                     append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                 )
@@ -3511,10 +3479,10 @@ def _run_locked(
             # not "did the session stay in scope" but "did the run honour the
             # standing instruction an operator gave it".
             if write_guards._enforce_protected_path_guard(
-                event_path=event_path,
-                payload=payload,
-                persistence=persistence,
-                guard_controller=guard_controller,
+                event_path=ctx.event_path,
+                payload=ctx.payload,
+                persistence=ctx.persistence,
+                guard_controller=ctx.guard_controller,
                 before=before,
                 after=after,
                 session_id=session_id,
@@ -3522,7 +3490,7 @@ def _run_locked(
                 session_details=session_details,
                 turn_payload=turn_payload,
                 paths=paths,
-                plan_cache=plan_cache,
+                plan_cache=ctx.plan_cache,
                 append_handoff_note=handoff_correction._append_handoff_note,
                 reinspect=session_verification._reinspect_after_revert,
                 changed_paths=(
@@ -3562,9 +3530,9 @@ def _run_locked(
             if (
                 terminating_disposition is not None
                 and handoff_guards._enforce_plan_artifact_guard(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     before=before,
                     after=after,
                     digests_before=plan_artifacts_before,
@@ -3574,7 +3542,7 @@ def _run_locked(
                     session_details=session_details,
                     turn_payload=turn_payload,
                     paths=paths,
-                    plan_cache=plan_cache,
+                    plan_cache=ctx.plan_cache,
                     result_disposition=terminating_disposition,
                     append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
@@ -3583,36 +3551,30 @@ def _run_locked(
                 break
 
             if terminating_disposition == "interrupted":
-                with persistence.lock:
-                    payload["final_snapshot"] = (
+                with ctx.persistence.lock:
+                    ctx.payload["final_snapshot"] = (
                         _snapshot_payload(after)
                         if after is not None
                         else _snapshot_payload(before)
                     )
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.pause(
                     reason="interrupted",
                     message="run interrupted by user",
                     details=session_details,
-                    persistence=persistence,
                 )
                 break
 
             if terminating_disposition == "timeout":
-                with persistence.lock:
-                    payload["final_snapshot"] = (
+                with ctx.persistence.lock:
+                    ctx.payload["final_snapshot"] = (
                         _snapshot_payload(after)
                         if after is not None
                         else _snapshot_payload(before)
                     )
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.pause(
                     reason="timeout",
                     message=f"harness turn timed out for {session_label}",
                     details=session_details,
-                    persistence=persistence,
                 )
                 break
 
@@ -3621,31 +3583,31 @@ def _run_locked(
                 # for this stop, so it is recorded as one.
                 with run_control_lock:
                     run_termination._honor_abort_turn(
-                        run_controls,
+                        ctx.run_controls,
                         snapshot=after if after is not None else before,
                         session_id=session_id,
-                        payload=payload,
-                        event_path=event_path,
-                        control_payload=control_payload,
-                        plan_cache=plan_cache,
+                        payload=ctx.payload,
+                        event_path=ctx.event_path,
+                        control_payload=ctx.control_payload,
+                        plan_cache=ctx.plan_cache,
                         revert_session_status=handoff_guards.session_status_reverter(
                             handoff_correction._append_handoff_note
                         ),
                         reinspect=session_verification._reinspect_after_revert,
                         context=turn_payload,
-                        persistence=persistence,
+                        persistence=ctx.persistence,
                     )
                 break
             if terminating_disposition == "malformed-plan":
                 corrected, correction_evidence = (
                     handoff_correction._correct_malformed_handoff(
-                        event_path=event_path,
-                        payload=payload,
-                        persistence=persistence,
-                        plan_cache=plan_cache,
+                        event_path=ctx.event_path,
+                        payload=ctx.payload,
+                        persistence=ctx.persistence,
+                        plan_cache=ctx.plan_cache,
                         before=before,
                         workspace=workspace,
-                        run_id=run_id,
+                        run_id=ctx.run_id,
                         turn_index=turn_index,
                         session_id=session_id,
                         plan_error=plan_error,
@@ -3664,7 +3626,7 @@ def _run_locked(
                     malformed_details["handoff_correction"] = correction_evidence
                 reopened_snapshot, reopen_evidence = (
                     handoff_correction._reopen_uninspectable_handoff(
-                        plan_cache=plan_cache,
+                        plan_cache=ctx.plan_cache,
                         before=before,
                         session_id=session_id,
                         plan_error=plan_error,
@@ -3676,14 +3638,13 @@ def _run_locked(
                 )
                 if reopen_evidence is not None:
                     malformed_details["handoff_reopen"] = reopen_evidence
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(
-                        before if reopened_snapshot is None else reopened_snapshot
-                    )
+                ctx.record_final_snapshot(
+                    before if reopened_snapshot is None else reopened_snapshot
+                )
                 _record_turn_rejected(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     turn_payload=turn_payload,
                     session_id=session_id,
                     guard="plan-inspection",
@@ -3693,13 +3654,10 @@ def _run_locked(
                     ),
                     detail={"error": plan_error},
                 )
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.pause(
                     reason="malformed-plan",
                     message="plan could not be inspected after the harness turn",
                     details=malformed_details,
-                    persistence=persistence,
                 )
                 break
 
@@ -3709,10 +3667,10 @@ def _run_locked(
             assert after is not None
             after, paused_status_repair = (
                 handoff_correction._repair_paused_handoff_status(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
-                    plan_cache=plan_cache,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
+                    plan_cache=ctx.plan_cache,
                     after=after,
                     session_id=session_id,
                     turn_index=turn_index,
@@ -3722,25 +3680,21 @@ def _run_locked(
             invalid_pause = run_inputs._invalid_status_pause(after)
             if invalid_pause is not None:
                 reason, message, details = invalid_pause
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(after)
+                ctx.record_final_snapshot(after)
                 _record_turn_rejected(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     turn_payload=turn_payload,
                     session_id=session_id,
                     guard="plan-status-validity",
                     reason=reason,
                     detail=details,
                 )
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.pause(
                     reason=reason,
                     message=message,
                     details=details | session_details,
-                    persistence=persistence,
                 )
                 break
 
@@ -3753,9 +3707,9 @@ def _run_locked(
                 and selected_after is not None
                 and selected_after.status == "complete"
                 and handoff_guards._enforce_mailbox_completion_guard(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     after=after,
                     session_id=session_id,
                     session_label=session_label,
@@ -3764,7 +3718,7 @@ def _run_locked(
                     state_dir_arg=args.state_dir,
                     turn_payload=turn_payload,
                     paths=paths,
-                    plan_cache=plan_cache,
+                    plan_cache=ctx.plan_cache,
                     append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                 )
@@ -3774,8 +3728,7 @@ def _run_locked(
             runner_pause = turn_payload.get("runner_pause")
             if terminating_disposition == "runner-pause":
                 pause_reason = _runner_pause_reason(str(runner_pause))
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(after)
+                ctx.record_final_snapshot(after)
                 pause_details: dict[str, Any] = {
                     **session_details,
                     "source": turn_payload.get("runner_pause_source"),
@@ -3786,7 +3739,7 @@ def _run_locked(
                     _worker_pause_resolution_for_turn(
                         plan_dir=after.plan_dir,
                         state_dir_arg=args.state_dir,
-                        run_id=run_id,
+                        run_id=ctx.run_id,
                         session_id=session_id,
                         turn_index=turn_index,
                     )
@@ -3795,7 +3748,7 @@ def _run_locked(
                 )
                 if worker_pause_resolution is not None:
                     pause_details["mailbox_resolution"] = {
-                        "run_id": run_id,
+                        "run_id": ctx.run_id,
                         "session_id": session_id,
                         "turn_index": turn_index,
                         "waiter_origin": mailbox.WAITER_ORIGIN_WORKER,
@@ -3809,13 +3762,10 @@ def _run_locked(
                             else len(worker_pause_resolution.note)
                         ),
                     }
-                    run_termination._pause_run(
-                        event_path,
-                        payload,
+                    ctx.pause(
                         reason=pause_reason,
                         message=str(runner_pause),
                         details=pause_details,
-                        persistence=persistence,
                     )
                     break
                 if _runner_pause_can_wait_for_mailbox_reply(
@@ -3826,22 +3776,22 @@ def _run_locked(
                     try:
                         prepared_wait = _prepare_mailbox_reply_wait(
                             snapshot=after,
-                            payload=payload,
+                            payload=ctx.payload,
                             plan_state=state_dir,
                             state_path=state_path,
                             state_dir_arg=args.state_dir,
-                            run_id=run_id,
+                            run_id=ctx.run_id,
                             session_id=session_id,
                             turn_index=turn_index,
                         )
                     except _MailboxReplyWaitUnavailable as error:
                         _record_mailbox_reply_wait_preparation_failed(
-                            event_path,
-                            payload,
+                            ctx.event_path,
+                            ctx.payload,
                             session_id=session_id,
                             turn_index=turn_index,
                             reason=error.reason,
-                            persistence=persistence,
+                            persistence=ctx.persistence,
                         )
                         prepared_wait = None
 
@@ -3851,21 +3801,21 @@ def _run_locked(
                         # answers, so the clock starts before the wait. Pinning
                         # it is this path's explicit opt-out from the
                         # structural refresh at the top of the loop.
-                        runner_work_finished_at = _utc_now()
-                        idle_baseline_pinned = True
+                        ctx.runner_work_finished_at = _utc_now()
+                        ctx.idle_baseline_pinned = True
                         wait_result = run_coordination.MailboxWaitCoordinator(
                             plan_dir=after.plan_dir,
                             state_dir_arg=args.state_dir,
                             prepared=prepared_wait,
-                            run_id=run_id,
+                            run_id=ctx.run_id,
                             store=run_coordination.WaitStateStore(
-                                event_path=event_path,
-                                payload=payload,
-                                persistence=persistence,
+                                event_path=ctx.event_path,
+                                payload=ctx.payload,
+                                persistence=ctx.persistence,
                             ),
-                            persistence=persistence,
+                            persistence=ctx.persistence,
                             notifier=run_persistence._AgentMuxWaitNotifier(
-                                payload, persistence
+                                ctx.payload, ctx.persistence
                             ),
                             poll_controls=mailbox_poll,
                             # Resolved here rather than inside the coordinator
@@ -3917,13 +3867,10 @@ def _run_locked(
                                 resolution_message.action
                                 == mailbox.RESOLUTION_ACTION_PAUSE
                             )
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.pause(
                     reason=pause_reason,
                     message=str(runner_pause),
                     details=pause_details,
-                    persistence=persistence,
                 )
                 break
             if terminating_disposition == "nonzero-exit":
@@ -3950,12 +3897,12 @@ def _run_locked(
                             run_selection.SPARK_MODEL,
                             reason=classification.reason,
                             retry_hint=classification.retry_at,
-                            run_id=run_id,
+                            run_id=ctx.run_id,
                         )
                     except OSError as error:
                         cooldown = None
-                        with persistence.lock:
-                            payload["spark"]["warning"] = (
+                        with ctx.persistence.lock:
+                            ctx.payload["spark"]["warning"] = (
                                 f"could not update model availability ledger: {error}"
                             )
                     fallback_reason = classification.reason
@@ -3972,27 +3919,27 @@ def _run_locked(
                     else:
                         spark_status_update = cooldown.to_dict()
                     spark_fallback_reason = fallback_reason
-                    with persistence.lock:
+                    with ctx.persistence.lock:
                         spark_route["fallback_reason"] = fallback_reason
                         turn_payload["spark_route"] = dict(spark_route)
-                        payload["spark"].update(spark_status_update)
-                        payload["spark"]["active_route"] = dict(spark_route)
-                        payload["final_snapshot"] = _snapshot_payload(after)
+                        ctx.payload["spark"].update(spark_status_update)
+                        ctx.payload["spark"]["active_route"] = dict(spark_route)
+                        ctx.payload["final_snapshot"] = _snapshot_payload(after)
                         _write_json_file(paths["result"], turn_payload)
-                        persistence.append_event(
-                            event_path,
+                        ctx.persistence.append_event(
+                            ctx.event_path,
                             "spark_fallback",
                             {
-                                "run_id": run_id,
+                                "run_id": ctx.run_id,
                                 "session_id": session_id,
                                 "failed_turn_index": turn_index,
                                 "failed_model": run_selection.SPARK_MODEL,
-                                "fallback_model": payload["spark"]["baseline"],
+                                "fallback_model": ctx.payload["spark"]["baseline"],
                                 "failure_classification": classification.to_dict(),
-                                "retry_at": payload["spark"].get("retry_at"),
+                                "retry_at": ctx.payload["spark"].get("retry_at"),
                             },
                         )
-                        persistence.write_state(payload)
+                        ctx.persistence.write_state(ctx.payload)
                     snapshot = after
                     continue
                 if classification.reason == events.PAUSE_REASON_NONZERO_EXIT:
@@ -4005,11 +3952,8 @@ def _run_locked(
                         f"{session_label} failed: {classification.reason} "
                         f"(harness exit {result.returncode})"
                     )
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(after)
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.record_final_snapshot(after)
+                ctx.pause(
                     reason=classification.reason,
                     message=pause_message,
                     details={
@@ -4022,7 +3966,6 @@ def _run_locked(
                             else {}
                         ),
                     },
-                    persistence=persistence,
                 )
                 break
 
@@ -4035,14 +3978,14 @@ def _run_locked(
             )
             status_changes = _status_changes(before, after)
             if not status_changes:
-                with persistence.lock:
-                    payload["expected_status_changes"] = list(expected_change)
-                    payload["observed_status_changes"] = []
-                    payload["final_snapshot"] = _snapshot_payload(after)
+                with ctx.persistence.lock:
+                    ctx.payload["expected_status_changes"] = list(expected_change)
+                    ctx.payload["observed_status_changes"] = []
+                    ctx.payload["final_snapshot"] = _snapshot_payload(after)
                 _record_turn_rejected(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     turn_payload=turn_payload,
                     session_id=session_id,
                     guard="status-change",
@@ -4052,9 +3995,7 @@ def _run_locked(
                         "observed_status_changes": [],
                     },
                 )
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.pause(
                     reason="no-status-change",
                     message=f"{session_label} did not change status",
                     details={
@@ -4062,18 +4003,17 @@ def _run_locked(
                         "expected_status_changes": list(expected_change),
                         "observed_status_changes": [],
                     },
-                    persistence=persistence,
                 )
                 break
             if len(status_changes) > 1:
-                with persistence.lock:
-                    payload["expected_status_changes"] = list(expected_change)
-                    payload["observed_status_changes"] = list(status_changes)
-                    payload["final_snapshot"] = _snapshot_payload(after)
+                with ctx.persistence.lock:
+                    ctx.payload["expected_status_changes"] = list(expected_change)
+                    ctx.payload["observed_status_changes"] = list(status_changes)
+                    ctx.payload["final_snapshot"] = _snapshot_payload(after)
                 _record_turn_rejected(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     turn_payload=turn_payload,
                     session_id=session_id,
                     guard="status-change",
@@ -4083,9 +4023,7 @@ def _run_locked(
                         "observed_status_changes": list(status_changes),
                     },
                 )
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.pause(
                     reason="multiple-status-changes",
                     message="more than one session status changed during one harness "
                     "turn",
@@ -4094,18 +4032,17 @@ def _run_locked(
                         "expected_status_changes": list(expected_change),
                         "observed_status_changes": list(status_changes),
                     },
-                    persistence=persistence,
                 )
                 break
             if status_changes != expected_change:
-                with persistence.lock:
-                    payload["expected_status_changes"] = list(expected_change)
-                    payload["observed_status_changes"] = list(status_changes)
-                    payload["final_snapshot"] = _snapshot_payload(after)
+                with ctx.persistence.lock:
+                    ctx.payload["expected_status_changes"] = list(expected_change)
+                    ctx.payload["observed_status_changes"] = list(status_changes)
+                    ctx.payload["final_snapshot"] = _snapshot_payload(after)
                 _record_turn_rejected(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     turn_payload=turn_payload,
                     session_id=session_id,
                     guard="status-change",
@@ -4115,9 +4052,7 @@ def _run_locked(
                         "observed_status_changes": list(status_changes),
                     },
                 )
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.pause(
                     reason="unexpected-status-change",
                     message="the changed session status did not match the expected "
                     "pending completion",
@@ -4126,7 +4061,6 @@ def _run_locked(
                         "expected_status_changes": list(expected_change),
                         "observed_status_changes": list(status_changes),
                     },
-                    persistence=persistence,
                 )
                 break
 
@@ -4136,9 +4070,9 @@ def _run_locked(
             # their sharper diagnosis; what is left is the tampering they
             # cannot see, an edit that moves no status at all.
             if handoff_guards._enforce_plan_artifact_guard(
-                event_path=event_path,
-                payload=payload,
-                persistence=persistence,
+                event_path=ctx.event_path,
+                payload=ctx.payload,
+                persistence=ctx.persistence,
                 before=before,
                 after=after,
                 digests_before=plan_artifacts_before,
@@ -4148,17 +4082,17 @@ def _run_locked(
                 session_details=session_details,
                 turn_payload=turn_payload,
                 paths=paths,
-                plan_cache=plan_cache,
+                plan_cache=ctx.plan_cache,
                 append_handoff_note=handoff_correction._append_handoff_note,
                 reinspect=session_verification._reinspect_after_revert,
             ):
                 break
 
             if session_verification._enforce_session_verification(
-                event_path=event_path,
-                payload=payload,
-                persistence=persistence,
-                progress=progress,
+                event_path=ctx.event_path,
+                payload=ctx.payload,
+                persistence=ctx.persistence,
+                progress=ctx.progress,
                 before=before,
                 after=after,
                 cwd=cwd,
@@ -4168,12 +4102,12 @@ def _run_locked(
                 allow_not_loop_ready=allow_not_loop_ready,
                 turn_payload=turn_payload,
                 paths=paths,
-                plan_cache=plan_cache,
+                plan_cache=ctx.plan_cache,
                 append_handoff_note=handoff_correction._append_handoff_note,
-                run_id=run_id,
+                run_id=ctx.run_id,
                 turn_index=turn_index,
                 total_sessions=total_sessions,
-                verification_context=verification_context,
+                verification_context=ctx.verification_context,
                 review_broad_failure_deferral=is_review_session,
                 require_review_artifact=(
                     review_session_version is not None
@@ -4194,24 +4128,26 @@ def _run_locked(
                 _drain_external_control_queue(
                     plan_dir=before.plan_dir,
                     state_dir_arg=args.state_dir,
-                    control_state=run_controls.state,
-                    seen_ids=seen_external_command_ids,
-                    payload=payload,
-                    event_path=event_path,
-                    control_payload=control_payload,
+                    control_state=ctx.run_controls.state,
+                    seen_ids=ctx.seen_external_command_ids,
+                    payload=ctx.payload,
+                    event_path=ctx.event_path,
+                    control_payload=ctx.control_payload,
                     context=turn_payload,
-                    persistence=persistence,
+                    persistence=ctx.persistence,
                     run_control_lock=run_control_lock,
                     wakeup=wakeup,
-                    guard_controller=guard_controller,
+                    guard_controller=ctx.guard_controller,
                 )
                 with run_control_lock:
-                    stop_after_current_pending = run_controls.state.stop_after_current
+                    stop_after_current_pending = (
+                        ctx.run_controls.state.stop_after_current
+                    )
                 verdict_action, verdict_snapshot = (
                     session_verification._enforce_review_verdict(
-                        event_path=event_path,
-                        payload=payload,
-                        persistence=persistence,
+                        event_path=ctx.event_path,
+                        payload=ctx.payload,
+                        persistence=ctx.persistence,
                         before=before,
                         after=after,
                         session_id=session_id,
@@ -4219,7 +4155,7 @@ def _run_locked(
                         session_details=session_details,
                         turn_payload=turn_payload,
                         paths=paths,
-                        plan_cache=plan_cache,
+                        plan_cache=ctx.plan_cache,
                         append_handoff_note=handoff_correction._append_handoff_note,
                         require_artifact=(
                             review_session_version is not None
@@ -4244,18 +4180,18 @@ def _run_locked(
             except Exception as error:
                 progress_appended = False
                 progress_error = str(error)
-                persistence.append_event(
-                    event_path,
+                ctx.persistence.append_event(
+                    ctx.event_path,
                     "progress-journal-append-failed",
                     {
-                        "run_id": payload.get("run_id"),
+                        "run_id": ctx.payload.get("run_id"),
                         "session": session_id,
                         "session_label": session_label,
                         "completed_at": completed_at,
                         "error": progress_error,
                     },
                 )
-            with persistence.lock:
+            with ctx.persistence.lock:
                 turn_payload["progress_appended"] = progress_appended
                 if progress_error is not None:
                     turn_payload["progress_error"] = progress_error
@@ -4264,59 +4200,51 @@ def _run_locked(
             try:
                 ledger_updates = plans.sync_derived_status_ledgers(after)
             except plans.PlanError as error:
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(after)
+                ctx.record_final_snapshot(after)
                 _record_turn_rejected(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     turn_payload=turn_payload,
                     session_id=session_id,
                     guard="ledger-sync",
                     reason="malformed-plan",
                     detail={"error": str(error)},
                 )
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.pause(
                     reason="malformed-plan",
                     message="derived status ledgers could not be synced",
                     details={
                         **session_details,
                         "error": str(error),
                     },
-                    persistence=persistence,
                 )
                 break
             if ledger_updates:
                 try:
-                    after = plan_cache.get_fresh(before.plan_dir)
+                    after = ctx.plan_cache.get_fresh(before.plan_dir)
                 except plans.PlanError as error:
-                    with persistence.lock:
-                        payload["final_snapshot"] = _snapshot_payload(after)
+                    ctx.record_final_snapshot(after)
                     _record_turn_rejected(
-                        event_path=event_path,
-                        payload=payload,
-                        persistence=persistence,
+                        event_path=ctx.event_path,
+                        payload=ctx.payload,
+                        persistence=ctx.persistence,
                         turn_payload=turn_payload,
                         session_id=session_id,
                         guard="ledger-sync",
                         reason="malformed-plan",
                         detail={"error": str(error)},
                     )
-                    run_termination._pause_run(
-                        event_path,
-                        payload,
+                    ctx.pause(
                         reason="malformed-plan",
                         message="plan could not be inspected after syncing ledgers",
                         details={
                             **session_details,
                             "error": str(error),
                         },
-                        persistence=persistence,
                     )
                     break
-                with persistence.lock:
+                with ctx.persistence.lock:
                     turn_payload["ledger_updates"] = [
                         str(path) for path in ledger_updates
                     ]
@@ -4324,7 +4252,7 @@ def _run_locked(
                     _write_json_file(paths["result"], turn_payload)
 
             readiness_gate._refresh_active_readiness_state(
-                payload, after.plan_dir, persistence
+                ctx.payload, after.plan_dir, ctx.persistence
             )
 
             repair_owned_commit = is_repair_session and commit_mode is None
@@ -4336,12 +4264,12 @@ def _run_locked(
                 try:
                     session_targets = (
                         commit_settlement._registered_session_commit_targets(
-                            verification_context,
+                            ctx.verification_context,
                             turn_payload.get("workspace_write_guard", {}),
                         )
-                        if verification_context.workspace is not None
+                        if ctx.verification_context.workspace is not None
                         else commit_settlement._dirty_commit_targets(
-                            verification_context
+                            ctx.verification_context
                         )
                     )
                     if repair_owned_commit:
@@ -4353,16 +4281,16 @@ def _run_locked(
                     if session_targets or not repair_owned_commit:
                         commit_group, failed_commit = (
                             commit_settlement._run_commit_group(
-                                event_path=event_path,
-                                payload=payload,
-                                progress=progress,
-                                verification_context=verification_context,
-                                run_dir=run_dir,
-                                run_id=run_id,
+                                event_path=ctx.event_path,
+                                payload=ctx.payload,
+                                progress=ctx.progress,
+                                verification_context=ctx.verification_context,
+                                run_dir=ctx.run_dir,
+                                run_id=ctx.run_id,
                                 session_id=session_id,
                                 targets=session_targets,
-                                generation=commit_generation,
-                                persistence=persistence,
+                                generation=ctx.commit_generation,
+                                persistence=ctx.persistence,
                             )
                         )
                     else:
@@ -4375,7 +4303,7 @@ def _run_locked(
                 else:
                     commit_error = None
                 if repair_owned_commit:
-                    with persistence.lock:
+                    with ctx.persistence.lock:
                         turn_payload["repair_commit"] = {
                             "mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
                             "result": (
@@ -4399,7 +4327,7 @@ def _run_locked(
                     # to the plan. Recording a `turn_rejected` here instead
                     # would say a guard refused a turn the very next call
                     # accepts.
-                    with persistence.lock:
+                    with ctx.persistence.lock:
                         turn_payload["session_commit"] = {
                             "guard": (
                                 "repair-session-commit"
@@ -4412,7 +4340,8 @@ def _run_locked(
                             "commit": failed_commit,
                         }
                         _write_json_file(paths["result"], turn_payload)
-                    soft_fail_commit(
+                    _soft_fail_commit(
+                        ctx,
                         scope="session",
                         session_id=session_id,
                         group=commit_group,
@@ -4425,42 +4354,40 @@ def _run_locked(
 
             try:
                 commit = turn_executor.commit(
-                    payload=payload,
+                    payload=ctx.payload,
                     turn_payload=turn_payload,
                     live_turn=live_turn_payload,
                     accepted=after,
                 )
             except _TurnCommitRejected as rejection:
-                with persistence.lock:
-                    payload["final_snapshot"] = _snapshot_payload(after)
+                ctx.record_final_snapshot(after)
                 _record_turn_rejected(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     turn_payload=turn_payload,
                     session_id=session_id,
                     guard="ledger-sync",
                     reason=rejection.reason,
                     detail=rejection.detail,
                 )
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+                ctx.pause(
                     reason=rejection.reason,
                     message=rejection.message,
                     details={**session_details, **rejection.detail},
-                    persistence=persistence,
                 )
                 break
 
-            with persistence.lock:
-                payload["completed_sessions"].append(_session_compat_value(session_id))
-                payload.setdefault("completed_session_ids", []).append(session_id)
+            with ctx.persistence.lock:
+                ctx.payload["completed_sessions"].append(
+                    _session_compat_value(session_id)
+                )
+                ctx.payload.setdefault("completed_session_ids", []).append(session_id)
                 if is_review_session:
-                    payload["review_completed"] = True
+                    ctx.payload["review_completed"] = True
                     review_verdict = commit.record.get("review_verdict")
                     if isinstance(review_verdict, dict):
-                        payload["review_verdict"] = {
+                        ctx.payload["review_verdict"] = {
                             "status_line": review_verdict["status_line"],
                             "outcome": review_verdict["outcome"],
                             "total_findings": review_verdict["total_findings"],
@@ -4469,16 +4396,15 @@ def _run_locked(
                             ],
                         }
             if not is_review_session:
-                completed_count += 1
+                ctx.completed_count += 1
             snapshot = after
-            with persistence.lock:
-                payload["final_snapshot"] = plans.snapshot_payload(commit.published)
+            ctx.record_final_snapshot(commit.published)
 
             if is_review_session:
                 cycle_action, snapshot = review_cycle._advance_review_cycle(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     args=args,
                     cwd=cwd,
                     session_id=session_id,
@@ -4487,14 +4413,14 @@ def _run_locked(
                     snapshot=snapshot,
                     turn_payload=commit.record,
                     max_review_fix_cycles=max_review_fix_cycles,
-                    plan_cache=plan_cache,
+                    plan_cache=ctx.plan_cache,
                     reinspect=session_verification._reinspect_after_plan_mutation,
                 )
                 review_resume = review_cycle._set_review_resume(
                     snapshot=snapshot,
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
                     max_repair_group_attempts=run_inputs._max_repair_group_attempts(
                         args
                     ),
@@ -4504,48 +4430,48 @@ def _run_locked(
                 if cycle_action == "paused":
                     break
                 if cycle_action == "complete":
-                    with persistence.lock:
-                        payload["reason"] = review_cycle._terminal_review_reason(
-                            payload
+                    with ctx.persistence.lock:
+                        ctx.payload["reason"] = review_cycle._terminal_review_reason(
+                            ctx.payload
                         )
                     break
                 # Repair children were materialized: clear the appended flag
                 # so the loop appends the next review session once the
                 # children complete, then fall through to the control tail
                 # so operator stop requests are honored between cycles.
-                review_appended = False
+                ctx.review_appended = False
 
             _drain_external_control_queue(
                 plan_dir=snapshot.plan_dir,
                 state_dir_arg=args.state_dir,
-                control_state=run_controls.state,
-                seen_ids=seen_external_command_ids,
-                payload=payload,
-                event_path=event_path,
-                control_payload=control_payload,
+                control_state=ctx.run_controls.state,
+                seen_ids=ctx.seen_external_command_ids,
+                payload=ctx.payload,
+                event_path=ctx.event_path,
+                control_payload=ctx.control_payload,
                 context=commit.record,
-                persistence=persistence,
+                persistence=ctx.persistence,
                 run_control_lock=run_control_lock,
                 wakeup=wakeup,
-                guard_controller=guard_controller,
+                guard_controller=ctx.guard_controller,
             )
             with run_control_lock:
                 # An unpending request is left set on purpose: the all-complete
                 # branch at the top of the loop owns it, so a stop is never
                 # swallowed by a run that still has a review to append.
                 stop_now = (
-                    run_controls.state.stop_after_current
+                    ctx.run_controls.state.stop_after_current
                     and snapshot.next_pending is not None
                 )
                 if stop_now:
                     run_termination._honor_stop_after_current(
-                        run_controls,
+                        ctx.run_controls,
                         snapshot=snapshot,
-                        payload=payload,
-                        event_path=event_path,
-                        control_payload=control_payload,
+                        payload=ctx.payload,
+                        event_path=ctx.event_path,
+                        control_payload=ctx.control_payload,
                         context=commit.record,
-                        persistence=persistence,
+                        persistence=ctx.persistence,
                     )
             if stop_now:
                 break
@@ -4559,19 +4485,19 @@ def _run_locked(
             finished_at = _utc_now()
             live_turn_payload = live_turn.finish(finished_at)
             with run_control_lock:
-                run_control_context = None
+                ctx.run_control_context = None
 
             after = guard_context.get("after")
             if after is None:
                 try:
-                    after = plan_cache.get_fresh(snapshot.plan_dir)
+                    after = ctx.plan_cache.get_fresh(snapshot.plan_dir)
                 except Exception:
                     after = None
             turn_payload = guard_context.get("turn_payload")
             if not isinstance(turn_payload, dict):
                 turn_payload = {
                     **live_turn_payload,
-                    "run_id": run_id,
+                    "run_id": ctx.run_id,
                     "turn_index": live_turn_payload.get("turn_index"),
                     **_session_identity_payload(str(guard_context["session_id"])),
                     "status_result": "exception",
@@ -4590,9 +4516,9 @@ def _run_locked(
             try:
                 if guard_mode == "legacy":
                     write_guards._enforce_legacy_implementation_write_guard(
-                        event_path=event_path,
-                        payload=payload,
-                        persistence=persistence,
+                        event_path=ctx.event_path,
+                        payload=ctx.payload,
+                        persistence=ctx.persistence,
                         cwd=guard_context["cwd"],
                         before=guard_context["before"],
                         after=after,
@@ -4604,11 +4530,11 @@ def _run_locked(
                         session_details=guard_context["session_details"],
                         turn_payload=turn_payload,
                         paths=guard_context["paths"],
-                        plan_cache=plan_cache,
+                        plan_cache=ctx.plan_cache,
                         append_handoff_note=handoff_correction._append_handoff_note,
                         reinspect=session_verification._reinspect_after_revert,
                         state_dir_arg=args.state_dir,
-                        run_dir=run_dir,
+                        run_dir=ctx.run_dir,
                         external_digests_before=guard_context.get(
                             "external_digests_before"
                         ),
@@ -4616,9 +4542,9 @@ def _run_locked(
                     )
                 elif guard_mode == "workspace":
                     write_guards._enforce_workspace_write_guard(
-                        event_path=event_path,
-                        payload=payload,
-                        persistence=persistence,
+                        event_path=ctx.event_path,
+                        payload=ctx.payload,
+                        persistence=ctx.persistence,
                         workspace=guard_context["workspace"],
                         scope=guard_context["scope"],
                         before=guard_context["before"],
@@ -4631,11 +4557,11 @@ def _run_locked(
                         session_details=guard_context["session_details"],
                         turn_payload=turn_payload,
                         paths=guard_context["paths"],
-                        plan_cache=plan_cache,
+                        plan_cache=ctx.plan_cache,
                         append_handoff_note=handoff_correction._append_handoff_note,
                         reinspect=session_verification._reinspect_after_revert,
                         state_dir_arg=args.state_dir,
-                        run_dir=run_dir,
+                        run_dir=ctx.run_dir,
                         external_digests_before=guard_context.get(
                             "external_digests_before"
                         ),
@@ -4653,10 +4579,10 @@ def _run_locked(
             # is recorded and the failure it belongs to is re-raised intact.
             try:
                 write_guards._enforce_protected_path_guard(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
-                    guard_controller=guard_controller,
+                    event_path=ctx.event_path,
+                    payload=ctx.payload,
+                    persistence=ctx.persistence,
+                    guard_controller=ctx.guard_controller,
                     before=guard_context["before"],
                     after=after,
                     session_id=str(guard_context["session_id"]),
@@ -4664,7 +4590,7 @@ def _run_locked(
                     session_details=guard_context["session_details"],
                     turn_payload=turn_payload,
                     paths=guard_context["paths"],
-                    plan_cache=plan_cache,
+                    plan_cache=ctx.plan_cache,
                     append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                     # A write guard that never recorded its comparison — it
@@ -4692,19 +4618,16 @@ def _run_locked(
                     f"the exception: {guard_error}"
                 )
         if isinstance(error, KeyboardInterrupt):
-            if not payload.get("paused"):
-                run_termination._pause_run(
-                    event_path,
-                    payload,
+            if not ctx.payload.get("paused"):
+                ctx.pause(
                     reason="interrupted",
                     message="run interrupted by user",
-                    details=dict(last_session_details),
-                    persistence=persistence,
+                    details=dict(ctx.last_session_details),
                 )
         else:
-            _expire_run_guards()
-            run_controls.stop()
-            inline_tail.stop()
+            _expire_run_guards(ctx)
+            ctx.run_controls.stop()
+            ctx.inline_tail.stop()
             raise
 
     if review_requested:
@@ -4713,7 +4636,7 @@ def _run_locked(
         # loop exit (including max-sessions, stop-after-current, and pauses)
         # publishes the plan's final continuation state.
         try:
-            final_review_snapshot = plan_cache.get(snapshot.plan_dir)
+            final_review_snapshot = ctx.plan_cache.get(snapshot.plan_dir)
         except plans.PlanError:
             # Preserve the run's existing malformed-plan pause and its last
             # safely computed projection when the final plan is unreadable.
@@ -4721,21 +4644,25 @@ def _run_locked(
         else:
             review_resume = review_cycle._set_review_resume(
                 snapshot=final_review_snapshot,
-                event_path=event_path,
-                payload=payload,
-                persistence=persistence,
+                event_path=ctx.event_path,
+                payload=ctx.payload,
+                persistence=ctx.persistence,
                 max_repair_group_attempts=run_inputs._max_repair_group_attempts(args),
                 max_review_fix_cycles=max_review_fix_cycles,
                 review_requested=True,
             )
 
-    with persistence.lock:
-        if payload["ok"] and payload["reason"] == "":
-            payload["reason"] = "stopped"
-        review_executed = payload.get("review_session_executed") is not None
-        if review_requested and review_executed and not payload.get("review_completed"):
+    with ctx.persistence.lock:
+        if ctx.payload["ok"] and ctx.payload["reason"] == "":
+            ctx.payload["reason"] = "stopped"
+        review_executed = ctx.payload.get("review_session_executed") is not None
+        if (
+            review_requested
+            and review_executed
+            and not ctx.payload.get("review_completed")
+        ):
             review_cycle._attest_executed_review(
-                payload,
+                ctx.payload,
                 snapshot.plan_dir,
                 require_artifact=executed_review_requires_artifact,
                 read_review_verdict=handoff_guards._read_review_verdict,
@@ -4743,23 +4670,23 @@ def _run_locked(
         if (
             review_requested
             and not review_executed
-            and not payload.get("review_completed")
-            and payload.get("review_skipped_reason") is None
+            and not ctx.payload.get("review_completed")
+            and ctx.payload.get("review_skipped_reason") is None
         ):
-            if payload.get("paused"):
-                payload["review_skipped_reason"] = (
-                    payload.get("pause_reason") or "paused"
+            if ctx.payload.get("paused"):
+                ctx.payload["review_skipped_reason"] = (
+                    ctx.payload.get("pause_reason") or "paused"
                 )
-            elif payload["reason"] not in (
+            elif ctx.payload["reason"] not in (
                 "",
                 "all-complete",
                 REVIEW_FINDINGS_UNRESOLVED_REASON,
             ):
-                payload["review_skipped_reason"] = payload["reason"]
+                ctx.payload["review_skipped_reason"] = ctx.payload["reason"]
 
-    with persistence.lock:
-        exit_code = 0 if payload["ok"] else 1
-        if payload.get("pause_reason") == "interrupted":
+    with ctx.persistence.lock:
+        exit_code = 0 if ctx.payload["ok"] else 1
+        if ctx.payload.get("pause_reason") == "interrupted":
             exit_code = INTERRUPTED_EXIT
     # The controls outlive the loop so a supervisor can still reach a run that
     # is finalizing: the terminal audit is a harness turn of its own, and an
@@ -4768,12 +4695,14 @@ def _run_locked(
     mailbox_poll.set_context(None)
     mailbox_poll.set_abort(finalization_abort, finalization=True)
     try:
-        return terminalize(exit_code, cancel=finalization_abort, poll=mailbox_poll)
+        return _terminalize(
+            ctx, exit_code, cancel=finalization_abort, poll=mailbox_poll
+        )
     finally:
         mailbox_poll.set_abort(None)
-        _expire_run_guards()
-        run_controls.stop()
-        inline_tail.stop()
+        _expire_run_guards(ctx)
+        ctx.run_controls.stop()
+        ctx.inline_tail.stop()
 
 
 def run_from_args(

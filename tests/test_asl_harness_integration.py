@@ -5713,6 +5713,24 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
     def runner_source(self) -> str:
         return Path(runner.__file__).read_text(encoding="utf-8")
 
+    def names_loop_state(self, node: ast.AST, field: str) -> bool:
+        """Is this node the loop's ``field``, held bare or on the run context?
+
+        The counters and flags this guard tracks live on ``RunContext`` so the
+        loop's helpers can state that they read them, but the guard is about
+        where in the loop they are written, not about which object holds them.
+        Matching both spellings keeps the structural claim intact across that
+        move instead of retiring it.
+        """
+        if isinstance(node, ast.Name):
+            return node.id == field
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == field
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "ctx"
+        )
+
     def session_loop_node(self, tree: ast.Module | None = None) -> ast.While:
         if tree is None:
             tree = ast.parse(self.runner_source())
@@ -5721,7 +5739,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             for node in ast.walk(tree)
             if isinstance(node, ast.While)
             and any(
-                isinstance(name, ast.Name) and name.id == "runner_work_finished_at"
+                self.names_loop_state(name, "runner_work_finished_at")
                 for statement in node.body
                 for name in ast.walk(statement)
             )
@@ -5735,7 +5753,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             for statement in ast.walk(node)
             if isinstance(statement, ast.Assign)
             and any(
-                isinstance(target, ast.Name) and target.id == "runner_work_finished_at"
+                self.names_loop_state(target, "runner_work_finished_at")
                 for target in statement.targets
             )
         ]
@@ -5744,7 +5762,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         return (
             isinstance(statement, ast.Assign)
             and any(
-                isinstance(target, ast.Name) and target.id == "idle_baseline_pinned"
+                self.names_loop_state(target, "idle_baseline_pinned")
                 for target in statement.targets
             )
             and isinstance(statement.value, ast.Constant)
@@ -5760,7 +5778,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
     def pinned_loop_head_arm(self, loop: ast.While) -> ast.If:
         arm: ast.stmt | None = loop.body[0]
         while isinstance(arm, ast.If):
-            if isinstance(arm.test, ast.Name) and arm.test.id == "idle_baseline_pinned":
+            if self.names_loop_state(arm.test, "idle_baseline_pinned"):
                 return arm
             arm = arm.orelse[0] if len(arm.orelse) == 1 else None
         self.fail(
@@ -5828,7 +5846,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         self.check_the_pinned_arm_clears_the_pin(tree)
         for mutation in (
             ("pass",),
-            ("if first_loop_pass:", "    idle_baseline_pinned = False"),
+            ("if ctx.first_loop_pass:", "    ctx.idle_baseline_pinned = False"),
         ):
             with (
                 self.subTest(mutation=mutation),
