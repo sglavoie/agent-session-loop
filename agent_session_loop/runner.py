@@ -12,15 +12,14 @@ happens before the ledger re-inspect.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import functools
 import json
 import shlex
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -39,6 +38,7 @@ from . import (
     external_write_evidence,
     guards,
     guidance_delivery,
+    handoff_correction,
     handoff_guards,
     harness_failures,
     harnesses,
@@ -250,17 +250,6 @@ MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS = (
     review_transitions.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS
 )
 REVIEW_VERDICT_FINGERPRINT_PREFIX = review_transitions.REVIEW_VERDICT_FINGERPRINT_PREFIX
-
-# Post-turn handoff correction control. A completed handoff whose ``Files
-# modified`` line is mechanically malformed — missing, still carrying the
-# pending placeholder, or holding an entry that is not ``Alias:path`` — stops
-# the whole plan from parsing, which used to end the run in a ``malformed-plan``
-# pause even though the defect is one line the worker can rewrite. The runner
-# instead reverts that session to ``pending`` once, names the defect in the
-# Handoff note, and re-runs it. One attempt is the whole budget: a worker that
-# reproduces the same unparsable handoff after being told exactly what is wrong
-# is not converging, and every further turn costs a full harness launch.
-MAX_HANDOFF_CORRECTION_ATTEMPTS = 1
 
 # How one repair/rereview cycle ended. The caps that bound those cycles are
 # resolved in ``run_inputs``; the dispositions themselves are declared beside
@@ -544,434 +533,6 @@ _is_review_verdict_repair_exhausted = (
 )
 _review_verdict_repair_references = review_transitions.review_verdict_repair_references
 REVIEW_FINDINGS_UNRESOLVED_REASON = review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON
-
-
-HANDOFF_DEFECT_MISSING_FILES = "missing-files-modified"
-HANDOFF_DEFECT_PENDING_PLACEHOLDER = "pending-files-modified-placeholder"
-HANDOFF_DEFECT_UNQUALIFIED_ENTRY = "unqualified-files-modified-entry"
-
-
-@dataclass(frozen=True)
-class _HandoffDefect:
-    """A ``Files modified`` defect the worker can repair by rewriting one line."""
-
-    code: str
-    detail: str
-    instruction: str
-
-
-def _classify_mechanical_handoff_defect(
-    snapshot: plans.PlanSnapshot,
-    session_id: str,
-    *,
-    registry_aliases: Sequence[str],
-) -> _HandoffDefect | None:
-    """Name the ``Files modified`` defect that left a completed handoff unparsable.
-
-    Reads the handoff with registry validation switched off, because the defect
-    being classified is exactly what that validation refuses. Only shapes the
-    worker can correct inside its own Handoff block are returned: an entry that
-    parses but names a repository outside the session's Writes is a scope
-    violation rather than a typo, and keeps the pause it earns.
-    """
-    session_status = next(
-        (item for item in snapshot.sessions if item.id == session_id),
-        None,
-    )
-    if session_status is None:
-        return None
-    try:
-        handoff = plans.read_session_handoff(
-            session_status.session, repository_registry=None
-        )
-    except plans.PlanError:
-        return None
-    if handoff.status != "complete":
-        return None
-    aliases = ", ".join(registry_aliases)
-    inline = handoff.files_modified[0].strip() if handoff.files_modified else ""
-    if not inline:
-        return _HandoffDefect(
-            code=HANDOFF_DEFECT_MISSING_FILES,
-            detail="the completed handoff carries no Files modified entry",
-            instruction=(
-                "list every file you changed on the Files modified line as "
-                f"comma-separated Alias:path entries (aliases: {aliases}), or "
-                "write (none) if the session changed no files"
-            ),
-        )
-    if inline == "(none yet)":
-        return _HandoffDefect(
-            code=HANDOFF_DEFECT_PENDING_PLACEHOLDER,
-            detail="the completed handoff still reads (none yet)",
-            instruction=(
-                "replace (none yet) on the Files modified line with the "
-                "Alias:path entries you actually changed "
-                f"(aliases: {aliases}), or with (none)"
-            ),
-        )
-    if inline == "(none)":
-        return None
-    for entry in (part.strip() for part in inline.split(",")):
-        try:
-            plans.parse_qualified_path(entry, registry_aliases)
-        except ValueError as error:
-            return _HandoffDefect(
-                code=HANDOFF_DEFECT_UNQUALIFIED_ENTRY,
-                detail=f"Files modified entry {entry!r} is invalid: {error}",
-                instruction=(
-                    f"rewrite the Files modified entry {entry!r} as "
-                    f"Alias:path using one of the declared aliases ({aliases})"
-                ),
-            )
-    return None
-
-
-def _preserved_review_artifact_evidence(plan_dir: Path) -> dict[str, Any] | None:
-    """Digest the review artifacts a malformed handoff says nothing about.
-
-    ``final-review.md`` and ``final-review.json`` are separate files with their
-    own validator, so a handoff that fails to parse is no reason to discard
-    them. Recording their digests and verdict before the session is re-run
-    makes the correction turn accountable for leaving them intact.
-    """
-    output_path = review.final_review_output_path(plan_dir)
-    artifact_path = review.final_review_artifact_path(plan_dir)
-    if not output_path.is_file() and not artifact_path.is_file():
-        return None
-    evidence: dict[str, Any] = {}
-    if output_path.is_file():
-        evidence["review_output_path"] = str(output_path)
-        with contextlib.suppress(OSError):
-            evidence["review_output_sha256"] = review.final_review_output_sha256(
-                plan_dir
-            )
-    if artifact_path.is_file():
-        evidence["review_artifact_path"] = str(artifact_path)
-        with contextlib.suppress(OSError):
-            evidence["review_artifact_sha256"] = review.final_review_artifact_sha256(
-                plan_dir
-            )
-    verdict = review.load_review_verdict(plan_dir)
-    evidence["review_verdict_ok"] = bool(verdict.get("ok"))
-    if verdict.get("ok"):
-        evidence["review_outcome"] = verdict.get("outcome")
-        evidence["review_total_findings"] = verdict.get("total_findings")
-    else:
-        evidence["review_verdict_reason"] = verdict.get("reason")
-    return evidence
-
-
-def _handoff_correction_attempt(event_path: str | Path, session_id: str) -> int:
-    """Return the 1-indexed attempt number the next correction would be."""
-    try:
-        text = Path(event_path).read_text(encoding="utf-8")
-    except OSError:
-        return 1
-    priors = 0
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        if record.get("name") != events.TURN_HANDOFF_CORRECTION_EVENT:
-            continue
-        payload = record.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        recorded = payload.get("session_id", payload.get("session"))
-        if str(recorded) != str(session_id):
-            continue
-        priors += 1
-    return priors + 1
-
-
-def _handoff_correction_note(
-    defect: _HandoffDefect, *, preserved_review: Mapping[str, Any] | None
-) -> str:
-    note = (
-        f"handoff correction required: {defect.detail}. The plan could not be "
-        f"inspected with this handoff in place. To fix it, {defect.instruction}. "
-        "Change nothing else: the session's work is already done and its status "
-        "was reverted to pending only so this line can be corrected."
-    )
-    if preserved_review is None:
-        return note
-    return (
-        f"{note} The review artifacts in this plan directory are valid on their "
-        "own terms and were preserved; leave them exactly as they are."
-    )
-
-
-def _correct_malformed_handoff(
-    *,
-    event_path: Path,
-    payload: dict[str, Any],
-    persistence: run_persistence._RunPersistence,
-    plan_cache: plans.PlanSnapshotCache,
-    before: plans.PlanSnapshot,
-    workspace: workspaces.ResolvedWorkspace | None,
-    run_id: str,
-    turn_index: int,
-    session_id: str,
-    plan_error: str | None,
-    turn_payload: dict[str, Any],
-    paths: dict[str, Path],
-) -> tuple[plans.PlanSnapshot | None, dict[str, Any] | None]:
-    """Give a mechanically malformed handoff one bounded chance to be corrected.
-
-    Returns the re-inspected snapshot when a correction turn was armed, and the
-    evidence describing the defect whenever one was recognized — including the
-    exhausted case, so the pause that follows says what was tried instead of
-    only that the plan would not parse.
-    """
-    if workspace is None:
-        return None, None
-    session_path = handoff_guards._session_path_in_snapshot(before, session_id)
-    if session_path is None or plan_error is None:
-        return None, None
-    if session_path.name not in plan_error:
-        return None, None
-    defect = _classify_mechanical_handoff_defect(
-        before, session_id, registry_aliases=workspace.registry.aliases
-    )
-    if defect is None:
-        return None, None
-    attempt = _handoff_correction_attempt(event_path, session_id)
-    preserved_review = _preserved_review_artifact_evidence(before.plan_dir)
-    evidence: dict[str, Any] = {
-        "run_id": run_id,
-        "turn_index": turn_index,
-        **_session_identity_payload(session_id),
-        "defect": defect.code,
-        "detail": defect.detail,
-        "plan_error": plan_error,
-        "attempt": attempt,
-        "max_attempts": MAX_HANDOFF_CORRECTION_ATTEMPTS,
-        "session_path": str(session_path),
-    }
-    if preserved_review is not None:
-        evidence["preserved_review_artifacts"] = preserved_review
-    if attempt > MAX_HANDOFF_CORRECTION_ATTEMPTS:
-        evidence["exhausted"] = True
-        return None, evidence
-    reverted = handoff_guards._revert_session_status_to_pending(
-        before,
-        session_id,
-        failure_note=_handoff_correction_note(
-            defect, preserved_review=preserved_review
-        ),
-        append_handoff_note=_append_handoff_note,
-    )
-    if reverted is None:
-        evidence["exhausted"] = True
-        return None, evidence
-    try:
-        corrected = plan_cache.get_fresh(before.plan_dir)
-    except plans.PlanError as error:
-        # The revert did not restore a readable plan, so something other than
-        # this handoff is also broken and no correction turn can be launched.
-        evidence["exhausted"] = True
-        evidence["revert_plan_error"] = str(error)
-        return None, evidence
-    evidence["exhausted"] = False
-    with persistence.lock:
-        turn_payload["handoff_correction"] = evidence
-        _write_json_file(paths["result"], turn_payload)
-        payload["final_snapshot"] = _snapshot_payload(corrected)
-        persistence.append_event(
-            event_path, events.TURN_HANDOFF_CORRECTION_EVENT, evidence
-        )
-        persistence.write_state(payload)
-    return corrected, evidence
-
-
-def _uninspectable_handoff_note(plan_error: str) -> str:
-    return (
-        "the plan could not be inspected with this completed handoff in place: "
-        f"{plan_error}. The status was reset to pending so the handoff can be "
-        "rewritten; the session's work is already done, so repair the reported "
-        "defect and change nothing else."
-    )
-
-
-def _reopen_uninspectable_handoff(
-    *,
-    plan_cache: plans.PlanSnapshotCache,
-    before: plans.PlanSnapshot,
-    session_id: str,
-    plan_error: str | None,
-    correction_exhausted: bool,
-) -> tuple[plans.PlanSnapshot | None, dict[str, Any] | None]:
-    """Return a completed handoff the plan cannot be read with to pending.
-
-    The bounded correction turn covers the ``Files modified`` shapes a worker
-    can be told how to fix. Everything else used to pause on a plan still
-    claiming the session is complete, which leaves nothing a relaunch could
-    pick up. Resetting the pre-turn session identity to pending and recording
-    the parse failure as a repair note leaves a plan that parses again and a
-    session a later turn can rewrite, so the pause reports whether the defect
-    is repairable rather than only that the plan would not parse.
-    """
-    session_path = handoff_guards._session_path_in_snapshot(before, session_id)
-    if session_path is None or plan_error is None:
-        return None, None
-    if session_path.name not in plan_error:
-        # The plan is unreadable for a reason this session's handoff does not
-        # own, so reopening it repairs nothing.
-        return None, None
-    session_status = next(
-        (item for item in before.sessions if item.id == session_id),
-        None,
-    )
-    if session_status is None:
-        return None, None
-    try:
-        handoff = plans.read_session_handoff(
-            session_status.session, repository_registry=None
-        )
-    except plans.PlanError:
-        return None, None
-    if handoff.status != "complete":
-        return None, None
-    evidence: dict[str, Any] = {
-        **_session_identity_payload(session_id),
-        "session_path": str(session_path),
-        "plan_error": plan_error,
-        "reopened": False,
-        "repairable": False,
-    }
-    reverted = handoff_guards._revert_session_status_to_pending(
-        before,
-        session_id,
-        failure_note=_uninspectable_handoff_note(plan_error),
-        append_handoff_note=_append_handoff_note,
-    )
-    if reverted is None:
-        return None, evidence
-    evidence["reopened"] = True
-    try:
-        reinspected = plan_cache.get_fresh(before.plan_dir)
-    except plans.PlanError as error:
-        evidence["reinspect_error"] = str(error)
-        return None, evidence
-    # A defect the bounded correction already failed to fix once is reopened
-    # for the operator's benefit, not as a promise that a rerun would converge.
-    evidence["repairable"] = not correction_exhausted
-    return reinspected, evidence
-
-
-def _paused_handoff_status_note(pause_reason: str) -> str:
-    return (
-        f"the runner recorded this turn's structured pause ({pause_reason}) and "
-        "reset the handoff status to pending, because a session that stopped "
-        "without finishing is pending; there is no paused status value. Leave "
-        "the status pending and answer the pause instead."
-    )
-
-
-def _repair_paused_handoff_status(
-    *,
-    event_path: Path,
-    payload: dict[str, Any],
-    persistence: run_persistence._RunPersistence,
-    plan_cache: plans.PlanSnapshotCache,
-    after: plans.PlanSnapshot,
-    session_id: str,
-    turn_index: int,
-    runner_pause: object,
-) -> tuple[plans.PlanSnapshot, dict[str, Any] | None]:
-    """Repair the selected session's handoff when its turn paused on purpose.
-
-    A worker that emits a structured ``RUNNER_PAUSE`` and also writes a status
-    the plan vocabulary has no value for (``paused``) is judged by the generic
-    invalid-status branch first, which terminates the run as ``unknown-status``
-    and discards the reason the worker gave. The status line is the only thing
-    wrong, so it is returned to pending here and the structured pause keeps the
-    run's cause. ``unknown-status`` stays the fallback: a pause message naming
-    no known reason, and any invalid status outside the selected session, are
-    both left to it.
-    """
-    if runner_pause is None:
-        return after, None
-    pause_reason = _runner_pause_reason(str(runner_pause))
-    if pause_reason == "runner-pause":
-        return after, None
-    invalid = run_inputs._invalid_status_pause(after)
-    if invalid is None:
-        return after, None
-    sessions = invalid[2].get("sessions") or []
-    if len(sessions) != 1 or sessions[0].get("id") != session_id:
-        return after, None
-    from_status = sessions[0].get("raw_value")
-    reverted = handoff_guards._revert_session_status_to_pending(
-        after,
-        session_id,
-        failure_note=_paused_handoff_status_note(pause_reason),
-        append_handoff_note=_append_handoff_note,
-    )
-    if reverted is None:
-        return after, None
-    repaired = session_verification._reinspect_after_revert(
-        after.plan_dir, after, reverted, plan_cache
-    )
-    evidence: dict[str, Any] = {
-        **_session_identity_payload(session_id),
-        "session_path": str(reverted),
-        "from_status": from_status,
-        "to_status": "pending",
-        "pause_reason": pause_reason,
-    }
-    persistence.append_event(
-        event_path,
-        events.SESSION_REOPENED_EVENT,
-        {
-            "run_id": payload.get("run_id"),
-            "turn_index": turn_index,
-            **_session_identity_payload(session_id),
-            "from_status": from_status,
-            "to_status": "pending",
-            "guard": "plan-status-validity",
-            "reason": pause_reason,
-            **_reopened_snapshot_identity(_snapshot_payload(repaired)),
-        },
-    )
-    return repaired, evidence
-
-
-def _append_handoff_note(
-    lines: list[str],
-    *,
-    handoff_index: int,
-    section_end: int,
-    note: str,
-) -> list[str]:
-    new_bullet = f"  - {note}"
-    notes_index: int | None = None
-    for index in range(handoff_index + 1, section_end):
-        if lines[index].lstrip().startswith("- **Notes**"):
-            notes_index = index
-            break
-    if notes_index is None:
-        insert_at = section_end
-        while insert_at - 1 > handoff_index and lines[insert_at - 1].strip() == "":
-            insert_at -= 1
-        return lines[:insert_at] + ["- **Notes**:", new_bullet] + lines[insert_at:]
-    insert_at = notes_index + 1
-    while insert_at < section_end:
-        candidate = lines[insert_at]
-        stripped = candidate.lstrip()
-        leading = candidate[: len(candidate) - len(stripped)]
-        if len(leading) >= 2 and stripped.startswith("-"):
-            insert_at += 1
-            continue
-        break
-    return lines[:insert_at] + [new_bullet] + lines[insert_at:]
 
 
 def _run_config_payload(
@@ -4230,7 +3791,7 @@ def _run_locked(
                     turn_payload=turn_payload,
                     paths=paths,
                     plan_cache=plan_cache,
-                    append_handoff_note=_append_handoff_note,
+                    append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                     state_dir_arg=args.state_dir,
                     run_dir=run_dir,
@@ -4281,7 +3842,7 @@ def _run_locked(
                     turn_payload=turn_payload,
                     paths=paths,
                     plan_cache=plan_cache,
-                    append_handoff_note=_append_handoff_note,
+                    append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                     state_dir_arg=args.state_dir,
                     run_dir=run_dir,
@@ -4315,7 +3876,7 @@ def _run_locked(
                     turn_payload=turn_payload,
                     paths=paths,
                     plan_cache=plan_cache,
-                    append_handoff_note=_append_handoff_note,
+                    append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                 )
             ):
@@ -4341,7 +3902,7 @@ def _run_locked(
                 turn_payload=turn_payload,
                 paths=paths,
                 plan_cache=plan_cache,
-                append_handoff_note=_append_handoff_note,
+                append_handoff_note=handoff_correction._append_handoff_note,
                 reinspect=session_verification._reinspect_after_revert,
                 changed_paths=(
                     write_guards._protected_path_changed_paths(
@@ -4394,7 +3955,7 @@ def _run_locked(
                     paths=paths,
                     plan_cache=plan_cache,
                     result_disposition=terminating_disposition,
-                    append_handoff_note=_append_handoff_note,
+                    append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                 )
             ):
@@ -4447,7 +4008,7 @@ def _run_locked(
                         control_payload=control_payload,
                         plan_cache=plan_cache,
                         revert_session_status=handoff_guards.session_status_reverter(
-                            _append_handoff_note
+                            handoff_correction._append_handoff_note
                         ),
                         reinspect=session_verification._reinspect_after_revert,
                         context=turn_payload,
@@ -4455,19 +4016,21 @@ def _run_locked(
                     )
                 break
             if terminating_disposition == "malformed-plan":
-                corrected, correction_evidence = _correct_malformed_handoff(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
-                    plan_cache=plan_cache,
-                    before=before,
-                    workspace=workspace,
-                    run_id=run_id,
-                    turn_index=turn_index,
-                    session_id=session_id,
-                    plan_error=plan_error,
-                    turn_payload=turn_payload,
-                    paths=paths,
+                corrected, correction_evidence = (
+                    handoff_correction._correct_malformed_handoff(
+                        event_path=event_path,
+                        payload=payload,
+                        persistence=persistence,
+                        plan_cache=plan_cache,
+                        before=before,
+                        workspace=workspace,
+                        run_id=run_id,
+                        turn_index=turn_index,
+                        session_id=session_id,
+                        plan_error=plan_error,
+                        turn_payload=turn_payload,
+                        paths=paths,
+                    )
                 )
                 if corrected is not None:
                     snapshot = corrected
@@ -4478,15 +4041,17 @@ def _run_locked(
                 }
                 if correction_evidence is not None:
                     malformed_details["handoff_correction"] = correction_evidence
-                reopened_snapshot, reopen_evidence = _reopen_uninspectable_handoff(
-                    plan_cache=plan_cache,
-                    before=before,
-                    session_id=session_id,
-                    plan_error=plan_error,
-                    correction_exhausted=bool(
-                        correction_evidence is not None
-                        and correction_evidence.get("exhausted")
-                    ),
+                reopened_snapshot, reopen_evidence = (
+                    handoff_correction._reopen_uninspectable_handoff(
+                        plan_cache=plan_cache,
+                        before=before,
+                        session_id=session_id,
+                        plan_error=plan_error,
+                        correction_exhausted=bool(
+                            correction_evidence is not None
+                            and correction_evidence.get("exhausted")
+                        ),
+                    )
                 )
                 if reopen_evidence is not None:
                     malformed_details["handoff_reopen"] = reopen_evidence
@@ -4521,15 +4086,17 @@ def _run_locked(
             # the plan could be inspected after, so the malformed-plan branch
             # owns the only `after is None` turn that reaches here.
             assert after is not None
-            after, paused_status_repair = _repair_paused_handoff_status(
-                event_path=event_path,
-                payload=payload,
-                persistence=persistence,
-                plan_cache=plan_cache,
-                after=after,
-                session_id=session_id,
-                turn_index=turn_index,
-                runner_pause=turn_payload.get("runner_pause"),
+            after, paused_status_repair = (
+                handoff_correction._repair_paused_handoff_status(
+                    event_path=event_path,
+                    payload=payload,
+                    persistence=persistence,
+                    plan_cache=plan_cache,
+                    after=after,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    runner_pause=turn_payload.get("runner_pause"),
+                )
             )
             invalid_pause = run_inputs._invalid_status_pause(after)
             if invalid_pause is not None:
@@ -4577,7 +4144,7 @@ def _run_locked(
                     turn_payload=turn_payload,
                     paths=paths,
                     plan_cache=plan_cache,
-                    append_handoff_note=_append_handoff_note,
+                    append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                 )
             ):
@@ -4961,7 +4528,7 @@ def _run_locked(
                 turn_payload=turn_payload,
                 paths=paths,
                 plan_cache=plan_cache,
-                append_handoff_note=_append_handoff_note,
+                append_handoff_note=handoff_correction._append_handoff_note,
                 reinspect=session_verification._reinspect_after_revert,
             ):
                 break
@@ -4981,7 +4548,7 @@ def _run_locked(
                 turn_payload=turn_payload,
                 paths=paths,
                 plan_cache=plan_cache,
-                append_handoff_note=_append_handoff_note,
+                append_handoff_note=handoff_correction._append_handoff_note,
                 run_id=run_id,
                 turn_index=turn_index,
                 total_sessions=total_sessions,
@@ -5032,7 +4599,7 @@ def _run_locked(
                         turn_payload=turn_payload,
                         paths=paths,
                         plan_cache=plan_cache,
-                        append_handoff_note=_append_handoff_note,
+                        append_handoff_note=handoff_correction._append_handoff_note,
                         require_artifact=(
                             review_session_version is not None
                             and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
@@ -5417,7 +4984,7 @@ def _run_locked(
                         turn_payload=turn_payload,
                         paths=guard_context["paths"],
                         plan_cache=plan_cache,
-                        append_handoff_note=_append_handoff_note,
+                        append_handoff_note=handoff_correction._append_handoff_note,
                         reinspect=session_verification._reinspect_after_revert,
                         state_dir_arg=args.state_dir,
                         run_dir=run_dir,
@@ -5444,7 +5011,7 @@ def _run_locked(
                         turn_payload=turn_payload,
                         paths=guard_context["paths"],
                         plan_cache=plan_cache,
-                        append_handoff_note=_append_handoff_note,
+                        append_handoff_note=handoff_correction._append_handoff_note,
                         reinspect=session_verification._reinspect_after_revert,
                         state_dir_arg=args.state_dir,
                         run_dir=run_dir,
@@ -5477,7 +5044,7 @@ def _run_locked(
                     turn_payload=turn_payload,
                     paths=guard_context["paths"],
                     plan_cache=plan_cache,
-                    append_handoff_note=_append_handoff_note,
+                    append_handoff_note=handoff_correction._append_handoff_note,
                     reinspect=session_verification._reinspect_after_revert,
                     # A write guard that never recorded its comparison — it
                     # raised, or the inventory failed — leaves this guard

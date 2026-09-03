@@ -14,6 +14,7 @@ from agent_session_loop import (
     assurance_models,
     contracts,
     events,
+    handoff_correction,
     pause_policy,
     plans,
     review,
@@ -89,7 +90,7 @@ class TurnFinalizationShapeTests(unittest.TestCase):
 class MechanicalHandoffDefectTests(unittest.TestCase):
     def classify(
         self, *, status: str, files_modified: str | None
-    ) -> runner._HandoffDefect | None:
+    ) -> handoff_correction._HandoffDefect | None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_multi_repo_plan(plan_dir, ("pending",))
@@ -99,25 +100,29 @@ class MechanicalHandoffDefectTests(unittest.TestCase):
                 status=status,
                 files_modified=files_modified,
             )
-            return runner._classify_mechanical_handoff_defect(
+            return handoff_correction._classify_mechanical_handoff_defect(
                 snapshot, "1", registry_aliases=ALIASES
             )
 
     def test_missing_files_modified_line_is_correctable(self) -> None:
         defect = self.classify(status="complete", files_modified=None)
         assert defect is not None
-        self.assertEqual(runner.HANDOFF_DEFECT_MISSING_FILES, defect.code)
+        self.assertEqual(handoff_correction.HANDOFF_DEFECT_MISSING_FILES, defect.code)
         self.assertIn("SVC", defect.instruction)
 
     def test_pending_placeholder_is_correctable(self) -> None:
         defect = self.classify(status="complete", files_modified="(none yet)")
         assert defect is not None
-        self.assertEqual(runner.HANDOFF_DEFECT_PENDING_PLACEHOLDER, defect.code)
+        self.assertEqual(
+            handoff_correction.HANDOFF_DEFECT_PENDING_PLACEHOLDER, defect.code
+        )
 
     def test_unqualified_entry_is_correctable(self) -> None:
         defect = self.classify(status="complete", files_modified="README.md")
         assert defect is not None
-        self.assertEqual(runner.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, defect.code)
+        self.assertEqual(
+            handoff_correction.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, defect.code
+        )
         self.assertIn("README.md", defect.detail)
 
     def test_mixed_entries_report_the_first_invalid_one(self) -> None:
@@ -125,7 +130,9 @@ class MechanicalHandoffDefectTests(unittest.TestCase):
             status="complete", files_modified="SVC:README.md, README.md"
         )
         assert defect is not None
-        self.assertEqual(runner.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, defect.code)
+        self.assertEqual(
+            handoff_correction.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, defect.code
+        )
         self.assertIn("'README.md'", defect.detail)
 
     def test_qualified_entries_are_not_a_defect(self) -> None:
@@ -141,7 +148,9 @@ class MechanicalHandoffDefectTests(unittest.TestCase):
         # repository, which is a scope question rather than a typo.
         defect = self.classify(status="complete", files_modified="Nope:README.md")
         assert defect is not None
-        self.assertEqual(runner.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, defect.code)
+        self.assertEqual(
+            handoff_correction.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, defect.code
+        )
 
     def test_incomplete_session_is_not_corrected(self) -> None:
         self.assertIsNone(self.classify(status="pending", files_modified="README.md"))
@@ -152,7 +161,7 @@ class MechanicalHandoffDefectTests(unittest.TestCase):
             write_multi_repo_plan(plan_dir, ("pending",))
             snapshot = plans.inspect_plan(plan_dir)
             self.assertIsNone(
-                runner._classify_mechanical_handoff_defect(
+                handoff_correction._classify_mechanical_handoff_defect(
                     snapshot, "9", registry_aliases=ALIASES
                 )
             )
@@ -163,7 +172,7 @@ class PreservedReviewArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_completed_review_plan(plan_dir, [])
-            evidence = runner._preserved_review_artifact_evidence(plan_dir)
+            evidence = handoff_correction._preserved_review_artifact_evidence(plan_dir)
             assert evidence is not None
             self.assertEqual(
                 str(review.final_review_output_path(plan_dir)),
@@ -188,7 +197,7 @@ class PreservedReviewArtifactTests(unittest.TestCase):
             review.final_review_output_path(plan_dir).write_text(
                 "# Final review\n\nNo verdict here.\n", encoding="utf-8"
             )
-            evidence = runner._preserved_review_artifact_evidence(plan_dir)
+            evidence = handoff_correction._preserved_review_artifact_evidence(plan_dir)
             assert evidence is not None
             self.assertFalse(evidence["review_verdict_ok"])
             self.assertTrue(evidence["review_verdict_reason"])
@@ -198,7 +207,9 @@ class PreservedReviewArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp) / "plan"
             write_multi_repo_plan(plan_dir, ("pending",))
-            self.assertIsNone(runner._preserved_review_artifact_evidence(plan_dir))
+            self.assertIsNone(
+                handoff_correction._preserved_review_artifact_evidence(plan_dir)
+            )
 
 
 class HandoffCorrectionAttemptTests(unittest.TestCase):
@@ -216,7 +227,10 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
     def test_missing_event_log_starts_at_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(
-                1, runner._handoff_correction_attempt(Path(tmp) / "none.jsonl", "1")
+                1,
+                handoff_correction._handoff_correction_attempt(
+                    Path(tmp) / "none.jsonl", "1"
+                ),
             )
 
     def test_prior_corrections_for_the_session_advance_the_attempt(self) -> None:
@@ -230,13 +244,17 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
                     self.correction("1"),
                 ],
             )
-            self.assertEqual(3, runner._handoff_correction_attempt(path, "1"))
+            self.assertEqual(
+                3, handoff_correction._handoff_correction_attempt(path, "1")
+            )
 
     def test_other_sessions_do_not_consume_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "events.jsonl"
             self.write_events(path, [self.correction("2"), self.correction("3")])
-            self.assertEqual(1, runner._handoff_correction_attempt(path, "1"))
+            self.assertEqual(
+                1, handoff_correction._handoff_correction_attempt(path, "1")
+            )
 
     def test_legacy_session_key_is_counted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -250,7 +268,9 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
                     }
                 ],
             )
-            self.assertEqual(2, runner._handoff_correction_attempt(path, "1"))
+            self.assertEqual(
+                2, handoff_correction._handoff_correction_attempt(path, "1")
+            )
 
     def test_corrupt_lines_are_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -259,19 +279,23 @@ class HandoffCorrectionAttemptTests(unittest.TestCase):
                 f"not json\n\n{json.dumps(self.correction('1'))}\n[]\n",
                 encoding="utf-8",
             )
-            self.assertEqual(2, runner._handoff_correction_attempt(path, "1"))
+            self.assertEqual(
+                2, handoff_correction._handoff_correction_attempt(path, "1")
+            )
 
     def test_correction_note_names_the_defect_and_the_repair(self) -> None:
-        defect = runner._HandoffDefect(
-            code=runner.HANDOFF_DEFECT_MISSING_FILES,
+        defect = handoff_correction._HandoffDefect(
+            code=handoff_correction.HANDOFF_DEFECT_MISSING_FILES,
             detail="the completed handoff carries no Files modified entry",
             instruction="list every file you changed",
         )
-        plain = runner._handoff_correction_note(defect, preserved_review=None)
+        plain = handoff_correction._handoff_correction_note(
+            defect, preserved_review=None
+        )
         self.assertIn(defect.detail, plain)
         self.assertIn(defect.instruction, plain)
         self.assertNotIn("review artifacts", plain)
-        with_review = runner._handoff_correction_note(
+        with_review = handoff_correction._handoff_correction_note(
             defect, preserved_review={"review_verdict_ok": True}
         )
         self.assertIn("review artifacts", with_review)

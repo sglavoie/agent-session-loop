@@ -31,6 +31,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from agent_session_loop import (
+    handoff_correction,
     handoff_guards,
     plans,
     review_transitions,
@@ -234,10 +235,14 @@ class SeamTests(unittest.TestCase):
                     self.assertIs(parameter.default, inspect.Parameter.empty)
 
     def test_the_seam_protocol_is_satisfied_by_the_symbol_the_loop_passes(self) -> None:
-        # Session 24 gives `_append_handoff_note` a home; until then this is
-        # what checks the declared shape against the symbol actually passed,
-        # rather than only the loop's call sites doing so at runtime.
-        appender: handoff_guards.HandoffNoteAppender = runner._append_handoff_note
+        # Session 24 gave `_append_handoff_note` a home, but the seam stays:
+        # `handoff_correction` imports this module, so importing the appender
+        # back would close a cycle. This is what checks the declared shape
+        # against the symbol actually passed, rather than only the loop's call
+        # sites doing so at runtime.
+        appender: handoff_guards.HandoffNoteAppender = (
+            handoff_correction._append_handoff_note
+        )
         self.assertEqual(
             ["- **Notes**:", "  - verification failed"],
             appender(
@@ -459,7 +464,7 @@ class _Turn:
             turn_payload=self.turn_payload,
             paths=self.paths,
             plan_cache=plans.PlanSnapshotCache(),
-            append_handoff_note=runner._append_handoff_note,
+            append_handoff_note=handoff_correction._append_handoff_note,
             run_id="run-1",
             turn_index=1,
             total_sessions=1,

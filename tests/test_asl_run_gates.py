@@ -28,6 +28,7 @@ from agent_session_loop import (
     config,
     control_queue,
     events,
+    handoff_correction,
     handoff_guards,
     harnesses,
     intervention,
@@ -1407,12 +1408,23 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
 
     def status_guard_line(self, loop: ast.While) -> int:
         """The line where the status guards take over the diagnosis."""
+        # Match `name(...)` and `module.name(...)` alike, for the reason
+        # `_call_lines` states below: the callee moved into a package module and
+        # a Name-only match would stop seeing this gate the moment it did.
         calls = [
             node.lineno
             for node in ast.walk(loop)
             if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "_repair_paused_handoff_status"
+            and (
+                (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "_repair_paused_handoff_status"
+                )
+                or (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_repair_paused_handoff_status"
+                )
+            )
         ]
         self.assertEqual(
             1,
@@ -5397,11 +5409,13 @@ class HandoffCorrectionTests(unittest.TestCase):
         corrections = self._payloads(events.TURN_HANDOFF_CORRECTION_EVENT)
         self.assertEqual(1, len(corrections))
         self.assertEqual(
-            runner.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, corrections[0]["defect"]
+            handoff_correction.HANDOFF_DEFECT_UNQUALIFIED_ENTRY,
+            corrections[0]["defect"],
         )
         self.assertEqual(1, corrections[0]["attempt"])
         self.assertEqual(
-            runner.MAX_HANDOFF_CORRECTION_ATTEMPTS, corrections[0]["max_attempts"]
+            handoff_correction.MAX_HANDOFF_CORRECTION_ATTEMPTS,
+            corrections[0]["max_attempts"],
         )
         self.assertFalse(corrections[0]["exhausted"])
         self.assertIn("README.md", corrections[0]["detail"])
@@ -5453,7 +5467,9 @@ class HandoffCorrectionTests(unittest.TestCase):
         evidence = payload["pause_details"]["handoff_correction"]
         self.assertTrue(evidence["exhausted"])
         self.assertEqual(2, evidence["attempt"])
-        self.assertEqual(runner.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, evidence["defect"])
+        self.assertEqual(
+            handoff_correction.HANDOFF_DEFECT_UNQUALIFIED_ENTRY, evidence["defect"]
+        )
         self.assertEqual(1, len(self._payloads(events.TURN_HANDOFF_CORRECTION_EVENT)))
         # The session is still reopened so the plan parses, but a defect the
         # bounded correction already failed on is not advertised as repairable.

@@ -43,7 +43,8 @@ handle, the plan snapshots, the snapshot cache, the resolved workspace, the guar
 controller and the turn-start evidence all enter as parameters, and the two
 collaborators that have not left the runner yet enter as required keyword-only
 seams: the handoff-note appender, through the
-:class:`handoff_guards.HandoffNoteAppender` Protocol Session 24 will satisfy, and
+:class:`handoff_guards.HandoffNoteAppender` Protocol ``handoff_correction``
+satisfies, and
 the post-revert plan re-read, through the
 :data:`run_termination.SnapshotReinspector` alias Session 23 will satisfy.
 Neither is ever defaulted, so no refusal path can silently skip the note or the

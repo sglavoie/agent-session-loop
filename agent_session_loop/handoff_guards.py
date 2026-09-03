@@ -40,7 +40,7 @@ Nothing here imports the runner. The event path, the payload, the persistence
 handle, the plan snapshots, the snapshot cache and the resolved workspace all
 enter as parameters. The two collaborators that have not left the runner yet
 enter as seams: the handoff-note appender, through
-:class:`HandoffNoteAppender`, which Session 24 will satisfy; and the
+:class:`HandoffNoteAppender`, which ``handoff_correction`` satisfies; and the
 post-revert plan re-read, through ``run_termination.SnapshotReinspector``,
 which Session 15 declared for exactly this shape and Session 23 will satisfy.
 Both are required keyword-only arguments, never defaulted, so a guard cannot
@@ -107,9 +107,10 @@ class HandoffNoteAppender(Protocol):
 
     Takes the session file's lines and the bounds of its handoff section, and
     returns the rewritten lines; it never touches the filesystem, so the caller
-    stays the only writer. The concrete implementation is still a runner symbol
-    and does not move until Session 24, which is why the revert takes it as a
-    seam rather than importing it.
+    stays the only writer. The concrete implementation is
+    ``handoff_correction._append_handoff_note``, which this module cannot import:
+    ``handoff_correction`` imports *this* module for the revert, so the edge only
+    runs one way and the seam is what keeps it acyclic.
     """
 
     def __call__(

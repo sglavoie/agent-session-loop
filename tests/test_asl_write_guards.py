@@ -30,6 +30,7 @@ from unittest import mock
 
 from agent_session_loop import (
     guards,
+    handoff_correction,
     handoff_guards,
     plans,
     review_continuation,
@@ -258,10 +259,13 @@ class SeamTests(unittest.TestCase):
         self,
     ) -> None:
         # Session 23 moved the re-read into `session_verification` and Session 24
-        # will give the appender a home; both stay seams, so this is what checks
-        # the two declared shapes against the symbols actually passed, rather
-        # than only the loop's call sites doing so at runtime.
-        appender: handoff_guards.HandoffNoteAppender = runner._append_handoff_note
+        # moved the appender into `handoff_correction`; both stay seams because
+        # `handoff_correction` imports both of those modules, so this is what
+        # checks the two declared shapes against the symbols actually passed,
+        # rather than only the loop's call sites doing so at runtime.
+        appender: handoff_guards.HandoffNoteAppender = (
+            handoff_correction._append_handoff_note
+        )
         reinspect: run_termination.SnapshotReinspector = (
             session_verification._reinspect_after_revert
         )

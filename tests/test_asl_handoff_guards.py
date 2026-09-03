@@ -20,8 +20,9 @@ state, because they exercise the run rather than the boundary:
   reach than any other extracted module has, so "which function may write what"
   has to be a checked list rather than a convention;
 * the two seams the loop still binds are structural, so drift in either is
-  silent: ``runner._append_handoff_note`` has to keep matching
-  :class:`handoff_guards.HandoffNoteAppender` until Session 24 gives it a home,
+  silent: ``handoff_correction._append_handoff_note`` has to keep matching
+  :class:`handoff_guards.HandoffNoteAppender`, which stays a Protocol because
+  ``handoff_correction`` imports this module and so cannot be imported back,
   and ``session_verification._reinspect_after_revert`` has to keep matching
   ``run_termination.SnapshotReinspector``; and
 * neither seam is ever defaulted, so no path can silently skip the note or the
@@ -44,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
+    handoff_correction,
     handoff_guards,
     harnesses,
     plans,
@@ -243,7 +245,7 @@ class HandoffGuardsBoundaryTests(unittest.TestCase):
         file the next session reads as its own instructions.
         """
         declared = inspect.signature(handoff_guards.HandoffNoteAppender.__call__)
-        actual = inspect.signature(runner._append_handoff_note)
+        actual = inspect.signature(handoff_correction._append_handoff_note)
         expected = [
             parameter
             for name, parameter in declared.parameters.items()
