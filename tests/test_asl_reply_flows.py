@@ -50,6 +50,28 @@ from tests.support import (
     write_plan,
 )
 
+# The runner publishes its mailbox question about a second into a turn, but
+# these tests observe that publish from a helper thread or from a sibling
+# process while the ``--all`` gate drives every shard through one thread pool.
+# This module's shard has been measured at 426s there against 190s bare, and
+# the former inline 5-10s windows were close enough to real latency to fail as
+# a timeout rather than as the assertion each test actually makes. Like the
+# bounds in tests/test_asl_harness_integration.py this is a hang backstop, not
+# a latency assertion: it exists so a runner that never publishes surfaces as a
+# failure instead of running out the suite's own clock.
+QUESTION_PUBLISH_TIMEOUT_SECONDS = 120
+
+# The matching backstop for joining a helper thread once the run has returned.
+# It has to outlast the poll window above, which starts before the run does.
+HELPER_THREAD_JOIN_TIMEOUT_SECONDS = 120
+
+# A full ``agent_session_loop`` invocation driven as a subprocess. Same
+# reasoning as the bound above, and the same value as the constant of this name
+# in tests/test_asl_harness_integration.py: these invocations take a few
+# seconds idle and half again that under the parallel shards, so the former
+# 10-30s bounds were latency assertions by accident.
+LOOP_RUN_TIMEOUT_SECONDS = 120
+
 
 class RunReplyResumeFlowTests(unittest.TestCase):
     def _seed_paused_plan(
@@ -508,7 +530,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
             def respond() -> None:
                 try:
-                    deadline = time.monotonic() + 5
+                    deadline = time.monotonic() + QUESTION_PUBLISH_TIMEOUT_SECONDS
                     while time.monotonic() < deadline:
                         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         if view.unanswered_questions:
@@ -550,7 +572,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 ) as notify_paused,
             ):
                 code, out, _err = self._run_capture(args)
-            responder.join(timeout=5)
+            responder.join(timeout=HELPER_THREAD_JOIN_TIMEOUT_SECONDS)
 
             self.assertEqual([], responder_error)
             self.assertFalse(responder.is_alive())
@@ -626,7 +648,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
             def respond() -> None:
                 try:
-                    deadline = time.monotonic() + 5
+                    deadline = time.monotonic() + QUESTION_PUBLISH_TIMEOUT_SECONDS
                     while time.monotonic() < deadline:
                         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         if view.unanswered_questions:
@@ -664,7 +686,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 ),
             ):
                 code, out, _err = self._run_capture(args)
-            responder.join(timeout=10)
+            responder.join(timeout=HELPER_THREAD_JOIN_TIMEOUT_SECONDS)
 
             self.assertEqual([], responder_error)
             self.assertFalse(responder.is_alive())
@@ -750,7 +772,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
             def respond() -> None:
                 try:
-                    deadline = time.monotonic() + 5
+                    deadline = time.monotonic() + QUESTION_PUBLISH_TIMEOUT_SECONDS
                     while time.monotonic() < deadline:
                         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         if view.unanswered_questions:
@@ -802,7 +824,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 ),
             ):
                 code, out, _err = self._run_capture(args)
-            responder.join(timeout=5)
+            responder.join(timeout=HELPER_THREAD_JOIN_TIMEOUT_SECONDS)
 
             self.assertEqual([], responder_error)
             self.assertEqual(0, code, out)
@@ -918,7 +940,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
             def resolve() -> None:
                 try:
-                    deadline = time.monotonic() + 5
+                    deadline = time.monotonic() + QUESTION_PUBLISH_TIMEOUT_SECONDS
                     while time.monotonic() < deadline:
                         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         questions = [
@@ -973,7 +995,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 ),
             ):
                 code, out, _err = self._run_capture(args)
-            responder.join(timeout=5)
+            responder.join(timeout=HELPER_THREAD_JOIN_TIMEOUT_SECONDS)
 
             self.assertEqual([], responder_error)
             self.assertFalse(responder.is_alive())
@@ -1078,7 +1100,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
             def resolve() -> None:
                 try:
-                    deadline = time.monotonic() + 5
+                    deadline = time.monotonic() + QUESTION_PUBLISH_TIMEOUT_SECONDS
                     while time.monotonic() < deadline:
                         view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
                         if view.unanswered_questions:
@@ -1123,7 +1145,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 ),
             ):
                 code, out, _err = self._run_capture(args)
-            responder.join(timeout=5)
+            responder.join(timeout=HELPER_THREAD_JOIN_TIMEOUT_SECONDS)
 
             self.assertEqual([], responder_error)
             self.assertEqual(1, calls)
@@ -4634,7 +4656,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             env=self._base_env(mode),
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=LOOP_RUN_TIMEOUT_SECONDS,
             check=False,
         )
         payload = json.loads(completed.stdout) if json_output else {}
@@ -4662,7 +4684,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             env=self._base_env("reply-aware"),
             text=True,
             capture_output=True,
-            timeout=20,
+            timeout=LOOP_RUN_TIMEOUT_SECONDS,
             check=False,
         )
         if json_output:
@@ -4718,7 +4740,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         state_path = (
             state.plan_state_dir(self.plan_dir, self.state_dir) / events.STATE_FILE_NAME
         )
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + QUESTION_PUBLISH_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             if state_path.exists():
                 try:
@@ -4762,7 +4784,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             env=self._base_env("reply-aware"),
             text=True,
             capture_output=True,
-            timeout=10,
+            timeout=LOOP_RUN_TIMEOUT_SECONDS,
             check=False,
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
@@ -4818,7 +4840,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             action=mailbox.RESOLUTION_ACTION_CONTINUE,
             note=sensitive_note,
         )
-        stdout, stderr = process.communicate(timeout=20)
+        stdout, stderr = process.communicate(timeout=LOOP_RUN_TIMEOUT_SECONDS)
 
         self.assertEqual(0, process.returncode, stderr or stdout)
         payload = json.loads(stdout)
@@ -4893,7 +4915,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
             action=mailbox.RESOLUTION_ACTION_PAUSE,
             note=sensitive_note,
         )
-        stdout, stderr = process.communicate(timeout=20)
+        stdout, stderr = process.communicate(timeout=LOOP_RUN_TIMEOUT_SECONDS)
 
         self.assertEqual(1, process.returncode, stderr or stdout)
         payload = json.loads(stdout)
@@ -5109,7 +5131,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
 
         plan_state = state.plan_state_dir(self.plan_dir, self.state_dir)
         state_path = plan_state / events.STATE_FILE_NAME
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + QUESTION_PUBLISH_TIMEOUT_SECONDS
         waiting: dict[str, Any] | None = None
         while time.monotonic() < deadline:
             if state_path.exists():
@@ -5138,7 +5160,7 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         result_lock = threading.Lock()
 
         def race_reply() -> None:
-            race_barrier.wait(timeout=2)
+            race_barrier.wait(timeout=HELPER_THREAD_JOIN_TIMEOUT_SECONDS)
             try:
                 reply = mailbox.append_reply(
                     self.plan_dir,
@@ -5160,14 +5182,14 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         for thread in reply_threads:
             thread.start()
         for thread in reply_threads:
-            thread.join(timeout=3)
+            thread.join(timeout=HELPER_THREAD_JOIN_TIMEOUT_SECONDS)
             self.assertFalse(thread.is_alive())
         self.assertEqual(1, len(reply_successes))
         self.assertEqual(
             [mailbox.REJECT_QUESTION_ALREADY_ANSWERED],
             reply_failures,
         )
-        stdout, stderr = process.communicate(timeout=20)
+        stdout, stderr = process.communicate(timeout=LOOP_RUN_TIMEOUT_SECONDS)
 
         self.assertEqual(0, process.returncode, stderr or stdout)
         payload = json.loads(stdout)

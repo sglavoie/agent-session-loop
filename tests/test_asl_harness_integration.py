@@ -4133,7 +4133,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             env=self.loop_env(
                 config_home=config_home,
                 mode="streaming-success",
-                extra={"FAKE_CODEX_STEP_SLEEP": "0.8"},
+                # The window this holds open has to cover two cold
+                # `python -m agent_session_loop status` subprocesses, which is
+                # far more than interpreter startup alone under a loaded
+                # parallel suite.
+                extra={"FAKE_CODEX_STEP_SLEEP": "8.0"},
             ),
             text=True,
             stdout=subprocess.PIPE,
