@@ -36,20 +36,15 @@ from typing import Any
 from agent_session_loop import commit_settlement, run_reporting, runner, turn_execution
 from tests.support import assert_no_runner_import
 
-#: The runner functions that still write ``sys.stderr`` directly after the
-#: move, and why neither of them is the run's live output. Both run where no
-#: coordinator exists: ``_not_implemented`` answers an unimplemented subcommand
-#: and ``_print_doctor_error`` belongs to a separate command. The third writer
-#: of this kind, ``_print_text_outcome``, left for ``run_outcome`` in session
-#: 26 and is pinned there by ``tests/test_asl_run_outcome.py`` under the same
-#: rule. Anything else appearing here is a second writer racing the coordinator
-#: for the terminal while a run is live.
-RUNNER_STDERR_WRITERS = frozenset(
-    {
-        "_not_implemented",
-        "_print_doctor_error",
-    }
-)
+#: The runner functions that write ``sys.stderr`` directly: none, since session
+#: 28. All three writers of this kind have left for boundaries that run where
+#: no coordinator exists -- ``_print_text_outcome`` to ``run_outcome`` in
+#: session 26, and ``_not_implemented`` and ``_print_doctor_error`` to
+#: ``run_doctor`` in session 28 -- and each is pinned at its new owner by
+#: ``tests/test_asl_run_outcome.py`` and ``tests/test_asl_run_doctor.py`` under
+#: the same rule. Anything appearing here now is a second writer racing the
+#: coordinator for the terminal while a run is live.
+RUNNER_STDERR_WRITERS: frozenset[str] = frozenset()
 
 
 class _RaisingStream(io.StringIO):

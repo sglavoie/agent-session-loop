@@ -28,7 +28,6 @@ from . import (
     clock,
     commit_groups,
     commit_settlement,
-    config,
     durability,
     events,
     external_write_evidence,
@@ -46,7 +45,6 @@ from . import (
     qna,
     readiness_gate,
     repository_evidence,
-    responses,
     review,
     review_continuation,
     review_cycle,
@@ -59,6 +57,7 @@ from . import (
     run_commit,
     run_control,
     run_coordination,
+    run_doctor,
     run_entry,
     run_inputs,
     run_outcome,
@@ -76,13 +75,11 @@ from . import (
     verification,
     verification_transitions,
     workspace_evidence,
-    workspaces,
     write_guards,
 )
 from .review_guard import RepairCommitPreflightError
 from .run_errors import RunError
 
-NOT_IMPLEMENTED_EXIT = 2
 # Turn timing, hang thresholds and the control-poll cadence are the turn
 # boundary's own tuning; re-exported here because operators and tests read
 # them at this name.
@@ -289,11 +286,6 @@ BROAD_REVIEW_CHECK_PREFIX = verification_transitions.BROAD_REVIEW_CHECK_PREFIX
 REVIEW_BROAD_FAILURES_DEFERRED_REASON = (
     verification_transitions.REVIEW_BROAD_FAILURES_DEFERRED_REASON
 )
-
-
-def _not_implemented(command: str) -> int:
-    print(f"agent-session-loop {command}: not implemented yet", file=sys.stderr)
-    return NOT_IMPLEMENTED_EXIT
 
 
 # The run loop and the turn boundary have to stamp the same moments the same
@@ -4801,270 +4793,12 @@ def run_from_args(
     return run_entry.run_from_args(args, run_argv=run_argv, run_locked=_run_locked)
 
 
-def _print_doctor_error(
-    args: argparse.Namespace,
-    *,
-    reason: str,
-    error: Exception,
-    cwd: Path | None = None,
-    plan_dir: Path | None = None,
-    details: dict[str, Any] | None = None,
-) -> int:
-    if args.json:
-        payload = responses.error_payload(
-            "doctor",
-            reason=reason,
-            error=str(error),
-            paused=False,
-            details=details,
-            harness=args.harness,
-            cwd=str(cwd) if cwd is not None else str(args.cwd),
-            plan_dir=str(plan_dir) if plan_dir is not None else str(args.plan_dir),
-        )
-        payload.update(run_selection._selected_model_effort_payload(args))
-        responses.print_json(payload)
-    else:
-        print(f"agent-session-loop doctor: {error}", file=sys.stderr)
-    return 1
-
-
 def doctor_from_args(args: argparse.Namespace) -> int:
-    """Check local harness prerequisites from CLI arguments."""
-    try:
-        cwd = plans.canonicalize_path(args.cwd)
-        if not cwd.is_dir():
-            raise plans.PlanError(f"cwd does not exist or is not a directory: {cwd}")
-    except (plans.PlanError, OSError) as error:
-        return _print_doctor_error(args, reason="input-error", error=error)
+    """Check local harness prerequisites from CLI arguments.
 
-    try:
-        repository_registry = plans.read_repository_registry(args.plan_dir)
-        snapshot = plans.inspect_plan(
-            args.plan_dir,
-            repository_registry=repository_registry,
-        )
-    except plans.PlanError as error:
-        return _print_doctor_error(
-            args,
-            reason="malformed-plan",
-            error=error,
-            cwd=cwd,
-        )
-
-    verification_context = verification.VerificationContext.legacy(cwd)
-    if repository_registry is not None:
-        try:
-            verification_context = verification.VerificationContext.resolved_workspace(
-                workspaces.resolve_workspace(cwd, repository_registry)
-            )
-        except workspaces.WorkspaceError as error:
-            return _print_doctor_error(
-                args,
-                reason="workspace-error",
-                error=error,
-                cwd=cwd,
-                plan_dir=snapshot.plan_dir,
-                details={"registry_digest": repository_registry.digest},
-            )
-        metadata = plans.load_plan_metadata(snapshot.plan_dir)
-        if metadata is not None and (
-            not isinstance(metadata, plans.WorkspacePlanMetadata)
-            or metadata.workspace_root != str(verification_context.root)
-            or metadata.registry_digest != repository_registry.digest
-        ):
-            return _print_doctor_error(
-                args,
-                reason="workspace-error",
-                error=plans.PlanError(
-                    "doctor workspace does not match the prepared workspace binding"
-                ),
-                cwd=cwd,
-                plan_dir=snapshot.plan_dir,
-                details={"registry_digest": repository_registry.digest},
-            )
-
-    prompt_workspace = (
-        verification_context.workspace if snapshot.next_pending is not None else None
-    )
-    prompt_scope = (
-        run_prompts._session_scope(snapshot.next_pending, prompt_workspace)
-        if snapshot.next_pending is not None and prompt_workspace is not None
-        else None
-    )
-    if (
-        prompt_workspace is not None
-        and prompt_scope is not None
-        and task_packet._worker_mode() == task_packet.WORKER_MODE_PACKET
-    ):
-        assert snapshot.next_pending is not None
-        prompt = task_packet.build_task_packet(
-            args.harness,
-            snapshot.plan_dir,
-            session_id=snapshot.next_pending.id,
-            session_kind=(
-                SESSION_KIND_REVIEW
-                if review_session_contract.is_generated_review_session_file(
-                    snapshot.next_pending.path
-                )
-                else SESSION_KIND_IMPLEMENTATION
-            ),
-            predecessor_id=task_packet._predecessor_session_id(
-                snapshot, snapshot.next_pending.id
-            ),
-            has_expansion=task_packet._session_has_expansion(
-                snapshot.plan_dir, snapshot.next_pending.id
-            ),
-            has_progress=(snapshot.plan_dir / plans.PROGRESS_FILE_NAME).is_file(),
-            workspace=prompt_workspace,
-            session_scope=prompt_scope,
-        ).render()
-    else:
-        prompt = run_prompts.build_session_prompt(
-            args.harness,
-            snapshot.plan_dir,
-            workspace=prompt_workspace,
-            session_scope=prompt_scope,
-        )
-
-    try:
-        harness_config = config.harness_config_payload()
-        adapter = harnesses.get_adapter(args.harness)
-        executable_path = adapter.resolve_executable()
-        if executable_path is None:
-            raise harnesses.HarnessError(
-                f"{args.harness} executable not found on PATH: {adapter.executable}"
-            )
-
-        last_message_path = (
-            state.plan_state_dir(snapshot.plan_dir) / "last-message-doctor.txt"
-        )
-        model_effort = run_selection._selected_model_effort_payload(args)
-        invocation = run_prompts.build_harness_invocation(
-            args.harness,
-            cwd=verification_context.root,
-            plan_dir=snapshot.plan_dir,
-            unsafe_bypass=run_selection._unsafe_bypass(args),
-            last_message_path=last_message_path,
-            model=run_selection._requested_model(args, harness=args.harness),
-            effort=args.effort,
-            prompt=prompt,
-        )
-    except config.ConfigError as error:
-        return _print_doctor_error(
-            args,
-            reason="config-error",
-            error=error,
-            cwd=cwd,
-            plan_dir=snapshot.plan_dir,
-        )
-    except harnesses.HarnessError as error:
-        return _print_doctor_error(
-            args,
-            reason="harness-error",
-            error=error,
-            cwd=cwd,
-            plan_dir=snapshot.plan_dir,
-        )
-    except OSError as error:
-        return _print_doctor_error(
-            args,
-            reason="os-error",
-            error=error,
-            cwd=cwd,
-            plan_dir=snapshot.plan_dir,
-        )
-
-    if args.json:
-        doctor_fields: dict[str, Any] = {}
-        if verification_context.workspace is not None:
-            doctor_fields = {
-                "workspace_root": str(verification_context.root),
-                "registry_digest": verification_context.registry_digest,
-                "repositories": [
-                    {
-                        "alias": repository.alias,
-                        "path": repository.repository.path,
-                        "origin": repository.origin,
-                        "resolved_root": str(repository.root),
-                    }
-                    for repository in verification_context.workspace.repositories
-                ],
-            }
-        responses.print_json(
-            responses.success_payload(
-                "doctor",
-                reason="ok",
-                harness=adapter.name,
-                **model_effort,
-                harness_config=harness_config,
-                executable=str(executable_path),
-                resolved_executable=str(executable_path),
-                cwd=str(cwd),
-                plan_dir=str(snapshot.plan_dir),
-                next_pending=(
-                    _session_compat_value(snapshot.next_pending.id)
-                    if snapshot.next_pending is not None
-                    else None
-                ),
-                next_pending_id=(
-                    snapshot.next_pending.id
-                    if snapshot.next_pending is not None
-                    else None
-                ),
-                prompt=prompt,
-                invocation=run_commit._build_invocation_payload(
-                    invocation,
-                    model_effort=model_effort,
-                    verification_context=verification_context,
-                ),
-                invocation_argv=invocation.argv,
-                **doctor_fields,
-            )
-        )
-        return 0
-
-    print(f"Harness: {adapter.name}")
-    run_outcome._print_model_effort_lines(model_effort)
-    print(f"Harness config: {harness_config['path']}")
-    configured_harnesses = harness_config["configured_harnesses"]
-    if configured_harnesses:
-        print(f"Configured harnesses: {', '.join(configured_harnesses)}")
-    else:
-        print("Configured harnesses: none")
-    print(f"Executable: {executable_path}")
-    if verification_context.workspace is None:
-        print(f"CWD: {cwd}")
-    else:
-        print(f"Workspace root: {cwd}")
-        print("Repositories:")
-        visible, omitted = workspaces.bounded_repository_rows(
-            verification_context.workspace.repositories
-        )
-        for repository in visible:
-            print(
-                f"  {repository.alias}: {repository.repository.path} -> "
-                f"{repository.root} ({repository.origin})"
-            )
-        if omitted:
-            print(f"  ... {omitted} more repositories")
-    print(f"Plan: {snapshot.plan_dir}")
-    if snapshot.next_pending is None:
-        print("Next pending: none")
-    else:
-        print(f"Next pending: session {snapshot.next_pending.id}")
-    print(f"Prompt: {prompt}")
-    print(f"Transport: {invocation.transport}")
-    print("Argv:")
-    for arg in invocation.argv:
-        print(f"  {arg}")
-    if invocation.turn_plan is not None:
-        # Argv no longer states the access profile under this transport, so a
-        # doctor report that printed only argv would no longer show what the
-        # turn is allowed to do.
-        print("Turn plan:")
-        payload = json.dumps(
-            invocation.turn_plan.to_payload(), indent=2, sort_keys=True
-        )
-        for line in payload.splitlines():
-            print(f"  {line}")
-    return 0
+    Reached by ``cli.py`` through the string
+    ``handler_ref="runner:doctor_from_args"``, so the name is a contract. The
+    staged resolution and every refusal it prints live in
+    :mod:`agent_session_loop.run_doctor`; this boundary keeps only the name.
+    """
+    return run_doctor.doctor_from_args(args)
