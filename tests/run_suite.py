@@ -276,8 +276,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--jobs",
         type=int,
-        default=os.cpu_count() or 4,
-        help="maximum parallel shard processes (default: CPU count)",
+        # Half the cores, not all of them: a shard is not a single process. The
+        # loop tests each spawn `agent_session_loop run`, which spawns a fake
+        # harness of its own, so one shard per core oversubscribes the machine
+        # several times over. Under that load the loop tests race their own
+        # subprocess timeouts and process-group enumeration, which reads as
+        # flaky tests rather than as the overload it is.
+        default=max(1, (os.cpu_count() or 4) // 2),
+        help="maximum parallel shard processes (default: half the CPU count)",
     )
     args = parser.parse_args(argv)
     mode = "portable" if args.portable else "fast" if args.fast else "all"

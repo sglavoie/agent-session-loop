@@ -61,6 +61,12 @@ from tests.support import (
     write_plan_with_ids,
 )
 
+#: Backstop for an ``agent_session_loop run`` subprocess, matching the sibling
+#: loop-test modules. It is a hang guard, not a performance assertion: a run
+#: that finishes in a second on an idle machine can take far longer than a
+#: tight bound while the rest of the sharded suite competes for the CPU.
+LOOP_RUN_TIMEOUT_SECONDS = 120
+
 
 class RunReviewHarnessLifecycleTests(unittest.TestCase):
     """End-to-end coverage for ``--review-harness`` lifecycle integration."""
@@ -242,7 +248,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             env=env,
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=LOOP_RUN_TIMEOUT_SECONDS,
             check=False,
         )
         payload = json.loads(completed.stdout) if json_mode else None
