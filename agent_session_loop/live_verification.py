@@ -26,10 +26,10 @@ records they own are:
 Every one of those writes goes through the :class:`_RunPersistence` handle the
 caller supplied, under that handle's lock, so this module never opens a file of
 its own. Verification additionally announces itself to the AgentMux projection
-through the loop's own notify seam, which enters :class:`_LiveVerification` as
-``notify`` rather than being reached for; finalization publishes no
-notification at all, because its whole audience is the state record an operator
-or a supervisor reads.
+through ``run_persistence._notify_agent_mux_loop``, looked up on the module at
+call time rather than bound at definition, so a patched notifier is still the
+one reached; finalization publishes no notification at all, because its whole
+audience is the state record an operator or a supervisor reads.
 
 Five invariants survive the move and are load-bearing:
 
@@ -69,7 +69,7 @@ import time
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from . import (
     agent_mux_delivery,
@@ -93,28 +93,6 @@ FINALIZATION_HEARTBEAT_INTERVAL_SECONDS = 30.0
 #: supervisor audit. It is a phase name rather than a boolean because a run's
 #: terminal work is expected to grow more of them.
 FINALIZATION_PHASE_ASSURANCE_AUDIT = "assurance-audit"
-
-
-class AgentMuxLoopNotifier(Protocol):
-    """How verification announces its liveness to this run's projection.
-
-    Who hears about a phase is a loop concern, so the seam enters
-    :class:`_LiveVerification` at construction the way ``run_persistence``
-    already enters it. The default is resolved at call time rather than bound
-    at definition, so patching the loop's notifier still reaches a holder that
-    named none.
-    """
-
-    def __call__(
-        self,
-        event_name: str,
-        payload: dict[str, Any],
-        *,
-        reason: str,
-        extra: dict[str, Any] | None = None,
-        persistence: run_persistence._RunPersistence | None = None,
-        cancelled: Callable[[], bool] | None = None,
-    ) -> None: ...
 
 
 class _LiveVerification:
@@ -144,13 +122,11 @@ class _LiveVerification:
         check_repos: tuple[str | None, ...] = (),
         parallel: bool = False,
         heartbeat_interval: float = VERIFICATION_HEARTBEAT_INTERVAL_SECONDS,
-        notify: AgentMuxLoopNotifier | None = None,
     ) -> None:
         self._event_path = event_path
         self._payload = payload
         self._progress = progress
         self._persistence = persistence
-        self._notify = notify
         self._run_id = run_id
         self._turn_index = turn_index
         self._session_id = session_id
@@ -267,14 +243,9 @@ class _LiveVerification:
         extra: dict[str, Any],
         cancelled: Callable[[], bool] | None = None,
     ) -> None:
-        # Resolved per call rather than captured at construction so a caller
-        # that named no notifier still follows a patched loop seam.
-        notify: AgentMuxLoopNotifier = (
-            run_persistence._notify_agent_mux_loop
-            if self._notify is None
-            else self._notify
-        )
-        notify(
+        # Looked up on the module per call rather than bound at definition, so
+        # a patched loop notifier is still the one this phase announces to.
+        run_persistence._notify_agent_mux_loop(
             event_name,
             self._payload,
             reason=reason,

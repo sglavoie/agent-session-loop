@@ -11,9 +11,9 @@ because they exercise the run rather than the seam:
 * it opens no file of its own — every durable record it owns is written through
   the ``_RunPersistence`` handle the caller supplied, under that handle's lock,
   and a second write path here would be a write outside the run's only mutex;
-* the AgentMux notify seam enters at construction rather than by import, and a
-  holder that named none still follows the loop's notifier because the default
-  is resolved per call rather than captured at definition;
+* verification announces through ``run_persistence._notify_agent_mux_loop``
+  looked up per call rather than bound at definition, so a patched loop
+  notifier is still the one reached;
 * finalization publishes no notification at all, so its audience is exactly the
   state record and nothing else; and
 * the two ordering guarantees that make a heartbeat trustworthy: a heartbeat
@@ -31,6 +31,7 @@ finished event tells a supervisor the opposite of the truth.
 from __future__ import annotations
 
 import ast
+import inspect
 import tempfile
 import threading
 import unittest
@@ -65,7 +66,7 @@ DURABLE_WRITE_METHODS = ("append_event", "write_state")
 
 
 class _RecordingNotifier:
-    """An AgentMux seam that records instead of announcing."""
+    """A stand-in for ``run_persistence._notify_agent_mux_loop`` that records."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -180,13 +181,18 @@ class _LiveRecordCase(unittest.TestCase):
 
 
 class AgentMuxSeamTests(_LiveRecordCase):
-    """Who hears about verification enters at construction, not by import."""
+    """Verification announces through the loop's notifier, resolved per call."""
 
-    def test_the_notifier_enters_at_construction(self) -> None:
+    def test_verification_announces_through_the_loop_notifier(self) -> None:
+        # Looked up on the module per call rather than bound at definition: a
+        # default captured at import would silently escape a patched notifier,
+        # and this is the run's only fail-open announcement path.
         notifier = _RecordingNotifier()
-        live = self._verification(notify=notifier)
-        live.start()
-        live.finish(passed=True, passed_count=1, reason="ok")
+
+        live = self._verification()
+        with mock.patch.object(run_persistence, "_notify_agent_mux_loop", notifier):
+            live.start()
+            live.finish(passed=True, passed_count=1, reason="ok")
 
         self.assertEqual(
             [
@@ -201,26 +207,14 @@ class AgentMuxSeamTests(_LiveRecordCase):
             self.assertEqual("run-1", extra["run_id"])
             self.assertEqual("1", extra["session_id"])
 
-    def test_a_holder_that_names_no_notifier_follows_the_loop_seam(self) -> None:
-        # Resolved per call rather than captured at construction: a default
-        # bound at definition time would silently escape a patched seam, and
-        # the seam is the run's only fail-open announcement path.
-        seen: list[str] = []
-
-        def record(event_name: str, payload: dict[str, Any], **kwargs: Any) -> None:
-            seen.append(event_name)
-
-        live = self._verification()
-        with mock.patch.object(run_persistence, "_notify_agent_mux_loop", record):
-            live.start()
-            live.finish(passed=True, passed_count=1, reason="ok")
-
-        self.assertEqual(
-            [
-                agent_mux_delivery.VERIFICATION_START_EVENT,
-                agent_mux_delivery.VERIFICATION_FINISH_EVENT,
-            ],
-            seen,
+    def test_the_holder_takes_no_notifier_of_its_own(self) -> None:
+        # Session 29 collapsed the `notify` construction seam: it had one
+        # implementation, no caller ever passed it, and this module already
+        # imports the module that owns it. Re-adding it would fork the
+        # announcement path again.
+        self.assertNotIn(
+            "notify",
+            inspect.signature(live_verification._LiveVerification).parameters,
         )
 
     def test_finalization_publishes_no_notification(self) -> None:
@@ -253,19 +247,20 @@ class HeartbeatOrderingTests(_LiveRecordCase):
         self,
     ) -> None:
         notifier = _RecordingNotifier()
-        live = self._verification(notify=notifier)
-        live.start()
-        live.check_started(
-            check_index=0, name="suite", kind="command", argv=("just",), cwd=None
-        )
-        notifier.calls.clear()
+        live = self._verification()
+        with mock.patch.object(run_persistence, "_notify_agent_mux_loop", notifier):
+            live.start()
+            live.check_started(
+                check_index=0, name="suite", kind="command", argv=("just",), cwd=None
+            )
+            notifier.calls.clear()
 
-        # `finish` sets `_stop` before it appends `verification_finished`. A
-        # heartbeat that lands in that window still updates the durable record
-        # -- it happened -- but must not announce, or a supervisor reads
-        # "still running" after the finish notification.
-        live._stop.set()
-        self.assertIsNotNone(live._record_heartbeat())
+            # `finish` sets `_stop` before it appends `verification_finished`.
+            # A heartbeat that lands in that window still updates the durable
+            # record -- it happened -- but must not announce, or a supervisor
+            # reads "still running" after the finish notification.
+            live._stop.set()
+            self.assertIsNotNone(live._record_heartbeat())
 
         self.assertEqual([], notifier.names)
         self.assertIn(events.VERIFICATION_HEARTBEAT_EVENT, self._event_names())
@@ -279,9 +274,10 @@ class HeartbeatOrderingTests(_LiveRecordCase):
         def notify(event_name: str, payload: dict[str, Any], **kwargs: Any) -> None:
             thread_at_notify.append(live._thread)
 
-        live = self._verification(notify=notify)
-        live.start()
-        live.finish(passed=True, passed_count=1, reason="ok")
+        live = self._verification()
+        with mock.patch.object(run_persistence, "_notify_agent_mux_loop", notify):
+            live.start()
+            live.finish(passed=True, passed_count=1, reason="ok")
 
         self.assertIsNone(thread_at_notify[0])
         self.assertIsNotNone(thread_at_notify[1])
