@@ -37,6 +37,7 @@ from agent_session_loop import (
     review,
     review_session_contract,
     run_flags,
+    run_payloads,
     run_prompts,
     run_selection,
     runner,
@@ -434,7 +435,9 @@ class AuditRunConfigPersistenceTests(unittest.TestCase):
 
     def _run_config(self, tokens: list[str]) -> dict:
         args = _parse(["run", "/tmp/plan", *tokens])
-        return runner._run_config_payload(args, cwd=Path("/tmp"), commit_mode=None)
+        return run_payloads._run_config_payload(
+            args, cwd=Path("/tmp"), commit_mode=None
+        )
 
     def test_new_runs_persist_audit_enabled_with_the_default_timeout(self) -> None:
         config = self._run_config([])
@@ -618,7 +621,7 @@ class AuditRunOutputTests(unittest.TestCase):
             reason="active",
             raw={},
         )
-        return runner._initial_payload(
+        return run_payloads._initial_payload(
             args=args,
             snapshot=plans.inspect_plan(plan_dir),
             state_dir=plan_state,

@@ -31,6 +31,7 @@ from agent_session_loop import (
     plans,
     readiness_gate,
     run_control,
+    run_payloads,
     run_persistence,
     run_selection,
     run_termination,
@@ -925,7 +926,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             reason="active",
             raw={},
         )
-        return runner._initial_payload(
+        return run_payloads._initial_payload(
             args=args,
             snapshot=plans.inspect_plan(plan_dir),
             state_dir=plan_state,

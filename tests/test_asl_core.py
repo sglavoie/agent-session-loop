@@ -6276,8 +6276,9 @@ class MarkRunAbandonedTests(unittest.TestCase):
         if assurance is not None:
             payload["assurance"] = assurance
         if run_config is not None:
-            # Shaped like `runner._initial_payload`: the plan directory is a
-            # top-level field and the workspace binding lives in `run_config`.
+            # Shaped like `run_payloads._initial_payload`: the plan directory
+            # is a top-level field and the workspace binding lives in
+            # `run_config`.
             payload["plan_dir"] = str(plans.canonicalize_path(self.plan_dir))
             payload["run_config"] = {
                 "workspace_root": str(plans.canonicalize_path(self.plan_dir)),

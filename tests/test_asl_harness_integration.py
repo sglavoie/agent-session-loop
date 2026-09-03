@@ -46,6 +46,7 @@ from agent_session_loop import (
     review_session_body,
     run_commit,
     run_control,
+    run_payloads,
     run_persistence,
     run_reporting,
     run_selection,
@@ -4451,7 +4452,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             mailbox_activation = run_selection._mailbox_activation_payload(
                 args, plan_dir
             )
-            payload = runner._initial_payload(
+            payload = run_payloads._initial_payload(
                 args=args,
                 snapshot=snapshot,
                 state_dir=plan_state_dir,
