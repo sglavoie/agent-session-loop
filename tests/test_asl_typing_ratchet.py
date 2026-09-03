@@ -206,6 +206,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.verification",
         "agent_session_loop.verification_transitions",
         "agent_session_loop.workbench_server",
+        "agent_session_loop.workspace_evidence",
         "agent_session_loop.workspaces",
     }
 )

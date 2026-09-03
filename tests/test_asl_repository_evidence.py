@@ -19,7 +19,7 @@ from agent_session_loop import (
     plans,
     repository_evidence,
     review_guard,
-    runner,
+    workspace_evidence,
     workspaces,
 )
 from tests.support import (
@@ -488,7 +488,7 @@ class RegisteredSnapshotTests(unittest.TestCase):
         )
 
         comparison = repository_evidence.compare_workspace_snapshots(before, after)
-        runner._annotate_history_transitions(
+        workspace_evidence._annotate_history_transitions(
             comparison, repository_roots={"alpha": alpha}
         )
 
@@ -674,7 +674,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
             "removed": ["old-repo"],
             "unavailable": {},
         }
-        evidence = runner._workspace_write_guard_evidence(
+        evidence = workspace_evidence._workspace_write_guard_evidence(
             workspace=self.workspace,
             scope=plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",)),
             comparison=comparison,
@@ -705,7 +705,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         read_only = repository_evidence.linked_worktree_key(
             "tundra_OAK", "/tmp/oak-hardening"
         )
-        evidence = runner._workspace_write_guard_evidence(
+        evidence = workspace_evidence._workspace_write_guard_evidence(
             workspace=self.workspace,
             scope=plans.SessionScope(reads=("SVC", "OAK"), writes=("SVC",)),
             comparison={
@@ -743,7 +743,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         )
 
     def test_guard_fails_closed_for_unavailable_evidence(self) -> None:
-        evidence = runner._workspace_write_guard_evidence(
+        evidence = workspace_evidence._workspace_write_guard_evidence(
             workspace=self.workspace,
             scope=plans.SessionScope(reads=("SVC",), writes=("SVC",)),
             comparison={
@@ -764,7 +764,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
             "git-command-failed",
             evidence["unavailable"]["tundra_svc"]["after"]["reason"],
         )
-        missing = runner._workspace_snapshot_unavailable(
+        missing = workspace_evidence._workspace_snapshot_unavailable(
             OrderedDict(), required_repository_paths=("tundra_svc",)
         )
         self.assertEqual(
@@ -779,7 +779,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         clean = {"changed": {}, "added": [], "removed": [], "unavailable": {}}
         scope = plans.SessionScope(reads=("SVC",), writes=("SVC",))
         self.assertTrue(
-            runner._workspace_write_guard_evidence(
+            workspace_evidence._workspace_write_guard_evidence(
                 workspace=self.workspace,
                 scope=scope,
                 comparison=clean,
@@ -789,7 +789,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         )
 
         unclassified_reason = external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_REASON
-        evidence = runner._workspace_write_guard_evidence(
+        evidence = workspace_evidence._workspace_write_guard_evidence(
             workspace=self.workspace,
             scope=scope,
             comparison=clean,
@@ -830,7 +830,9 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual(["tundra_OAK", "tundra_svc"], list(snapshot))
-        self.assertEqual({}, runner._workspace_snapshot_unavailable(snapshot))
+        self.assertEqual(
+            {}, workspace_evidence._workspace_snapshot_unavailable(snapshot)
+        )
 
     def test_repair_comparison_suppresses_registry_delta_only(self) -> None:
         comparison = {
@@ -840,7 +842,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
             "unavailable": {},
         }
 
-        repaired, suppressed = runner._workspace_scope_repair_comparison(
+        repaired, suppressed = workspace_evidence._workspace_scope_repair_comparison(
             comparison,
             frozenset({"tundra_svc", "tundra_OAK"}),
         )
@@ -961,7 +963,7 @@ class LegacyUnobservedRepositoryTests(unittest.TestCase):
         clean = {"changed": {}, "added": [], "removed": [], "unavailable": {}}
 
         self.assertTrue(
-            runner._legacy_implementation_write_guard_evidence(
+            workspace_evidence._legacy_implementation_write_guard_evidence(
                 cwd=self.repo_root,
                 comparison=clean,
                 exclude=(),
@@ -969,7 +971,7 @@ class LegacyUnobservedRepositoryTests(unittest.TestCase):
             )["passed"]
         )
 
-        evidence = runner._legacy_implementation_write_guard_evidence(
+        evidence = workspace_evidence._legacy_implementation_write_guard_evidence(
             cwd=self.repo_root,
             comparison=clean,
             exclude=(),
@@ -988,7 +990,7 @@ class LegacyUnobservedRepositoryTests(unittest.TestCase):
         self.assertEqual([], evidence["violations"])
 
     def test_a_failed_fingerprint_outranks_a_repository_never_looked_at(self) -> None:
-        evidence = runner._legacy_implementation_write_guard_evidence(
+        evidence = workspace_evidence._legacy_implementation_write_guard_evidence(
             cwd=self.repo_root,
             comparison={
                 "changed": {},
@@ -1087,7 +1089,7 @@ class ExternalWriteEvidenceTests(unittest.TestCase):
             "include_ignored": False,
         }
         options.update(overrides)
-        return runner._legacy_implementation_write_guard_evidence(**options)
+        return workspace_evidence._legacy_implementation_write_guard_evidence(**options)
 
     def test_every_named_path_lands_in_exactly_one_bucket(self) -> None:
         evidence = self._evidence(

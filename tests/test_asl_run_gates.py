@@ -45,6 +45,7 @@ from agent_session_loop import (
     state,
     turn_execution,
     verification,
+    workspace_evidence,
     workspaces,
 )
 from tests.support import (
@@ -3492,7 +3493,7 @@ class RepairChildWriteScopeRegenerationTests(unittest.TestCase):
         workspace = context.workspace
         assert workspace is not None
         status = self._child_status()
-        return runner._regenerated_repair_child_write_scope(
+        return workspace_evidence._regenerated_repair_child_write_scope(
             session=status,
             plan_dir=self.plan_dir,
             workspace=workspace,

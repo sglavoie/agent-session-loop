@@ -60,6 +60,7 @@ from agent_session_loop import (
     verification,
     workbench,
     workbench_server,
+    workspace_evidence,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -5250,7 +5251,9 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 exclude=(),
                 include_ignored=False,
             )
-            bases = runner._workspace_review_bases(context.workspace, snapshot)
+            bases = workspace_evidence._workspace_review_bases(
+                context.workspace, snapshot
+            )
             (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
                 "## Findings\nStatus: 1 Findings (0 high, 1 med, 0 low)\n",
                 encoding="utf-8",
