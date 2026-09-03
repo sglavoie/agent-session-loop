@@ -28,6 +28,14 @@ from tests.support import (
     wait_for_process_exit,
 )
 
+#: Generation bound the timeout test drives the harness with. It is a hang
+#: guard, not a performance assertion: the bound has to outlast the fixture's
+#: own cold interpreter start, which costs seconds rather than milliseconds
+#: while the sharded suite saturates the machine. Too tight a bound kills the
+#: process tree before the fixture publishes the grandchild PID the test reads,
+#: which reads as a flaky test rather than as the overload it is.
+GENERATION_TIMEOUT_PROBE_SECONDS = 15
+
 
 def build_hunk(index: int, *, lines: int = 6) -> str:
     """One unified-diff hunk with a stable, greppable body."""
@@ -1431,7 +1439,7 @@ class CommitHandlerTests(unittest.TestCase):
             "--yes",
             "--json",
             "--timeout",
-            "2",
+            str(GENERATION_TIMEOUT_PROBE_SECONDS),
             env={
                 "FAKE_CODEX_COMMIT_MODE": "hang",
                 "FAKE_CODEX_COMMIT_HANG_CHILD_PID": str(pid_path),
@@ -1444,8 +1452,14 @@ class CommitHandlerTests(unittest.TestCase):
         self.assertLess(elapsed, 120, "the harness turn outlived its bound")
         payload = json.loads(out)
         self.assertEqual(commit_message.REASON_GENERATION_TIMEOUT, payload["reason"])
-        self.assertEqual(2, payload["details"]["timeout_seconds"])
-        self.assertIn("did not produce a commit message within 2s", payload["error"])
+        self.assertEqual(
+            GENERATION_TIMEOUT_PROBE_SECONDS, payload["details"]["timeout_seconds"]
+        )
+        self.assertIn(
+            "did not produce a commit message within "
+            f"{GENERATION_TIMEOUT_PROBE_SECONDS}s",
+            payload["error"],
+        )
         # Nothing was committed and the staged change survives for a retry.
         self.assertEqual(before, self.commit_count())
         self.assertTrue(commit_message.has_staged_changes(self.repo))
