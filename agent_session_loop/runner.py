@@ -33,7 +33,6 @@ from . import (
     commit_groups,
     commit_settlement,
     config,
-    contracts,
     control_signal,
     durability,
     events,
@@ -43,7 +42,6 @@ from . import (
     handoff_guards,
     harness_failures,
     harnesses,
-    live_verification,
     mailbox,
     mailbox_rendering,
     model_availability,
@@ -75,6 +73,7 @@ from . import (
     run_reporting,
     run_selection,
     run_termination,
+    session_verification,
     state,
     supervisor_audit,
     task_packet,
@@ -547,494 +546,6 @@ _review_verdict_repair_references = review_transitions.review_verdict_repair_ref
 REVIEW_FINDINGS_UNRESOLVED_REASON = review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON
 
 
-def _enforce_review_verdict(
-    *,
-    event_path: Path,
-    payload: dict[str, Any],
-    persistence: run_persistence._RunPersistence,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot,
-    session_id: str,
-    session_label: str,
-    session_details: dict[str, Any],
-    turn_payload: dict[str, Any],
-    paths: dict[str, Path],
-    plan_cache: plans.PlanSnapshotCache,
-    require_artifact: bool = False,
-    stop_after_current_pending: bool = False,
-) -> tuple[str, plans.PlanSnapshot | None]:
-    """Validate and persist the final review verdict.
-
-    ``require_artifact=True`` (review sessions at or above
-    :data:`STRUCTURED_REVIEW_MIN_VERSION`) additionally requires a valid,
-    consistent ``final-review.json``; v1 review sessions stay
-    Markdown-compatible.
-
-    Returns ``("pass", None)`` for a valid verdict. An invalid verdict always
-    reverts the review session to ``pending`` with the exact validation error
-    as a Handoff note, then either returns ``("retry", snapshot)`` — the caller
-    adopts the snapshot and ``continue``s, so the main loop re-selects and
-    re-runs the same review session — or ``("pause", snapshot)`` once the
-    repair is exhausted or ``stop_after_current_pending`` says an operator
-    stop must win over another turn (the caller must ``break``).
-    """
-    review_path = review_session_contract.final_review_output_path(before.plan_dir)
-    verdict = handoff_guards._read_review_verdict(
-        before.plan_dir, require_artifact=require_artifact
-    )
-    cursor = review_transitions.REVIEW_VERDICT_MACHINE.start()
-    # Fingerprint this rejection and compare against the retries already
-    # recorded for this session in the current review cycle (read before the
-    # new retry event is appended). An identical rejection cannot loop, and the
-    # attempt cap bounds a reviewer that keeps producing *different* malformed
-    # artifacts.
-    graded = review_transitions.adjudicate_review_verdict(
-        verdict=verdict,
-        priors=_read_prior_review_verdict_retries(event_path, session_id),
-        stop_after_current_pending=stop_after_current_pending,
-    )
-    cursor.advance(graded.event)
-    if graded.accepted:
-        with persistence.lock:
-            turn_payload["review_verdict"] = {
-                "passed": True,
-                **{key: value for key, value in verdict.items() if key != "ok"},
-            }
-            _write_json_file(paths["result"], turn_payload)
-        return ("pass", None)
-
-    error = verdict.get("error", "invalid review verdict")
-    failure_note = f"review verdict validation failed: {error}"
-    reverted = handoff_guards._revert_session_status_to_pending(
-        after,
-        session_id,
-        failure_note=failure_note,
-        append_handoff_note=_append_handoff_note,
-    )
-    snapshot_after = _reinspect_after_revert(
-        before.plan_dir, after, reverted, plan_cache
-    )
-
-    repair_payload = graded.to_payload()
-    with persistence.lock:
-        payload["final_snapshot"] = _snapshot_payload(snapshot_after)
-        payload["review_verdict"] = None
-        turn_payload["review_verdict"] = {
-            "passed": False,
-            "reason": "invalid-review-verdict",
-            **{
-                key: value
-                for key, value in verdict.items()
-                if key not in ("ok", "reason")
-            },
-            "failure_reason": verdict.get("reason"),
-            **repair_payload,
-        }
-        _write_json_file(paths["result"], turn_payload)
-    _record_turn_rejected(
-        event_path=event_path,
-        payload=payload,
-        persistence=persistence,
-        turn_payload=turn_payload,
-        session_id=session_id,
-        guard="review-verdict",
-        reason="invalid-review-verdict",
-        reopened=reverted is not None,
-        detail={"failure_reason": verdict.get("reason"), "attempt": graded.attempt},
-    )
-
-    if graded.action == "retry":
-        persistence.append_event(
-            event_path,
-            events.REVIEW_VERDICT_RETRY_EVENT,
-            {
-                "run_id": payload.get("run_id"),
-                **_session_identity_payload(session_id),
-                "attempt": graded.attempt,
-                "max_attempts": graded.max_attempts,
-                "fingerprint": graded.fingerprint,
-                "failure_reason": verdict.get("reason"),
-                "error": str(error),
-            },
-        )
-        cursor.advance("resubmit")
-        return ("retry", snapshot_after)
-
-    details = {
-        **session_details,
-        "review_output_path": str(review_path),
-        "error": str(error),
-        "failure_reason": verdict.get("reason"),
-        **repair_payload,
-    }
-    if "review_artifact_path" in verdict:
-        details["review_artifact_path"] = verdict["review_artifact_path"]
-    run_termination._pause_run(
-        event_path,
-        payload,
-        reason="verify-failed",
-        message=(f"review verdict validation failed for {session_label}: {error}"),
-        details=details,
-        persistence=persistence,
-    )
-    return ("pause", snapshot_after)
-
-
-def _enforce_session_verification(
-    *,
-    event_path: Path,
-    payload: dict[str, Any],
-    persistence: run_persistence._RunPersistence,
-    progress: run_reporting._ProgressReporter,
-    before: plans.PlanSnapshot,
-    after: plans.PlanSnapshot,
-    cwd: Path,
-    session_id: str,
-    session_label: str,
-    session_details: dict[str, Any],
-    allow_not_loop_ready: bool,
-    turn_payload: dict[str, Any],
-    paths: dict[str, Path],
-    plan_cache: plans.PlanSnapshotCache,
-    run_id: str | None,
-    turn_index: int,
-    total_sessions: int | None,
-    heartbeat_interval: float = (
-        live_verification.VERIFICATION_HEARTBEAT_INTERVAL_SECONDS
-    ),
-    verification_context: verification.VerificationContext | None = None,
-    review_broad_failure_deferral: bool = False,
-    require_review_artifact: bool = False,
-    generated_review_session: bool = False,
-) -> bool:
-    """Run the session's `Verify` recipe and pause on failure or contract problems.
-
-    The lane's states — scheduled, running, and the settled passed / deferred /
-    failed / unenforced / refused — are declared in
-    :data:`verification_transitions.VERIFICATION_MACHINE` and driven here beside
-    the effects each one earns, so an out-of-order step raises rather than
-    writing a durable record describing a lifecycle this session never had.
-
-    Returns ``True`` when the run should pause (the caller must ``break``);
-    ``False`` when verification passed and the loop should continue.
-    """
-    cursor = verification_transitions.VERIFICATION_MACHINE.start()
-    live: live_verification._LiveVerification | None = None
-
-    def refuse(
-        refusal: verification_transitions.VerificationRefusal,
-    ) -> bool:
-        """Apply a refusal's effects: close the live record, revert, pause."""
-
-        if live is not None and refusal.live_finish_reason is not None:
-            live.finish(
-                passed=False,
-                passed_count=0,
-                reason=refusal.live_finish_reason,
-                error=refusal.error,
-            )
-        reverted = handoff_guards._revert_session_status_to_pending(
-            after,
-            session_id,
-            failure_note=refusal.failure_note,
-            append_handoff_note=_append_handoff_note,
-        )
-        snapshot_after = _reinspect_after_revert(
-            before.plan_dir, after, reverted, plan_cache
-        )
-        with persistence.lock:
-            payload["final_snapshot"] = _snapshot_payload(snapshot_after)
-            turn_payload["verification"] = refusal.turn_verification(session_id)
-            _write_json_file(paths["result"], turn_payload)
-        _record_turn_rejected(
-            event_path=event_path,
-            payload=payload,
-            persistence=persistence,
-            turn_payload=turn_payload,
-            session_id=session_id,
-            guard="session-verification",
-            reason=refusal.reason,
-            reopened=reverted is not None,
-            detail=refusal.guard_detail,
-        )
-        run_termination._pause_run(
-            event_path,
-            payload,
-            reason=refusal.reason,
-            message=refusal.message,
-            details=refusal.pause_details(session_details),
-            persistence=persistence,
-        )
-        return True
-
-    contract: contracts.CompletionContract | None
-    contract_error: str | None = None
-    try:
-        contract = contracts.read_completion_contract(before.plan_dir, session_id)
-    except plans.PlanError as error:
-        contract, contract_error = None, str(error)
-
-    schedule = verification_transitions.schedule_verification(
-        contract=contract,
-        contract_error=contract_error,
-        allow_not_loop_ready=allow_not_loop_ready,
-        session_label=session_label,
-    )
-    cursor.advance(schedule.event)
-    if not schedule.runs:
-        if schedule.refusal is not None:
-            return refuse(schedule.refusal)
-        # Waived: a loop-ready run accepted a session with no contract, so the
-        # turn records that nothing was enforced and the loop continues.
-        with persistence.lock:
-            turn_payload["verification"] = schedule.turn_verification(session_id)
-            _write_json_file(paths["result"], turn_payload)
-        return False
-
-    # `schedule.runs` is `state == "contract-ready"`, which
-    # `schedule_verification` returns on exactly one branch: the one guarded by
-    # `contract is not None`. The invariant lives across a module boundary, so
-    # it is restated here to narrow the contract every call below requires.
-    assert contract is not None
-
-    # Persist `final_snapshot` to the post-turn inspected snapshot before
-    # verification starts. Completion bookkeeping (progress.md append and
-    # `completed_sessions`) still waits until verification passes, but the
-    # snapshot itself is the post-turn view either way so operator tools see
-    # the in-flight phase as "verifying" rather than "idle".
-    with persistence.lock:
-        payload["final_snapshot"] = _snapshot_payload(after)
-
-    if generated_review_session:
-        review_workspace = (
-            verification_context.workspace if verification_context is not None else None
-        )
-        contract = review_session_contract._authenticated_generated_review_contract(
-            contract,
-            plan_dir=before.plan_dir,
-            repository_aliases=(
-                () if review_workspace is None else review_workspace.registry.aliases
-            ),
-        )
-
-    contract_checks = contract.verify.checks
-    check_count = len(contract_checks)
-    live = live_verification._LiveVerification(
-        event_path=event_path,
-        payload=payload,
-        progress=progress,
-        persistence=persistence,
-        run_id=run_id,
-        turn_index=turn_index,
-        session_id=session_id,
-        session_label=session_label,
-        total_sessions=total_sessions,
-        check_count=check_count,
-        check_names=tuple(check.name for check in contract_checks),
-        check_kinds=tuple(check.kind for check in contract_checks),
-        check_repos=tuple(check.repo for check in contract_checks),
-        parallel=contract.verify.parallel,
-        heartbeat_interval=heartbeat_interval,
-    )
-
-    def _on_check_started(event: verification.CheckStartedEvent) -> None:
-        live.check_started(
-            check_index=event.check_index,
-            name=event.name,
-            kind=event.kind,
-            argv=event.argv,
-            cwd=event.cwd,
-            repo=event.repo,
-        )
-
-    def _on_check_finished(event: verification.CheckFinishedEvent) -> None:
-        live.check_finished(
-            check_index=event.check_index,
-            name=event.name,
-            kind=event.kind,
-            role=event.role,
-            status=event.result.status,
-            duration_seconds=event.result.duration_seconds,
-            failure_reason=event.result.failure_reason,
-            returncode=event.result.returncode,
-            repo=event.repo,
-            failure_diagnostic=event.result.failure_diagnostic,
-        )
-
-    def _on_check_skipped(event: verification.CheckSkippedEvent) -> None:
-        live.check_skipped(
-            check_index=event.check_index,
-            name=event.name,
-            kind=event.kind,
-            on_failure_of=event.on_failure_of,
-            reason=event.reason,
-            repo=event.repo,
-        )
-
-    observer = verification.VerificationObserver(
-        on_check_started=_on_check_started,
-        on_check_finished=_on_check_finished,
-        on_check_skipped=_on_check_skipped,
-    )
-
-    # Retain failed command stdout/stderr under the turn's artifact directory so
-    # large output stays recoverable off to the side while result.json keeps
-    # only bounded previews.
-    verification_artifact_dir = paths["artifact_dir"] / "verification"
-
-    cursor.advance("start")
-    live.start()
-    try:
-        verification_kwargs: dict[str, Any] = {
-            "observer": observer,
-            "artifact_dir": verification_artifact_dir,
-        }
-        if verification_context is None:
-            verification_kwargs["repo_root"] = cwd
-        else:
-            verification_kwargs["context"] = verification_context
-        result = verification.run_verification(contract, **verification_kwargs)
-    except KeyboardInterrupt:
-        cursor.advance("run-refused")
-        return refuse(
-            verification_transitions.refuse_interrupted_verification(
-                session_label=session_label
-            )
-        )
-    except OSError as error:
-        cursor.advance("run-refused")
-        return refuse(
-            verification_transitions.refuse_unavailable_verification(
-                session_label=session_label, error=str(error)
-            )
-        )
-
-    graded = verification_transitions.adjudicate_verification(
-        result=result,
-        contract=contract,
-        deferral=(
-            review_delta._review_broad_failure_acceptance(
-                result,
-                plan_dir=before.plan_dir,
-                require_artifact=require_review_artifact,
-                read_review_verdict=handoff_guards._read_review_verdict,
-            )
-            if review_broad_failure_deferral and not result.passed
-            else None
-        ),
-    )
-    cursor.advance(graded.event)
-    details = graded.details
-    live.finish(
-        passed=graded.passed,
-        passed_count=graded.passed_count,
-        skipped_count=graded.skipped_count,
-        executed_count=graded.executed_count,
-        gate_count=graded.gate_count,
-        diagnostic_count=graded.diagnostic_count,
-        reason=graded.reason,
-        acceptance=graded.acceptance,
-    )
-
-    with persistence.lock:
-        turn_payload["verification"] = graded.turn_verification(session_id)
-        _write_json_file(paths["result"], turn_payload)
-        for check in result.checks:
-            run_persistence._append_process_sweep_event(
-                event_path=event_path,
-                persistence=persistence,
-                report=check.sweep,
-                phase="verification",
-                identity={
-                    "run_id": run_id,
-                    "turn_index": turn_index,
-                    **_session_identity_payload(session_id),
-                    "check": check.name,
-                },
-            )
-
-    if graded.continues:
-        return False
-
-    summary = str(graded.summary)
-    reverted = handoff_guards._revert_session_status_to_pending(
-        after,
-        session_id,
-        failure_note=f"verification failed: {summary}",
-        append_handoff_note=_append_handoff_note,
-    )
-    snapshot_after = _reinspect_after_revert(
-        before.plan_dir, after, reverted, plan_cache
-    )
-
-    # Fingerprint this failure and compare against prior verify-failed events
-    # for the same session (read before this pause is appended). The repair is
-    # exhausted when the fingerprint repeats a prior failure (an identical
-    # failure cannot loop) or when the total number of verify-failures exceeds
-    # the attempt cap. The autopilot honors ``verification_repair_exhausted``
-    # and stops relaunching; a changed fingerprint under the cap stays eligible.
-    repair = verification_transitions.adjudicate_verification_repair(
-        details=details,
-        budget=verification_transitions.verification_repair_budget(
-            event_path, session_id
-        ),
-    )
-    repair_payload = repair.to_payload()
-    with persistence.lock:
-        payload["final_snapshot"] = _snapshot_payload(snapshot_after)
-        turn_payload["verification"].update(repair_payload)
-        _write_json_file(paths["result"], turn_payload)
-    _record_turn_rejected(
-        event_path=event_path,
-        payload=payload,
-        persistence=persistence,
-        turn_payload=turn_payload,
-        session_id=session_id,
-        guard="session-verification",
-        reason="verify-failed",
-        reopened=reverted is not None,
-        detail={"summary": summary, "fingerprint": repair.fingerprint},
-    )
-    run_termination._pause_run(
-        event_path,
-        payload,
-        reason="verify-failed",
-        message=(f"verification failed for {session_label}: {summary}"),
-        details={**session_details, **details, **repair_payload},
-        persistence=persistence,
-    )
-    return True
-
-
-def _reinspect_after_revert(
-    plan_dir: Path,
-    fallback: plans.PlanSnapshot,
-    reverted_path: Path | None,
-    plan_cache: plans.PlanSnapshotCache,
-) -> plans.PlanSnapshot:
-    if reverted_path is None:
-        return fallback
-    return _reinspect_after_plan_mutation(plan_cache, fallback)
-
-
-def _reinspect_after_plan_mutation(
-    plan_cache: plans.PlanSnapshotCache,
-    fallback: plans.PlanSnapshot,
-) -> plans.PlanSnapshot:
-    """Re-read a plan the runner itself just rewrote.
-
-    Reverting a session or materializing repair children changes the durable
-    plan, so a projection still built from the pre-mutation snapshot describes
-    a plan that no longer exists. The pre-mutation snapshot is kept only when
-    the rewritten plan cannot be parsed at all, which is a separate failure the
-    caller already reports.
-    """
-    try:
-        return plan_cache.get_fresh(fallback.plan_dir)
-    except plans.PlanError:
-        return fallback
-
-
 HANDOFF_DEFECT_MISSING_FILES = "missing-files-modified"
 HANDOFF_DEFECT_PENDING_PLACEHOLDER = "pending-files-modified-placeholder"
 HANDOFF_DEFECT_UNQUALIFIED_ENTRY = "unqualified-files-modified-entry"
@@ -1406,7 +917,9 @@ def _repair_paused_handoff_status(
     )
     if reverted is None:
         return after, None
-    repaired = _reinspect_after_revert(after.plan_dir, after, reverted, plan_cache)
+    repaired = session_verification._reinspect_after_revert(
+        after.plan_dir, after, reverted, plan_cache
+    )
     evidence: dict[str, Any] = {
         **_session_identity_payload(session_id),
         "session_path": str(reverted),
@@ -4718,7 +4231,7 @@ def _run_locked(
                     paths=paths,
                     plan_cache=plan_cache,
                     append_handoff_note=_append_handoff_note,
-                    reinspect=_reinspect_after_revert,
+                    reinspect=session_verification._reinspect_after_revert,
                     state_dir_arg=args.state_dir,
                     run_dir=run_dir,
                     external_digests_before=external_digests_before,
@@ -4769,7 +4282,7 @@ def _run_locked(
                     paths=paths,
                     plan_cache=plan_cache,
                     append_handoff_note=_append_handoff_note,
-                    reinspect=_reinspect_after_revert,
+                    reinspect=session_verification._reinspect_after_revert,
                     state_dir_arg=args.state_dir,
                     run_dir=run_dir,
                     external_digests_before=external_digests_before,
@@ -4803,7 +4316,7 @@ def _run_locked(
                     paths=paths,
                     plan_cache=plan_cache,
                     append_handoff_note=_append_handoff_note,
-                    reinspect=_reinspect_after_revert,
+                    reinspect=session_verification._reinspect_after_revert,
                 )
             ):
                 finalization_paused = True
@@ -4829,7 +4342,7 @@ def _run_locked(
                 paths=paths,
                 plan_cache=plan_cache,
                 append_handoff_note=_append_handoff_note,
-                reinspect=_reinspect_after_revert,
+                reinspect=session_verification._reinspect_after_revert,
                 changed_paths=(
                     write_guards._protected_path_changed_paths(
                         turn_payload.get("workspace_write_guard")
@@ -4882,7 +4395,7 @@ def _run_locked(
                     plan_cache=plan_cache,
                     result_disposition=terminating_disposition,
                     append_handoff_note=_append_handoff_note,
-                    reinspect=_reinspect_after_revert,
+                    reinspect=session_verification._reinspect_after_revert,
                 )
             ):
                 break
@@ -4936,7 +4449,7 @@ def _run_locked(
                         revert_session_status=handoff_guards.session_status_reverter(
                             _append_handoff_note
                         ),
-                        reinspect=_reinspect_after_revert,
+                        reinspect=session_verification._reinspect_after_revert,
                         context=turn_payload,
                         persistence=persistence,
                     )
@@ -5065,7 +4578,7 @@ def _run_locked(
                     paths=paths,
                     plan_cache=plan_cache,
                     append_handoff_note=_append_handoff_note,
-                    reinspect=_reinspect_after_revert,
+                    reinspect=session_verification._reinspect_after_revert,
                 )
             ):
                 break
@@ -5449,11 +4962,11 @@ def _run_locked(
                 paths=paths,
                 plan_cache=plan_cache,
                 append_handoff_note=_append_handoff_note,
-                reinspect=_reinspect_after_revert,
+                reinspect=session_verification._reinspect_after_revert,
             ):
                 break
 
-            if _enforce_session_verification(
+            if session_verification._enforce_session_verification(
                 event_path=event_path,
                 payload=payload,
                 persistence=persistence,
@@ -5468,6 +4981,7 @@ def _run_locked(
                 turn_payload=turn_payload,
                 paths=paths,
                 plan_cache=plan_cache,
+                append_handoff_note=_append_handoff_note,
                 run_id=run_id,
                 turn_index=turn_index,
                 total_sessions=total_sessions,
@@ -5505,23 +5019,26 @@ def _run_locked(
                 )
                 with run_control_lock:
                     stop_after_current_pending = run_controls.state.stop_after_current
-                verdict_action, verdict_snapshot = _enforce_review_verdict(
-                    event_path=event_path,
-                    payload=payload,
-                    persistence=persistence,
-                    before=before,
-                    after=after,
-                    session_id=session_id,
-                    session_label=session_label,
-                    session_details=session_details,
-                    turn_payload=turn_payload,
-                    paths=paths,
-                    plan_cache=plan_cache,
-                    require_artifact=(
-                        review_session_version is not None
-                        and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
-                    ),
-                    stop_after_current_pending=stop_after_current_pending,
+                verdict_action, verdict_snapshot = (
+                    session_verification._enforce_review_verdict(
+                        event_path=event_path,
+                        payload=payload,
+                        persistence=persistence,
+                        before=before,
+                        after=after,
+                        session_id=session_id,
+                        session_label=session_label,
+                        session_details=session_details,
+                        turn_payload=turn_payload,
+                        paths=paths,
+                        plan_cache=plan_cache,
+                        append_handoff_note=_append_handoff_note,
+                        require_artifact=(
+                            review_session_version is not None
+                            and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
+                        ),
+                        stop_after_current_pending=stop_after_current_pending,
+                    )
                 )
                 if verdict_action == "pause":
                     break
@@ -5783,7 +5300,7 @@ def _run_locked(
                     turn_payload=commit.record,
                     max_review_fix_cycles=max_review_fix_cycles,
                     plan_cache=plan_cache,
-                    reinspect=_reinspect_after_plan_mutation,
+                    reinspect=session_verification._reinspect_after_plan_mutation,
                 )
                 review_resume = review_cycle._set_review_resume(
                     snapshot=snapshot,
@@ -5901,7 +5418,7 @@ def _run_locked(
                         paths=guard_context["paths"],
                         plan_cache=plan_cache,
                         append_handoff_note=_append_handoff_note,
-                        reinspect=_reinspect_after_revert,
+                        reinspect=session_verification._reinspect_after_revert,
                         state_dir_arg=args.state_dir,
                         run_dir=run_dir,
                         external_digests_before=guard_context.get(
@@ -5928,7 +5445,7 @@ def _run_locked(
                         paths=guard_context["paths"],
                         plan_cache=plan_cache,
                         append_handoff_note=_append_handoff_note,
-                        reinspect=_reinspect_after_revert,
+                        reinspect=session_verification._reinspect_after_revert,
                         state_dir_arg=args.state_dir,
                         run_dir=run_dir,
                         external_digests_before=guard_context.get(
@@ -5961,7 +5478,7 @@ def _run_locked(
                     paths=guard_context["paths"],
                     plan_cache=plan_cache,
                     append_handoff_note=_append_handoff_note,
-                    reinspect=_reinspect_after_revert,
+                    reinspect=session_verification._reinspect_after_revert,
                     # A write guard that never recorded its comparison — it
                     # raised, or the inventory failed — leaves this guard
                     # blind, and blind is recorded as unavailable rather than

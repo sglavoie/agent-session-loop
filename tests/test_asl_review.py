@@ -40,6 +40,7 @@ from agent_session_loop import (
     run_inputs,
     run_persistence,
     runner,
+    session_verification,
     state,
     workbench,
     workspaces,
@@ -4634,7 +4635,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             },
             max_review_fix_cycles=1,
             plan_cache=plans.PlanSnapshotCache(),
-            reinspect=runner._reinspect_after_plan_mutation,
+            reinspect=session_verification._reinspect_after_plan_mutation,
         )
 
         self.assertEqual("complete", action)
@@ -4712,7 +4713,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             turn_payload=turn_payload,
             max_review_fix_cycles=2,
             plan_cache=plans.PlanSnapshotCache(),
-            reinspect=runner._reinspect_after_plan_mutation,
+            reinspect=session_verification._reinspect_after_plan_mutation,
         )
 
         self.assertEqual("paused", action)
@@ -4803,7 +4804,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 },
                 max_review_fix_cycles=2,
                 plan_cache=plans.PlanSnapshotCache(),
-                reinspect=runner._reinspect_after_plan_mutation,
+                reinspect=session_verification._reinspect_after_plan_mutation,
             )
         return action, after, payload, event_path
 

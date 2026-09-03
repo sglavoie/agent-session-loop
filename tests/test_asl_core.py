@@ -41,6 +41,7 @@ from agent_session_loop import (
     responses,
     review,
     review_cycle,
+    review_transitions,
     run_commit,
     run_inputs,
     run_persistence,
@@ -7482,7 +7483,7 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
             runner._is_review_verdict_repair_exhausted(
                 "fp-2",
                 ("fp-1",),
-                runner.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
+                review_transitions.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
             )
         )
         self.assertTrue(
@@ -7492,13 +7493,13 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
             runner._is_review_verdict_repair_exhausted(
                 "fp-3",
                 ("fp-1", "fp-2"),
-                runner.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS + 1,
+                review_transitions.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS + 1,
             )
         )
         # An unfingerprintable verdict still respects the attempt budget.
         self.assertTrue(
             runner._is_review_verdict_repair_exhausted(
-                None, (), runner.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS + 1
+                None, (), review_transitions.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS + 1
             )
         )
 

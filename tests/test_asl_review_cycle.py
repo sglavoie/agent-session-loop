@@ -10,11 +10,11 @@ cannot state, because they exercise the run rather than the boundary:
 * the module does not import the runner, and needs nothing from it;
 * it opens no file of its own — every durable write goes through the
   ``_RunPersistence`` handle the caller supplied, under that handle's lock;
-* both seams the runner still satisfies are structural, so drift in either is
+* both seams the loop still binds are structural, so drift in either is
   silent: ``handoff_guards._read_review_verdict`` has to keep matching
-  ``review_delta.ReviewVerdictReader`` and ``runner._reinspect_after_plan_mutation``
-  has to keep matching :data:`review_cycle.PlanMutationReinspector` until
-  Session 23 gives the latter a home; and
+  ``review_delta.ReviewVerdictReader`` and
+  ``session_verification._reinspect_after_plan_mutation`` has to keep matching
+  :data:`review_cycle.PlanMutationReinspector`; and
 * the arithmetic nobody watching a run can see is right — a missing cap is not
   a zero cap, a recovered backfill counts its source once, and a refused reopen
   is recorded as loudly as a successful one.
@@ -44,6 +44,7 @@ from agent_session_loop import (
     review_transitions,
     run_persistence,
     runner,
+    session_verification,
 )
 from tests.support import assert_no_runner_import, read_jsonl
 
@@ -175,16 +176,18 @@ class ReviewCycleBoundaryTests(unittest.TestCase):
             [(p.name, p.kind, p.default) for p in actual.parameters.values()],
         )
 
-    def test_the_runner_reinspector_still_satisfies_the_seam(self) -> None:
+    def test_the_bound_reinspector_still_satisfies_the_seam(self) -> None:
         """The post-mutation re-read is a callback, not an import.
 
-        ``_reinspect_after_plan_mutation`` does not move until Session 23, so
-        until then it is passed in. A positional-shape change there would be
-        caught by mypy at the one call site, but the *meaning* would not: the
-        cache comes first and the fallback second, and swapping them would
-        still type-check nowhere near here.
+        Session 23 gave ``_reinspect_after_plan_mutation`` a home in
+        ``session_verification``, but it stays a seam here: importing it would
+        point this boundary at the module that verifies the turns it reopens. A
+        positional-shape change there would be caught by mypy at the one call
+        site, but the *meaning* would not: the cache comes first and the
+        fallback second, and swapping them would still type-check nowhere near
+        here.
         """
-        actual = inspect.signature(runner._reinspect_after_plan_mutation)
+        actual = inspect.signature(session_verification._reinspect_after_plan_mutation)
         self.assertEqual(["plan_cache", "fallback"], list(actual.parameters))
         self.assertTrue(
             all(

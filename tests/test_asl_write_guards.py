@@ -38,6 +38,7 @@ from agent_session_loop import (
     run_prompts,
     run_termination,
     runner,
+    session_verification,
     workspace_evidence,
     workspaces,
     write_guards,
@@ -253,12 +254,17 @@ class SeamTests(unittest.TestCase):
                     self.assertIs(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
                     self.assertIs(parameter.default, inspect.Parameter.empty)
 
-    def test_the_seam_protocols_are_satisfied_by_the_runners_own_symbols(self) -> None:
-        # Sessions 23 and 24 move the implementations; until then this is what
-        # checks the two declared shapes against the symbols actually passed,
-        # rather than only the loop's call sites doing so at runtime.
+    def test_the_seam_protocols_are_satisfied_by_the_symbols_the_loop_passes(
+        self,
+    ) -> None:
+        # Session 23 moved the re-read into `session_verification` and Session 24
+        # will give the appender a home; both stay seams, so this is what checks
+        # the two declared shapes against the symbols actually passed, rather
+        # than only the loop's call sites doing so at runtime.
         appender: handoff_guards.HandoffNoteAppender = runner._append_handoff_note
-        reinspect: run_termination.SnapshotReinspector = runner._reinspect_after_revert
+        reinspect: run_termination.SnapshotReinspector = (
+            session_verification._reinspect_after_revert
+        )
         self.assertEqual(
             ["- **Notes**:", "  - guard refused"],
             appender(

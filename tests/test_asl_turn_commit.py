@@ -41,6 +41,7 @@ from agent_session_loop import (
     run_reporting,
     run_selection,
     runner,
+    session_verification,
     state,
     supervisor_audit,
     turn_execution,
@@ -1596,7 +1597,7 @@ class PlanMutationReinspectionTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        refreshed = runner._reinspect_after_plan_mutation(
+        refreshed = session_verification._reinspect_after_plan_mutation(
             plans.PlanSnapshotCache(), self.snapshot
         )
         self.assertEqual("pending", self.snapshot.sessions[0].status)
@@ -1604,7 +1605,7 @@ class PlanMutationReinspectionTests(unittest.TestCase):
 
     def test_unparseable_rewrite_keeps_the_pre_mutation_snapshot(self) -> None:
         (self.plan_dir / "session-1.md").write_text("no handoff\n", encoding="utf-8")
-        refreshed = runner._reinspect_after_plan_mutation(
+        refreshed = session_verification._reinspect_after_plan_mutation(
             plans.PlanSnapshotCache(), self.snapshot
         )
         self.assertIs(self.snapshot, refreshed)

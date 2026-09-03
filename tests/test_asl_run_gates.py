@@ -42,6 +42,7 @@ from agent_session_loop import (
     run_inputs,
     runner,
     session_overview,
+    session_verification,
     state,
     turn_execution,
     verification,
@@ -4797,14 +4798,14 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         contract = _contract_block(check_payload, session="1")
         write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
 
-        real_enforce = runner._enforce_session_verification
+        real_enforce = session_verification._enforce_session_verification
 
         def short_heartbeat_enforce(**kwargs: object) -> bool:
             kwargs["heartbeat_interval"] = 0.05
             return real_enforce(**kwargs)
 
         with mock.patch.object(
-            runner,
+            session_verification,
             "_enforce_session_verification",
             new=short_heartbeat_enforce,
         ):
@@ -4905,7 +4906,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         contract = _contract_block(check_payload, session="1")
         write_plan(self.plan_dir, ("pending",), contracts_by_id={"1": contract})
 
-        real_enforce = runner._enforce_session_verification
+        real_enforce = session_verification._enforce_session_verification
 
         def short_heartbeat_enforce(**kwargs: object) -> bool:
             kwargs["heartbeat_interval"] = 0.05
@@ -4921,7 +4922,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
                 ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS="30",
             ),
             mock.patch.object(
-                runner,
+                session_verification,
                 "_enforce_session_verification",
                 new=short_heartbeat_enforce,
             ),

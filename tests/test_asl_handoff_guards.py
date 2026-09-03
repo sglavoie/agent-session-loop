@@ -19,11 +19,11 @@ state, because they exercise the run rather than the boundary:
   file, a journal row, a turn result and two events, which is more filesystem
   reach than any other extracted module has, so "which function may write what"
   has to be a checked list rather than a convention;
-* the two seams the runner still satisfies are structural, so drift in either is
+* the two seams the loop still binds are structural, so drift in either is
   silent: ``runner._append_handoff_note`` has to keep matching
   :class:`handoff_guards.HandoffNoteAppender` until Session 24 gives it a home,
-  and ``runner._reinspect_after_revert`` has to keep matching
-  ``run_termination.SnapshotReinspector`` until Session 23 does the same; and
+  and ``session_verification._reinspect_after_revert`` has to keep matching
+  ``run_termination.SnapshotReinspector``; and
 * neither seam is ever defaulted, so no path can silently skip the note or the
   post-revert re-read.
 
@@ -50,6 +50,7 @@ from agent_session_loop import (
     repository_intent,
     run_termination,
     runner,
+    session_verification,
 )
 from tests.support import assert_no_runner_import, write_plan
 
@@ -253,16 +254,18 @@ class HandoffGuardsBoundaryTests(unittest.TestCase):
             [(p.name, p.kind, p.default) for p in actual.parameters.values()],
         )
 
-    def test_the_runner_reinspector_still_satisfies_the_seam(self) -> None:
+    def test_the_bound_reinspector_still_satisfies_the_seam(self) -> None:
         """The post-revert plan re-read is a callback, not an import.
 
-        ``_reinspect_after_revert`` does not move until Session 23, so until
-        then it is passed in. A positional-shape change there would be caught by
-        mypy at the call sites, but the *meaning* would not: the fallback and
-        the reverted path are both accepted positionally, and swapping them
-        would publish the pre-revert snapshot as the final one.
+        Session 23 gave ``_reinspect_after_revert`` a home in
+        ``session_verification``, but it stays a seam here: this boundary is
+        called *by* the verification gate, so importing it back would close a
+        cycle. A positional-shape change there would be caught by mypy at the
+        call sites, but the *meaning* would not: the fallback and the reverted
+        path are both accepted positionally, and swapping them would publish the
+        pre-revert snapshot as the final one.
         """
-        actual = inspect.signature(runner._reinspect_after_revert)
+        actual = inspect.signature(session_verification._reinspect_after_revert)
         self.assertEqual(
             ["plan_dir", "fallback", "reverted_path", "plan_cache"],
             list(actual.parameters),

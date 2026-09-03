@@ -40,9 +40,11 @@ from agent_session_loop import (
     review_repair,
     review_session_body,
     review_session_contract,
+    review_transitions,
     run_persistence,
     run_selection,
     runner,
+    session_verification,
     state,
     verification_transitions,
 )
@@ -2141,7 +2143,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual(1, len(retries))
         self.assertEqual(1, retries[0]["attempt"])
         self.assertEqual(
-            runner.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
+            review_transitions.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
             retries[0]["max_attempts"],
         )
         self.assertEqual("malformed-review-artifact", retries[0]["failure_reason"])
@@ -2175,7 +2177,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertTrue(details["review_verdict_repair_exhausted"])
         self.assertEqual(3, details["review_verdict_repair_attempt"])
         self.assertEqual(
-            runner.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
+            review_transitions.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
             details["review_verdict_repair_max_attempts"],
         )
         self.assertEqual("malformed-review-artifact", details["failure_reason"])
@@ -2816,7 +2818,7 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
             return real_inspect_plan(plan_dir)
 
         counts_after_revert: list[int] = []
-        real_reinspect = runner._reinspect_after_revert
+        real_reinspect = session_verification._reinspect_after_revert
 
         def recording_reinspect(*args, **kwargs):
             snapshot = real_reinspect(*args, **kwargs)
@@ -2852,7 +2854,9 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
             mock.patch.object(
                 runner.harnesses, "run_harness", side_effect=fake_run_harness
             ),
-            mock.patch.object(runner, "_reinspect_after_revert", recording_reinspect),
+            mock.patch.object(
+                session_verification, "_reinspect_after_revert", recording_reinspect
+            ),
         ):
             lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
             try:
@@ -5162,7 +5166,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
             },
             max_review_fix_cycles=1,
             plan_cache=plans.PlanSnapshotCache(),
-            reinspect=runner._reinspect_after_plan_mutation,
+            reinspect=session_verification._reinspect_after_plan_mutation,
         )
 
         self.assertEqual("complete", action)
@@ -5537,7 +5541,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
             },
             max_review_fix_cycles=4,
             plan_cache=plans.PlanSnapshotCache(),
-            reinspect=runner._reinspect_after_plan_mutation,
+            reinspect=session_verification._reinspect_after_plan_mutation,
         )
 
         self.assertEqual("complete", action)

@@ -27,6 +27,7 @@ from agent_session_loop import (
     runner,
     state,
     task_packet,
+    verification_transitions,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -2212,7 +2213,7 @@ class VerificationRepairLoopTests(unittest.TestCase):
             runner._is_verification_repair_exhausted(
                 "verify-failed:z",
                 ("verify-failed:x", "verify-failed:y"),
-                runner.MAX_VERIFICATION_REPAIR_ATTEMPTS + 1,
+                verification_transitions.MAX_VERIFICATION_REPAIR_ATTEMPTS + 1,
             )
         )
         # No fingerprint on the first attempt is not exhausted.
