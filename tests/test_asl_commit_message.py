@@ -21,20 +21,13 @@ from unittest import mock
 
 from agent_session_loop import cli, commit_message, config
 from tests.support import (
+    GENERATION_TIMEOUT_PROBE_SECONDS,
     git_stdout,
     init_git_repo,
     install_fake_codex,
     patched_env,
     wait_for_process_exit,
 )
-
-#: Generation bound the timeout test drives the harness with. It is a hang
-#: guard, not a performance assertion: the bound has to outlast the fixture's
-#: own cold interpreter start, which costs seconds rather than milliseconds
-#: while the sharded suite saturates the machine. Too tight a bound kills the
-#: process tree before the fixture publishes the grandchild PID the test reads,
-#: which reads as a flaky test rather than as the overload it is.
-GENERATION_TIMEOUT_PROBE_SECONDS = 15
 
 
 def build_hunk(index: int, *, lines: int = 6) -> str:

@@ -281,6 +281,17 @@ def install_fake_amx(tmp_dir: Path) -> tuple[Path, Path]:
     return fake_path, log_path
 
 
+#: Generation bound the commit-timeout probes drive the fake harness with. It
+#: is a hang guard, not a performance assertion: the bound has to outlast the
+#: whole cold start it races -- an `asl commit` subprocess that stages, captures
+#: the diff and only then spawns the fixture, which starts an interpreter of its
+#: own before publishing the grandchild PID the probes read. That costs seconds
+#: rather than milliseconds while the sharded suite saturates the machine, and
+#: too tight a bound kills the process tree before the PID is published, which
+#: reads as a flaky test rather than as the overload it is.
+GENERATION_TIMEOUT_PROBE_SECONDS = 15
+
+
 def fake_commit_harness_env(
     tmp_dir: Path, *, log_path: Path | None = None
 ) -> dict[str, str]:

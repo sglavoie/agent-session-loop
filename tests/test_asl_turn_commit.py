@@ -49,6 +49,7 @@ from agent_session_loop import (
 from agent_session_loop import verification as verification_module
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
+    GENERATION_TIMEOUT_PROBE_SECONDS,
     REPO_ROOT,
     _contract_block,
     assert_no_runner_import,
@@ -649,7 +650,9 @@ class TurnCommitRunTests(unittest.TestCase):
                 repository_alias="SVC",
                 qualified_paths=["SVC:declared.txt"],
                 staging_paths=["SVC:declared.txt"],
-                generation=run_commit._CommitGeneration(harness="codex", timeout=2),
+                generation=run_commit._CommitGeneration(
+                    harness="codex", timeout=GENERATION_TIMEOUT_PROBE_SECONDS
+                ),
             )
         elapsed = time.monotonic() - started
 
@@ -657,14 +660,23 @@ class TurnCommitRunTests(unittest.TestCase):
         # classified failure, so the run never reached its outer backstop.
         self.assertLess(elapsed, 120, "the nested commit outlived its bound")
         argv = list(commit["argv"])
-        self.assertEqual("2", argv[argv.index("--timeout") + 1])
-        self.assertEqual(2, commit["generation_timeout_seconds"])
+        self.assertEqual(
+            str(GENERATION_TIMEOUT_PROBE_SECONDS),
+            argv[argv.index("--timeout") + 1],
+        )
+        self.assertEqual(
+            GENERATION_TIMEOUT_PROBE_SECONDS, commit["generation_timeout_seconds"]
+        )
         self.assertFalse(commit["timed_out"])
         self.assertNotEqual(0, commit["returncode"])
         self.assertEqual("nonzero-exit", commit["status_result"])
         self.assertFalse(commit["success"])
         stderr = Path(str(commit["stderr_path"])).read_text(encoding="utf-8")
-        self.assertIn("did not produce a commit message within 2s", stderr)
+        self.assertIn(
+            "did not produce a commit message within "
+            f"{GENERATION_TIMEOUT_PROBE_SECONDS}s",
+            stderr,
+        )
         # Nothing was committed, and the stalled harness's whole process tree
         # went down with the bound rather than outliving the run.
         self.assertEqual(commit["head_before"], commit["head_after"])
