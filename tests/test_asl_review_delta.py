@@ -12,7 +12,7 @@ the boundary:
 * the only file it writes is the pending review session body, and the one event
   it appends goes through the ``_RunPersistence`` handle the caller supplied,
   under that handle's lock;
-* ``runner._read_review_verdict`` still satisfies ``ReviewVerdictReader``,
+* ``handoff_guards._read_review_verdict`` still satisfies ``ReviewVerdictReader``,
   because that Protocol is structural and the reader does not move into a module
   of its own until Session 19; and
 * the fail-closed rule is a rule, not a habit — every probe that can fail names
@@ -39,6 +39,7 @@ from typing import Any
 
 from agent_session_loop import (
     events,
+    handoff_guards,
     plans,
     review,
     review_continuation,
@@ -132,7 +133,7 @@ class ReviewDeltaBoundaryTests(unittest.TestCase):
         caller believed it had demanded.
         """
         declared = inspect.signature(review_delta.ReviewVerdictReader.__call__)
-        actual = inspect.signature(runner._read_review_verdict)
+        actual = inspect.signature(handoff_guards._read_review_verdict)
 
         expected = [
             parameter

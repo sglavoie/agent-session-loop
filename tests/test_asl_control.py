@@ -40,6 +40,7 @@ from agent_session_loop import (
     control_queue,
     control_signal,
     events,
+    handoff_guards,
     harnesses,
     mailbox,
     mailbox_cli,
@@ -1199,7 +1200,7 @@ class MailboxTests(unittest.TestCase):
             turn_index=4,
             waiter_origin=mailbox.WAITER_ORIGIN_WORKER,
         )
-        evidence = runner._mailbox_completion_guard_evidence(
+        evidence = handoff_guards._mailbox_completion_guard_evidence(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
             run_id="run-A",
@@ -1213,7 +1214,7 @@ class MailboxTests(unittest.TestCase):
         mailbox.append_reply(
             self.plan_dir, question.id, "private answer", state_dir=self.state_dir
         )
-        evidence = runner._mailbox_completion_guard_evidence(
+        evidence = handoff_guards._mailbox_completion_guard_evidence(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
             run_id="run-A",
@@ -1231,7 +1232,7 @@ class MailboxTests(unittest.TestCase):
             state_dir=self.state_dir,
         )
         self.assertIsNone(
-            runner._mailbox_completion_guard_evidence(
+            handoff_guards._mailbox_completion_guard_evidence(
                 plan_dir=self.plan_dir,
                 state_dir_arg=str(self.state_dir),
                 run_id="run-A",
@@ -1263,7 +1264,7 @@ class MailboxTests(unittest.TestCase):
             pause_wait.id,
             state_dir=self.state_dir,
         )
-        evidence = runner._mailbox_completion_guard_evidence(
+        evidence = handoff_guards._mailbox_completion_guard_evidence(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
             run_id="run-A",

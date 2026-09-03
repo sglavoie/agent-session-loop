@@ -28,6 +28,7 @@ from agent_session_loop import (
     config,
     control_queue,
     events,
+    handoff_guards,
     harnesses,
     intervention,
     plans,
@@ -1339,11 +1340,17 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.source = Path(runner.__file__).read_text(encoding="utf-8")
         self.tree = ast.parse(self.source)
+        # The dispatch lives in the runner; the disposition it dispatches on
+        # moved to `handoff_guards`, so the two are read from separate trees
+        # and only the runner's is ever mutated by these tests.
+        self.disposition_tree = ast.parse(
+            Path(handoff_guards.__file__).read_text(encoding="utf-8")
+        )
 
-    def disposition_names(self, tree: ast.Module) -> list[str]:
+    def disposition_names(self) -> list[str]:
         functions = [
             node
-            for node in ast.walk(tree)
+            for node in ast.walk(self.disposition_tree)
             if isinstance(node, ast.FunctionDef)
             and node.name == "_terminating_result_disposition"
         ]
@@ -1513,7 +1520,7 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
     def check_every_terminating_branch_is_selected_by_the_disposition(
         self, tree: ast.Module
     ) -> None:
-        names = self.disposition_names(tree)
+        names = self.disposition_names()
         self.assertEqual(
             list(self.DISPOSITION_NAMES),
             names,
@@ -4660,7 +4667,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         with mock.patch.object(
-            runner,
+            handoff_guards,
             "_append_progress_entry",
             side_effect=raise_keyboard_interrupt,
         ):

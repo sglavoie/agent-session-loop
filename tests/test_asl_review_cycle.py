@@ -11,7 +11,7 @@ cannot state, because they exercise the run rather than the boundary:
 * it opens no file of its own — every durable write goes through the
   ``_RunPersistence`` handle the caller supplied, under that handle's lock;
 * both seams the runner still satisfies are structural, so drift in either is
-  silent: ``runner._read_review_verdict`` has to keep matching
+  silent: ``handoff_guards._read_review_verdict`` has to keep matching
   ``review_delta.ReviewVerdictReader`` and ``runner._reinspect_after_plan_mutation``
   has to keep matching :data:`review_cycle.PlanMutationReinspector` until
   Session 23 gives the latter a home; and
@@ -37,6 +37,7 @@ from typing import Any
 
 from agent_session_loop import (
     events,
+    handoff_guards,
     review_continuation,
     review_cycle,
     review_delta,
@@ -162,7 +163,7 @@ class ReviewCycleBoundaryTests(unittest.TestCase):
         on evidence the caller believed it had demanded.
         """
         declared = inspect.signature(review_delta.ReviewVerdictReader.__call__)
-        actual = inspect.signature(runner._read_review_verdict)
+        actual = inspect.signature(handoff_guards._read_review_verdict)
 
         expected = [
             parameter

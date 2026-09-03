@@ -24,6 +24,7 @@ from agent_session_loop import (
     config,
     contracts,
     events,
+    handoff_guards,
     pause_policy,
     plans,
     progress_repair,
@@ -530,7 +531,7 @@ class StructuredReviewArtifactTests(unittest.TestCase):
                 json.dumps(self._artifact()), encoding="utf-8"
             )
 
-            runner_verdict = runner._read_review_verdict(
+            runner_verdict = handoff_guards._read_review_verdict(
                 plan_dir, require_artifact=True
             )
             autopilot_verdict = autopilot._read_review_verdict(

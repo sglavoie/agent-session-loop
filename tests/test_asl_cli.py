@@ -31,6 +31,7 @@ from agent_session_loop import (
     control_cli,
     control_queue,
     events,
+    handoff_guards,
     harnesses,
     mailbox,
     mailbox_cli,
@@ -5243,7 +5244,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                 plan_dir, workspace_root
             )
             assert context.workspace is not None
-            snapshot = runner._capture_workspace_write_guard_snapshot(
+            snapshot = handoff_guards._capture_workspace_write_guard_snapshot(
                 workspace=context.workspace,
                 plan_dir=plan_dir,
                 exclude=(),

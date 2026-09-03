@@ -17,6 +17,7 @@ from unittest import mock
 
 from agent_session_loop import (
     cli,
+    handoff_guards,
     plans,
     progress_cli,
     progress_repair,
@@ -305,7 +306,7 @@ class ProgressJournalTests(unittest.TestCase):
 
 
 class RunnerProgressEntryHelperTests(unittest.TestCase):
-    """Unit coverage for ``runner._append_progress_entry``."""
+    """Unit coverage for ``handoff_guards._append_progress_entry``."""
 
     def _write_complete_plan(self, plan_dir: Path) -> plans.PlanSnapshot:
         plan_dir.mkdir(parents=True, exist_ok=True)
@@ -347,8 +348,12 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
             snapshot = self._write_complete_plan(plan_dir)
             completed_at = "2026-06-19T15:00:00Z"
 
-            self.assertTrue(runner._append_progress_entry(snapshot, "1", completed_at))
-            self.assertFalse(runner._append_progress_entry(snapshot, "1", completed_at))
+            self.assertTrue(
+                handoff_guards._append_progress_entry(snapshot, "1", completed_at)
+            )
+            self.assertFalse(
+                handoff_guards._append_progress_entry(snapshot, "1", completed_at)
+            )
 
             entries = plans.read_progress_entries(plan_dir)
             self.assertEqual(1, len(entries))
@@ -367,10 +372,14 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
             snapshot = self._write_complete_plan(plan_dir)
 
             self.assertTrue(
-                runner._append_progress_entry(snapshot, "1", "2026-06-19T15:00:00Z")
+                handoff_guards._append_progress_entry(
+                    snapshot, "1", "2026-06-19T15:00:00Z"
+                )
             )
             self.assertTrue(
-                runner._append_progress_entry(snapshot, "1", "2026-06-19T16:00:00Z")
+                handoff_guards._append_progress_entry(
+                    snapshot, "1", "2026-06-19T16:00:00Z"
+                )
             )
 
             entries = plans.read_progress_entries(plan_dir)
@@ -386,7 +395,9 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
             snapshot = self._write_complete_plan(plan_dir)
 
             with self.assertRaises(plans.PlanError):
-                runner._append_progress_entry(snapshot, "99", "2026-06-19T15:00:00Z")
+                handoff_guards._append_progress_entry(
+                    snapshot, "99", "2026-06-19T15:00:00Z"
+                )
 
     def test_utc_iso_now_returns_iso_string_with_timezone(self) -> None:
         value = runner._utc_iso_now()

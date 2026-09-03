@@ -14,6 +14,8 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    external_write_evidence,
+    handoff_guards,
     plans,
     repository_evidence,
     review_guard,
@@ -786,6 +788,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
             )["passed"]
         )
 
+        unclassified_reason = external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_REASON
         evidence = runner._workspace_write_guard_evidence(
             workspace=self.workspace,
             scope=scope,
@@ -797,9 +800,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
                 "control_plane": {},
                 "control_plane_mutated": [],
                 "unclassified": {
-                    "/elsewhere/inbox.jsonl": {
-                        "reason": runner.EXTERNAL_WRITE_UNCLASSIFIED_REASON
-                    }
+                    "/elsewhere/inbox.jsonl": {"reason": unclassified_reason}
                 },
                 "paths": {"/elsewhere/inbox.jsonl": "unclassified"},
             },
@@ -808,7 +809,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         self.assertFalse(evidence["passed"])
         self.assertEqual([], evidence["violations"])
         self.assertEqual(
-            runner.EXTERNAL_WRITE_UNCLASSIFIED_REASON,
+            external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_REASON,
             evidence["unavailable"]["/elsewhere/inbox.jsonl"]["reason"],
         )
         self.assertEqual(
@@ -821,7 +822,7 @@ class WorkspaceWriteGuardClassificationTests(unittest.TestCase):
         init_git_repo(scratch)
         init_git_repo(scratch / "inner")
 
-        snapshot = runner._capture_workspace_write_guard_snapshot(
+        snapshot = handoff_guards._capture_workspace_write_guard_snapshot(
             workspace=self.workspace,
             plan_dir=self.plan_dir,
             exclude=(),
@@ -883,7 +884,7 @@ class LegacyUnobservedRepositoryTests(unittest.TestCase):
             "provenance_roots": (),
         }
         options.update(overrides)
-        return runner._legacy_unobserved_repositories(**options)
+        return handoff_guards._legacy_unobserved_repositories(**options)
 
     def test_a_second_repository_named_after_the_turn_is_not_observed(self) -> None:
         unobserved = self._unobserved(
@@ -931,7 +932,7 @@ class LegacyUnobservedRepositoryTests(unittest.TestCase):
 
         self.assertEqual(
             {},
-            runner._legacy_unobserved_repositories(
+            handoff_guards._legacy_unobserved_repositories(
                 cwd=self.repo_root,
                 artifact_paths=(missing,),
                 exempt_roots=(),
@@ -1051,7 +1052,7 @@ class ExternalWriteEvidenceTests(unittest.TestCase):
         return str(workspaces.canonicalize_filesystem_path(path))
 
     def _digests_before(self) -> dict[str, dict[str, Any]]:
-        return runner._capture_external_write_digests(
+        return external_write_evidence._capture_external_write_digests(
             (self.plan_dir,), shallow_roots=(self.state_root,)
         )
 
@@ -1071,7 +1072,7 @@ class ExternalWriteEvidenceTests(unittest.TestCase):
             "ephemeral_roots": (),
         }
         options.update(overrides)
-        return runner._external_write_evidence(**options)
+        return external_write_evidence._external_write_evidence(**options)
 
     def _legacy_guard(self, **overrides: Any) -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -1112,7 +1113,8 @@ class ExternalWriteEvidenceTests(unittest.TestCase):
         # Every path is counted once and the counts cover the whole vocabulary.
         self.assertEqual(len(evidence["paths"]), sum(evidence["classified"].values()))
         self.assertEqual(
-            sorted(runner.EXTERNAL_WRITE_CLASSES), sorted(evidence["classified"])
+            sorted(external_write_evidence.EXTERNAL_WRITE_CLASSES),
+            sorted(evidence["classified"]),
         )
 
     def test_a_write_no_authority_claims_fails_the_guard_closed(self) -> None:
@@ -1131,7 +1133,9 @@ class ExternalWriteEvidenceTests(unittest.TestCase):
 
         self.assertFalse(guard["passed"])
         row = guard["unavailable"][self._canonical(self.foreign_record)]
-        self.assertEqual(runner.EXTERNAL_WRITE_UNCLASSIFIED_REASON, row["reason"])
+        self.assertEqual(
+            external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_REASON, row["reason"]
+        )
         # Unavailable rather than a violation, and no repository was implicated.
         self.assertEqual([], guard["violations"])
         self.assertEqual({}, guard["changed"])
@@ -1252,7 +1256,7 @@ class ExternalWriteEvidenceTests(unittest.TestCase):
             [self._canonical(self.state_root)],
             [
                 self._canonical(root)
-                for root in runner._control_plane_shallow_digest_roots(
+                for root in external_write_evidence._control_plane_shallow_digest_roots(
                     str(self.state_root)
                 )
             ],
@@ -1260,9 +1264,11 @@ class ExternalWriteEvidenceTests(unittest.TestCase):
 
     def test_a_large_file_is_digested_by_size_and_mtime(self) -> None:
         transcript = self.root / "transcript.log"
-        transcript.write_bytes(b"x" * (runner.EXTERNAL_WRITE_DIGEST_MAX_BYTES + 1))
+        transcript.write_bytes(
+            b"x" * (external_write_evidence.EXTERNAL_WRITE_DIGEST_MAX_BYTES + 1)
+        )
 
-        record = runner._external_path_digest(transcript)
+        record = external_write_evidence._external_path_digest(transcript)
 
         self.assertTrue(record["truncated"])
         self.assertNotIn("sha256", record)
@@ -1270,7 +1276,8 @@ class ExternalWriteEvidenceTests(unittest.TestCase):
 
     def test_an_absent_path_digests_as_absent(self) -> None:
         self.assertEqual(
-            {"present": False}, runner._external_path_digest(self.root / "absent")
+            {"present": False},
+            external_write_evidence._external_path_digest(self.root / "absent"),
         )
 
 
