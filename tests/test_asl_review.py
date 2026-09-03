@@ -30,6 +30,7 @@ from agent_session_loop import (
     readiness_gate,
     review,
     review_continuation,
+    review_cycle,
     review_delta,
     review_guard,
     review_repair,
@@ -1818,7 +1819,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             payload["current_repositories"][1]["dirty_paths"],
         )
         event_path = self.tmp_path / "events.jsonl"
-        reopen = runner._review_reopen_record(
+        reopen = review_cycle._review_reopen_record(
             event_path=event_path,
             payload={"run_id": "eventless"},
             resume=resume,
@@ -3120,7 +3121,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
             {
                 "cycle": 1,
                 "review_session_id": "2",
-                "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                "disposition": review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
                 "fingerprints": [review.finding_fingerprint(first)],
                 "repair_session_ids": ["2.1"],
                 "repair_groups": [
@@ -3145,7 +3146,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         self.assertEqual("terminal", projected.action)
         self.assertFalse(projected.eligible)
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
             projected.blocker,
         )
         self.assertEqual(1, projected.max_repair_group_attempts)
@@ -3175,7 +3176,7 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         resume = review_continuation.ReviewResume(
             source_cycle=2,
             review_session_id="2",
-            source_disposition=runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+            source_disposition=review_continuation.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
             action="materialize-repairs",
             eligible=False,
             blocker="higher-cap-required",
@@ -4126,7 +4127,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 "name": events.REVIEW_CYCLE_EVENT,
                 "payload": {
                     "cycle": 1,
-                    "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                    "disposition": review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
                     "fingerprints": ["finding:aaaa", "finding:bbbb"],
                 },
             },
@@ -4135,7 +4136,9 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 "name": events.REVIEW_CYCLE_EVENT,
                 "payload": {
                     "cycle": 2,
-                    "disposition": (runner.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR),
+                    "disposition": (
+                        review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR
+                    ),
                     "fingerprints": [],
                 },
             },
@@ -4522,7 +4525,9 @@ class ReviewRepairCycleTests(unittest.TestCase):
                     "name": events.REVIEW_CYCLE_EVENT,
                     "payload": {
                         "cycle": 1,
-                        "disposition": (runner.REVIEW_CYCLE_DISPOSITION_REPAIRS),
+                        "disposition": (
+                            review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS
+                        ),
                         "fingerprints": ["finding:legacy"],
                         "max_review_fix_cycles": 1,
                     },
@@ -4606,7 +4611,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             "run_dir": str(self.tmp_path / "run"),
             "review_cycles": [],
         }
-        action, after = runner._advance_review_cycle(
+        action, after = review_cycle._advance_review_cycle(
             event_path=event_path,
             payload=payload,
             persistence=run_persistence._RunPersistence(),
@@ -4628,13 +4633,14 @@ class ReviewRepairCycleTests(unittest.TestCase):
             },
             max_review_fix_cycles=1,
             plan_cache=plans.PlanSnapshotCache(),
+            reinspect=runner._reinspect_after_plan_mutation,
         )
 
         self.assertEqual("complete", action)
         self.assertIs(snapshot, after)
         self.assertFalse((self.plan_dir / "session-3.1.md").exists())
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
             payload["review_cycles"][0]["disposition"],
         )
         enforced = review_delta._review_cycle_state(event_path, snapshot)
@@ -4690,7 +4696,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         }
         snapshot = plans.inspect_plan(self.plan_dir)
 
-        action, after = runner._advance_review_cycle(
+        action, after = review_cycle._advance_review_cycle(
             event_path=event_path,
             payload=payload,
             persistence=run_persistence._RunPersistence(),
@@ -4705,6 +4711,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             turn_payload=turn_payload,
             max_review_fix_cycles=2,
             plan_cache=plans.PlanSnapshotCache(),
+            reinspect=runner._reinspect_after_plan_mutation,
         )
 
         self.assertEqual("paused", action)
@@ -4718,11 +4725,11 @@ class ReviewRepairCycleTests(unittest.TestCase):
         cycles = payload["review_cycles"]
         self.assertEqual(1, len(cycles))
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_MALFORMED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_MALFORMED,
             cycles[0]["disposition"],
         )
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_MALFORMED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_MALFORMED,
             payload["review_fix_disposition"],
         )
         event_names = [record["name"] for record in read_jsonl(event_path)]
@@ -4772,7 +4779,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 "baseline_summary": None,
             },
         ):
-            action, after = runner._advance_review_cycle(
+            action, after = review_cycle._advance_review_cycle(
                 event_path=event_path,
                 payload=payload,
                 persistence=run_persistence._RunPersistence(),
@@ -4795,6 +4802,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 },
                 max_review_fix_cycles=2,
                 plan_cache=plans.PlanSnapshotCache(),
+                reinspect=runner._reinspect_after_plan_mutation,
             )
         return action, after, payload, event_path
 
@@ -4998,7 +5006,9 @@ class ReviewRepairCycleTests(unittest.TestCase):
                 events.REVIEW_CYCLE_EVENT,
                 {
                     "cycle": 1,
-                    "disposition": runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
+                    "disposition": (
+                        review_continuation.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED
+                    ),
                     "fingerprints": ["finding:legacy"],
                     "repair_session_ids": [],
                     "max_review_fix_cycles": 0,
@@ -5313,7 +5323,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual("2", cycles[0]["review_session_id"])
         self.assertEqual("findings", cycles[0]["outcome"])
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
             cycles[0]["disposition"],
         )
         self.assertEqual(["2.1"], cycles[0]["repair_session_ids"])
@@ -5322,7 +5332,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual("3", cycles[1]["review_session_id"])
         self.assertEqual("all-clear", cycles[1]["outcome"])
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_ALL_CLEAR,
             cycles[1]["disposition"],
         )
         self.assertEqual(cycles[0]["fingerprints"], cycles[1]["closed_findings"])
@@ -5345,17 +5355,17 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_REPEATED,
             payload["review_fix_disposition"],
         )
         cycles = payload["review_cycles"]
         self.assertEqual(2, len(cycles))
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
             cycles[0]["disposition"],
         )
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_REPEATED,
             cycles[1]["disposition"],
         )
         self.assertEqual(cycles[0]["fingerprints"], cycles[1]["repeated_findings"])
@@ -5396,7 +5406,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         first_cycle = first_payload["review_cycles"][0]
         fingerprint = first_cycle["fingerprints"][0]
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
             first_cycle["disposition"],
         )
 
@@ -5427,7 +5437,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual("terminal", projected.action)
         self.assertFalse(projected.eligible)
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_REPEATED,
             projected.blocker,
         )
         self.assertEqual((fingerprint,), projected.current_fingerprints)
@@ -5441,7 +5451,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual([], resumed_payload["turns"])
         self.assertEqual("terminal", resumed_payload["review_resume"]["action"])
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_REPEATED,
             resumed_payload["review_resume"]["blocker"],
         )
         self.assertFalse((self.plan_dir / "session-3.1.md").exists())
@@ -5460,7 +5470,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
         self.assertEqual(0, payload["max_review_fix_cycles"])
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
             payload["review_fix_disposition"],
         )
         cycles = payload["review_cycles"]
@@ -5485,17 +5495,17 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
             payload["review_fix_disposition"],
         )
         cycles = payload["review_cycles"]
         self.assertEqual(2, len(cycles))
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
             cycles[0]["disposition"],
         )
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
             cycles[1]["disposition"],
         )
         # The new finding is introduced, not repeated.
@@ -5515,7 +5525,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertEqual(0, payload["max_review_fix_cycles"])
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
             payload["review_fix_disposition"],
         )
         self.assertFalse((self.plan_dir / "session-2.1.md").exists())
@@ -5860,7 +5870,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         )
         self.assertEqual(1, first.returncode, first.stderr)
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
             first_payload["review_fix_disposition"],
         )
 
@@ -5938,7 +5948,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
                     "source_cycle": 2,
                     "source_review_session_id": "3",
                     "source_disposition": (
-                        runner.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED
+                        review_continuation.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED
                     ),
                     "previous_fingerprints": None,
                     "current_fingerprints": [corrected_fingerprint],
@@ -5972,7 +5982,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
             [turn["session_id"] for turn in resumed_payload["turns"]],
         )
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_REPEATED,
             resumed_payload["review_fix_disposition"],
         )
         post_reopen = resumed_payload["review_cycles"][-1]
@@ -6105,14 +6115,14 @@ class ReviewRepairCycleTests(unittest.TestCase):
             (
                 "repeats-eventless",
                 "findings-new",
-                runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+                review_continuation.REVIEW_CYCLE_DISPOSITION_REPEATED,
                 [eventless_fingerprint],
                 [],
             ),
             (
                 "matches-only-older",
                 "findings",
-                runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+                review_continuation.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
                 [],
                 None,
             ),
@@ -6291,7 +6301,7 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual(1, len(payload["review_cycles"]))
         rereview_cycle = payload["review_cycles"][0]
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_REPEATED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_REPEATED,
             rereview_cycle["disposition"],
         )
         self.assertEqual([fingerprint], rereview_cycle["repeated_findings"])

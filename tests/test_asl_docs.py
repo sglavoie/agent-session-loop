@@ -3108,7 +3108,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
                 self.docs,
                 f"docs never mention required finding key {key!r}",
             )
-        for disposition in runner.REVIEW_CYCLE_DISPOSITIONS:
+        for disposition in review_continuation.REVIEW_CYCLE_DISPOSITIONS:
             self.assertIn(
                 f"`{disposition}`",
                 self.docs,

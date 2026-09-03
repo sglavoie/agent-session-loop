@@ -40,6 +40,7 @@ from agent_session_loop import (
     readiness_gate,
     responses,
     review,
+    review_cycle,
     run_commit,
     run_inputs,
     run_persistence,
@@ -6115,7 +6116,7 @@ class ParserAndStateTests(unittest.TestCase):
             payload["review_verdict"] = {"outcome": "changes-requested"}
             persistence = run_persistence._RunPersistence(write_state=False)
 
-            reason = runner._terminal_review_reason(payload)
+            reason = review_cycle._terminal_review_reason(payload)
             commit_settlement._finish_run(
                 event_path,
                 payload,

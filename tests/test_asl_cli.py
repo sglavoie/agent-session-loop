@@ -42,6 +42,7 @@ from agent_session_loop import (
     responses,
     retention,
     review,
+    review_continuation,
     review_delta,
     review_guard,
     review_repair,
@@ -5209,7 +5210,7 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
             payload = json.loads(completed.stdout)
             first_cycle = payload["review_cycles"][0]
             self.assertEqual(
-                runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
                 first_cycle["disposition"],
             )
             self.assertEqual("SVC", first_cycle["findings"][0]["repo"])
@@ -5286,7 +5287,9 @@ class MultiRepositoryRunnerFoundationTests(unittest.TestCase):
                     {
                         "name": events.REVIEW_CYCLE_EVENT,
                         "payload": {
-                            "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                            "disposition": (
+                                review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS
+                            ),
                             "repositories": bases,
                         },
                     }

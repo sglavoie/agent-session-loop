@@ -1014,7 +1014,7 @@ class TerminalAdjudicationTests(unittest.TestCase):
         self.record_cycle(
             cycle=1,
             outcome=review.REVIEW_OUTCOME_FINDINGS,
-            disposition=runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            disposition=review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
         )
         self.record_cycle(
             cycle=2,
@@ -1039,7 +1039,7 @@ class TerminalAdjudicationTests(unittest.TestCase):
         self.record_cycle(
             cycle=1,
             outcome=review.REVIEW_OUTCOME_FINDINGS,
-            disposition=runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+            disposition=review_continuation.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
         )
         self.record_cycle(
             cycle=2,
@@ -1135,7 +1135,7 @@ class TerminalAdjudicationTests(unittest.TestCase):
         payload = self.state(
             review_requested=True,
             review_completed=True,
-            review_fix_disposition=runner.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
+            review_fix_disposition=review_continuation.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
             review_verdict={
                 "outcome": review.REVIEW_OUTCOME_FINDINGS,
                 "total_findings": 3,

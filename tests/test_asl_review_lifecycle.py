@@ -34,6 +34,7 @@ from agent_session_loop import (
     plans,
     review,
     review_continuation,
+    review_cycle,
     review_delta,
     review_guard,
     review_repair,
@@ -944,7 +945,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 events.REVIEW_CYCLE_EVENT,
                 {
                     "cycle": 1,
-                    "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                    "disposition": review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
                     "review_session_id": "2",
                     "repair_session_ids": ["2.1"],
                     "fingerprints": [f"finding:{finding['id']}"],
@@ -2405,7 +2406,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 events.REVIEW_CYCLE_EVENT,
                 {
                     "cycle": 1,
-                    "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                    "disposition": review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
                     "review_session_id": "2",
                     "repair_session_ids": ["2.1"],
                     "fingerprints": [f"finding:{finding['id']}"],
@@ -4640,7 +4641,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
     def _record_repair_cycle(self, **overrides: object) -> None:
         record: dict[str, Any] = {
             "cycle": 1,
-            "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+            "disposition": review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
             "review_session_id": "2",
             "repair_session_ids": ["2.1"],
             "fingerprints": ["finding:F1"],
@@ -5131,7 +5132,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
             "review_cycles": [],
         }
 
-        action, _ = runner._advance_review_cycle(
+        action, _ = review_cycle._advance_review_cycle(
             event_path=self.event_path,
             payload=payload,
             persistence=run_persistence._RunPersistence(),
@@ -5155,6 +5156,7 @@ class ReviewDeltaScopeTests(unittest.TestCase):
             },
             max_review_fix_cycles=1,
             plan_cache=plans.PlanSnapshotCache(),
+            reinspect=runner._reinspect_after_plan_mutation,
         )
 
         self.assertEqual("complete", action)
@@ -5484,7 +5486,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
                 {
                     "cycle": 1,
                     "review_session_id": "2",
-                    "disposition": runner.REVIEW_CYCLE_DISPOSITION_REPAIRS,
+                    "disposition": review_continuation.REVIEW_CYCLE_DISPOSITION_REPAIRS,
                     "fingerprints": [review.finding_fingerprint(initial)],
                     "repair_session_ids": ["2.1"],
                     "repair_groups": [
@@ -5505,7 +5507,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
             "review_cycles": [],
         }
 
-        action, after = runner._advance_review_cycle(
+        action, after = review_cycle._advance_review_cycle(
             event_path=self.event_path,
             payload=payload,
             persistence=run_persistence._RunPersistence(),
@@ -5529,6 +5531,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
             },
             max_review_fix_cycles=4,
             plan_cache=plans.PlanSnapshotCache(),
+            reinspect=runner._reinspect_after_plan_mutation,
         )
 
         self.assertEqual("complete", action)
@@ -5537,7 +5540,7 @@ class ReviewRepairGroupAttemptHistoryTests(unittest.TestCase):
         cycle = payload["review_cycles"][0]
         assert isinstance(cycle, dict)
         self.assertEqual(
-            runner.REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
+            review_continuation.REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED,
             cycle["disposition"],
         )
         self.assertEqual([], cycle["repair_session_ids"])

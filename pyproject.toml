@@ -155,6 +155,7 @@ module = [
     "agent_session_loop.retry_hints",
     "agent_session_loop.review",
     "agent_session_loop.review_continuation",
+    "agent_session_loop.review_cycle",
     "agent_session_loop.review_delta",
     "agent_session_loop.review_guard",
     "agent_session_loop.review_repair",

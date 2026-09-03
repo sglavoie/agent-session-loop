@@ -73,6 +73,7 @@ FAST_MODULES = (
     "tests.test_asl_live_verification",
     "tests.test_asl_run_termination",
     "tests.test_asl_readiness_gate",
+    "tests.test_asl_review_cycle",
     "tests.test_asl_review_delta",
     "tests.test_asl_guidance_delivery",
     "tests.test_asl_claude_stream",
