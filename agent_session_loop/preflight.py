@@ -868,21 +868,27 @@ _CATEGORY_HINT_OVERRIDES: dict[str, RepairHint] = {
         ),
         fix_category="env-state",
     ),
+    # The check id says `split` because an invariant key feeds an issue
+    # fingerprint and renaming one splits the issue's history in the inbox. The
+    # remedy it once named did the opposite of what the finding asks: resplitting
+    # replaces one pending parent with several pending children, so it raises the
+    # very count the finding is about.
     "env-turn-budget.split": RepairHint(
         category="env-turn-budget",
         check_id="env-turn-budget.split",
         severity_hint="yellow",
         message=(
-            "Split the plan further with `$session-resplit`, or rerun "
-            "preflight with `--max-pending-sessions N` when the larger "
-            "serial plan is intentional."
+            "Bound the run with `asl run --max-sessions N` so it stops inside "
+            "the turn budget, complete or close pending sessions to bring the "
+            "count down, or rerun preflight with `--max-pending-sessions N` "
+            "when the larger serial plan is intentional."
         ),
         question_template=(
             "Pending session count exceeds the turn-budget threshold "
-            "({message}). Resplit the plan, cap `asl run --max-sessions`, "
-            "or raise `--max-pending-sessions`?"
+            "({message}). Cap `asl run --max-sessions`, close pending "
+            "sessions, or raise `--max-pending-sessions`?"
         ),
-        fix_category="plan-edit",
+        fix_category="env-state",
     ),
     "command-not-runnable.executable": RepairHint(
         category="command-not-runnable",

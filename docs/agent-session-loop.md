@@ -2457,7 +2457,11 @@ harness/commit-mode prerequisites when `--cwd`, `--harness`, or a commit-mode
 flag is supplied. The turn-budget check defaults to allowing 24 pending
 sessions; 25 or more pending sessions emits yellow `env-turn-budget`. Pass
 `--max-pending-sessions N` to `asl preflight` or `asl run` when a larger serial
-plan is intentional and should still pass the loop-ready gate. JSON output
+plan is intentional and should still pass the loop-ready gate. Its repair hint
+names that flag, `asl run --max-sessions N` to bound the run inside the budget,
+and completing or closing pending sessions. It deliberately does not suggest
+resplitting: a resplit replaces one pending parent with several pending
+children, which raises the count the finding is about. JSON output
 carries a stable shape with `findings`, `findings_by_severity`, `repair_hints`,
 `readiness`, `expected_readiness_sha256`, `max_pending_sessions`,
 `mark_loop_ready_requested`, and `marked_loop_ready` fields. JSON also always

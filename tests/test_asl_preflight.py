@@ -2237,8 +2237,21 @@ class PreflightRepairHintTests(unittest.TestCase):
             message="30 pending sessions exceeds yellow threshold 25",
         )
         hint = preflight.repair_hint_for_finding(finding)
+        # The id still says `split` because it feeds an issue fingerprint and
+        # renaming it would split the issue's history in the inbox.
         self.assertEqual("env-turn-budget.split", hint.check_id)
-        self.assertEqual("plan-edit", hint.fix_category)
+        self.assertEqual("env-state", hint.fix_category)
+
+    def test_the_turn_budget_hint_names_no_remedy_that_raises_the_count(self) -> None:
+        # A resplit replaces one pending parent with several pending children,
+        # so the remedy the hint used to lead with raised the very count the
+        # finding is about.
+        hint = preflight._CATEGORY_HINT_OVERRIDES["env-turn-budget.split"]
+
+        for text in (hint.message, hint.question_template):
+            self.assertNotIn("resplit", text.lower())
+        self.assertIn("--max-sessions", hint.message)
+        self.assertIn("--max-pending-sessions", hint.message)
 
     def test_env_turn_budget_green_resolves_to_healthy(self) -> None:
         finding = preflight.PreflightFinding(
