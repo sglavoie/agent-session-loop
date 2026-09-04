@@ -25,6 +25,7 @@ from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from unittest import mock
 
@@ -53,6 +54,7 @@ from agent_session_loop import (
     runner,
     state,
     task_packet,
+    turn_dispositions,
     turn_execution,
     verification,
 )
@@ -75,6 +77,14 @@ from tests.support import (
     write_plan_with_ids,
     write_process_tree_scripts,
 )
+
+#: Boundaries the session loop hands a terminating disposition to, and so the
+#: modules the idle-baseline guard below has to search alongside the loop
+#: itself. Session 35 moved the mailbox reply wait -- the run's one sanctioned
+#: opt-out from the structural idle refresh -- out of the loop and into
+#: ``turn_dispositions``; a guard that kept searching only ``runner`` would
+#: have passed by finding no opt-out at all.
+IDLE_BASELINE_DELEGATES = (turn_dispositions,)
 
 # Bounds a wedged child so it cannot hang the suite; it is not a latency
 # assertion, so it stays far above what a run needs on a machine already
@@ -5787,7 +5797,27 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "leaves paths where the pin is neither honoured nor cleared"
         )
 
-    def followed_by_pin(self, loop: ast.While, assignment: ast.Assign) -> bool:
+    def idle_baseline_roots(self, loop: ast.While) -> list[ast.AST]:
+        """The loop plus every boundary a terminating branch delegates to.
+
+        The pin used to sit in the loop, so counting pins meant walking the
+        loop. Session 35 moved the mailbox reply wait into
+        ``turn_dispositions``, and a guard that kept walking only the loop
+        would now pass by finding nothing at all. The claim is about the run's
+        idle clock, not about one file, so the search follows the branches
+        wherever they went: a module named here is one the loop hands a
+        terminating disposition to, and a second pin appearing in any of them
+        is the same defect it always was.
+        """
+        delegates = (
+            ast.parse(self.module_source(module)) for module in IDLE_BASELINE_DELEGATES
+        )
+        return [loop, *delegates]
+
+    def module_source(self, module: ModuleType) -> str:
+        return Path(module.__file__ or "").read_text(encoding="utf-8")
+
+    def followed_by_pin(self, loop: ast.AST, assignment: ast.Assign) -> bool:
         for node in ast.walk(loop):
             for field in ("body", "orelse", "finalbody"):
                 block = getattr(node, field, None)
@@ -5866,9 +5896,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "statement, so no path back to the loop top can bypass it",
         )
 
+        roots = self.idle_baseline_roots(loop)
         pins = [
             statement
-            for statement in ast.walk(loop)
+            for root in roots
+            for statement in ast.walk(root)
             if self.pins_idle_baseline(statement)
         ]
         self.assertEqual(
@@ -5879,16 +5911,17 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             "stops tracking runner work",
         )
 
-        for assignment in self.idle_baseline_assignments(loop):
-            if assignment in structural:
-                continue
-            self.assertTrue(
-                self.followed_by_pin(loop, assignment),
-                "a hand-stamped idle baseline outside the loop top must pin "
-                "itself, otherwise the next pass overwrites it and the "
-                "per-path stamping this replaced is back "
-                f"(agent_session_loop/runner.py:{assignment.lineno})",
-            )
+        for root in roots:
+            for assignment in self.idle_baseline_assignments(root):
+                if assignment in structural:
+                    continue
+                self.assertTrue(
+                    self.followed_by_pin(root, assignment),
+                    "a hand-stamped idle baseline outside the loop top must "
+                    "pin itself, otherwise the next pass overwrites it and "
+                    f"the per-path stamping this replaced is back (line "
+                    f"{assignment.lineno})",
+                )
 
     def test_a_new_turn_supersedes_the_previous_turns_action_required(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

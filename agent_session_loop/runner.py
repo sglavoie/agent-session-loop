@@ -35,7 +35,11 @@ from . import (
     handoff_guards,
     harness_failures,
     harnesses,
-    mailbox,
+    # Re-exported, not used here: the last call site moved to
+    # `turn_dispositions` in Session 35, but in-tree callers patch
+    # `runner.mailbox` to stub a mailbox read, and this session moves code
+    # rather than names.
+    mailbox,  # noqa: F401
     mailbox_rendering,
     model_availability,
     plans,
@@ -66,6 +70,7 @@ from . import (
     session_verification,
     state,
     supervisor_audit,
+    turn_dispositions,
     turn_execution,
     turn_postflight,
     turn_preflight,
@@ -2155,114 +2160,49 @@ def _run_locked(
             terminating_disposition = postflight.terminating_disposition
 
             if terminating_disposition == "interrupted":
-                with ctx.persistence.lock:
-                    ctx.payload["final_snapshot"] = (
-                        _snapshot_payload(after)
-                        if after is not None
-                        else _snapshot_payload(before)
-                    )
-                ctx.pause(
-                    reason="interrupted",
-                    message="run interrupted by user",
-                    details=session_details,
+                turn_dispositions.pause_interrupted_run(
+                    ctx,
+                    before=before,
+                    after=after,
+                    session_details=session_details,
                 )
                 break
 
             if terminating_disposition == "timeout":
-                with ctx.persistence.lock:
-                    ctx.payload["final_snapshot"] = (
-                        _snapshot_payload(after)
-                        if after is not None
-                        else _snapshot_payload(before)
-                    )
-                ctx.pause(
-                    reason="timeout",
-                    message=f"harness turn timed out for {session_label}",
-                    details=session_details,
+                turn_dispositions.pause_timed_out_turn(
+                    ctx,
+                    before=before,
+                    after=after,
+                    session_label=session_label,
+                    session_details=session_details,
                 )
                 break
 
             if terminating_disposition == "aborted":
-                # Beside the timeout branch, but not a pause: the operator asked
-                # for this stop, so it is recorded as one.
-                with run_control_lock:
-                    run_termination._honor_abort_turn(
-                        ctx.run_controls,
-                        snapshot=after if after is not None else before,
-                        session_id=session_id,
-                        payload=ctx.payload,
-                        event_path=ctx.event_path,
-                        control_payload=ctx.control_payload,
-                        plan_cache=ctx.plan_cache,
-                        revert_session_status=handoff_guards.session_status_reverter(
-                            handoff_correction._append_handoff_note
-                        ),
-                        reinspect=session_verification._reinspect_after_revert,
-                        context=turn_payload,
-                        persistence=ctx.persistence,
-                    )
+                turn_dispositions.record_aborted_turn(
+                    ctx,
+                    ctx.run_controls,
+                    before=before,
+                    after=after,
+                    session_id=session_id,
+                    turn_payload=turn_payload,
+                )
                 break
             if terminating_disposition == "malformed-plan":
-                corrected, correction_evidence = (
-                    handoff_correction._correct_malformed_handoff(
-                        event_path=ctx.event_path,
-                        payload=ctx.payload,
-                        persistence=ctx.persistence,
-                        plan_cache=ctx.plan_cache,
-                        before=before,
-                        workspace=workspace,
-                        run_id=ctx.run_id,
-                        turn_index=turn_index,
-                        session_id=session_id,
-                        plan_error=plan_error,
-                        turn_payload=turn_payload,
-                        paths=paths,
-                    )
+                corrected = turn_dispositions.settle_malformed_plan(
+                    ctx,
+                    before=before,
+                    workspace=workspace,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    plan_error=plan_error,
+                    turn_payload=turn_payload,
+                    paths=paths,
+                    session_details=session_details,
                 )
                 if corrected is not None:
                     snapshot = corrected
                     continue
-                malformed_details: dict[str, Any] = {
-                    "error": plan_error,
-                    **session_details,
-                }
-                if correction_evidence is not None:
-                    malformed_details["handoff_correction"] = correction_evidence
-                reopened_snapshot, reopen_evidence = (
-                    handoff_correction._reopen_uninspectable_handoff(
-                        plan_cache=ctx.plan_cache,
-                        before=before,
-                        session_id=session_id,
-                        plan_error=plan_error,
-                        correction_exhausted=bool(
-                            correction_evidence is not None
-                            and correction_evidence.get("exhausted")
-                        ),
-                    )
-                )
-                if reopen_evidence is not None:
-                    malformed_details["handoff_reopen"] = reopen_evidence
-                ctx.record_final_snapshot(
-                    before if reopened_snapshot is None else reopened_snapshot
-                )
-                _record_turn_rejected(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    turn_payload=turn_payload,
-                    session_id=session_id,
-                    guard="plan-inspection",
-                    reason="malformed-plan",
-                    reopened=bool(
-                        reopen_evidence is not None and reopen_evidence["reopened"]
-                    ),
-                    detail={"error": plan_error},
-                )
-                ctx.pause(
-                    reason="malformed-plan",
-                    message="plan could not be inspected after the harness turn",
-                    details=malformed_details,
-                )
                 break
 
             # Every disposition that survives the branches above names a turn
@@ -2329,248 +2269,55 @@ def _run_locked(
             ):
                 break
 
-            runner_pause = turn_payload.get("runner_pause")
             if terminating_disposition == "runner-pause":
-                pause_reason = _runner_pause_reason(str(runner_pause))
-                ctx.record_final_snapshot(after)
-                pause_details: dict[str, Any] = {
-                    **session_details,
-                    "source": turn_payload.get("runner_pause_source"),
-                }
-                if paused_status_repair is not None:
-                    pause_details["handoff_status_repair"] = paused_status_repair
-                worker_pause_resolution = (
-                    _worker_pause_resolution_for_turn(
-                        plan_dir=after.plan_dir,
-                        state_dir_arg=args.state_dir,
-                        run_id=ctx.run_id,
-                        session_id=session_id,
-                        turn_index=turn_index,
-                    )
-                    if mailbox_enabled
-                    else None
-                )
-                if worker_pause_resolution is not None:
-                    pause_details["mailbox_resolution"] = {
-                        "run_id": ctx.run_id,
-                        "session_id": session_id,
-                        "turn_index": turn_index,
-                        "waiter_origin": mailbox.WAITER_ORIGIN_WORKER,
-                        "question_id": worker_pause_resolution.to,
-                        "resolution_message_id": worker_pause_resolution.id,
-                        "resolution_seq": worker_pause_resolution.seq,
-                        "action": worker_pause_resolution.action,
-                        "note_length": (
-                            None
-                            if worker_pause_resolution.note is None
-                            else len(worker_pause_resolution.note)
-                        ),
-                    }
-                    ctx.pause(
-                        reason=pause_reason,
-                        message=str(runner_pause),
-                        details=pause_details,
-                    )
-                    break
-                if _runner_pause_can_wait_for_mailbox_reply(
-                    mailbox_enabled=mailbox_enabled,
-                    pause_reason=pause_reason,
+                continuation = turn_dispositions.settle_runner_pause(
+                    ctx,
+                    after=after,
+                    session_id=session_id,
+                    turn_index=turn_index,
                     result=result,
-                ):
-                    try:
-                        prepared_wait = _prepare_mailbox_reply_wait(
-                            snapshot=after,
-                            payload=ctx.payload,
-                            plan_state=state_dir,
-                            state_path=state_path,
-                            state_dir_arg=args.state_dir,
-                            run_id=ctx.run_id,
-                            session_id=session_id,
-                            turn_index=turn_index,
-                        )
-                    except _MailboxReplyWaitUnavailable as error:
-                        _record_mailbox_reply_wait_preparation_failed(
-                            ctx.event_path,
-                            ctx.payload,
-                            session_id=session_id,
-                            turn_index=turn_index,
-                            reason=error.reason,
-                            persistence=ctx.persistence,
-                        )
-                        prepared_wait = None
-
-                    if prepared_wait is not None:
-                        # The wait that follows is genuine idle time: the
-                        # runner has no work left for this turn until a human
-                        # answers, so the clock starts before the wait. Pinning
-                        # it is this path's explicit opt-out from the
-                        # structural refresh at the top of the loop.
-                        ctx.runner_work_finished_at = _utc_now()
-                        ctx.idle_baseline_pinned = True
-                        wait_result = run_coordination.MailboxWaitCoordinator(
-                            plan_dir=after.plan_dir,
-                            state_dir_arg=args.state_dir,
-                            prepared=prepared_wait,
-                            run_id=ctx.run_id,
-                            store=run_coordination.WaitStateStore(
-                                event_path=ctx.event_path,
-                                payload=ctx.payload,
-                                persistence=ctx.persistence,
-                            ),
-                            persistence=ctx.persistence,
-                            notifier=run_persistence._AgentMuxWaitNotifier(
-                                ctx.payload, ctx.persistence
-                            ),
-                            poll_controls=mailbox_poll,
-                            # Resolved here rather than inside the coordinator
-                            # so this module keeps owning both names: callers
-                            # patch them on the runner to assert a wait was or
-                            # was not entered.
-                            wait_for_reply=_wait_for_mailbox_reply,
-                            finish_lifecycle=_finish_mailbox_reply_wait_lifecycle,
-                        ).run()
-
-                        if wait_result.reply is not None:
-                            reply_message = wait_result.reply
-                            assert reply_message.text is not None
-                            pending_reply = run_prompts._PendingReply(
-                                text=reply_message.text,
-                                context=prepared_wait.context,
-                                origin=run_prompts.REPLY_ORIGIN_MAILBOX,
-                                process_start=False,
-                                question_id=prepared_wait.question.id,
-                                reply_message_id=reply_message.id,
-                                reply_seq=reply_message.seq,
-                            )
-                            # The session remains pending; start its explicit
-                            # reply continuation before honoring any
-                            # stop-after-current request.
-                            snapshot = after
-                            continue
-                        if wait_result.resolution is not None:
-                            resolution_message = wait_result.resolution
-                            assert resolution_message.action is not None
-                            if (
-                                resolution_message.action
-                                == mailbox.RESOLUTION_ACTION_CONTINUE
-                            ):
-                                pending_resolution = run_prompts._PendingResolution(
-                                    action=resolution_message.action,
-                                    note=resolution_message.note,
-                                    context=prepared_wait.context,
-                                    question_id=prepared_wait.question.id,
-                                    resolution_message_id=(resolution_message.id),
-                                    resolution_seq=resolution_message.seq,
-                                )
-                                # The session remains pending; schedule its
-                                # answerless continuation before honoring any
-                                # stop-after-current request.
-                                snapshot = after
-                                continue
-                            assert (
-                                resolution_message.action
-                                == mailbox.RESOLUTION_ACTION_PAUSE
-                            )
-                ctx.pause(
-                    reason=pause_reason,
-                    message=str(runner_pause),
-                    details=pause_details,
+                    turn_payload=turn_payload,
+                    session_details=session_details,
+                    paused_status_repair=paused_status_repair,
+                    mailbox_enabled=mailbox_enabled,
+                    mailbox_poll=mailbox_poll,
+                    plan_state=state_dir,
+                    state_path=state_path,
+                    state_dir_arg=args.state_dir,
+                    # Resolved here rather than inside the boundary so this
+                    # module keeps owning all three names: callers patch them
+                    # on the runner to assert a wait was or was not entered.
+                    prepare_wait=_prepare_mailbox_reply_wait,
+                    wait_for_reply=_wait_for_mailbox_reply,
+                    finish_lifecycle=_finish_mailbox_reply_wait_lifecycle,
                 )
+                if continuation is not None:
+                    snapshot = continuation.snapshot
+                    pending_reply = continuation.pending_reply
+                    pending_resolution = continuation.pending_resolution
+                    continue
                 break
             if terminating_disposition == "nonzero-exit":
-                classification = classify_harness_failure(result)
-                spark_failure = spark_route[
-                    "decision"
-                ] == "spark" and classification.reason in {
-                    events.PAUSE_REASON_QUOTA_EXHAUSTED,
-                    events.PAUSE_REASON_INVALID_MODEL,
-                }
-                selected_after = next(
-                    (item for item in after.sessions if item.id == session_id),
-                    None,
+                retry = turn_dispositions.settle_nonzero_exit(
+                    ctx,
+                    before=before,
+                    after=after,
+                    result=result,
+                    spark_route=spark_route,
+                    session_id=session_id,
+                    session_label=session_label,
+                    turn_index=turn_index,
+                    turn_payload=turn_payload,
+                    session_details=session_details,
+                    paths=paths,
+                    state_dir_arg=args.state_dir,
+                    spark_run_suppression=spark_run_suppression,
                 )
-                safely_retryable = (
-                    selected_after is not None
-                    and selected_after.status == "pending"
-                    and after.content_sha256 == before.content_sha256
-                )
-                if spark_failure and safely_retryable:
-                    try:
-                        cooldown = model_availability.suppress_until(
-                            state.state_root(args.state_dir),
-                            run_selection.SPARK_MODEL,
-                            reason=classification.reason,
-                            retry_hint=classification.retry_at,
-                            run_id=ctx.run_id,
-                        )
-                    except OSError as error:
-                        cooldown = None
-                        with ctx.persistence.lock:
-                            ctx.payload["spark"]["warning"] = (
-                                f"could not update model availability ledger: {error}"
-                            )
-                    fallback_reason = classification.reason
-                    if cooldown is None:
-                        spark_run_suppression = (
-                            f"{classification.reason}-for-current-run"
-                        )
-                        spark_status_update = {
-                            "available": False,
-                            "availability": False,
-                            "reason": spark_run_suppression,
-                            "retry_at": None,
-                        }
-                    else:
-                        spark_status_update = cooldown.to_dict()
-                    spark_fallback_reason = fallback_reason
-                    with ctx.persistence.lock:
-                        spark_route["fallback_reason"] = fallback_reason
-                        turn_payload["spark_route"] = dict(spark_route)
-                        ctx.payload["spark"].update(spark_status_update)
-                        ctx.payload["spark"]["active_route"] = dict(spark_route)
-                        ctx.payload["final_snapshot"] = _snapshot_payload(after)
-                        _write_json_file(paths["result"], turn_payload)
-                        ctx.persistence.append_event(
-                            ctx.event_path,
-                            "spark_fallback",
-                            {
-                                "run_id": ctx.run_id,
-                                "session_id": session_id,
-                                "failed_turn_index": turn_index,
-                                "failed_model": run_selection.SPARK_MODEL,
-                                "fallback_model": ctx.payload["spark"]["baseline"],
-                                "failure_classification": classification.to_dict(),
-                                "retry_at": ctx.payload["spark"].get("retry_at"),
-                            },
-                        )
-                        ctx.persistence.write_state(ctx.payload)
-                    snapshot = after
+                if retry is not None:
+                    snapshot = retry.snapshot
+                    spark_fallback_reason = retry.fallback_reason
+                    spark_run_suppression = retry.run_suppression
                     continue
-                if classification.reason == events.PAUSE_REASON_NONZERO_EXIT:
-                    pause_message = (
-                        f"harness exited with status {result.returncode} "
-                        f"for {session_label}"
-                    )
-                else:
-                    pause_message = (
-                        f"{session_label} failed: {classification.reason} "
-                        f"(harness exit {result.returncode})"
-                    )
-                ctx.record_final_snapshot(after)
-                ctx.pause(
-                    reason=classification.reason,
-                    message=pause_message,
-                    details={
-                        **session_details,
-                        "returncode": result.returncode,
-                        "failure_classification": classification.to_dict(),
-                        **(
-                            {"spark_fallback_unsafe": True}
-                            if spark_failure and not safely_retryable
-                            else {}
-                        ),
-                    },
-                )
                 break
 
             expected_change = (
