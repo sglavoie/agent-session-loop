@@ -26,6 +26,24 @@ GROUP_STATUSES = (
     GROUP_STATUS_COMPLETE,
 )
 
+#: One session's work committed on the accepted path, after its verification
+#: passed.
+GROUP_SCOPE_SESSION = "session"
+#: One session's *retained* work committed at a recoverable pause instead of at
+#: acceptance. It is a scope of its own rather than a flag on
+#: ``GROUP_SCOPE_SESSION`` because group identity is hashed from ``{scope,
+#: session_id, ordered_aliases}``: reusing the accepted scope would give the
+#: paused commit the same ``group_id`` as the accepted commit the same session
+#: earns afterwards, and persisting it would overwrite that completed row in
+#: place.
+GROUP_SCOPE_SESSION_PAUSED = "session-paused"
+#: The end-of-run sweep, which belongs to no session.
+GROUP_SCOPE_END = "end"
+#: The scopes that name exactly one session. Membership here, not equality with
+#: a single scope, is what the scope/session-id invariant tests.
+SESSION_GROUP_SCOPES = (GROUP_SCOPE_SESSION, GROUP_SCOPE_SESSION_PAUSED)
+GROUP_SCOPES = (*SESSION_GROUP_SCOPES, GROUP_SCOPE_END)
+
 
 class CommitGroupError(RuntimeError):
     """Raised when durable commit-group evidence is malformed or unsafe."""
@@ -64,6 +82,25 @@ def create_target(
     }
 
 
+def _check_scope(scope: object, *, has_session_id: bool) -> None:
+    """Enforce the scope/session-id invariant for writers and readers alike.
+
+    :func:`create_group` and :func:`validate_group` are mirrors of one another,
+    so the rule is stated once here: a scope that names a session requires
+    exactly one session id, and ``end`` requires none. Relaxing the check in
+    one of the two callers alone would split the invariant and let a group be
+    written that could never be read back.
+    """
+    if scope not in GROUP_SCOPES:
+        raise CommitGroupError(
+            "commit group scope must be one of " + ", ".join(GROUP_SCOPES)
+        )
+    if (scope in SESSION_GROUP_SCOPES) != has_session_id:
+        raise CommitGroupError(
+            "session-scoped commit groups require exactly one session id"
+        )
+
+
 def create_group(
     *,
     scope: str,
@@ -71,11 +108,15 @@ def create_group(
     targets: Sequence[Mapping[str, Any]],
     initial_heads: Mapping[str, str | None],
 ) -> dict[str, Any]:
-    """Create an unresolved group whose identity is stable across restarts."""
-    if scope not in {"session", "end"}:
-        raise CommitGroupError("commit group scope must be session or end")
-    if (scope == "session") != (session_id is not None):
-        raise CommitGroupError("session commit groups require exactly one session id")
+    """Create an unresolved group whose identity is stable across restarts.
+
+    ``scope`` is one of :data:`GROUP_SCOPES`. Identity is hashed from
+    ``{scope, session_id, ordered_aliases}``, so the scope is the field that
+    separates the two commits one session can owe — the accepted one and the
+    one settled at a recoverable pause — even though both name the same
+    session and the same repositories.
+    """
+    _check_scope(scope, has_session_id=session_id is not None)
     target_rows = [dict(target) for target in targets]
     ordered_aliases = [str(target.get("key")) for target in target_rows]
     if any(not alias for alias in ordered_aliases):
@@ -153,10 +194,7 @@ def validate_group(group: Mapping[str, Any]) -> dict[str, Any]:
         raise CommitGroupError("commit group status is invalid")
     scope = copied.get("scope")
     session_id = copied.get("session_id")
-    if scope not in {"session", "end"} or (
-        (scope == "session") != isinstance(session_id, str)
-    ):
-        raise CommitGroupError("commit group scope and session id are invalid")
+    _check_scope(scope, has_session_id=isinstance(session_id, str))
     identity = {
         "scope": scope,
         "session_id": session_id,

@@ -467,16 +467,34 @@ def _run_commit_group(
     session_id: str | None,
     targets: Sequence[Mapping[str, Any]],
     generation: run_commit._CommitGeneration,
+    scope: str | None = None,
     recovered_group: Mapping[str, Any] | None = None,
     persistence: run_persistence._RunPersistence | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Build or resume one commit group and drive it to its first stop.
+
+    ``scope`` names the boundary the group is owed at. Left unset it is
+    derived from ``session_id`` exactly as it always was — a session commit
+    when a session owns it, the end-of-run sweep otherwise — so a caller that
+    does not care keeps today's behaviour. A caller that owes a session a
+    second, differently-scoped commit passes the scope explicitly, because the
+    scope is part of the group's identity and therefore of its ``group_id``.
+    """
     persistence = run_persistence._run_persistence(persistence)
     if recovered_group is None:
         initial_heads = {
             str(target["key"]): _commit_target_head(target) for target in targets
         }
         group = commit_groups.create_group(
-            scope="session" if session_id is not None else "end",
+            scope=(
+                scope
+                if scope is not None
+                else (
+                    commit_groups.GROUP_SCOPE_SESSION
+                    if session_id is not None
+                    else commit_groups.GROUP_SCOPE_END
+                )
+            ),
             session_id=session_id,
             targets=targets,
             initial_heads=initial_heads,

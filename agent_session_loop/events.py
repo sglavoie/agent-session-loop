@@ -57,6 +57,13 @@ COMMIT_FINISHED_EVENT = "commit_finished"
 COMMIT_GROUP_STARTED_EVENT = "commit_group_started"
 COMMIT_GROUP_UPDATED_EVENT = "commit_group_updated"
 COMMIT_GROUP_FINISHED_EVENT = "commit_group_finished"
+# Appended when a recoverable pause settled the retained work of the session it
+# paused on, so the relaunch meets a clean tree instead of the startup commit
+# gate. Its group carries the `session-paused` scope, which is what keeps that
+# commit's identity distinct from the accepted commit the same session earns
+# later; the pause reason is unchanged, so this event is the only statement
+# that the settlement happened.
+PAUSED_WORK_COMMITTED_EVENT = "paused_work_committed"
 REPAIR_COMMIT_PREFLIGHT_EVENT = "repair_commit_preflight"
 RUN_CONTROL_EVENT = "run_control"
 MAILBOX_EVENT = "mailbox"
