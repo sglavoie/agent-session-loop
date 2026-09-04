@@ -60,7 +60,16 @@ Three invariants survive the move:
   order is readable as one sequence rather than reconstructed across call sites.
 * **Every refusal ends the pass.** A guard that pauses returns immediately with
   :data:`ACTION_STOP`; there is no path where a refusal is recorded and the
-  turn is then committed anyway.
+  turn is then committed anyway. Accepting a turn and committing the bytes it
+  retained are two different acts, and only the first one is claimed here: a
+  refusal that pauses recoverably may still have its changes committed
+  afterwards, by the run loop's paused-work settlement at the loop's exit,
+  under a message that says the work is unverified and the session is back to
+  ``pending``. That commit is not this pass reversing itself. ``turn_finished``
+  is still never emitted, the session is still not ``complete``, and the
+  per-session commit below still runs only on the accepted path — what the
+  settlement adds is that the retained dirt does not have to outlive the
+  process to stay inspectable.
 * **The image the loop keeps is the one this pass ended on.** Both retry and
   completion hand back the snapshot the next pass must start from, so the loop
   never re-reads the plan behind a decision already made against it.

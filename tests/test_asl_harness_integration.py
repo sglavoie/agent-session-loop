@@ -3607,23 +3607,31 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
     def test_a_verify_failed_session_dead_ends_on_the_relaunchs_commit_gate(
         self,
     ) -> None:
-        """Characterize defect ASL-PAUSED-RETAINED-WORK-COMMIT-PREFLIGHT.
+        """Defect ASL-PAUSED-RETAINED-WORK-COMMIT-PREFLIGHT, now fixed.
 
-        Today a recoverable pause under a commit mode is a dead end for a
-        supervisor. The first process fails verification, deliberately retains
-        the turn's changes and pauses ``verify-failed`` -- recoverable, so the
-        supervisor relaunches. The second process finds the retained dirt at
-        its startup commit preflight and pauses ``commit-preflight``, which
-        classifies as non-recoverable with ``user_action: inspect``. The repair
-        attempt the first pause earned therefore never runs: a human has to
-        clear the tree by hand.
+        A recoverable pause under a commit mode used to be a dead end for a
+        supervisor. The first process failed verification, deliberately
+        retained the turn's changes and paused ``verify-failed`` -- recoverable,
+        so the supervisor relaunched. The second process then found the
+        retained dirt at its startup commit preflight and paused
+        ``commit-preflight``, non-recoverable with ``user_action: inspect``, so
+        the repair attempt the first pause had earned never ran.
 
-        This asserts that wrong outcome on purpose so the suite stays green
-        while the fix is built. Session 7 of the settlement plan inverts *this*
-        test into the autonomy regression rather than adding a new one, so the
-        arrangement below is the contract: one session whose check fails its
-        first run and passes every one after it, two ``asl run`` processes over
-        the same plan and state, zero human input between them.
+        Session 5 of the settlement plan wired the retained-work settlement
+        into the run loop, and this test was inverted in place at the same time
+        rather than left asserting an outcome the code no longer produces. What
+        it pins now is the autonomy the fix buys: the first process commits
+        what it retained before it exits, and the second finds a clean tree,
+        passes the commit gate and runs the repair turn. The arrangement is the
+        contract -- one session whose check fails its first run and passes every
+        one after it, two ``asl run`` processes over the same plan and state,
+        zero human input between them.
+
+        This is the minimum inversion. Session 7 owns deepening it into the
+        full regression -- the two commits' ordering in ``git log``, the
+        settlement record's own ``result``, per-repository commit-gate
+        cleanliness, the retained-work subject template -- and owns renaming it
+        away from the dead end it no longer describes.
         """
         plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
             statuses=("pending",)
@@ -3702,16 +3710,23 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         # ran, so the retained paths are named and authorized.
         first_turn = first_payload["turns"][-1]
         self.assertTrue(first_turn["workspace_write_guard"]["passed"])
-        # Verification reverted the session but kept the work, and no commit
-        # ran because the per-session commit lives only on the accepted path.
+        # Verification reverted the session but kept the work, and the pause
+        # then committed it. The revert has to come first: staging here is a
+        # repository-wide `git add -A`, so committing before it would commit
+        # the session as `complete` and the revert would re-dirty the plan.
         self.assertIn(
             "- **Status**: pending",
             (plan_dir / "session-1.md").read_text(encoding="utf-8"),
         )
-        self.assertEqual([], first_payload["commits"])
+        self.assertEqual(1, len(first_payload["commits"]), first_payload["commits"])
+        # And it committed without a generation turn. `commit_log` records one
+        # line per commit-message harness call, and the settlement makes none:
+        # it passes `--message-file` with a deterministic marking, so a pause
+        # caused by a sick harness never has to ask that harness for a message.
         self.assertFalse(commit_log.exists())
-        retained = git_stdout(repo_dir, "status", "--porcelain")
-        self.assertIn("worked.txt", retained)
+        # Nothing retained survives the process, which is the whole point: the
+        # relaunch below meets a clean tree instead of unexplained dirt.
+        self.assertEqual("", git_stdout(repo_dir, "status", "--porcelain").strip())
 
         second_completed, second_payload = self.run_loop_command(
             mode="success",
@@ -3723,27 +3738,16 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             extra_env=commit_env,
         )
 
-        self.assertEqual(1, second_completed.returncode, second_completed.stderr)
-        self.assertTrue(second_payload["paused"], second_payload)
-        # The defect. The relaunch never reaches the repair attempt the first
-        # pause earned: Gate A refuses the tree the first process retained.
-        self.assertEqual("commit-preflight", second_payload["pause_reason"])
-        self.assertIn("git status --porcelain", second_payload["pause_message"])
-        self.assertFalse(second_payload["pause_policy"]["recoverable"])
-        self.assertEqual(
-            pause_policy.USER_ACTION_INSPECT,
-            second_payload["pause_policy"]["user_action"],
+        self.assertEqual(0, second_completed.returncode, second_completed.stderr)
+        self.assertFalse(second_payload["paused"], second_payload)
+        # The autonomy. The relaunch passes the startup commit gate the first
+        # process's settlement cleared for it, spends the repair attempt the
+        # first pause earned, and the check that failed once now passes.
+        self.assertNotEqual([], second_payload["turns"])
+        self.assertIn(
+            "- **Status**: complete",
+            (plan_dir / "session-1.md").read_text(encoding="utf-8"),
         )
-        self.assertEqual(
-            pause_policy.USER_ACTION_INSPECT,
-            second_payload["action_required"]["user_action"],
-        )
-        # No turn, so the check that would now pass is never run and
-        # `verification_repair_max_attempts` can never be spent.
-        self.assertEqual([], second_payload["turns"])
-        self.assertEqual([], second_payload["commits"])
-        self.assertFalse(commit_log.exists())
-        self.assertIn("worked.txt", git_stdout(repo_dir, "status", "--porcelain"))
 
     def test_commit_per_session_commits_after_each_completed_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

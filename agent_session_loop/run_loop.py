@@ -27,7 +27,7 @@ behaviour, or through the seams the delegate modules already publish. The
 runner is left holding two argv entry points that call :func:`run_locked` and
 nothing else.
 
-Three properties of the loop are load-bearing and easy to break by accident:
+Four properties of the loop are load-bearing and easy to break by accident:
 
 * **The lock is already held.** :func:`run_locked` is called with the run lock
   taken and ``lock_info`` describing it. Nothing here acquires it, and every
@@ -39,6 +39,15 @@ Three properties of the loop are load-bearing and easy to break by accident:
   -- must reach the crash-path handler below, which is the only writer of the
   terminal record for an unplanned exit. Swallowing an exception inside the
   loop silently converts a crash into a hung, non-terminal run.
+* **The retained-work settlement has one arming site and one call site.** A
+  turn that clears the post-turn write guards arms ``ctx.retained_work``; the
+  convergence point every loop exit falls through to is where that work is
+  committed, if the pause the run recorded is one a machine can recover from
+  and a commit mode makes the commit this run's to make. Both halves are
+  placements rather than conditions: arming below the guards is what keeps a
+  write-scope or protected-path refusal from ever reaching the settlement, and
+  calling after the loop is what keeps the commit behind the revert that a
+  repository-wide stage would otherwise commit the wrong side of.
 * **The ``finally`` block is the only shutdown.** The mailbox poll's abort hook,
   the run guards' expiry, the control surfaces, and the inline tail are all
   stopped there. Returning early from a branch above without going through it
@@ -61,6 +70,7 @@ from . import (
     clock,
     commit_groups,
     commit_settlement,
+    durability,
     events,
     guards,
     guidance_delivery,
@@ -179,6 +189,12 @@ class RunContext:
     #: Retries already spent per group, so a repository that fails the same way
     #: every time cannot turn the run loop into a commit loop.
     owed_commit_group_attempts: dict[str, int] = dataclasses.field(default_factory=dict)
+    #: The turn whose filesystem changes a pause would leave behind, armed
+    #: only once that turn has cleared the post-turn write guards. A pause is
+    #: not a place the loop can rebuild a turn's identity from, so the turn
+    #: hands it over while it still exists; ``None`` past the loop means no
+    #: turn ever got far enough to retain work anyone may commit.
+    retained_work: commit_settlement.RetainedWorkContext | None = None
 
     def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None:
         """Publish the plan image this run ends on, under the write lock."""
@@ -378,6 +394,83 @@ def _settle_owed_commit_group(ctx: RunContext) -> None:
             "before the next session"
         ),
     )
+
+
+def _settle_paused_retained_work(ctx: RunContext, *, commit_mode: str | None) -> None:
+    """Commit what a recoverable pause is about to leave in the worktree.
+
+    A pause is not an ending the accepted path ever reaches, so under a commit
+    mode the turn's retained changes used to survive the process and meet the
+    next one's startup commit gate as unexplained dirt. This is the one place
+    that settles them, and it runs after the pause is already recorded:
+    ``run_termination.set_pause`` has written the reason, the details and the
+    classification, and the ``run_paused`` event has been appended. The commit
+    must not run any earlier than that. Staging in a legacy workspace is a
+    repository-wide ``git add -A``, so committing before
+    ``session_verification`` reverts the session to ``pending`` would commit
+    the plan file saying ``complete`` and the revert would immediately re-dirty
+    it — the same dead end, one line later.
+
+    The gate reads the policy the pause already recorded rather than
+    classifying the reason again: ``pause_policy`` has one owner, and a second
+    opinion here would be a second vocabulary for the supervisor to reconcile.
+    What it adds to that policy is what only the loop knows -- whether a turn
+    ever armed :attr:`RunContext.retained_work`, and whether this run's commit
+    mode makes the commit the run's to make. A repair child owns its commit
+    with no mode at all, which is why ``None`` is not simply a refusal.
+
+    The record is mirrored twice on purpose. The ``run_paused`` event is
+    already on disk and does not carry it -- events are append-only and the
+    settlement is later than the pause by construction -- so every reader that
+    must see it reads state instead: the run payload under
+    :data:`commit_settlement.PAUSED_WORK_COMMIT_KEY`, and the pause details,
+    which ``run_termination.set_pause`` aliases to ``payload["details"]`` so
+    one in-place update serves both spellings. The turn's own ``result.json``
+    is rewritten last, because ``commit_settlement`` writes the record onto the
+    live turn payload but makes no file writes of its own.
+    """
+    retained = ctx.retained_work
+    if retained is None:
+        return
+    payload = ctx.payload
+    if payload.get("paused") is not True:
+        return
+    policy = payload.get("pause_policy")
+    if not isinstance(policy, Mapping) or policy.get("recoverable") is not True:
+        return
+    if retained.is_review_session:
+        return
+    if commit_mode not in run_selection.COMMIT_MODES and not (
+        commit_mode is None and retained.is_repair_session
+    ):
+        return
+    # `set_pause` is the only writer of the block gated on above, and it always
+    # writes a dict here; the isinstance is what lets the mirror below be an
+    # in-place update of the payload's own details rather than of a copy.
+    raw_details = payload.get("pause_details")
+    details = raw_details if isinstance(raw_details, dict) else {}
+    record = commit_settlement._settle_paused_retained_work(
+        event_path=ctx.event_path,
+        payload=payload,
+        progress=ctx.progress,
+        verification_context=ctx.verification_context,
+        run_dir=ctx.run_dir,
+        run_id=ctx.run_id,
+        retained=retained,
+        pause_reason=str(payload.get("pause_reason") or ""),
+        pause_details=details,
+        commit_mode=commit_mode,
+        generation=ctx.commit_generation,
+        soft_fail=functools.partial(_soft_fail_commit, ctx),
+        persistence=ctx.persistence,
+    )
+    if record is None:
+        return
+    with ctx.persistence.lock:
+        payload[commit_settlement.PAUSED_WORK_COMMIT_KEY] = record
+        details[commit_settlement.PAUSED_WORK_COMMIT_KEY] = record
+        ctx.persistence.write_state(payload)
+        durability.write_json_file(retained.result_path, retained.turn_payload)
 
 
 def _handle_run_control_action(
@@ -1750,6 +1843,23 @@ def run_locked(
             )
             if postflight.stopped:
                 break
+            # The one arming site, and it sits here rather than at any pause
+            # because of what is above it: every post-turn write guard has run
+            # and reported. A write-scope violation or a protected-path change
+            # stops inside `enforce_post_turn_guards` and leaves the loop on
+            # the line above, so those pauses structurally never arm this and
+            # the dirt they retain for a human to inspect is never a candidate
+            # for a commit. That guarantee is the control flow, not a blacklist
+            # of reasons the settlement below has to keep in step with.
+            ctx.retained_work = commit_settlement.RetainedWorkContext(
+                session_id=session_id,
+                session_label=session_label,
+                turn_payload=turn_payload,
+                result_path=paths["result"],
+                artifact_dir=paths["artifact_dir"],
+                is_review_session=is_review_session,
+                is_repair_session=is_repair_session,
+            )
             terminating_disposition = postflight.terminating_disposition
 
             if terminating_disposition == "interrupted":
@@ -2139,6 +2249,14 @@ def run_locked(
             ctx.run_controls.stop()
             ctx.inline_tail.stop()
             raise
+
+    # The one call site, at the point every one of the loop's breaks converges
+    # on. Placing it here rather than at each pause is what keeps the ordering
+    # the settlement depends on -- the revert, the plan re-read, `turn_rejected`
+    # and `run_paused` have all happened by now -- and it is still ahead of
+    # `_terminalize`, which snapshots the unresolved commit groups a soft-failed
+    # settlement would have to appear in.
+    _settle_paused_retained_work(ctx, commit_mode=commit_mode)
 
     if review_requested:
         # An ordinary repair child can change pending/completed membership
