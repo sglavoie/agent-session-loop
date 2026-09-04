@@ -45,12 +45,12 @@ than a review catch.
 Nothing here imports the runner. The event path, the payload, the persistence
 handle, the progress reporter, the plan snapshots, the snapshot cache, the
 verification context and the turn's paths all enter as parameters, and the one
-collaborator that has not left the runner yet enters as a required keyword-only
-seam: the handoff-note appender, through the
-:class:`handoff_guards.HandoffNoteAppender` Protocol ``handoff_correction``
-satisfies. It stays a seam rather than a direct import because
-``handoff_correction`` imports *this* module for the post-revert re-read, so the
-edge only runs one way. It
+collaborator the caller supplies enters as a required keyword-only seam: the
+handoff-note appender, through the
+:class:`handoff_guards.HandoffNoteAppender` Protocol
+``handoff_correction._append_handoff_note`` satisfies. It stays a seam rather
+than a direct import because ``handoff_correction`` imports *this* module for
+the post-revert re-read, so the edge only runs one way. It
 is never defaulted, so no refusal path can silently skip the note that tells the
 next turn why its predecessor was reopened.
 

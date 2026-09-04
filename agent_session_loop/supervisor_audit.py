@@ -1016,14 +1016,16 @@ _AUDIT_ROLE_SOURCE_VALUES = frozenset(assurance_models.AUDIT_ROLE_SOURCES)
 
 #: Closed set of tokens a ``source`` may carry to name *where a runner control
 #: signal was read*, as opposed to application output. Deliberately a value
-#: allowlist rather than a parent-name exemption: the runner writes this
+#: allowlist rather than a parent-name exemption: a live run writes this
 #: provenance under several different parents, while a ``source`` holding real
 #: application text must stay withheld under every one of them.
 #:
-#: Mirrors, without importing the runner (which imports this module):
-#: ``get_args(harnesses.StreamName)``, ``runner.TRUSTED_RUNNER_SIGNAL_SOURCES``
-#: minus the streams, ``runner.RUNNER_STATUS_SOURCE_ABSENT``, and the ``"pause"``
-#: literal the runner stamps when the pause itself, not a stream, is the origin.
+#: Mirrors, rather than imports, the values the run-loop boundaries above this
+#: module own — this module is imported *by* them, so naming the values keeps
+#: the layering one way round: ``get_args(harnesses.StreamName)``,
+#: ``turn_execution.TRUSTED_RUNNER_SIGNAL_SOURCES`` minus the streams,
+#: ``turn_execution.RUNNER_STATUS_SOURCE_ABSENT``, and the ``"pause"`` literal
+#: ``run_termination`` stamps when the pause itself, not a stream, is the origin.
 _CONTROL_PLANE_SOURCE_VALUES = frozenset(get_args(harnesses.StreamName)) | frozenset(
     {"last_message", "absent", "pause"}
 )
@@ -2513,10 +2515,10 @@ def _status_section(
     """The terminal state projection, with an answered ask retired.
 
     ``action_required`` is the current unresolved intervention, not the run's
-    history — the reading ``runner._clear_live_action_required`` already
-    enforces on live state, where starting another turn or finishing unpaused
-    proves the signal was answered. Neither proof is available to a run that
-    stopped *on* the signal, so a paused run reaches the bundle still
+    history — the reading ``turn_execution.clear_live_action_required``
+    already enforces on live state, where starting another turn or finishing
+    unpaused proves the signal was answered. Neither proof is available to a
+    run that stopped *on* the signal, so a paused run reaches the bundle still
     advertising an ask a human has already ruled on, and an auditor cannot tell
     it from a run genuinely waiting on one.
 

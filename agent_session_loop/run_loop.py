@@ -1673,8 +1673,8 @@ def run_locked(
             plan_error = finalization.plan_error
             turn_payload = finalization.turn_payload
             # The turn enters run state as executed-but-unaccepted. Every guard
-            # below may still amend or refuse it; `_commit_turn` is what
-            # replaces this record with the published one.
+            # below may still amend or refuse it; `turn_execution.commit_turn`
+            # is what replaces this record with the published one.
             with ctx.persistence.lock:
                 ctx.payload["turns"].append(turn_payload)
                 # A harness that reports no model leaves the last observation

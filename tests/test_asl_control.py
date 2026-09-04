@@ -6987,8 +6987,8 @@ class ControlCliWaitTests(unittest.TestCase):
     ):
         """Drain the queue from another thread, like a live runner's poll.
 
-        The real ``runner._drain_external_control_queue`` is used so the receipt
-        the CLI tails is the one production writes.
+        The real ``run_coordination.drain_external_control_queue`` is used so
+        the receipt the CLI tails is the one production writes.
         """
         stop = threading.Event()
         errors: list[BaseException] = []

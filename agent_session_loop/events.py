@@ -174,20 +174,22 @@ MAILBOX_ACTIONS: tuple[str, ...] = (
 # while the run is still stopped on it; a reason the runner itself declared —
 # review findings above all — is not a live signal and is never retired.
 # ``action_required`` is the current unresolved intervention, not the run's
-# history, and this set is what both readers of that rule retire against: the
-# runner on the durable state it keeps, and the supervisor audit on the status
-# section it projects into a bundle. Splitting the two would let a bundle
-# advertise an ask the runner had already retired.
+# history, and this set is what both readers of that rule retire against:
+# ``turn_execution.clear_live_action_required`` on the durable state a live run
+# keeps, and the supervisor audit on the status section it projects into a
+# bundle. Splitting the two would let a bundle advertise an ask the live run had
+# already retired.
 LIVE_ACTION_REQUIRED_REASONS = frozenset(
     {"runner-pause", "runner-status-paused", "approval-required"}
 )
 # Stable, evidence-based harness-failure categories produced by
-# ``agent_session_loop.runner.classify_harness_failure``. A nonzero harness
-# exit is classified into exactly one of these; ``nonzero-exit`` remains the
-# fail-closed fallback for unrecognized (and legacy) failures. The higher-level
-# recoverable / user-required pause policy that composes from these atoms lives
-# in ``agent_session_loop.pause_policy`` (the single source of truth consumed by
-# the runner, ``asl status``/``asl questions``, and the supervisor helper).
+# ``agent_session_loop.harness_failures.classify_harness_failure``. A nonzero
+# harness exit is classified into exactly one of these; ``nonzero-exit`` remains
+# the fail-closed fallback for unrecognized (and legacy) failures. The
+# higher-level recoverable / user-required pause policy that composes from these
+# atoms lives in ``agent_session_loop.pause_policy`` (the single source of truth
+# consumed by the run loop, ``asl status``/``asl questions``, and the supervisor
+# helper).
 PAUSE_REASON_NONZERO_EXIT = "nonzero-exit"
 PAUSE_REASON_QUOTA_EXHAUSTED = "quota-exhausted"
 PAUSE_REASON_AUTH_FAILED = "auth-failed"

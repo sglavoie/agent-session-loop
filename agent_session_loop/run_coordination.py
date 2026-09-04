@@ -24,7 +24,7 @@ loop happens to be holding:
   phase, runs the advisory audit, and guarantees the phase is closed even when
   the audit is cancelled.
 
-Nothing here imports the runner. The three collaborators the runner owns --
+Nothing here imports the runner. The three collaborators ``run_loop`` owns --
 serialized persistence, the AgentMux notification seam, and the compacted state
 projection the audit reads -- enter through the :class:`CoordinationPersistence`,
 :class:`WaitNotifier`, and ``state_snapshot`` seams, which is what lets this

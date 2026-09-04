@@ -41,12 +41,13 @@ failure rather than a review catch.
 Nothing here imports the runner. The event path, the payload, the persistence
 handle, the plan snapshots, the snapshot cache, the resolved workspace, the guard
 controller and the turn-start evidence all enter as parameters, and the two
-collaborators that have not left the runner yet enter as required keyword-only
+collaborators the caller supplies enter as required keyword-only
 seams: the handoff-note appender, through the
-:class:`handoff_guards.HandoffNoteAppender` Protocol ``handoff_correction``
-satisfies, and
+:class:`handoff_guards.HandoffNoteAppender` Protocol
+``handoff_correction._append_handoff_note`` satisfies, and
 the post-revert plan re-read, through the
-:data:`run_termination.SnapshotReinspector` alias Session 23 will satisfy.
+:data:`run_termination.SnapshotReinspector` alias
+``session_verification._reinspect_after_revert`` satisfies.
 Neither is ever defaulted, so no refusal path can silently skip the note or the
 re-read.
 

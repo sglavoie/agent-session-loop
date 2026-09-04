@@ -47,6 +47,7 @@ from agent_session_loop import (
     run_coordination,
     run_inputs,
     run_persistence,
+    runner,
     startup_context,
     state,
     supervisor_audit,
@@ -836,6 +837,50 @@ class HarnessDocsRegressionTests(unittest.TestCase):
         )
 
 
+#: Every file the runner-ownership gate below reads: maintained architecture
+#: prose and the executable-adjacent comments beside it. The package with its
+#: README and agent rules, the bundled supervisor scripts, the operator
+#: documentation, the repository's own README and agent rules, and `tests/`,
+#: because a comment naming a dead patch target is the same defect as a
+#: paragraph naming a dead owner and the tests carry most of them. `PLAN.md` is
+#: deliberately absent: a captured plan describes the tree it was written
+#: against, so its pre-extraction spellings are the record, not a claim.
+_MAINTAINED_PROSE_GLOBS = (
+    "AGENTS.md",
+    "README.md",
+    "agent_session_loop/*.md",
+    "agent_session_loop/*.py",
+    "docs/*.md",
+    "skills/asl/scripts/*.py",
+    "tests/*.py",
+)
+
+#: `runner.py` in prose is a filename, never an attribute reference.
+_RUNNER_FILENAME_SUFFIX = "py"
+
+#: Matches `runner.<name>` and `agent_session_loop.runner.<name>` but not
+#: `some_other_runner.<name>`: a dot may precede the word, another identifier
+#: character may not.
+_RUNNER_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])runner\.([A-Za-z_][A-Za-z0-9_]*)")
+
+#: The `runner.<name>` spellings that survive the gate without resolving on the
+#: facade, allowed by file *and* by name and by nothing else. Each is prose
+#: deliberately *about* the extraction rather than a claim about where behaviour
+#: lives now: `X` and `_x` are the placeholder the retired alias convention is
+#: described with, and `mailbox` and `MAX_VERIFICATION_REPAIR_ATTEMPTS` are two
+#: of the 226 aliases named as retired at the point they are said to be retired.
+_HISTORICAL_RUNNER_MENTIONS: dict[str, frozenset[str]] = {
+    "agent_session_loop/AGENTS.md": frozenset({"X"}),
+    "agent_session_loop/README.md": frozenset({"X", "mailbox"}),
+    "agent_session_loop/runner.py": frozenset({"X"}),
+    "tests/test_asl_docs.py": frozenset({"X", "mailbox"}),
+    "tests/test_asl_run_loop.py": frozenset({"_x"}),
+    "tests/test_asl_session_verification.py": frozenset(
+        {"MAX_VERIFICATION_REPAIR_ATTEMPTS"}
+    ),
+}
+
+
 class RunnerFacadeDocsTests(unittest.TestCase):
     """Lock the end state of the runner extraction in the package README.
 
@@ -847,7 +892,107 @@ class RunnerFacadeDocsTests(unittest.TestCase):
     stated twice, in the `verification_transitions` paragraph and again in the
     `run_coordination` one, which is why the absence is asserted on the phrase
     rather than on either paragraph.
+
+    Pinning sentences catches only the sentences somebody thought to pin, which
+    is how prose across the package went on attributing `_commit_turn`,
+    `_parse_retry_at`, `_terminal_blocker` and six more to a module that no
+    longer defines any of them. The last three tests are the mechanical half:
+    every `runner.<name>` spelling in maintained prose must resolve on the
+    facade or be listed as history. The escape hatch is bounded from the other
+    side by `tests/test_asl_runner_shrink.py`, which pins the facade's public
+    surface, so widening what this gate allows means widening the runner.
     """
+
+    def _runner_mentions(self) -> dict[str, set[str]]:
+        """Every `runner.<name>` spelling in maintained prose, by relative path."""
+        mentions: dict[str, set[str]] = {}
+        for pattern in _MAINTAINED_PROSE_GLOBS:
+            for path in sorted(REPO_ROOT.glob(pattern)):
+                names = {
+                    match.group(1)
+                    for match in _RUNNER_MENTION_RE.finditer(
+                        path.read_text(encoding="utf-8")
+                    )
+                } - {_RUNNER_FILENAME_SUFFIX}
+                if names:
+                    mentions[path.relative_to(REPO_ROOT).as_posix()] = names
+        return mentions
+
+    def test_maintained_prose_names_no_retired_runner_symbol(self) -> None:
+        stale: list[str] = []
+        for relative, names in sorted(self._runner_mentions().items()):
+            allowed = _HISTORICAL_RUNNER_MENTIONS.get(relative, frozenset())
+            stale.extend(
+                f"{relative}: runner.{name}"
+                for name in sorted(names)
+                if not hasattr(runner, name) and name not in allowed
+            )
+
+        self.assertEqual(
+            [],
+            stale,
+            msg=(
+                "maintained prose attributes a symbol to `runner.py` that the "
+                "facade does not define; name the module that owns it, or add "
+                "the mention to _HISTORICAL_RUNNER_MENTIONS if the sentence is "
+                "deliberately about the extraction's history"
+            ),
+        )
+
+    def test_the_historical_mention_allowlist_stays_earned(self) -> None:
+        mentions = self._runner_mentions()
+
+        for relative, names in sorted(_HISTORICAL_RUNNER_MENTIONS.items()):
+            with self.subTest(path=relative):
+                self.assertIn(
+                    relative,
+                    mentions,
+                    msg=(
+                        f"{relative} no longer mentions `runner.<name>` at all; "
+                        "delete its _HISTORICAL_RUNNER_MENTIONS row"
+                    ),
+                )
+                for name in sorted(names):
+                    self.assertIn(
+                        name,
+                        mentions[relative],
+                        msg=(
+                            f"{relative} no longer mentions `runner.{name}`; "
+                            "drop it from _HISTORICAL_RUNNER_MENTIONS so the "
+                            "allowlist keeps naming only live exemptions"
+                        ),
+                    )
+                    self.assertFalse(
+                        hasattr(runner, name),
+                        msg=(
+                            f"`runner.{name}` resolves on the facade, so it is "
+                            "the public surface rather than history and needs "
+                            "no exemption"
+                        ),
+                    )
+
+    def test_the_gate_rejects_a_reintroduced_runner_owner_reference(self) -> None:
+        # The three shapes the stale references actually took: a bare private
+        # name, a constant, and a fully qualified dotted path. Each sentence is
+        # assembled rather than written out so this file does not trip its own
+        # gate, and `qualifier` proves the pattern reads through the package
+        # prefix while `other` proves it does not fire on a different module.
+        module = "runner"
+        for name, qualifier, other in (
+            ("_commit_turn", "", "turn_execution"),
+            ("TRUSTED_RUNNER_SIGNAL_SOURCES", "", "turn_execution"),
+            ("classify_harness_failure", "agent_session_loop.", "harness_failures"),
+        ):
+            with self.subTest(name=name):
+                sentence = (
+                    f"the guards run before ``{qualifier}{module}.{name}``, "
+                    f"unlike ``mock_{module}.{name}`` and ``{other}.{name}``"
+                )
+                self.assertEqual(
+                    [name],
+                    [m.group(1) for m in _RUNNER_MENTION_RE.finditer(sentence)],
+                )
+                self.assertFalse(hasattr(runner, name))
 
     def _normalized_readme(self) -> str:
         readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(

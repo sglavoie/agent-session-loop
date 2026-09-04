@@ -38,11 +38,12 @@ Durable records this boundary writes:
 
 Nothing here imports the runner. The event path, the payload, the persistence
 handle, the plan snapshots, the snapshot cache and the resolved workspace all
-enter as parameters. The two collaborators that have not left the runner yet
-enter as seams: the handoff-note appender, through
-:class:`HandoffNoteAppender`, which ``handoff_correction`` satisfies; and the
-post-revert plan re-read, through ``run_termination.SnapshotReinspector``,
-which Session 15 declared for exactly this shape and Session 23 will satisfy.
+enter as parameters. The two collaborators the caller supplies enter as seams:
+the handoff-note appender, through :class:`HandoffNoteAppender`, which
+``handoff_correction._append_handoff_note`` satisfies; and the post-revert plan
+re-read, through ``run_termination.SnapshotReinspector``, which Session 15
+declared for exactly this shape and
+``session_verification._reinspect_after_revert`` satisfies.
 Both are required keyword-only arguments, never defaulted, so a guard cannot
 silently skip the note or the re-read by omitting them.
 

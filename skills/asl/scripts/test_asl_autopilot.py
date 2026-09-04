@@ -3071,7 +3071,7 @@ class _WallClock:
 
 
 class ParseQuotaResetAtTest(unittest.TestCase):
-    """Every `retry_at` shape `runner._parse_retry_at` can hand the supervisor."""
+    """Every `retry_at` shape `harness_failures._parse_retry_at` hands over."""
 
     def _parse(self, value, *, now=QUOTA_NOW):
         return autopilot._parse_quota_reset_at(value, now=now)
@@ -3133,8 +3133,8 @@ class ParseQuotaResetAtTest(unittest.TestCase):
             self.assertIsNone(self._parse(value), value)
 
     def test_out_of_range_hints_decline_instead_of_raising(self) -> None:
-        # `runner._parse_retry_at` bounds the hint to 60 characters and not at
-        # all in magnitude, so syntactically accepted provider text can name an
+        # `harness_failures._parse_retry_at` bounds the hint to 60 characters and
+        # not at all in magnitude, so syntactically accepted provider text can name an
         # instant off the end of the calendar. Both overflow shapes appear: a
         # span no `timedelta` can hold, and one no `datetime` can reach.
         for value in (

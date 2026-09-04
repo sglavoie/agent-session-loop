@@ -279,9 +279,10 @@ DEFAULT_MAX_QUOTA_RESUMES = 8
 QUOTA_WAIT_SLICE_SECONDS = 30.0
 
 # Escalation classes carried in the `worker_hung` result's `hang.class`. The
-# first two mirror the runner's `hang_suspected.reason` values
-# (`runner.HANG_REASON_RESULT_RECEIVED` / `runner.HANG_REASON_ZERO_CPU`); the
-# ceiling class marks an idle overrun with no (or a different) runner block.
+# first two mirror the run's `hang_suspected.reason` values
+# (`agent_session_loop.turn_execution.HANG_REASON_RESULT_RECEIVED` /
+# `agent_session_loop.turn_execution.HANG_REASON_ZERO_CPU`); the ceiling class
+# marks an idle overrun with no (or a different) runner block.
 HANG_CLASS_RESULT_RECEIVED = "result_received_process_alive"
 HANG_CLASS_ZERO_CPU = "zero_cpu_idle"
 HANG_CLASS_IDLE_CEILING = "idle_ceiling_exceeded"
@@ -3012,7 +3013,8 @@ def _verification_repair_exhausted(run_payload: dict) -> bool:
     return False
 
 
-# Shapes a provider's reset hint actually takes once `runner._parse_retry_at`
+# Shapes a provider's reset hint actually takes once
+# `agent_session_loop.harness_failures._parse_retry_at`
 # has trimmed it to <=60 characters of free text: an ISO 8601 timestamp (only
 # tried when it opens with a date, so a bare `10:30` is not mistaken for one), a
 # relative `N hours` / `N minutes`, or a wall-clock time of day with an optional
@@ -3055,7 +3057,8 @@ def _shift_datetime(base: datetime, seconds: float) -> datetime | None:
 def _parse_quota_reset_at(retry_at: object, *, now: datetime) -> datetime | None:
     """Resolve a runner ``retry_at`` hint to the absolute instant quota resets.
 
-    ``retry_at`` is the advisory free text ``runner._parse_retry_at`` extracted
+    ``retry_at`` is the advisory free text
+    ``agent_session_loop.harness_failures._parse_retry_at`` extracted
     from harness output (bounded to 60 characters); ``now`` is a
     timezone-aware wall-clock instant. Recognizes a bare ``Retry-After`` second
     count, an ISO 8601 timestamp (a trailing ``Z`` is tolerated; a naive one is

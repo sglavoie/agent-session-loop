@@ -6,16 +6,17 @@ Two lanes live here and they are deliberately separate:
 one session's ``Verify`` recipe — scheduling it against the completion contract,
 running it, and adjudicating the result into passed, deferred, or failed, with
 the bounded repair budget a failure earns.  Every decision is a function of its
-inputs; the runner keeps the effects (pausing, reverting, writing the durable
-turn record) and asks this module what those effects should say.
+inputs; the callers keep the effects — ``session_verification`` enforcing them,
+``run_termination`` taking the pause — and ask this module what those effects
+should say.
 
 *Terminal required-check adjudication* is the run-level success policy Session 2
 introduced: a run may not report success it did not earn.  It lives beside the
 per-session lane because it grades exactly what that lane recorded — required
 gates that never reached passed, and deferrals no later review redeemed — and
 having one home for it is what keeps a single definition of success rather than
-one per exit.  ``runner._terminal_blocker`` is a thin alias over
-:func:`terminal_blocker`; there is no second implementation.
+one per exit.  ``run_termination`` reaches :func:`terminal_blocker` here by
+name; there is no second implementation and no alias standing in front of it.
 
 Nothing here imports :mod:`agent_session_loop.runner`.
 """

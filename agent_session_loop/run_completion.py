@@ -42,8 +42,8 @@ loop that owns ``RunContext`` either: the context enters as the structural
 to the loop's own context object. The two collaborators the context does not
 carry enter beside it: the run-control listener, which is non-optional here
 because a completion pass only happens after the loop bound it, and
-``soft_fail_commit``, which stays in the runner because the owed-group recovery
-above the loop shares it. Everything else is read at its true owner.
+``soft_fail_commit``, which stays in ``run_loop`` because the owed-group
+recovery above the loop shares it. Everything else is read at its true owner.
 
 Five invariants survive the move:
 

@@ -50,8 +50,8 @@ pass reaches. ``run_controls`` is a
 parameter rather than a context member for the reason ``run_completion`` already
 states: it is ``RunControlListener | None`` on the dataclass and mypy narrows it
 inside the loop, and that narrowing does not travel across a call. The commit
-soft-fail enters as the :class:`SoftFailCommit` seam because the runner shares
-that implementation with the owed-group settlement above the loop.
+soft-fail enters as the :class:`SoftFailCommit` seam because ``run_loop``
+shares that implementation with the owed-group settlement above the loop.
 
 Three invariants survive the move:
 

@@ -12,7 +12,7 @@ Every transition hands back a frozen record (:class:`TurnExecution`,
 caller's dictionaries in place, so what a phase produced is readable from its
 return value rather than reconstructed from whichever keys appeared.
 
-Nothing here imports the runner. The two collaborators the runner owns --
+Nothing here imports the runner. The two collaborators ``run_loop`` owns --
 serialized persistence and human-facing progress -- enter through the
 :class:`TurnPersistence` and :class:`TurnProgress` protocols, which is what
 lets the boundary be typed without a cycle.

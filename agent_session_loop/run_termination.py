@@ -333,9 +333,10 @@ def _terminalize_run(
     visible but not cancellable.
 
     ``write_readiness_state`` is required rather than defaulted: the readiness
-    gate has not left the runner yet, and a terminal path that silently skipped
-    the readiness close would leave the plan advertising a state the run no
-    longer holds.
+    gate is ``readiness_gate.write_readiness_state``, which this module cannot
+    import because the readiness gate pauses through :func:`_pause_run`, and a
+    terminal path that silently skipped the readiness close would leave the plan
+    advertising a state the run no longer holds.
     """
     resolved_persistence = run_persistence._run_persistence(persistence)
     adjudication = _adjudicate_terminal_run(

@@ -26,10 +26,10 @@ Durable records this boundary writes:
   a narrower scope was refused. It is appended through the ``_RunPersistence``
   handle the caller supplies, under that handle's lock.
 
-Nothing here imports the runner. The one thing it needs from the loop that has
-not left the runner yet -- the review verdict reader -- enters through the
-:class:`ReviewVerdictReader` seam, which Session 19 will satisfy with the
-module that ends up owning the read.
+Nothing here imports the runner. The one thing it needs from the loop -- the
+review verdict reader -- enters through the :class:`ReviewVerdictReader` seam,
+which ``handoff_guards._read_review_verdict`` satisfies as the module that owns
+the read.
 
 Invariants that survive the move:
 
