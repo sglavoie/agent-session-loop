@@ -1324,10 +1324,19 @@ ordered aliases: without it the paused-work group and the accepted group for the
 same session would share a `group_id`, and the later upsert would overwrite the
 completed row rather than record a second commit. The commit *payloads* a
 paused-work group produces are still stamped `scope: "session"`, deliberately —
-that field feeds the progress labels, the `tail` renderer, the run summary, and
-the workspace projection, all of which mean "per-session or end-of-run" by it.
-So a reader telling a session's two commits apart reads the group's scope, never
-the commit's.
+that field feeds the per-commit progress labels, the `tail` renderer, the run
+summary, and the workspace projection, all of which mean "per-session or
+end-of-run" by it. So a reader telling a session's two commits apart reads the
+group's scope, never the commit's.
+
+The sentences that name a *group* read that scope for the same reason. A
+`session-paused` group is labelled `session <id> retained work`, so the
+`commit failed` line, the recovered-group line, and the final
+`commit group(s) were never completed` warning distinguish a lost accepted
+commit from a lost settlement of work no verification passed — which is what an
+operator holding the relaunch is deciding on. `session` and `end` groups are
+named as they always were, and a group summary persisted before this scope
+existed carries no scope and falls back to naming its session.
 
 That settlement is what makes a supervised commit run recover on its own. Under
 `--commit-per-session` or `--commit-at-end`, a `verify-failed`,

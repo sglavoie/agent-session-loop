@@ -367,8 +367,28 @@ def _unresolved_commit_groups(payload: Mapping[str, Any]) -> list[dict[str, Any]
 
 
 def _unresolved_commit_group_label(summary: Mapping[str, Any]) -> str:
+    """Name one commit group in the sentences an operator reads.
+
+    The session id alone does not identify the group, because one session can
+    owe two commits: the accepted one its verification earned, and the one a
+    recoverable pause settled for the work its failed turn retained. Those are
+    separate durable groups by scope, so a label that read only the session id
+    printed the same warning for both and hid the one thing the operator is
+    deciding on — whether the lost commit covers verified work or work no
+    verification ever passed. A ``session-paused`` group therefore says so.
+
+    The group's own ``scope`` is read, never the commit payload's: a paused
+    group's commits are stamped ``scope: "session"`` deliberately. A summary
+    written before this scope existed carries no ``scope`` at all, and falls
+    back to naming the session, which is what it always did.
+    """
     session_id = summary.get("session_id")
-    scope = "end-of-run" if session_id is None else f"session {session_id}"
+    if session_id is None:
+        scope = "end-of-run"
+    elif summary.get("scope") == commit_groups.GROUP_SCOPE_SESSION_PAUSED:
+        scope = f"session {session_id} retained work"
+    else:
+        scope = f"session {session_id}"
     alias = summary.get("failed_alias")
     return f"{scope} ({alias})" if alias else scope
 

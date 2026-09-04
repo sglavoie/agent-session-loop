@@ -282,6 +282,14 @@ class CommitVocabularySeamTests(unittest.TestCase):
             {"session_id": None, "failed_alias": None},
             {},
         ]
+        # Every scope as well, since the scope is now part of the sentence and
+        # the two implementations must agree on which value changes it.
+        summaries.extend(
+            {"scope": scope, "session_id": session_id, "failed_alias": alias}
+            for scope in ("session", "session-paused", "end", "invented", None)
+            for session_id in ("3", None)
+            for alias in ("OAK", None)
+        )
         for summary in summaries:
             with self.subTest(summary=summary):
                 self.assertEqual(

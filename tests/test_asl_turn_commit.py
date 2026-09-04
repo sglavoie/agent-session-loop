@@ -1974,6 +1974,24 @@ class CommitFailureProgressTests(unittest.TestCase):
             call(progress)
         return stream.getvalue()
 
+    def _emitted_by_the_run(self, call: Any) -> str:
+        """Emit through the labeller ``run_loop`` actually injects.
+
+        The reporter's own default is a second implementation of the same
+        sentence, pinned equal in ``tests/test_asl_run_reporting.py``. A test
+        about which group a line names has to read the one the run installs,
+        or it would pass on the copy while the run printed the other.
+        """
+        stream = io.StringIO()
+        progress = run_reporting._ProgressReporter(
+            enabled=True,
+            commit_group_label=commit_settlement._unresolved_commit_group_label,
+            unresolved_groups_key=commit_settlement.UNRESOLVED_COMMIT_GROUPS_KEY,
+        )
+        with redirect_stderr(stream):
+            call(progress)
+        return stream.getvalue()
+
     def test_a_retried_failure_says_the_run_continues(self) -> None:
         text = self._emitted(
             lambda progress: progress.commit_failed(
@@ -2027,6 +2045,69 @@ class CommitFailureProgressTests(unittest.TestCase):
         )
         # The warning is non-fatal: the run still reports that it finished.
         self.assertIn("run finished: run run-1, reason all-complete", text)
+
+    def test_unresolved_paused_group_label_names_paused_scope(self) -> None:
+        # All three group scopes in one summary, because the point is that the
+        # operator can tell them apart: the commit a session's verification
+        # earned, the commit a recoverable pause settled for the work that
+        # session's failed turn retained, and the end-of-run sweep. Naming the
+        # middle one "session 2" hid whether the lost commit covered verified
+        # work or work no verification ever passed.
+        text = self._emitted_by_the_run(
+            lambda progress: progress.run_finished(
+                {
+                    "ok": False,
+                    "pause_reason": "verify-failed",
+                    "run_id": "run-2",
+                    "duration_seconds": 1.0,
+                    commit_settlement.UNRESOLVED_COMMIT_GROUPS_KEY: [
+                        {
+                            "scope": commit_groups.GROUP_SCOPE_SESSION,
+                            "session_id": "2",
+                            "failed_alias": "SVC",
+                        },
+                        {
+                            "scope": commit_groups.GROUP_SCOPE_SESSION_PAUSED,
+                            "session_id": "2",
+                            "failed_alias": "SVC",
+                        },
+                        {
+                            "scope": commit_groups.GROUP_SCOPE_END,
+                            "session_id": None,
+                            "failed_alias": None,
+                        },
+                    ],
+                }
+            )
+        )
+
+        self.assertIn(
+            "warning: 3 commit group(s) were never completed: "
+            "session 2 (SVC), session 2 retained work (SVC), end-of-run",
+            text,
+        )
+
+    def test_a_paused_group_failure_names_the_retained_work(self) -> None:
+        # The same distinction on the failure line, which is where an operator
+        # meets the paused-work group first: a refused settlement says it was
+        # the retained work that stayed uncommitted.
+        text = self._emitted_by_the_run(
+            lambda progress: progress.commit_failed(
+                commit_settlement._commit_failure_record(
+                    scope=commit_groups.GROUP_SCOPE_SESSION_PAUSED,
+                    session_id="2",
+                    group=None,
+                    commit=None,
+                    error="paused-work commit refused",
+                    message="paused-work commit failed",
+                )
+            )
+        )
+
+        self.assertIn(
+            "commit failed: session 2 retained work: paused-work commit refused",
+            text,
+        )
 
 
 class CommitFailureSoftFailTests(unittest.TestCase):

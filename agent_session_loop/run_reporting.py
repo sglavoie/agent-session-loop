@@ -122,11 +122,24 @@ def default_commit_group_label(summary: Mapping[str, Any]) -> str:
 
     The reporter needs a label before the commit lifecycle is a module of its
     own, so this is the fallback a caller that names no labeller gets. It reads
-    only the two fields any commit-group summary carries; the equivalence
+    only the three fields any commit-group summary carries; the equivalence
     against the runner's labeller is asserted rather than assumed.
+
+    ``scope`` is read as a bare string rather than through the commit
+    lifecycle's constant, because importing it here is the direction this
+    boundary does not import in. The one value that changes the sentence is
+    ``session-paused``: the retained-work commit a recoverable pause settles is
+    a different group from the accepted commit for the same session, and a
+    label that named only the session could not tell an operator which of the
+    two a run lost.
     """
     session_id = summary.get("session_id")
-    scope = "end-of-run" if session_id is None else f"session {session_id}"
+    if session_id is None:
+        scope = "end-of-run"
+    elif summary.get("scope") == "session-paused":
+        scope = f"session {session_id} retained work"
+    else:
+        scope = f"session {session_id}"
     alias = summary.get("failed_alias")
     return f"{scope} ({alias})" if alias else scope
 

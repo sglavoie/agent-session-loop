@@ -229,6 +229,29 @@ class UnresolvedCommitGroupTests(unittest.TestCase):
             "session 3 (OAK)", commit_settlement._unresolved_commit_group_label(summary)
         )
 
+    def test_a_paused_group_is_summarized_as_retained_work(self) -> None:
+        # The summariser is what puts the scope in front of the labeller, so a
+        # paused group that lost its commit is named as retained work rather
+        # than as the accepted commit the same session can also owe.
+        payload = {
+            "commit_groups": [
+                self.group(scope=commit_groups.GROUP_SCOPE_SESSION_PAUSED),
+                self.group(group_id="g2"),
+            ]
+        }
+
+        paused, accepted = commit_settlement._unresolved_commit_groups(payload)
+
+        self.assertEqual(commit_groups.GROUP_SCOPE_SESSION_PAUSED, paused["scope"])
+        self.assertEqual(
+            "session 3 retained work (OAK)",
+            commit_settlement._unresolved_commit_group_label(paused),
+        )
+        self.assertEqual(
+            "session 3 (OAK)",
+            commit_settlement._unresolved_commit_group_label(accepted),
+        )
+
     def test_failure_without_a_durable_group_is_still_reported(self) -> None:
         # A commit that fails before any group exists leaves no row behind, so
         # the recorded failure is the only evidence the run can end honest on.
