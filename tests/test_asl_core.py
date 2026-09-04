@@ -6114,17 +6114,22 @@ class ParserAndStateTests(unittest.TestCase):
         self.assertIsNone(payload.get("action_required"))
 
     def test_a_live_signal_outranks_the_pause_derived_ask(self) -> None:
+        # The pause names the same ask the turn already raised, so the turn's
+        # record — the more specific of the two — stands. A pause the runner
+        # declared instead retires it; see
+        # ``run_termination._supersede_live_action_signal`` and ASI-114.
         with tempfile.TemporaryDirectory() as tmp:
             payload = self._base_state_payload(Path(tmp) / "state.json")
             signal = self._live_action_required()
             payload["action_required"] = signal
             run_termination.set_pause(
                 payload,
-                reason="blocked",
+                reason="runner-pause",
                 message="RUNNER_PAUSE: blocked - needs a decision",
             )
 
         self.assertEqual(signal, payload["action_required"])
+        self.assertNotIn(events.ACTION_REQUIRED_SUPERSEDED_KEY, payload)
 
     def test_unresolved_review_findings_survive_an_unpaused_finish(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
