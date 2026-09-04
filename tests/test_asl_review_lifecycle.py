@@ -48,6 +48,7 @@ from agent_session_loop import (
     runner,
     session_verification,
     state,
+    turn_execution,
     verification_transitions,
 )
 from tests.support import (
@@ -152,9 +153,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         Generated review sessions are v2 and require a consistent
         ``final-review.json`` beside ``final-review.md``.
         """
-        path = self.plan_dir / runner.FINAL_REVIEW_FILENAME
+        path = self.plan_dir / review.FINAL_REVIEW_FILENAME
         path.write_text(self._valid_final_review_body(), encoding="utf-8")
-        (self.plan_dir / runner.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
             self._valid_final_review_artifact_body(), encoding="utf-8"
         )
         return path
@@ -435,9 +436,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # Both impl and review turns ran with the right kind tag.
         turns = payload["turns"]
         self.assertEqual(2, len(turns))
-        self.assertEqual(runner.SESSION_KIND_IMPLEMENTATION, turns[0]["session_kind"])
+        self.assertEqual(plans.SESSION_KIND_IMPLEMENTATION, turns[0]["session_kind"])
         self.assertEqual("codex", turns[0]["harness"])
-        self.assertEqual(runner.SESSION_KIND_REVIEW, turns[1]["session_kind"])
+        self.assertEqual(plans.SESSION_KIND_REVIEW, turns[1]["session_kind"])
         self.assertEqual("claude", turns[1]["harness"])
         self.assertEqual(1, turns[0]["total_sessions"])
         self.assertEqual(2, turns[1]["total_sessions"])
@@ -534,9 +535,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("2", payload["review_session_id"])
         # Only the review turn should have executed.
         self.assertEqual(1, len(payload["turns"]))
-        self.assertEqual(
-            runner.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"]
-        )
+        self.assertEqual(plans.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"])
         self.assertEqual("claude", payload["turns"][0]["harness"])
         # Initial readiness was 'complete'; after appending a review session
         # the readiness was switched to 'running' and then finalized to
@@ -710,9 +709,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual(review_session.session_id.value, payload["review_session_id"])
         # Only the existing review session needed to run.
         self.assertEqual(1, len(payload["turns"]))
-        self.assertEqual(
-            runner.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"]
-        )
+        self.assertEqual(plans.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"])
 
     def test_pending_review_session_without_review_harness_pauses(self) -> None:
         self._write_plan(("complete",), readiness=None)
@@ -753,7 +750,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # review session could be appended.
         self.assertEqual(1, len(payload["turns"]))
         self.assertEqual(
-            runner.SESSION_KIND_IMPLEMENTATION,
+            plans.SESSION_KIND_IMPLEMENTATION,
             payload["turns"][0]["session_kind"],
         )
         # No review session file should have been created.
@@ -1232,9 +1229,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("nonzero-exit", payload["pause_reason"])
         self.assertFalse(payload["review_completed"])
         self.assertEqual(1, len(payload["turns"]))
-        self.assertEqual(
-            runner.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"]
-        )
+        self.assertEqual(plans.SESSION_KIND_REVIEW, payload["turns"][0]["session_kind"])
 
     def test_review_timeout_pauses_run(self) -> None:
         self._write_plan(("complete",), readiness=None)
@@ -1306,7 +1301,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             ),
         )
         # Whitespace-only final-review.md must fail the contract.
-        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
             "   \n\t\n", encoding="utf-8"
         )
 
@@ -1330,7 +1325,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
-        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
             "Looks good overall.\nNo issues found.\n", encoding="utf-8"
         )
 
@@ -1371,7 +1366,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 [
                     f"# {review_id.display_label}: Final Review",
                     "",
-                    runner.REVIEW_SESSION_MARKER,
+                    review.REVIEW_SESSION_MARKER,
                     "",
                     "## Instructions",
                     "",
@@ -1411,7 +1406,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 checked_at="2026-06-19T00:00:00Z",
             ),
         )
-        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
             (
                 "## Findings\n"
                 "- Reviewed agent_session_loop/runner.py for generated review "
@@ -1564,7 +1559,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         turns = payload["turns"]
         self.assertEqual(["copilot", "claude"], [turn["harness"] for turn in turns])
         self.assertEqual(
-            [runner.SESSION_KIND_IMPLEMENTATION, runner.SESSION_KIND_REVIEW],
+            [plans.SESSION_KIND_IMPLEMENTATION, plans.SESSION_KIND_REVIEW],
             [turn["session_kind"] for turn in turns],
         )
 
@@ -1598,7 +1593,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         turns = payload["turns"]
         self.assertEqual(["codex", "copilot"], [turn["harness"] for turn in turns])
         self.assertEqual(
-            [runner.SESSION_KIND_IMPLEMENTATION, runner.SESSION_KIND_REVIEW],
+            [plans.SESSION_KIND_IMPLEMENTATION, plans.SESSION_KIND_REVIEW],
             [turn["session_kind"] for turn in turns],
         )
 
@@ -1658,7 +1653,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         )
         # The findings the run could not close keep it from claiming success.
         self.assertFalse(payload["ok"])
-        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
+        self.assertEqual(
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"]
+        )
         self.assertEqual(5, payload["action_required"]["unresolved_findings"])
 
     def _setup_complete_plan_with_pending_review(self) -> plans.SessionFile:
@@ -1743,13 +1740,13 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         review_turns = [
             turn
             for turn in payload["turns"]
-            if turn["session_kind"] == runner.SESSION_KIND_REVIEW
+            if turn["session_kind"] == plans.SESSION_KIND_REVIEW
         ]
         self.assertEqual(2, len(review_turns))
         first_verification = review_turns[0]["verification"]
         self.assertFalse(first_verification["passed"])
         self.assertEqual(
-            runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
+            verification_transitions.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
             first_verification["acceptance"]["reason"],
         )
         self.assertEqual(
@@ -1891,11 +1888,12 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         adjudication = payload["terminal_adjudication"]
         self.assertFalse(adjudication["claimed_ok"])
         self.assertEqual(
-            runner.REVIEW_FINDINGS_UNRESOLVED_REASON, adjudication["claimed_reason"]
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON,
+            adjudication["claimed_reason"],
         )
         # The narrower reason the review path recorded survives the pause.
         self.assertEqual(
-            runner.REVIEW_FINDINGS_UNRESOLVED_REASON,
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON,
             payload["action_required"]["reason"],
         )
         self.assertEqual(
@@ -2036,7 +2034,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         review_session = self._setup_complete_plan_with_pending_review()
         # Valid markdown review, but no final-review.json: the generated v2
         # contract must fail closed.
-        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
             self._valid_final_review_body(), encoding="utf-8"
         )
 
@@ -2060,7 +2058,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self,
     ) -> None:
         review_session = self._setup_complete_plan_with_pending_review()
-        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
             "## Findings\n"
             "- High issue in agent_session_loop/runner.py.\n"
             "- Context in tests/test_agent_session_loop.py.\n"
@@ -2069,7 +2067,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
             encoding="utf-8",
         )
         # All-clear artifact contradicts the findings status line.
-        (self.plan_dir / runner.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
             json.dumps({"version": 2, "outcome": "all-clear", "findings": []}),
             encoding="utf-8",
         )
@@ -2090,7 +2088,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # valid contract check passes the standalone contract gate and must be
         # caught by the runner's shared-module validation.
         review_session = self._setup_complete_plan_with_pending_review()
-        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
             "## Findings\n"
             "- High issue in agent_session_loop/runner.py.\n"
             "- Context in tests/test_agent_session_loop.py.\n"
@@ -2101,7 +2099,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         finding = _structured_review_finding(
             verification_checks=[{"type": "bogus", "name": "not-a-check"}]
         )
-        (self.plan_dir / runner.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
             json.dumps({"version": 2, "outcome": "findings", "findings": [finding]}),
             encoding="utf-8",
         )
@@ -2321,7 +2319,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("stopped", payload["review_skipped_reason"])
         self.assertEqual("initial-review", payload["review_resume"]["action"])
         self.assertEqual(
-            [runner.SESSION_KIND_IMPLEMENTATION],
+            [plans.SESSION_KIND_IMPLEMENTATION],
             [turn["session_kind"] for turn in payload["turns"]],
         )
         self.assertEqual([], self._generated_review_sessions())
@@ -2393,7 +2391,9 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         completed, payload = self._run(review_harness="claude", max_review_fix_cycles=0)
 
         self.assertEqual(1, completed.returncode, completed.stderr)
-        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
+        self.assertEqual(
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"]
+        )
         self.assertEqual("higher-cap-required", payload["review_resume"]["blocker"])
         self.assertEqual([], payload["turns"])
         self.assertFalse((self.plan_dir / "session-2.1.md").is_file())
@@ -2494,7 +2494,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
                 [
                     f"# {review_id.display_label}: Final Review",
                     "",
-                    runner.REVIEW_SESSION_MARKER,
+                    review.REVIEW_SESSION_MARKER,
                     "",
                     "## Instructions",
                     "",
@@ -2582,7 +2582,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertTrue(payload["review_completed"])
         self.assertIsNone(payload.get("action_required"))
         self.assertEqual(
-            [runner.SESSION_KIND_IMPLEMENTATION, runner.SESSION_KIND_REVIEW],
+            [plans.SESSION_KIND_IMPLEMENTATION, plans.SESSION_KIND_REVIEW],
             [turn["session_kind"] for turn in payload["turns"]],
         )
         for turn in payload["turns"]:
@@ -2615,7 +2615,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # before the review turn starts.
         self.assertEqual(1, len(payload["turns"]))
         self.assertEqual(
-            runner.SESSION_KIND_IMPLEMENTATION, payload["turns"][0]["session_kind"]
+            plans.SESSION_KIND_IMPLEMENTATION, payload["turns"][0]["session_kind"]
         )
         # A review session was appended (so it's recorded for resume) even
         # though the review turn could not start.
@@ -2676,7 +2676,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         self.assertEqual("1", turns[0]["session_id"])
         self.assertEqual("1.1", turns[1]["session_id"])
         self.assertEqual("2", turns[2]["session_id"])
-        self.assertEqual(runner.SESSION_KIND_REVIEW, turns[2]["session_kind"])
+        self.assertEqual(plans.SESSION_KIND_REVIEW, turns[2]["session_kind"])
 
     def test_commit_per_session_skips_review_turn(self) -> None:
         # --commit-per-session must commit after implementation sessions but
@@ -2732,7 +2732,7 @@ class RunReviewHarnessLifecycleTests(unittest.TestCase):
         # All turns are implementation, never review.
         self.assertTrue(payload["turns"])
         for turn in payload["turns"]:
-            self.assertEqual(runner.SESSION_KIND_IMPLEMENTATION, turn["session_kind"])
+            self.assertEqual(plans.SESSION_KIND_IMPLEMENTATION, turn["session_kind"])
         # No generated review session file should exist.
         review_candidates = [
             path
@@ -3069,7 +3069,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
         self.assertIn("git-command-failed", payload["pause_message"])
 
     def test_clean_captures_still_complete_the_review(self) -> None:
-        (self.plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
             "## Findings\n"
             "- Reviewed agent_session_loop/runner.py for guard behavior.\n"
             "- Checked tests/test_asl_review_lifecycle.py for coverage.\n"
@@ -3077,7 +3077,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
             "Status: All clear, no findings\n",
             encoding="utf-8",
         )
-        (self.plan_dir / runner.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+        (self.plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
             json.dumps({"version": 2, "outcome": "all-clear", "findings": []}),
             encoding="utf-8",
         )
@@ -3296,7 +3296,9 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
         self.assertIsNone(payload.get("waiting_for_reply"))
 
     def test_interrupted_review_turn_trips_the_guard(self) -> None:
-        payload = self._run_locked(returncode=runner.INTERRUPTED_EXIT, interrupted=True)
+        payload = self._run_locked(
+            returncode=turn_execution.INTERRUPTED_EXIT, interrupted=True
+        )
 
         self._assert_guard_pause(payload)
 

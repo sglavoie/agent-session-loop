@@ -19,8 +19,8 @@ from agent_session_loop import (
     harnesses,
     plans,
     run_persistence,
-    runner,
     state,
+    turn_execution,
 )
 from tests.support import (
     CLAUDE_SESSION_LIMIT_FIXTURE,
@@ -157,7 +157,7 @@ class StateCompactionTests(unittest.TestCase):
         )
 
         payload = json.loads(state_path.read_text(encoding="utf-8"))
-        self.assertEqual(runner.STATE_SCHEMA_VERSION, payload["version"])
+        self.assertEqual(agent_mux_projection.STATE_SCHEMA_VERSION, payload["version"])
         self.assertEqual(projection, payload[agent_mux_projection.PROJECTION_KEY])
 
     def test_compaction_preserves_unknown_top_level_run_config(self) -> None:
@@ -541,7 +541,9 @@ class HarnessFailureClassificationTests(unittest.TestCase):
 
     def test_codex_usage_limit_fixture_is_quota_non_retryable(self) -> None:
         text = CODEX_USAGE_LIMIT_FIXTURE.read_text(encoding="utf-8")
-        classification = runner.classify_harness_failure(self._result(stderr=text))
+        classification = harness_failures.classify_harness_failure(
+            self._result(stderr=text)
+        )
         self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason)
         self.assertFalse(classification.retryable)
         # Reset time is parsed but does not gate retryability.
@@ -551,7 +553,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
 
     def test_claude_session_limit_fixture_is_quota_non_retryable(self) -> None:
         text = CLAUDE_SESSION_LIMIT_FIXTURE.read_text(encoding="utf-8")
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(last_message=text)
         )
         self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason)
@@ -564,7 +566,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
             "insufficient_quota: you have run out of credits",
         ):
             with self.subTest(text=text):
-                classification = runner.classify_harness_failure(
+                classification = harness_failures.classify_harness_failure(
                     self._result(stderr=text)
                 )
                 self.assertEqual(
@@ -580,7 +582,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
             "You are not logged in. Please sign in.",
         ):
             with self.subTest(text=text):
-                classification = runner.classify_harness_failure(
+                classification = harness_failures.classify_harness_failure(
                     self._result(stderr=text)
                 )
                 self.assertEqual(events.PAUSE_REASON_AUTH_FAILED, classification.reason)
@@ -598,7 +600,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
             ),
         ):
             with self.subTest(text=text):
-                classification = runner.classify_harness_failure(
+                classification = harness_failures.classify_harness_failure(
                     self._result(stderr=text)
                 )
                 self.assertEqual(
@@ -614,7 +616,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
             "stream error: Overloaded",
         ):
             with self.subTest(text=text):
-                classification = runner.classify_harness_failure(
+                classification = harness_failures.classify_harness_failure(
                     self._result(stderr=text)
                 )
                 self.assertEqual(
@@ -629,7 +631,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
     def test_invalid_model_outranks_capacity(self) -> None:
         # A typo'd model name must still fail fast even when the same output
         # suggests trying a different model.
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(stderr="model not found; please try a different model")
         )
         self.assertEqual(events.PAUSE_REASON_INVALID_MODEL, classification.reason)
@@ -643,7 +645,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
             "Context length exceeded for this model",
         ):
             with self.subTest(text=text):
-                classification = runner.classify_harness_failure(
+                classification = harness_failures.classify_harness_failure(
                     self._result(stderr=text)
                 )
                 # Nothing here can be relaunched unchanged, so the reason and the
@@ -667,7 +669,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
         # The audit sends a transcript of ASL itself, so the refused request can
         # quote every word the quota and auth rules match on. The refusal is
         # about the request, not about the account, and must win the race.
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(
                 stderr=(
                     "prompt is too long: 517000 tokens > 200000 maximum\n"
@@ -691,7 +693,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
             "stream disconnected unexpectedly",
         ):
             with self.subTest(text=text):
-                classification = runner.classify_harness_failure(
+                classification = harness_failures.classify_harness_failure(
                     self._result(stderr=text)
                 )
                 self.assertEqual(
@@ -701,7 +703,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
                 self.assertTrue(classification.retryable)
 
     def test_unknown_nonzero_fails_closed(self) -> None:
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(stderr="fake codex failure", returncode=3)
         )
         self.assertEqual(events.PAUSE_REASON_NONZERO_EXIT, classification.reason)
@@ -710,7 +712,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
         self.assertIn("exit-3", classification.fingerprint)
 
     def test_interruption_is_classified_and_non_retryable(self) -> None:
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(returncode=130, interrupted=True)
         )
         self.assertEqual(events.PAUSE_REASON_INTERRUPTED, classification.reason)
@@ -719,7 +721,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
     def test_quota_precedes_transport_when_both_present(self) -> None:
         # A 429 rate-limit alongside a transient marker still classifies as
         # quota (non-retryable), never as a retryable transport failure.
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(
                 stderr="429 rate limit; connection reset by peer",
             )
@@ -728,7 +730,7 @@ class HarnessFailureClassificationTests(unittest.TestCase):
         self.assertFalse(classification.retryable)
 
     def test_quota_without_reset_time_still_non_retryable(self) -> None:
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(stderr="you've hit your usage limit")
         )
         self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, classification.reason)
@@ -736,10 +738,10 @@ class HarnessFailureClassificationTests(unittest.TestCase):
         self.assertFalse(classification.retryable)
 
     def test_fingerprint_is_normalized_and_stable(self) -> None:
-        first = runner.classify_harness_failure(
+        first = harness_failures.classify_harness_failure(
             self._result(stderr="429 Too Many Requests at 10:00")
         )
-        second = runner.classify_harness_failure(
+        second = harness_failures.classify_harness_failure(
             self._result(stderr="rate limit reached at 11:30")
         )
         # Same category -> same normalized fingerprint despite differing text.
@@ -748,13 +750,15 @@ class HarnessFailureClassificationTests(unittest.TestCase):
 
     def test_evidence_preview_is_bounded(self) -> None:
         noisy = "connection reset " + ("x" * 5000)
-        classification = runner.classify_harness_failure(self._result(stderr=noisy))
+        classification = harness_failures.classify_harness_failure(
+            self._result(stderr=noisy)
+        )
         self.assertLessEqual(
-            len(classification.evidence), runner.FAILURE_EVIDENCE_MAX_CHARS
+            len(classification.evidence), harness_failures.FAILURE_EVIDENCE_MAX_CHARS
         )
 
     def test_to_dict_is_json_serializable_and_complete(self) -> None:
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(stderr="401 Unauthorized")
         )
         payload = classification.to_dict()
@@ -791,24 +795,24 @@ class HarnessFailureClassificationTests(unittest.TestCase):
 
     def test_turn_status_result_uses_classified_reason(self) -> None:
         result = self._result(stderr="429 Too Many Requests")
-        status = runner._turn_status_result(
+        status = turn_execution.turn_status_result(
             result=result,
             status_changes=(),
             pending_completed=(),
             session_id="5",
-            runner_signals=runner._runner_signals(result),
+            runner_signals=turn_execution.runner_signals(result),
             plan_error=None,
         )
         self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, status)
 
     def test_turn_status_result_generic_failure_stays_nonzero_exit(self) -> None:
         result = self._result(stderr="fake codex failure")
-        status = runner._turn_status_result(
+        status = turn_execution.turn_status_result(
             result=result,
             status_changes=(),
             pending_completed=(),
             session_id="5",
-            runner_signals=runner._runner_signals(result),
+            runner_signals=turn_execution.runner_signals(result),
             plan_error=None,
         )
         self.assertEqual(events.PAUSE_REASON_NONZERO_EXIT, status)

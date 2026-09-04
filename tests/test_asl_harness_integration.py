@@ -30,7 +30,9 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    agent_mux_delivery,
     cli,
+    clock,
     commit_message,
     config,
     contracts,
@@ -47,6 +49,7 @@ from agent_session_loop import (
     review_session_body,
     run_commit,
     run_control,
+    run_coordination,
     run_loop,
     run_payloads,
     run_persistence,
@@ -575,13 +578,13 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 state.release_lock(plan_dir, state_dir)
 
     def idle_started_at(self, turn: dict[str, Any]) -> datetime:
-        started_at = runner._parse_datetime(turn["started_at"])
+        started_at = clock.parse_datetime(turn["started_at"])
         assert isinstance(started_at, datetime)
         return started_at - timedelta(seconds=turn["idle_seconds_since_previous_turn"])
 
     def last_event_created_at(self, events_path: Path, name: str) -> datetime:
         created_at = [
-            runner._parse_datetime(record["created_at"])
+            clock.parse_datetime(record["created_at"])
             for record in read_jsonl(events_path)
             if record["name"] == name
         ][-1]
@@ -733,11 +736,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     "FAKE_AMX_LOG": str(amx_log),
                     # The suite environment forces notification off; this
                     # test exercises real delivery against the fake amx.
-                    runner.AGENT_MUX_NOTIFY_ENV_VAR: "auto",
+                    agent_mux_delivery.NOTIFY_ENV_VAR: "auto",
                     # Under parallel-shard load the fake amx interpreter can
                     # take longer than the 1s production timeout to start,
                     # which silently drops the notification record.
-                    runner.AGENT_MUX_NOTIFY_TIMEOUT_ENV_VAR: "30",
+                    agent_mux_delivery.NOTIFY_TIMEOUT_ENV_VAR: "30",
                     "PATH": str(tmp_dir) + os.pathsep + os.environ.get("PATH", ""),
                     "PYTHONPATH": str(REPO_ROOT)
                     + os.pathsep
@@ -778,10 +781,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             amx_records = read_jsonl(amx_log)
             self.assertEqual(
                 [
-                    runner.AGENT_MUX_START_EVENT,
-                    runner.AGENT_MUX_TURN_START_EVENT,
-                    runner.AGENT_MUX_TURN_FINISH_EVENT,
-                    runner.AGENT_MUX_FINISH_EVENT,
+                    agent_mux_delivery.START_EVENT,
+                    agent_mux_delivery.TURN_START_EVENT,
+                    agent_mux_delivery.TURN_FINISH_EVENT,
+                    agent_mux_delivery.FINISH_EVENT,
                 ],
                 [record["argv"][-1] for record in amx_records],
             )
@@ -793,10 +796,10 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             hook_payloads = [json.loads(str(record["stdin"])) for record in amx_records]
             self.assertEqual(
                 [
-                    runner.AGENT_MUX_START_REASON,
-                    runner.AGENT_MUX_TURN_START_REASON,
-                    runner.AGENT_MUX_TURN_FINISH_REASON,
-                    runner.AGENT_MUX_FINISH_REASON,
+                    agent_mux_delivery.START_REASON,
+                    agent_mux_delivery.TURN_START_REASON,
+                    agent_mux_delivery.TURN_FINISH_REASON,
+                    agent_mux_delivery.FINISH_REASON,
                 ],
                 [hook_payload["reason"] for hook_payload in hook_payloads],
             )
@@ -850,7 +853,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             hook_payloads.append(
                 run_persistence._agent_mux_loop_payload(
                     payload,
-                    reason=runner.AGENT_MUX_TURN_START_REASON,
+                    reason=agent_mux_delivery.TURN_START_REASON,
                     active_turn=active_turn,
                 )
             )
@@ -862,7 +865,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             finish_payloads.append(
                 run_persistence._agent_mux_loop_payload(
                     payload,
-                    reason=runner.AGENT_MUX_FINISH_REASON,
+                    reason=agent_mux_delivery.FINISH_REASON,
                 )
             )
 
@@ -1127,7 +1130,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
-                now=runner._parse_datetime("2026-06-11T12:00:20+00:00"),
+                now=clock.parse_datetime("2026-06-11T12:00:20+00:00"),
             )
         )
 
@@ -1173,7 +1176,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
-                now=runner._parse_datetime("2026-06-11T12:01:30+00:00"),
+                now=clock.parse_datetime("2026-06-11T12:01:30+00:00"),
             )
         )
 
@@ -1349,7 +1352,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
-                now=runner._parse_datetime("2026-06-11T12:00:20+00:00"),
+                now=clock.parse_datetime("2026-06-11T12:00:20+00:00"),
             )
         )
 
@@ -1405,7 +1408,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 payload=payload,
                 control=control,
                 snapshot=plans.inspect_plan(plan_dir),
-                now=runner._parse_datetime("2026-06-11T12:00:01+00:00"),
+                now=clock.parse_datetime("2026-06-11T12:00:01+00:00"),
             )
         )
 
@@ -1717,7 +1720,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             output=output,
         )
 
-        self.assertEqual(runner.INTERRUPTED_EXIT, process.returncode, output)
+        self.assertEqual(turn_execution.INTERRUPTED_EXIT, process.returncode, output)
         self.assertIn(f"Note: {note}", output)
         self.assertIn("Run paused: interrupted", output)
         payload = self.read_run_payload(plan_dir=plan_dir, state_dir=state_dir)
@@ -2939,7 +2942,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         turn = payload["turns"][0]
-        self.assertEqual(runner.SESSION_KIND_REVIEW, turn["session_kind"])
+        self.assertEqual(plans.SESSION_KIND_REVIEW, turn["session_kind"])
         self.assertEqual("claude", turn["harness"])
         self.assertEqual("claude-review", turn["model"])
         self.assertEqual(config.MODEL_SOURCE_FLAG, turn["model_source"])
@@ -4362,7 +4365,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr_path": str(tmp_dir / "stderr.log"),
                 "last_message_path": str(tmp_dir / "last-message.txt"),
                 "result_path": str(tmp_dir / "result.json"),
-                "started_at": runner._isoformat(runner._utc_now()),
+                "started_at": clock.isoformat(clock.utc_now()),
                 "finished_at": None,
                 "duration_seconds": None,
                 "idle_seconds_since_previous_turn": 0.0,
@@ -4397,7 +4400,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     )
                 )
                 live_turn.stop()
-                live_turn.finish(runner._utc_now())
+                live_turn.finish(clock.utc_now())
 
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
             event_records = [
@@ -4506,7 +4509,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     run_dir / "turn-0001-session-1" / "last-message.txt"
                 ),
                 "result_path": str(run_dir / "turn-0001-session-1" / "result.json"),
-                "started_at": runner._isoformat(runner._utc_now()),
+                "started_at": clock.isoformat(clock.utc_now()),
                 "finished_at": None,
                 "duration_seconds": None,
                 "idle_seconds_since_previous_turn": 0.0,
@@ -4537,7 +4540,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 self.assertIsNone(active_state["active_verification"])
             finally:
                 live_turn.stop()
-                live_turn.finish(runner._utc_now())
+                live_turn.finish(clock.utc_now())
 
     def test_live_verification_heartbeat_updates_state_events_and_progress(
         self,
@@ -5505,7 +5508,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr_path": str(tmp_dir / "stderr.log"),
                 "last_message_path": str(tmp_dir / "last-message.txt"),
                 "result_path": str(tmp_dir / "result.json"),
-                "started_at": runner._isoformat(runner._utc_now()),
+                "started_at": clock.isoformat(clock.utc_now()),
                 "finished_at": None,
                 "duration_seconds": None,
                 "idle_seconds_since_previous_turn": 0.0,
@@ -5534,7 +5537,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             # ordinary activity waits for the heartbeat instead.
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
             live_turn.stop()
-            live_turn.finish(runner._utc_now())
+            live_turn.finish(clock.utc_now())
 
             event_records = read_jsonl(event_path)
             action_events = [
@@ -5598,11 +5601,11 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         turns = payload["turns"]
         self.assertEqual(2, len(turns))
         verification_finished_at = next(
-            runner._parse_datetime(record["payload"]["finished_at"])
+            clock.parse_datetime(record["payload"]["finished_at"])
             for record in read_jsonl(Path(payload["events_path"]))
             if record["name"] == events.VERIFICATION_FINISHED_EVENT
         )
-        harness_exited_at = runner._parse_datetime(turns[0]["finished_at"])
+        harness_exited_at = clock.parse_datetime(turns[0]["finished_at"])
         idle_started_at = self.idle_started_at(turns[1])
         # The idle clock starts after the runner's own verification and
         # finalization, so it cannot begin back at the harness's exit.
@@ -5956,7 +5959,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr_path": str(tmp_dir / "stderr.log"),
                 "last_message_path": str(tmp_dir / "last-message.txt"),
                 "result_path": str(tmp_dir / "result.json"),
-                "started_at": runner._isoformat(runner._utc_now()),
+                "started_at": clock.isoformat(clock.utc_now()),
                 "finished_at": None,
                 "duration_seconds": None,
                 "idle_seconds_since_previous_turn": 0.0,
@@ -5981,7 +5984,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
             live_turn.start()
             live_turn.stop()
-            live_turn.finish(runner._utc_now())
+            live_turn.finish(clock.utc_now())
 
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
 
@@ -6000,7 +6003,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "run_id": "run-1",
                 "harness": "codex",
                 "active_turn": None,
-                "control": runner._initial_control_payload(),
+                "control": run_coordination.initial_control_payload(),
             }
             active_turn = {
                 "run_id": "run-1",
@@ -6012,7 +6015,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 "stderr_path": str(tmp_dir / "stderr.log"),
                 "last_message_path": str(tmp_dir / "last-message.txt"),
                 "result_path": str(tmp_dir / "result.json"),
-                "started_at": runner._isoformat(runner._utc_now()),
+                "started_at": clock.isoformat(clock.utc_now()),
                 "finished_at": None,
                 "duration_seconds": None,
                 "idle_seconds_since_previous_turn": 0.0,
@@ -6081,7 +6084,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
             def record_control() -> None:
                 try:
-                    runner._record_run_control_action(
+                    run_coordination.record_run_control_action(
                         event_path=event_path,
                         payload=payload,
                         control_payload=dict(payload["control"]),
@@ -6178,7 +6181,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             event_path = tmp_dir / events.EVENTS_FILE_NAME
             state_path = tmp_dir / events.STATE_FILE_NAME
             payload = {"state_path": str(state_path), "active_turn": None}
-            started_at = runner._isoformat(runner._utc_now())
+            started_at = clock.isoformat(clock.utc_now())
             active_turn = {
                 "run_id": "run-1",
                 "turn_index": 1,
@@ -6814,7 +6817,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         )
         state_path = self.tmp_dir / "state.json"
         event_path = self.tmp_dir / "events.jsonl"
-        started_at = runner._isoformat(runner._utc_now())
+        started_at = clock.isoformat(clock.utc_now())
         payload: dict[str, Any] = {"state_path": str(state_path)}
         active_turn = {
             "run_id": "run-burst",
@@ -6856,7 +6859,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
                 stream_callback=live_turn.record_activity,
             )
             active_snapshot = dict(payload["active_turn"])
-            live_turn.finish(runner._utc_now())
+            live_turn.finish(clock.utc_now())
 
         expected_stdout = "".join(f"out-{index:05d}\n" for index in range(line_count))
         expected_stderr = "".join(f"err-{index:05d}\n" for index in range(line_count))
@@ -7100,7 +7103,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         stdout_log = self.tmp_dir / "stdout.log"
         stderr_log = self.tmp_dir / "stderr.log"
         payload: dict[str, Any] = {"state_path": str(state_path)}
-        started_at = runner._isoformat(runner._utc_now())
+        started_at = clock.isoformat(clock.utc_now())
 
         def make_active_turn(session: int) -> dict[str, Any]:
             return {
@@ -7146,7 +7149,7 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         self.assertIn("claude text: working", result.stdout)
         self.assertEqual([], fired)
 
-        live_turn.finish(runner._utc_now())
+        live_turn.finish(clock.utc_now())
         later_turn = run_commit._LiveTurn(
             payload=payload,
             event_path=event_path,
@@ -7773,7 +7776,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
         def sample_tree(pid: int):
             return samples.pop(0)
 
-        sentinel = runner._HangSentinel(
+        sentinel = turn_execution.HangSentinel(
             sample_tree=sample_tree,
             monotonic=time.monotonic,
             trigger_idle_seconds=120.0,
@@ -7781,7 +7784,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             cpu_epsilon_seconds=0.5,
             result_grace_seconds=45.0,
         )
-        started_at = runner._isoformat(runner._utc_now() - timedelta(seconds=600))
+        started_at = clock.isoformat(clock.utc_now() - timedelta(seconds=600))
         active_turn: dict[str, Any] = {
             "run_id": "run-hang",
             "turn_index": 1,
@@ -7814,7 +7817,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
 
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         block = state["active_turn"]["hang_suspected"]
-        self.assertEqual(runner.HANG_REASON_ZERO_CPU, block["reason"])
+        self.assertEqual(turn_execution.HANG_REASON_ZERO_CPU, block["reason"])
         self.assertEqual(4242, block["harness_pid"])
         self.assertEqual(2, block["confirm_samples"])
         self.assertGreaterEqual(block["idle_seconds"], 120.0)
@@ -7828,7 +7831,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(suspected))
         self.assertEqual(
-            runner.HANG_REASON_ZERO_CPU,
+            turn_execution.HANG_REASON_ZERO_CPU,
             suspected[0]["payload"]["hang_suspected"]["reason"],
         )
 
@@ -7848,7 +7851,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             if record["name"] == events.TURN_HEARTBEAT_EVENT
         ]
         self.assertEqual(
-            runner.HANG_REASON_ZERO_CPU,
+            turn_execution.HANG_REASON_ZERO_CPU,
             heartbeats[-1]["payload"]["hang_suspected"]["reason"],
         )
 
@@ -7864,14 +7867,14 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(cleared))
         self.assertEqual(
-            runner.HANG_REASON_ZERO_CPU,
+            turn_execution.HANG_REASON_ZERO_CPU,
             cleared[0]["payload"]["hang_suspected"]["reason"],
         )
 
     def _live_turn(
         self, sample_tree, *, result_grace_seconds: float = 45.0
     ) -> run_commit._LiveTurn:
-        sentinel = runner._HangSentinel(
+        sentinel = turn_execution.HangSentinel(
             sample_tree=sample_tree,
             monotonic=time.monotonic,
             trigger_idle_seconds=120.0,
@@ -7879,7 +7882,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
             cpu_epsilon_seconds=0.5,
             result_grace_seconds=result_grace_seconds,
         )
-        started_at = runner._isoformat(runner._utc_now() - timedelta(seconds=600))
+        started_at = clock.isoformat(clock.utc_now() - timedelta(seconds=600))
         active_turn: dict[str, Any] = {
             "run_id": "run-hang",
             "turn_index": 1,
@@ -7974,7 +7977,7 @@ class LiveTurnHangSentinelIntegrationTests(unittest.TestCase):
 
         # A harness that exits without another output chunk still clears the
         # live episode at turn finalization, preserving the recovery evidence.
-        live_turn.finish(runner._utc_now())
+        live_turn.finish(clock.utc_now())
         cleared = [
             record
             for record in read_jsonl(self.event_path)
@@ -8435,7 +8438,7 @@ class HarnessTransportClassificationTests(unittest.TestCase):
     def test_connection_was_closed_unexpectedly_classifies_as_retryable_transport(
         self,
     ) -> None:
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(last_message=OBSERVED_SOCKET_CLOSURE)
         )
 
@@ -8457,7 +8460,7 @@ class HarnessTransportClassificationTests(unittest.TestCase):
             "the connection has been refused",
         ):
             with self.subTest(text=text):
-                classification = runner.classify_harness_failure(
+                classification = harness_failures.classify_harness_failure(
                     self._result(stderr=text)
                 )
                 self.assertEqual(
@@ -8466,7 +8469,7 @@ class HarnessTransportClassificationTests(unittest.TestCase):
                 self.assertTrue(classification.retryable)
 
     def test_unrecognized_failure_still_fails_closed(self) -> None:
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(stderr="fake codex failure", returncode=3)
         )
 
@@ -8476,13 +8479,13 @@ class HarnessTransportClassificationTests(unittest.TestCase):
     def test_invalid_model_and_capacity_outrank_the_widened_transport_rule(
         self,
     ) -> None:
-        invalid = runner.classify_harness_failure(
+        invalid = harness_failures.classify_harness_failure(
             self._result(stderr="model not found; the connection was closed")
         )
         self.assertEqual(events.PAUSE_REASON_INVALID_MODEL, invalid.reason)
         self.assertFalse(invalid.retryable)
 
-        capacity = runner.classify_harness_failure(
+        capacity = harness_failures.classify_harness_failure(
             self._result(stderr="model is at capacity; the connection was closed")
         )
         self.assertEqual(harness_failures.MODEL_CAPACITY_MARKER, capacity.marker)
@@ -8545,7 +8548,7 @@ class HarnessAuthenticationClassificationTests(unittest.TestCase):
         return harnesses.HarnessResult(**fields)
 
     def test_the_observed_oauth_expiry_is_auth_failed_not_a_nonzero_exit(self) -> None:
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(last_message=OBSERVED_AUTH_EXPIRY)
         )
 
@@ -8557,7 +8560,7 @@ class HarnessAuthenticationClassificationTests(unittest.TestCase):
         # The point of the category: an operator cannot refresh a harness's
         # OAuth session by answering a mailbox question, so the pause has to
         # escalate rather than hold the turn open waiting for one.
-        classification = runner.classify_harness_failure(
+        classification = harness_failures.classify_harness_failure(
             self._result(last_message=OBSERVED_AUTH_EXPIRY)
         )
 
@@ -8576,7 +8579,7 @@ class HarnessAuthenticationClassificationTests(unittest.TestCase):
             "user is unauthenticated",
         ):
             with self.subTest(text=text):
-                classification = runner.classify_harness_failure(
+                classification = harness_failures.classify_harness_failure(
                     self._result(stderr=text)
                 )
                 self.assertEqual(events.PAUSE_REASON_AUTH_FAILED, classification.reason)
@@ -8588,7 +8591,7 @@ class HarnessAuthenticationClassificationTests(unittest.TestCase):
             "token expired",
         ):
             with self.subTest(text=text):
-                classification = runner.classify_harness_failure(
+                classification = harness_failures.classify_harness_failure(
                     self._result(stderr=text)
                 )
                 self.assertEqual(events.PAUSE_REASON_AUTH_FAILED, classification.reason)
@@ -8597,12 +8600,12 @@ class HarnessAuthenticationClassificationTests(unittest.TestCase):
         # Widening the pattern must not reorder the table: the oversized-request
         # rule and the quota rule both precede it, and both describe requests an
         # auth message may legitimately mention.
-        overflow = runner.classify_harness_failure(
+        overflow = harness_failures.classify_harness_failure(
             self._result(last_message="Prompt is too long; failed to authenticate")
         )
         self.assertEqual(harness_failures.CONTEXT_OVERFLOW_MARKER, overflow.marker)
 
-        quota = runner.classify_harness_failure(
+        quota = harness_failures.classify_harness_failure(
             self._result(stderr="usage limit reached; please authenticate again")
         )
         self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, quota.reason)

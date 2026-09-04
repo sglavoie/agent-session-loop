@@ -25,6 +25,7 @@ from agent_session_loop import (
     mailbox,
     pause_policy,
     qna,
+    run_coordination,
     run_outcome,
     run_persistence,
     run_prompts,
@@ -276,14 +277,14 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         for reason in pause_policy.ENVIRONMENT_BLOCKED_PAUSE_REASONS:
             with self.subTest(reason=reason):
                 self.assertFalse(
-                    runner._runner_pause_can_wait_for_mailbox_reply(
+                    run_coordination.runner_pause_can_wait_for_mailbox_reply(
                         mailbox_enabled=True,
                         pause_reason=reason,
                         result=result,
                     )
                 )
         self.assertTrue(
-            runner._runner_pause_can_wait_for_mailbox_reply(
+            run_coordination.runner_pause_can_wait_for_mailbox_reply(
                 mailbox_enabled=True,
                 pause_reason="blocked",
                 result=result,
@@ -294,7 +295,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         self,
     ) -> None:
         started_at = datetime(2026, 7, 24, 12, tzinfo=UTC)
-        waiting = runner._waiting_for_reply_payload(
+        waiting = run_coordination.waiting_for_reply_payload(
             question_id="question-1",
             session_id="9",
             turn_index=3,
@@ -314,7 +315,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
 
         for bad_ceiling in (0, -1.0, float("nan"), float("inf"), "1800", True):
             with self.assertRaisesRegex(ValueError, "unsupervised_ceiling_seconds"):
-                runner._waiting_for_reply_payload(
+                run_coordination.waiting_for_reply_payload(
                     question_id="question-1",
                     session_id="9",
                     turn_index=3,
@@ -338,7 +339,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 "state_path": str(state_path),
             }
             started_at = datetime(2026, 7, 24, 12, tzinfo=UTC)
-            waiting = runner._waiting_for_reply_payload(
+            waiting = run_coordination.waiting_for_reply_payload(
                 question_id="question-1",
                 session_id="9",
                 turn_index=3,
@@ -353,7 +354,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             with mock.patch.object(
                 run_persistence, "_notify_agent_mux_loop_paused"
             ) as notify_paused:
-                runner._set_waiting_for_reply(
+                run_coordination.set_waiting_for_reply(
                     event_path,
                     payload,
                     waiting,
@@ -383,7 +384,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
             notify_paused.assert_not_called()
 
-            runner._clear_waiting_for_reply(
+            run_coordination.clear_waiting_for_reply(
                 event_path,
                 payload,
                 reason="reply",
@@ -437,7 +438,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             last_seq=2,
             size_bytes=mailbox.MAILBOX_MAX_BYTES,
         )
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=2.0,
             lease_extension_seconds=1.0,
             unsupervised_ceiling_seconds=5.0,
@@ -445,8 +446,8 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             io_grace_seconds=1.0,
         )
 
-        with mock.patch.object(runner.mailbox, "read_mailbox", return_value=view):
-            result = runner._wait_for_mailbox_reply(
+        with mock.patch.object(mailbox, "read_mailbox", return_value=view):
+            result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -474,7 +475,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                     "turn_index": 3,
                 },
             }
-            runner._clear_waiting_for_reply(
+            run_coordination.clear_waiting_for_reply(
                 event_path,
                 payload,
                 reason=result.reason,
@@ -509,7 +510,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 "state_path": str(state_path),
             }
             started_at = datetime(2026, 7, 24, 12, tzinfo=UTC)
-            waiting = runner._waiting_for_reply_payload(
+            waiting = run_coordination.waiting_for_reply_payload(
                 question_id="question-1",
                 session_id="9",
                 turn_index=3,
@@ -520,7 +521,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                 last_lease_activity_at=None,
             )
             persistence = run_persistence._RunPersistence()
-            runner._set_waiting_for_reply(
+            run_coordination.set_waiting_for_reply(
                 event_path,
                 payload,
                 waiting,
@@ -530,7 +531,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
 
             # Eight hours of suspend later, only the deadlines move.
             wake = started_at + timedelta(hours=8, seconds=2)
-            runner._rebase_waiting_deadlines(
+            run_coordination.rebase_waiting_deadlines(
                 payload,
                 question_id="question-1",
                 base_deadline=wake + timedelta(minutes=3),
@@ -585,59 +586,59 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
 
     def test_mailbox_reply_wait_settings_fail_safe_on_bad_overrides(self) -> None:
-        settings = runner._mailbox_reply_wait_settings(
+        settings = run_coordination.mailbox_reply_wait_settings(
             {
-                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "nan",
-                runner.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_ENV_VAR: "-1",
-                runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "0",
-                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "not-a-number",
-                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "inf",
+                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "nan",
+                run_coordination.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_ENV_VAR: "-1",
+                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "0",
+                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "not-a-number",
+                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "inf",
             }
         )
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_BASE_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_BASE_SECONDS,
             settings.base_seconds,
         )
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS,
             settings.lease_extension_seconds,
         )
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
             settings.unsupervised_ceiling_seconds,
         )
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_POLL_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_POLL_SECONDS,
             settings.poll_seconds,
         )
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS,
             settings.io_grace_seconds,
         )
 
-        clamped = runner._mailbox_reply_wait_settings(
+        clamped = run_coordination.mailbox_reply_wait_settings(
             {
-                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "20",
-                runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "10",
+                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "20",
+                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "10",
             }
         )
         self.assertEqual(10.0, clamped.base_seconds)
         self.assertEqual(10.0, clamped.unsupervised_ceiling_seconds)
 
     def test_mailbox_question_identity_is_stable_uuid5_per_turn(self) -> None:
-        first = runner._mailbox_question_id(
+        first = run_coordination.mailbox_question_id(
             plan_dir=Path("/tmp/plan"),
             run_id="run-1",
             session_id="10",
             turn_index=3,
         )
-        repeated = runner._mailbox_question_id(
+        repeated = run_coordination.mailbox_question_id(
             plan_dir=Path("/tmp/plan"),
             run_id="run-1",
             session_id="10",
             turn_index=3,
         )
-        next_turn = runner._mailbox_question_id(
+        next_turn = run_coordination.mailbox_question_id(
             plan_dir=Path("/tmp/plan"),
             run_id="run-1",
             session_id="10",
@@ -679,7 +680,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             fresh=False,
             reason=mailbox.LEASE_EXPIRED,
         )
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=2.0,
             lease_extension_seconds=1.0,
             unsupervised_ceiling_seconds=5.0,
@@ -711,10 +712,10 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             append_events=False,
         )
         with (
-            mock.patch.object(runner.mailbox, "read_mailbox", return_value=view),
-            mock.patch.object(runner.mailbox, "read_lease", side_effect=read_lease),
+            mock.patch.object(mailbox, "read_mailbox", return_value=view),
+            mock.patch.object(mailbox, "read_lease", side_effect=read_lease),
         ):
-            result = runner._wait_for_mailbox_reply(
+            result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload=payload,
@@ -730,7 +731,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         # Each fresh lease moves the ceiling with the active deadline, so the
         # ratchet carried the wait past a bound that used to end it at 5.0.
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         self.assertEqual(supervision_ends, now[0])
@@ -743,7 +744,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
     def test_mailbox_reply_wait_degrades_after_sustained_io_failure(
         self,
     ) -> None:
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=10.0,
             lease_extension_seconds=1.0,
             unsupervised_ceiling_seconds=20.0,
@@ -759,11 +760,11 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             now[0] += seconds
 
         with mock.patch.object(
-            runner.mailbox,
+            mailbox,
             "read_mailbox",
             side_effect=mailbox.MailboxError(mailbox.ERROR_MAILBOX_READ),
         ):
-            result = runner._wait_for_mailbox_reply(
+            result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -800,28 +801,28 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             stderr="quota exhausted",
         )
         self.assertTrue(
-            runner._runner_pause_can_wait_for_mailbox_reply(
+            run_coordination.runner_pause_can_wait_for_mailbox_reply(
                 mailbox_enabled=True,
                 pause_reason="blocked",
                 result=success,
             )
         )
         self.assertFalse(
-            runner._runner_pause_can_wait_for_mailbox_reply(
+            run_coordination.runner_pause_can_wait_for_mailbox_reply(
                 mailbox_enabled=True,
                 pause_reason="verify-failed",
                 result=success,
             )
         )
         self.assertFalse(
-            runner._runner_pause_can_wait_for_mailbox_reply(
+            run_coordination.runner_pause_can_wait_for_mailbox_reply(
                 mailbox_enabled=True,
                 pause_reason="blocked",
                 result=failure,
             )
         )
         self.assertFalse(
-            runner._runner_pause_can_wait_for_mailbox_reply(
+            run_coordination.runner_pause_can_wait_for_mailbox_reply(
                 mailbox_enabled=False,
                 pause_reason="blocked",
                 result=success,
@@ -1149,7 +1150,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                     code = runner.run_from_args(args)
             self.assertEqual(0, code, out.getvalue())
 
-            placeholder = runner._reply_argv_placeholder(len(reply_text))
+            placeholder = turn_execution.reply_argv_placeholder(len(reply_text))
 
             plan_state = state.plan_state_dir(plan_dir, state_dir)
             state_path = plan_state / events.STATE_FILE_NAME

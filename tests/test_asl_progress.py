@@ -17,11 +17,11 @@ from unittest import mock
 
 from agent_session_loop import (
     cli,
+    clock,
     handoff_guards,
     plans,
     progress_cli,
     progress_repair,
-    runner,
 )
 from tests.support import (
     write_plan,
@@ -400,9 +400,9 @@ class RunnerProgressEntryHelperTests(unittest.TestCase):
                 )
 
     def test_utc_iso_now_returns_iso_string_with_timezone(self) -> None:
-        value = runner._utc_iso_now()
+        value = clock.utc_iso_now()
 
-        parsed = runner._parse_datetime(value)
+        parsed = clock.parse_datetime(value)
         self.assertIsNotNone(parsed)
         self.assertEqual("UTC", parsed.tzname())
 

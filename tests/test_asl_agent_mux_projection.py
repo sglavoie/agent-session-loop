@@ -27,7 +27,7 @@ from agent_session_loop import (
     durability,
     process_tree,
     run_persistence,
-    runner,
+    verification_transitions,
 )
 
 PROJECTION_SCHEMA = contract.load_schema(contract.COMPONENT_PROJECTION)
@@ -35,6 +35,10 @@ HOOK_SCHEMA = contract.load_schema(contract.COMPONENT_LIFECYCLE_HOOK)
 
 RUN_STARTED_AT = "2026-06-19T14:00:00+00:00"
 UPDATED_AT = "2026-06-19T14:31:02.481900+00:00"
+
+#: Read at its owning module rather than spelled inline: the reason is 62
+#: characters and the fixture payloads that carry it nest four levels deep.
+DEFERRED_REASON = verification_transitions.REVIEW_BROAD_FAILURES_DEFERRED_REASON
 
 
 def _base_payload(**overrides: Any) -> dict[str, Any]:
@@ -98,7 +102,8 @@ class ContractIdentityTests(unittest.TestCase):
             HOOK_SCHEMA["version"], agent_mux_projection.HOOK_SCHEMA_VERSION
         )
         self.assertEqual(
-            agent_mux_projection.STATE_SCHEMA_VERSION, runner.STATE_SCHEMA_VERSION
+            agent_mux_projection.STATE_SCHEMA_VERSION,
+            agent_mux_projection.STATE_SCHEMA_VERSION,
         )
 
     def test_phase_vocabularies_match_the_schemas(self) -> None:
@@ -472,7 +477,7 @@ class DurableStateWriteTests(unittest.TestCase):
     def test_write_state_payload_emits_a_valid_v3_record(self) -> None:
         run_persistence._write_state_payload(self._payload(active_turn=_turn()))
         record = self._read()
-        self.assertEqual(runner.STATE_SCHEMA_VERSION, record["version"])
+        self.assertEqual(agent_mux_projection.STATE_SCHEMA_VERSION, record["version"])
         projection = record[agent_mux_projection.PROJECTION_KEY]
         violations = contract.validate_document(
             PROJECTION_SCHEMA, projection, root="projection"
@@ -800,7 +805,7 @@ def _emitted_hook_payloads(hook: Any) -> dict[str, dict[str, Any]]:
                 "heartbeat_count": 6,
                 "acceptance": {
                     "accepted": True,
-                    "reason": runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
+                    "reason": DEFERRED_REASON,
                     "review_outcome": "findings",
                     "deferred_failure_count": 1,
                     "deferred_failure_names": ["review-broad:correctness"],

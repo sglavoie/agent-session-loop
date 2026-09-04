@@ -1,6 +1,6 @@
-"""The ratchet that keeps ``agent_session_loop/runner.py`` shrinking.
+"""The ratchet that kept ``agent_session_loop/runner.py`` shrinking.
 
-The 38-session extraction program moves roughly 17,400 lines out of the
+The 38-session extraction program moved roughly 17,400 lines out of the
 runner and into package modules behind the typed-boundary contract. Nothing
 in the suite noticed the runner *growing*, so a session could pay the cost of
 a move and hand back a file that was no smaller than the one it started from.
@@ -17,19 +17,23 @@ missed:
   a session shed bulk while leaving the re-export surface intact, which is the
   end state the plan explicitly rejects ("a runner that is nothing but a
   re-export table"). Names bound by ``import`` are deliberately excluded: the
-  500-line runner keeps its imports, and an extraction that leaves behind
-  delegation legitimately adds one.
+  runner keeps its imports, and an extraction that leaves behind delegation
+  legitimately adds one.
 * **Alias assignments.** ``X = <module>.Y`` is the convention this program
-  reverses. The 228 that exist are recorded as a floor set that may only
-  shrink; Session 38 empties it. A plain ``from .run_errors import RunError``
-  binds a name without creating an alias assignment, which is why the rule is
-  written against the assignment's shape rather than against the name.
+  reverses. The 226 that existed were recorded as a floor set that could only
+  shrink; Session 38 retired the last of them, so
+  :data:`RUNNER_ALIAS_FLOOR` is now empty. It is kept rather than deleted:
+  empty, the two rules that read it become a permanent no-new-aliases gate,
+  which is what stops the convention from growing back one convenient
+  re-export at a time. A plain ``from .run_errors import RunError`` binds a
+  name without creating an alias assignment, which is why the rule is written
+  against the assignment's shape rather than against the name.
 
-The per-session step is one appended row in :data:`RUNNER_SHRINK_HISTORY` plus
-whatever alias rows the session retired. The history is what makes "may only
-fall" structural rather than a matter of review: each row is compared against
-the one before it, so lowering a ceiling is an append and raising one is a
-visible rewrite of recorded facts.
+The program is finished -- the runner is 68 lines -- so the history is now a
+record rather than a running tally. Its last row is still asserted by equality
+against the live file, which is what keeps the end state from eroding: a line
+added to the runner, a public name re-introduced, or an alias assignment
+restored each fail here by name.
 """
 
 from __future__ import annotations
@@ -42,8 +46,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = REPO_ROOT / "agent_session_loop" / "runner.py"
 
-#: The end state the program is aiming at: a docstring, imports, and thin
-#: delegation. Session 38 removes the skip on the test that asserts it.
+#: The end state the program aimed at: a docstring, imports, and thin
+#: delegation. Session 38 reached it and removed the skip on the test that
+#: asserts it, so this is a live bound rather than a target.
 RUNNER_LINE_TARGET = 500
 
 #: One row per session that changes the runner: ``(session, lines, public
@@ -88,239 +93,14 @@ RUNNER_SHRINK_HISTORY: tuple[tuple[str, int, int], ...] = (
     ("35", 3084, 113),
     ("36", 2649, 113),
     ("37", 516, 111),
+    ("38", 68, 2),
 )
 
 #: Every ``X = <module>.Y`` assignment in the runner today, mapped to the
-#: module that owns the symbol. A session that moves a symbol deletes its row
-#: here along with the assignment; no session may add one.
-RUNNER_ALIAS_FLOOR: dict[str, str] = {
-    "ABORT_TURN_DEFAULT_REASON": "run_coordination",
-    "AGENT_MUX_FINISH_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_FINISH_REASON": "agent_mux_delivery",
-    "AGENT_MUX_NOTIFY_ENV_VAR": "agent_mux_delivery",
-    "AGENT_MUX_NOTIFY_OFF": "agent_mux_delivery",
-    "AGENT_MUX_NOTIFY_TIMEOUT_ENV_VAR": "agent_mux_delivery",
-    "AGENT_MUX_NOTIFY_TIMEOUT_SECONDS": "agent_mux_delivery",
-    "AGENT_MUX_PAUSE_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_PHASE_BY_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_SOURCE": "agent_mux_delivery",
-    "AGENT_MUX_START_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_START_REASON": "agent_mux_delivery",
-    "AGENT_MUX_TURN_FINISH_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_TURN_FINISH_REASON": "agent_mux_delivery",
-    "AGENT_MUX_TURN_HANG_CLEARED_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_TURN_HANG_CLEARED_REASON": "agent_mux_delivery",
-    "AGENT_MUX_TURN_HANG_SUSPECTED_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_TURN_HANG_SUSPECTED_REASON": "agent_mux_delivery",
-    "AGENT_MUX_TURN_HEARTBEAT_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_TURN_HEARTBEAT_REASON": "agent_mux_delivery",
-    "AGENT_MUX_TURN_START_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_TURN_START_REASON": "agent_mux_delivery",
-    "AGENT_MUX_VERIFICATION_FINISH_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_VERIFICATION_FINISH_REASON": "agent_mux_delivery",
-    "AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_VERIFICATION_HEARTBEAT_REASON": "agent_mux_delivery",
-    "AGENT_MUX_VERIFICATION_START_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_VERIFICATION_START_REASON": "agent_mux_delivery",
-    "AGENT_MUX_WAIT_END_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_WAIT_END_REASON": "agent_mux_delivery",
-    "AGENT_MUX_WAIT_START_EVENT": "agent_mux_delivery",
-    "AGENT_MUX_WAIT_START_REASON": "agent_mux_delivery",
-    "APPROVAL_SIGNAL_PATTERNS": "turn_execution",
-    "BROAD_REVIEW_CHECK_PREFIX": "verification_transitions",
-    "FAILURE_EVIDENCE_MAX_CHARS": "harness_failures",
-    "FINAL_REVIEW_ARTIFACT_FILENAME": "review",
-    "FINAL_REVIEW_FILENAME": "review",
-    "FailureClassification": "harness_failures",
-    "GENERATED_REVIEW_SESSION_VERSION": "review",
-    "HANG_CONFIRM_SAMPLES": "turn_execution",
-    "HANG_CONFIRM_SAMPLES_ENV_VAR": "turn_execution",
-    "HANG_CPU_EPSILON_SECONDS": "turn_execution",
-    "HANG_REASON_RESULT_RECEIVED": "turn_execution",
-    "HANG_REASON_ZERO_CPU": "turn_execution",
-    "HANG_RESULT_GRACE_ENV_VAR": "turn_execution",
-    "HANG_RESULT_GRACE_SECONDS": "turn_execution",
-    "HANG_TRIGGER_IDLE_ENV_VAR": "turn_execution",
-    "HANG_TRIGGER_IDLE_SECONDS": "turn_execution",
-    "HEARTBEAT_INTERVAL_SECONDS": "turn_execution",
-    "INTERRUPTED_EXIT": "turn_execution",
-    "LIVE_CONTROL_POLL_INTERVAL_SECONDS": "turn_execution",
-    "MAILBOX_QUESTION_TEXT_MAX_CHARS": "run_coordination",
-    "MAILBOX_REPLY_WAIT_BASE_ENV_VAR": "run_coordination",
-    "MAILBOX_REPLY_WAIT_BASE_SECONDS": "run_coordination",
-    "MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR": "run_coordination",
-    "MAILBOX_REPLY_WAIT_IO_GRACE_SECONDS": "run_coordination",
-    "MAILBOX_REPLY_WAIT_LEASE_EXTENSION_ENV_VAR": "run_coordination",
-    "MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS": "run_coordination",
-    "MAILBOX_REPLY_WAIT_POLL_ENV_VAR": "run_coordination",
-    "MAILBOX_REPLY_WAIT_POLL_SECONDS": "run_coordination",
-    "MAILBOX_REPLY_WAIT_PREPARATION_REASONS": "run_coordination",
-    "MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST": "run_coordination",
-    "MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS": "run_coordination",
-    "MAILBOX_REPLY_WAIT_SUSPEND_SKEW_SECONDS": "run_coordination",
-    "MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR": "run_coordination",
-    "MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS": "run_coordination",
-    "MAX_RENDERED_GUIDANCE": "mailbox_rendering",
-    "MAX_RENDERED_GUIDANCE_BYTES": "mailbox_rendering",
-    "MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS": "review_transitions",
-    "MAX_VERIFICATION_REPAIR_ATTEMPTS": "verification_transitions",
-    "MULTI_REPO_CAPABILITY_PAUSE_REASON": "events",
-    "REPOSITORY_AWARE_GENERATED_REVIEW_SESSION_VERSION": "review",
-    "REPOSITORY_AWARE_REVIEW_ARTIFACT_VERSION": "review",
-    "REQUIRED_CHECKS_INCOMPLETE_REASON": "verification_transitions",
-    "RESULT_SCHEMA_VERSION": "turn_execution",
-    "REVIEW_ARTIFACT_VERSION": "review",
-    "REVIEW_BROAD_FAILURES_DEFERRED_REASON": "verification_transitions",
-    "REVIEW_CYCLE_DISPOSITIONS": "review_continuation",
-    "REVIEW_CYCLE_DISPOSITION_ALL_CLEAR": "review_continuation",
-    "REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED": "review_continuation",
-    "REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED": "review_continuation",
-    "REVIEW_CYCLE_DISPOSITION_GROUP_EXHAUSTED": "review_continuation",
-    "REVIEW_CYCLE_DISPOSITION_MALFORMED": "review_continuation",
-    "REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY": "review_continuation",
-    "REVIEW_CYCLE_DISPOSITION_REPAIRS": "review_continuation",
-    "REVIEW_CYCLE_DISPOSITION_REPEATED": "review_continuation",
-    "REVIEW_CYCLE_DISPOSITION_UNSTRUCTURED": "review_continuation",
-    "REVIEW_FINDINGS_UNRESOLVED_REASON": "review_transitions",
-    "REVIEW_NOT_CLEAR_REASON": "verification_transitions",
-    "REVIEW_SESSION_MARKER": "review",
-    "REVIEW_STATUS_ALL_CLEAR": "review",
-    "REVIEW_VERDICT_FINGERPRINT_PREFIX": "review_transitions",
-    "RUNNER_STATUS_SOURCE_ABSENT": "turn_execution",
-    "RUN_CONTROL_EVENT_ACTIONS": "run_coordination",
-    "RUN_CONTROL_EVENT_MESSAGES": "run_coordination",
-    "SESSION_KINDS": "plans",
-    "SESSION_KIND_IMPLEMENTATION": "plans",
-    "SESSION_KIND_REVIEW": "plans",
-    "STATE_SCHEMA_VERSION": "agent_mux_projection",
-    "STRUCTURED_REVIEW_MIN_VERSION": "review",
-    "TRUSTED_RUNNER_SIGNAL_SOURCES": "turn_execution",
-    "TurnCommit": "turn_execution",
-    "TurnExecution": "turn_execution",
-    "TurnExecutor": "turn_execution",
-    "TurnFinalization": "turn_execution",
-    "TurnIdentity": "turn_execution",
-    "TurnLaunch": "turn_execution",
-    "VERIFICATION_FINGERPRINT_PREFIX": "verification_transitions",
-    "_AUDITABLE_ASSURANCE_STATES": "run_coordination",
-    "_DEGRADED_ASSURANCE_STATES": "run_coordination",
-    "_HangAssessment": "turn_execution",
-    "_HangSentinel": "turn_execution",
-    "_LIVE_ACTION_REQUIRED_REASONS": "turn_execution",
-    "_MAILBOX_TOKEN_UNSEEN": "run_coordination",
-    "_MailboxPoll": "run_coordination",
-    "_MailboxReplyWaitResult": "run_coordination",
-    "_MailboxReplyWaitSettings": "run_coordination",
-    "_MailboxReplyWaitUnavailable": "run_coordination",
-    "_PLAN_COMPLETION_REASONS": "verification_transitions",
-    "_PreparedMailboxReplyWait": "run_coordination",
-    "_REVIEW_STATUS_FINDINGS_RE": "review",
-    "_ReplyStatePreserver": "run_coordination",
-    "_TerminalAuditContext": "run_coordination",
-    "_TerminalBlocker": "verification_transitions",
-    "_TurnCommitRejected": "turn_execution",
-    "_abort_turn_guidance_text": "run_coordination",
-    "_accepted_broad_failure_deferral": "verification_transitions",
-    "_append_text": "durability",
-    "_apply_external_control_command": "run_coordination",
-    "_apply_run_control_action": "run_coordination",
-    "_approval_match_is_content": "turn_execution",
-    "_arm_requested_abort": "run_coordination",
-    "_attach_assurance_report": "run_coordination",
-    "_clear_live_action_required": "turn_execution",
-    "_clear_waiting_for_reply": "run_coordination",
-    "_commit_turn": "turn_execution",
-    "_create_turn_logs": "turn_execution",
-    "_degrade_abort_to_stop_after_current": "run_coordination",
-    "_drain_external_control_queue": "run_coordination",
-    "_duration_seconds": "clock",
-    "_ensure_mailbox_question": "run_coordination",
-    "_extract_prefixed_line": "turn_execution",
-    "_final_review_is_clear": "verification_transitions",
-    "_finalize_turn_execution": "turn_execution",
-    "_finish_mailbox_reply_wait_lifecycle": "run_coordination",
-    "_finite_positive_env": "run_coordination",
-    "_initial_control_payload": "run_coordination",
-    "_is_noop_runner_pause": "turn_execution",
-    "_is_review_verdict_repair_exhausted": "review_transitions",
-    "_is_verification_repair_exhausted": "verification_transitions",
-    "_isoformat": "clock",
-    "_lease_evidence": "run_coordination",
-    "_live_action_signal": "turn_execution",
-    "_live_stream_callback": "turn_execution",
-    "_mailbox_question_id": "run_coordination",
-    "_mailbox_question_text": "run_coordination",
-    "_mailbox_reply_wait_settings": "run_coordination",
-    "_observed_model_payload": "turn_execution",
-    "_parse_datetime": "clock",
-    "_pending_completed": "plans",
-    "_persisted_result_argv": "turn_execution",
-    "_prepare_mailbox_reply_wait": "run_coordination",
-    "_prepare_stream_logs": "turn_execution",
-    "_preview_text": "turn_execution",
-    "_publication_snapshot": "turn_execution",
-    "_read_optional_bytes": "run_coordination",
-    "_read_prior_review_verdict_retries": "review_transitions",
-    "_read_prior_verification_failures": "verification_transitions",
-    "_read_verification_finished_events": "verification_transitions",
-    "_rebase_waiting_deadlines": "run_coordination",
-    "_record_control_command_observed": "run_coordination",
-    "_record_degraded_assurance": "run_coordination",
-    "_record_mailbox_reply_wait_preparation_failed": "run_coordination",
-    "_record_run_control_action": "run_coordination",
-    "_record_turn_rejected": "turn_execution",
-    "_record_waiting_lease_activity": "run_coordination",
-    "_recorded_review_cycles": "verification_transitions",
-    "_reopened_snapshot_identity": "turn_execution",
-    "_replace_turn_record": "turn_execution",
-    "_reply_argv_placeholder": "turn_execution",
-    "_resolution_argv_placeholder": "turn_execution",
-    "_restore_optional_bytes": "run_coordination",
-    "_review_verdict_fingerprint": "review_transitions",
-    "_review_verdict_repair_references": "review_transitions",
-    "_runner_pause_can_wait_for_mailbox_reply": "run_coordination",
-    "_runner_pause_reason": "turn_execution",
-    "_runner_signal_lines": "turn_execution",
-    "_runner_signals": "turn_execution",
-    "_sanitize_reply_argv": "turn_execution",
-    "_sanitize_resolution_argv": "turn_execution",
-    "_session_compat_value": "plans",
-    "_session_details_payload": "plans",
-    "_session_identity_payload": "plans",
-    "_session_label": "plans",
-    "_session_number_alias": "plans",
-    "_session_path_label": "plans",
-    "_session_payload": "plans",
-    "_session_status_change_payload": "plans",
-    "_sessions_with_status": "plans",
-    "_set_waiting_for_reply": "run_coordination",
-    "_signal_line_candidates": "turn_execution",
-    "_signal_source_trusted": "turn_execution",
-    "_snapshot_payload": "plans",
-    "_status_changes": "plans",
-    "_status_counts": "plans",
-    "_status_map": "plans",
-    "_terminal_blocker": "verification_transitions",
-    "_turn_paths": "turn_execution",
-    "_turn_status_result": "turn_execution",
-    "_unpassed_run_verifications": "verification_transitions",
-    "_unresolved_deferred_verifications": "verification_transitions",
-    "_utc_iso_now": "clock",
-    "_utc_now": "clock",
-    "_utc_run_id": "clock",
-    "_verification_failure_details": "verification_transitions",
-    "_verification_failure_summary": "verification_transitions",
-    "_verification_fingerprint": "verification_transitions",
-    "_verification_repair_references": "verification_transitions",
-    "_wait_for_mailbox_reply": "run_coordination",
-    "_waiting_for_reply_payload": "run_coordination",
-    "_worker_pause_resolution_for_turn": "run_coordination",
-    "_write_bytes_file": "durability",
-    "_write_json_file": "durability",
-    "_write_text": "durability",
-    "_write_turn_artifacts": "turn_execution",
-    "classify_harness_failure": "harness_failures",
-}
+#: module that owns the symbol. Empty since Session 38 retired the last of the
+#: 226: the runner carries no re-export at all, and the two rules below now
+#: read as "the runner may hold no alias" in both directions.
+RUNNER_ALIAS_FLOOR: dict[str, str] = {}
 
 
 def runner_source() -> str:
@@ -475,10 +255,6 @@ class RunnerShrinkRatchetTests(unittest.TestCase):
             "describing the file",
         )
 
-    @unittest.skip(
-        f"the extraction target: runner.py at most {RUNNER_LINE_TARGET} lines. "
-        f"Session 38 removes this skip."
-    )
     def test_the_runner_is_at_most_the_target_length(self) -> None:
         actual = runner_line_count(self.source)
 

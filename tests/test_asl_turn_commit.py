@@ -348,7 +348,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
 
     def _commit(self, turn_payload: dict[str, Any]) -> Any:
         payload: dict[str, Any] = {"run_id": "run-1", "turns": [turn_payload]}
-        commit = runner._commit_turn(
+        commit = turn_execution.commit_turn(
             event_path=self.tmp_path / "events.jsonl",
             payload=payload,
             persistence=run_persistence._RunPersistence(write_state=False),
@@ -364,7 +364,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
     def test_commit_returns_the_published_snapshot_it_recorded(self) -> None:
         turn_payload = {"turn_index": 1, "session": "1"}
         payload: dict[str, Any] = {"run_id": "run-1", "turns": [turn_payload]}
-        commit = runner._commit_turn(
+        commit = turn_execution.commit_turn(
             event_path=self.tmp_path / "events.jsonl",
             payload=payload,
             persistence=run_persistence._RunPersistence(write_state=False),
@@ -398,7 +398,7 @@ class CommittedTurnImmutabilityTests(unittest.TestCase):
         committed, _payload = self._commit(
             {"turn_index": 1, "session": "1", "after": {"stale": True}}
         )
-        self.assertEqual(runner._snapshot_payload(self.snapshot), committed["after"])
+        self.assertEqual(plans.snapshot_payload(self.snapshot), committed["after"])
 
 
 class TurnCommitRunTests(unittest.TestCase):
@@ -567,7 +567,7 @@ class TurnCommitRunTests(unittest.TestCase):
         self._run_accepted()
         finished = self._payloads(events.TURN_FINISHED_EVENT)[0]
         self.assertEqual(
-            runner._snapshot_payload(plans.inspect_plan(self.plan_dir)),
+            plans.snapshot_payload(plans.inspect_plan(self.plan_dir)),
             finished["after"],
         )
 
@@ -1148,7 +1148,7 @@ class TurnCommitRunTests(unittest.TestCase):
         self.assertEqual(1, len(self._payloads(events.SESSION_REOPENED_EVENT)))
 
     def test_publication_drift_pauses_instead_of_crashing_the_loop(self) -> None:
-        rejection = runner._TurnCommitRejected(
+        rejection = turn_execution.TurnCommitRejected(
             reason="unexpected-status-change",
             message="session statuses moved",
             detail={"status_changes": []},
@@ -1655,7 +1655,9 @@ class PublicationSnapshotTests(unittest.TestCase):
         self.snapshot = plans.inspect_plan(self.plan_dir)
 
     def publish(self) -> plans.PlanSnapshot:
-        return runner._publication_snapshot(plans.PlanSnapshotCache(), self.snapshot)
+        return turn_execution.publication_snapshot(
+            plans.PlanSnapshotCache(), self.snapshot
+        )
 
     def test_readiness_bookkeeping_is_republished_without_moving_identity(self) -> None:
         plans.write_readiness_metadata(
@@ -1680,7 +1682,7 @@ class PublicationSnapshotTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        with self.assertRaises(runner._TurnCommitRejected) as caught:
+        with self.assertRaises(turn_execution.TurnCommitRejected) as caught:
             self.publish()
         self.assertEqual("unexpected-status-change", caught.exception.reason)
         self.assertEqual(
@@ -1692,7 +1694,7 @@ class PublicationSnapshotTests(unittest.TestCase):
         self,
     ) -> None:
         (self.plan_dir / "session-1.md").write_text("no handoff\n", encoding="utf-8")
-        with self.assertRaises(runner._TurnCommitRejected) as caught:
+        with self.assertRaises(turn_execution.TurnCommitRejected) as caught:
             self.publish()
         self.assertEqual("malformed-plan", caught.exception.reason)
         self.assertTrue(caught.exception.detail["error"])

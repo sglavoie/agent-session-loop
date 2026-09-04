@@ -28,6 +28,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    agent_mux_delivery,
     authoring,
     config,
     control_signal,
@@ -38,7 +39,6 @@ from agent_session_loop import (
     review,
     review_session_body,
     run_control,
-    runner,
     state,
     workbench,
 )
@@ -52,13 +52,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # `amx` binary on PATH. Notifier-specific tests opt back in with
 # `agent_mux_notify_enabled()` and point delivery at a fake executable or a
 # mocked subprocess layer.
-os.environ[runner.AGENT_MUX_NOTIFY_ENV_VAR] = runner.AGENT_MUX_NOTIFY_OFF
+os.environ[agent_mux_delivery.NOTIFY_ENV_VAR] = agent_mux_delivery.NOTIFY_OFF
 
 
 @contextmanager
 def agent_mux_notify_enabled(mode: str = "auto"):
     """Re-enable AgentMux notification inside a notifier-specific test."""
-    with patched_env(**{runner.AGENT_MUX_NOTIFY_ENV_VAR: mode}):
+    with patched_env(**{agent_mux_delivery.NOTIFY_ENV_VAR: mode}):
         yield
 
 

@@ -28,7 +28,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import artifacts, events, plans, run_persistence, runner, state
+from . import (
+    artifacts,
+    events,
+    plans,
+    run_persistence,
+    state,
+    turn_execution,
+)
 
 # Subdirectory (relative to a turn artifact directory) where failed-command
 # gzip artifacts live, matching the runner-managed verification convention.
@@ -178,7 +185,7 @@ def _compact_result_payload(
     size driver is removed. The record is stamped as schema v2.
     """
     compact = json.loads(json.dumps(payload))  # deep copy without shared refs
-    compact["version"] = runner.RESULT_SCHEMA_VERSION
+    compact["version"] = turn_execution.RESULT_SCHEMA_VERSION
     verification = compact.get("verification")
     if isinstance(verification, dict):
         checks = verification.get("checks")

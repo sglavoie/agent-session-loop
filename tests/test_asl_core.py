@@ -47,9 +47,9 @@ from agent_session_loop import (
     run_inputs,
     run_persistence,
     run_termination,
-    runner,
     state,
     tail,
+    turn_execution,
 )
 from agent_session_loop.formatting import (
     format_duration_seconds,
@@ -240,7 +240,7 @@ class ParserAndStateTests(unittest.TestCase):
                 {
                     "session_id": "7",
                     "total_sessions": 7,
-                    "session_kind": runner.SESSION_KIND_REVIEW,
+                    "session_kind": plans.SESSION_KIND_REVIEW,
                 }
             ),
         )
@@ -250,7 +250,7 @@ class ParserAndStateTests(unittest.TestCase):
                 {
                     "session_id": "7",
                     "total_sessions": 7,
-                    "session_kind": runner.SESSION_KIND_IMPLEMENTATION,
+                    "session_kind": plans.SESSION_KIND_IMPLEMENTATION,
                 }
             ),
         )
@@ -297,7 +297,7 @@ class ParserAndStateTests(unittest.TestCase):
                 {
                     "session_id": "7",
                     "total_sessions": 7,
-                    "session_kind": runner.SESSION_KIND_REVIEW,
+                    "session_kind": plans.SESSION_KIND_REVIEW,
                 },
             ),
         )
@@ -5723,7 +5723,7 @@ class ParserAndStateTests(unittest.TestCase):
     def _detailed_turn(self) -> dict[str, object]:
         check = self._verification_check()
         return {
-            "version": runner.RESULT_SCHEMA_VERSION,
+            "version": turn_execution.RESULT_SCHEMA_VERSION,
             "run_id": "run-1",
             "turn_index": 1,
             "session": 1,
@@ -5780,7 +5780,9 @@ class ParserAndStateTests(unittest.TestCase):
 
             persisted = json.loads(state_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(runner.STATE_SCHEMA_VERSION, persisted["version"])
+        self.assertEqual(
+            agent_mux_projection.STATE_SCHEMA_VERSION, persisted["version"]
+        )
         # The projection rides in the same write the version names.
         self.assertEqual(
             "turn",
@@ -6143,9 +6145,9 @@ class ParserAndStateTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, reason)
+        self.assertEqual(review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON, reason)
         self.assertEqual(
-            runner.REVIEW_FINDINGS_UNRESOLVED_REASON,
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON,
             payload["action_required"]["reason"],
         )
 
@@ -7428,7 +7430,7 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
             events.REVIEW_VERDICT_RETRY_EVENT,
             {
                 "session": session,
-                "fingerprint": runner._review_verdict_fingerprint(
+                "fingerprint": review_transitions.review_verdict_fingerprint(
                     {"reason": "malformed-review-artifact", "error": error}
                 ),
                 "failure_reason": "malformed-review-artifact",
@@ -7437,33 +7439,33 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
         )
 
     def test_fingerprint_folds_reason_and_error(self) -> None:
-        first = runner._review_verdict_fingerprint(
+        first = review_transitions.review_verdict_fingerprint(
             {"reason": "malformed-review", "error": "bad status line"}
         )
         self.assertEqual(
             first,
-            runner._review_verdict_fingerprint(
+            review_transitions.review_verdict_fingerprint(
                 {"reason": "malformed-review", "error": "bad status line"}
             ),
         )
         self.assertTrue(first.startswith("review-verdict:"))
         self.assertNotEqual(
             first,
-            runner._review_verdict_fingerprint(
+            review_transitions.review_verdict_fingerprint(
                 {"reason": "malformed-review", "error": "missing status line"}
             ),
         )
         self.assertNotEqual(
             first,
-            runner._review_verdict_fingerprint(
+            review_transitions.review_verdict_fingerprint(
                 {"reason": "review-missing", "error": "bad status line"}
             ),
         )
 
     def test_fingerprint_is_none_without_reason_or_error(self) -> None:
-        self.assertIsNone(runner._review_verdict_fingerprint({}))
+        self.assertIsNone(review_transitions.review_verdict_fingerprint({}))
         self.assertIsNone(
-            runner._review_verdict_fingerprint({"reason": "", "error": ""})
+            review_transitions.review_verdict_fingerprint({"reason": "", "error": ""})
         )
 
     def test_prior_retries_reset_at_each_review_cycle(self) -> None:
@@ -7471,7 +7473,9 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
         self._append(events.REVIEW_CYCLE_EVENT, {"cycle": 1})
         self._append_retry("3", "fresh error")
 
-        priors = runner._read_prior_review_verdict_retries(self.event_path, "3")
+        priors = review_transitions.read_prior_review_verdict_retries(
+            self.event_path, "3"
+        )
 
         self.assertEqual(["fresh error"], [p["error"] for p in priors])
 
@@ -7479,35 +7483,39 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
         self._append_retry("3", "other session error")
         self._append_retry("4", "target error")
 
-        priors = runner._read_prior_review_verdict_retries(self.event_path, "4")
+        priors = review_transitions.read_prior_review_verdict_retries(
+            self.event_path, "4"
+        )
 
         self.assertEqual(["target error"], [p["error"] for p in priors])
 
     def test_prior_retries_tolerate_a_missing_or_corrupt_log(self) -> None:
         self.assertEqual(
             [],
-            runner._read_prior_review_verdict_retries(self.event_path, "3"),
+            review_transitions.read_prior_review_verdict_retries(self.event_path, "3"),
         )
         self.event_path.write_text("not json\n\n", encoding="utf-8")
         self.assertEqual(
             [],
-            runner._read_prior_review_verdict_retries(self.event_path, "3"),
+            review_transitions.read_prior_review_verdict_retries(self.event_path, "3"),
         )
 
     def test_exhaustion_on_repeat_fingerprint_or_over_budget(self) -> None:
-        self.assertFalse(runner._is_review_verdict_repair_exhausted("fp-1", (), 1))
         self.assertFalse(
-            runner._is_review_verdict_repair_exhausted(
+            review_transitions.is_review_verdict_repair_exhausted("fp-1", (), 1)
+        )
+        self.assertFalse(
+            review_transitions.is_review_verdict_repair_exhausted(
                 "fp-2",
                 ("fp-1",),
                 review_transitions.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS,
             )
         )
         self.assertTrue(
-            runner._is_review_verdict_repair_exhausted("fp-1", ("fp-1",), 1)
+            review_transitions.is_review_verdict_repair_exhausted("fp-1", ("fp-1",), 1)
         )
         self.assertTrue(
-            runner._is_review_verdict_repair_exhausted(
+            review_transitions.is_review_verdict_repair_exhausted(
                 "fp-3",
                 ("fp-1", "fp-2"),
                 review_transitions.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS + 1,
@@ -7515,19 +7523,22 @@ class ReviewVerdictRepairHelperTests(unittest.TestCase):
         )
         # An unfingerprintable verdict still respects the attempt budget.
         self.assertTrue(
-            runner._is_review_verdict_repair_exhausted(
+            review_transitions.is_review_verdict_repair_exhausted(
                 None, (), review_transitions.MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS + 1
             )
         )
 
     def test_repair_references_quote_the_latest_error(self) -> None:
         self.assertEqual(
-            (), runner._review_verdict_repair_references(self.event_path, "3")
+            (),
+            review_transitions.review_verdict_repair_references(self.event_path, "3"),
         )
         self._append_retry("3", "first error")
         self._append_retry("3", "second error")
 
-        references = runner._review_verdict_repair_references(self.event_path, "3")
+        references = review_transitions.review_verdict_repair_references(
+            self.event_path, "3"
+        )
 
         joined = "\n".join(references)
         self.assertIn("attempt 2", joined)

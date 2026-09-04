@@ -31,6 +31,7 @@ from agent_session_loop import (
     plans,
     readiness_gate,
     run_control,
+    run_coordination,
     run_payloads,
     run_persistence,
     run_selection,
@@ -38,6 +39,7 @@ from agent_session_loop import (
     runner,
     state,
     supervisor_audit,
+    turn_execution,
     verification_transitions,
 )
 from agent_session_loop.assurance_models import RUBRIC_LANES, AuditRole
@@ -942,9 +944,11 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             ),
         )
 
-    def _context(self, payload: dict[str, object]) -> runner._TerminalAuditContext:
+    def _context(
+        self, payload: dict[str, object]
+    ) -> run_coordination.TerminalAuditContext:
         state_path = Path(str(payload["state_path"]))
-        return runner._TerminalAuditContext(
+        return run_coordination.TerminalAuditContext(
             plan=supervisor_audit.AuditPlan(
                 config=supervisor_audit.AuditConfig(harness="claude"),
                 role=AuditRole(
@@ -1042,7 +1046,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
         The terminal adjudicator is the sole exception, and it is exercised by
         ``test_an_unearned_success_is_refused_before_the_audit_runs``.
         """
-        for exit_code in (0, 1, runner.INTERRUPTED_EXIT):
+        for exit_code in (0, 1, turn_execution.INTERRUPTED_EXIT):
             with (
                 self.subTest(exit_code=exit_code),
                 tempfile.TemporaryDirectory() as tmp,
@@ -1257,14 +1261,14 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             self._stage_outcome(payload, "paused")
             with mock.patch.object(supervisor_audit, "audit_terminal_run", interrupt):
                 code = run_termination._terminalize_run(
-                    exit_code=runner.INTERRUPTED_EXIT,
+                    exit_code=turn_execution.INTERRUPTED_EXIT,
                     event_path=Path(str(payload["events_path"])),
                     payload=payload,
                     write_readiness_state=readiness_gate.write_readiness_state,
                     audit_context=self._context(payload),
                 )
 
-            self.assertEqual(runner.INTERRUPTED_EXIT, code)
+            self.assertEqual(turn_execution.INTERRUPTED_EXIT, code)
             assurance = payload["assurance"]
             self.assertEqual("unavailable", assurance["state"])
             self.assertEqual(supervisor_audit.REASON_INTERRUPTED, assurance["reason"])
@@ -1364,7 +1368,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             context = self._context(payload)
             abort = harnesses.AbortSignal()
             persistence = run_persistence._RunPersistence()
-            mailbox_poll = runner._MailboxPoll(
+            mailbox_poll = run_coordination.MailboxPoll(
                 plan_dir=plan_dir,
                 state_dir_arg=str(tmp_dir / "state"),
                 control_state=run_control.RunControlState(current_harness="codex"),

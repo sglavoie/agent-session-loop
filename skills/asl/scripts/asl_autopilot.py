@@ -71,6 +71,9 @@ from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     pause_policy as _pause_policy,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    plans as _plans,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     retry_hints as _retry_hints,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
@@ -80,13 +83,13 @@ from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     review_continuation as _review_continuation,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    review_transitions as _review_transitions,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     run_flags as _run_flags,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     run_inputs as _run_inputs,
-)
-from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
-    runner as _runner,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     state as _state,
@@ -159,8 +162,8 @@ HARNESS_NAMES = _harnesses.HARNESS_NAMES
 # Session kinds the runner stamps on `active_turn.session_kind`, re-exported for
 # the same reason. A dual-harness run alternates between them: implementation
 # legs run under `--harness`, review/rereview legs under `--review-harness`.
-SESSION_KIND_IMPLEMENTATION = _runner.SESSION_KIND_IMPLEMENTATION
-SESSION_KIND_REVIEW = _runner.SESSION_KIND_REVIEW
+SESSION_KIND_IMPLEMENTATION = _plans.SESSION_KIND_IMPLEMENTATION
+SESSION_KIND_REVIEW = _plans.SESSION_KIND_REVIEW
 
 # Every `asl` child this helper spawns is internal automation, not a direct
 # operator call, so its invocation trace is attributed to the helper.
@@ -3881,7 +3884,8 @@ def supervise_run(
         # `_attach_review_context` re-tags the result `review_findings`, which
         # carries the severity counts a bare `blocked` would throw away.
         if run_payload.get("ok") is False and (
-            run_payload.get("reason") != _runner.REVIEW_FINDINGS_UNRESOLVED_REASON
+            run_payload.get("reason")
+            != _review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON
         ):
             return run_result(
                 False,

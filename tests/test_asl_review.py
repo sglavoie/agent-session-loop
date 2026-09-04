@@ -37,6 +37,7 @@ from agent_session_loop import (
     review_repair,
     review_session_body,
     review_session_contract,
+    review_transitions,
     run_inputs,
     run_persistence,
     runner,
@@ -655,7 +656,7 @@ class StructuredReviewArtifactTests(unittest.TestCase):
                     review.GENERATED_REVIEW_SESSION_VERSION,
                     review.review_session_marker_version(body),
                 )
-                self.assertIn(runner.FINAL_REVIEW_ARTIFACT_FILENAME, body)
+                self.assertIn(review.FINAL_REVIEW_ARTIFACT_FILENAME, body)
             self.assertEqual(
                 contracts.parse_completion_contract(
                     full, session_id=session_id
@@ -676,9 +677,9 @@ class StructuredReviewArtifactTests(unittest.TestCase):
                 plan_dir=plan_dir,
             )
 
-            self.assertIn(runner.REVIEW_SESSION_MARKER, body)
+            self.assertIn(review.REVIEW_SESSION_MARKER, body)
             self.assertIn(review.review_session_version_marker(), body)
-            self.assertIn(runner.FINAL_REVIEW_ARTIFACT_FILENAME, body)
+            self.assertIn(review.FINAL_REVIEW_ARTIFACT_FILENAME, body)
             self.assertEqual(
                 review.GENERATED_REVIEW_SESSION_VERSION,
                 review.review_session_marker_version(body),
@@ -5312,10 +5313,10 @@ class ReviewRepairCycleTests(unittest.TestCase):
         )
         self.assertEqual(
             [
-                runner.SESSION_KIND_IMPLEMENTATION,
-                runner.SESSION_KIND_REVIEW,
-                runner.SESSION_KIND_IMPLEMENTATION,
-                runner.SESSION_KIND_REVIEW,
+                plans.SESSION_KIND_IMPLEMENTATION,
+                plans.SESSION_KIND_REVIEW,
+                plans.SESSION_KIND_IMPLEMENTATION,
+                plans.SESSION_KIND_REVIEW,
             ],
             [turn["session_kind"] for turn in payload["turns"]],
         )
@@ -5355,7 +5356,9 @@ class ReviewRepairCycleTests(unittest.TestCase):
 
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertFalse(payload["ok"])
-        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
+        self.assertEqual(
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"]
+        )
         self.assertEqual(
             review_continuation.REVIEW_CYCLE_DISPOSITION_REPEATED,
             payload["review_fix_disposition"],
@@ -5469,7 +5472,9 @@ class ReviewRepairCycleTests(unittest.TestCase):
 
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertFalse(payload["ok"])
-        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
+        self.assertEqual(
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"]
+        )
         self.assertEqual(0, payload["max_review_fix_cycles"])
         self.assertEqual(
             review_continuation.REVIEW_CYCLE_DISPOSITION_CYCLES_DISABLED,
@@ -5495,7 +5500,9 @@ class ReviewRepairCycleTests(unittest.TestCase):
 
         self.assertEqual(1, completed.returncode, completed.stderr)
         self.assertFalse(payload["ok"])
-        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
+        self.assertEqual(
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"]
+        )
         self.assertEqual(
             review_continuation.REVIEW_CYCLE_DISPOSITION_CAP_EXHAUSTED,
             payload["review_fix_disposition"],

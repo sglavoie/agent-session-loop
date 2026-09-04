@@ -24,7 +24,6 @@ from agent_session_loop import (
     prepare,
     review,
     review_delta,
-    runner,
     state,
     task_packet,
     verification_transitions,
@@ -2185,39 +2184,43 @@ class VerificationRepairLoopTests(unittest.TestCase):
         changed["failures"][0]["stdout_sha256"] = "def"
 
         self.assertEqual(
-            runner._verification_fingerprint(base),
-            runner._verification_fingerprint(same),
+            verification_transitions.verification_fingerprint(base),
+            verification_transitions.verification_fingerprint(same),
         )
         self.assertNotEqual(
-            runner._verification_fingerprint(base),
-            runner._verification_fingerprint(changed),
+            verification_transitions.verification_fingerprint(base),
+            verification_transitions.verification_fingerprint(changed),
         )
-        self.assertIsNone(runner._verification_fingerprint({"failures": []}))
-        self.assertIsNone(runner._verification_fingerprint(None))
+        self.assertIsNone(
+            verification_transitions.verification_fingerprint({"failures": []})
+        )
+        self.assertIsNone(verification_transitions.verification_fingerprint(None))
 
     def test_repair_exhaustion_decision(self) -> None:
         # An identical fingerprint that already appeared is exhausted.
         self.assertTrue(
-            runner._is_verification_repair_exhausted(
+            verification_transitions.is_verification_repair_exhausted(
                 "verify-failed:x", ("verify-failed:x",), 2
             )
         )
         # A changed fingerprint under the attempt cap stays eligible.
         self.assertFalse(
-            runner._is_verification_repair_exhausted(
+            verification_transitions.is_verification_repair_exhausted(
                 "verify-failed:y", ("verify-failed:x",), 2
             )
         )
         # Exceeding the attempt cap is exhausted regardless of fingerprint.
         self.assertTrue(
-            runner._is_verification_repair_exhausted(
+            verification_transitions.is_verification_repair_exhausted(
                 "verify-failed:z",
                 ("verify-failed:x", "verify-failed:y"),
                 verification_transitions.MAX_VERIFICATION_REPAIR_ATTEMPTS + 1,
             )
         )
         # No fingerprint on the first attempt is not exhausted.
-        self.assertFalse(runner._is_verification_repair_exhausted(None, (), 1))
+        self.assertFalse(
+            verification_transitions.is_verification_repair_exhausted(None, (), 1)
+        )
 
     def test_read_prior_verification_failures_filters_by_session(self) -> None:
         event_path = self.tmp_path / "events.jsonl"
@@ -2251,7 +2254,9 @@ class VerificationRepairLoopTests(unittest.TestCase):
         _pause("1", "timeout", "c")
         _pause("1", "verify-failed", "d")
 
-        priors = runner._read_prior_verification_failures(event_path, "1")
+        priors = verification_transitions.read_prior_verification_failures(
+            event_path, "1"
+        )
         self.assertEqual(2, len(priors))
         self.assertEqual(
             ["a", "d"], [p["failures"][0]["stdout_sha256"] for p in priors]

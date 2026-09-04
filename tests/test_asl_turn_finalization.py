@@ -21,11 +21,13 @@ from agent_session_loop import (
     review_continuation,
     review_session_body,
     review_session_contract,
+    review_transitions,
+    run_coordination,
     run_loop,
     run_persistence,
     run_termination,
-    runner,
     supervisor_audit,
+    turn_execution,
     turn_settlement,
     verification,
     verification_transitions,
@@ -39,6 +41,10 @@ from .support import (
 )
 
 ALIASES = tuple(alias for alias, _path, _origin in DEFAULT_MULTI_REPO_SPECS)
+
+#: Read at its owning module rather than spelled inline: the reason is 62
+#: characters and the fixture payloads that carry it nest five levels deep.
+DEFERRED_REASON = verification_transitions.REVIEW_BROAD_FAILURES_DEFERRED_REASON
 
 
 def set_handoff(session_path: Path, *, status: str, files_modified: str | None) -> None:
@@ -59,20 +65,20 @@ def set_handoff(session_path: Path, *, status: str, files_modified: str | None) 
 
 class TurnFinalizationShapeTests(unittest.TestCase):
     def test_finalization_carries_execution_state_only(self) -> None:
-        fields = tuple(runner.TurnFinalization.__dataclass_fields__)
+        fields = tuple(turn_execution.TurnFinalization.__dataclass_fields__)
         self.assertEqual(("result", "after", "plan_error", "turn_payload"), fields)
 
     def test_finalization_exposes_no_accepted_completion(self) -> None:
         public = [
             name
-            for name in vars(runner.TurnFinalization)
+            for name in vars(turn_execution.TurnFinalization)
             if not name.startswith("_")
-            and callable(getattr(runner.TurnFinalization, name, None))
+            and callable(getattr(turn_execution.TurnFinalization, name, None))
         ]
         self.assertEqual([], public)
 
     def test_execution_phase_never_announces_turn_finished(self) -> None:
-        source = inspect.getsource(runner._finalize_turn_execution)
+        source = inspect.getsource(turn_execution.finalize_turn_execution)
         self.assertIn("TURN_EXECUTION_FINISHED_EVENT", source)
         self.assertNotIn("turn_finished", source)
 
@@ -92,7 +98,7 @@ class TurnFinalizationShapeTests(unittest.TestCase):
         )
 
     def test_turn_result_is_written_durably(self) -> None:
-        source = inspect.getsource(runner._write_turn_artifacts)
+        source = inspect.getsource(turn_execution.write_turn_artifacts)
         self.assertIn(
             'durability.write_json_file(paths["result"], payload, durable=True)', source
         )
@@ -662,7 +668,7 @@ class BroadReviewGateTests(unittest.TestCase):
             str(check["name"])
             for check in checks
             if str(check["name"]).startswith(
-                f"{runner.BROAD_REVIEW_CHECK_PREFIX}:",
+                f"{verification_transitions.BROAD_REVIEW_CHECK_PREFIX}:",
             )
         ]
 
@@ -946,7 +952,7 @@ class TerminalAdjudicationTests(unittest.TestCase):
                 "acceptance": (
                     {
                         "accepted": True,
-                        "reason": runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
+                        "reason": DEFERRED_REASON,
                         "review_outcome": review.REVIEW_OUTCOME_FINDINGS,
                         "deferred_failure_count": len(checks),
                         "deferred_failure_names": list(checks),
@@ -1123,7 +1129,7 @@ class TerminalAdjudicationTests(unittest.TestCase):
                         "reason": "checks-failed",
                         "acceptance": {
                             "accepted": True,
-                            "reason": runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
+                            "reason": DEFERRED_REASON,
                             "review_outcome": review.REVIEW_OUTCOME_FINDINGS,
                             "deferred_failure_count": 2,
                             "deferred_failure_names": ["broad:1:suite"],
@@ -1237,8 +1243,10 @@ class TerminalAdjudicationTests(unittest.TestCase):
         payload = self.state(
             ok=False,
             paused=False,
-            reason=runner.REVIEW_FINDINGS_UNRESOLVED_REASON,
-            action_required={"reason": runner.REVIEW_FINDINGS_UNRESOLVED_REASON},
+            reason=review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON,
+            action_required={
+                "reason": review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON
+            },
         )
 
         adjudication = self.adjudicate(payload)
@@ -1246,7 +1254,8 @@ class TerminalAdjudicationTests(unittest.TestCase):
         self.assertTrue(adjudication.blocked)
         self.assertFalse(adjudication.claimed_ok)
         self.assertEqual(
-            runner.REVIEW_FINDINGS_UNRESOLVED_REASON, adjudication.claimed_reason
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON,
+            adjudication.claimed_reason,
         )
         self.assertEqual(
             verification_transitions.REQUIRED_CHECKS_INCOMPLETE_REASON,
@@ -1254,7 +1263,7 @@ class TerminalAdjudicationTests(unittest.TestCase):
         )
         # The narrower reason the review path recorded is not lost to the pause.
         self.assertEqual(
-            runner.REVIEW_FINDINGS_UNRESOLVED_REASON,
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON,
             payload["action_required"]["reason"],
         )
 
@@ -1264,7 +1273,7 @@ class TerminalAdjudicationTests(unittest.TestCase):
         payload = self.state(
             ok=False,
             paused=False,
-            reason=runner.REVIEW_FINDINGS_UNRESOLVED_REASON,
+            reason=review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON,
             review_requested=True,
             review_completed=True,
         )
@@ -1273,7 +1282,9 @@ class TerminalAdjudicationTests(unittest.TestCase):
 
         self.assertFalse(adjudication.blocked)
         self.assertFalse(payload["paused"])
-        self.assertEqual(runner.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"])
+        self.assertEqual(
+            review_transitions.REVIEW_FINDINGS_UNRESOLVED_REASON, payload["reason"]
+        )
 
     def test_a_dry_run_claimed_nothing_and_is_not_adjudicated(self) -> None:
         self.record_deferral()
@@ -1365,7 +1376,9 @@ class DegradedAssuranceTests(unittest.TestCase):
         ).to_dict()
 
     def record(self, payload: dict[str, Any]) -> None:
-        runner._record_degraded_assurance(payload, persistence=self.persistence)
+        run_coordination.record_degraded_assurance(
+            payload, persistence=self.persistence
+        )
 
     def test_an_audit_that_could_not_speak_degrades_a_success(self) -> None:
         payload = {

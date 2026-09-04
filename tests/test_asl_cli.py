@@ -58,6 +58,7 @@ from agent_session_loop import (
     state,
     supervisor_guide,
     task_packet,
+    turn_execution,
     verification,
     workbench,
     workbench_server,
@@ -361,7 +362,7 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertNotIn('"type": "system"', result.stdout)
         self.assertEqual(
             "complete",
-            runner._extract_prefixed_line(
+            turn_execution.extract_prefixed_line(
                 result.stdout,
                 events.RUNNER_STATUS_PREFIX,
             ),
@@ -375,7 +376,7 @@ class CommandAndConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             "complete",
-            runner._runner_signals(result)["runner_status"],
+            turn_execution.runner_signals(result)["runner_status"],
         )
         self.assertEqual(
             {
@@ -384,7 +385,7 @@ class CommandAndConfigTests(unittest.TestCase):
                 "source": "stdout",
                 "matched": events.RUNNER_PAUSE_PREFIX,
             },
-            runner._live_action_signal(
+            turn_execution.live_action_signal(
                 "stdout",
                 "claude text: RUNNER_PAUSE: unsafe - wait\n",
             ),
@@ -408,16 +409,16 @@ class CommandAndConfigTests(unittest.TestCase):
             last_message="Runner status: complete\n",
         )
 
-        signals = runner._runner_signals(result)
+        signals = turn_execution.runner_signals(result)
         self.assertEqual("complete", signals["runner_status"])
         self.assertEqual("last_message", signals["runner_status_source"])
         self.assertNotIn("runner_pause", signals)
         self.assertEqual(
             "complete",
-            runner._turn_status_result(
+            turn_execution.turn_status_result(
                 result=result,
                 status_changes=(
-                    runner._session_status_change_payload(
+                    plans.session_status_change_payload(
                         "9",
                         before="pending",
                         after="complete",
@@ -443,7 +444,7 @@ class CommandAndConfigTests(unittest.TestCase):
             last_message="",
         )
 
-        signals = runner._runner_signals(result)
+        signals = turn_execution.runner_signals(result)
         self.assertEqual(
             {"runner_status": "complete", "runner_status_source": "stdout"},
             signals,
@@ -460,11 +461,11 @@ class CommandAndConfigTests(unittest.TestCase):
             last_message="",
         )
 
-        signals = runner._runner_signals(result)
+        signals = turn_execution.runner_signals(result)
         self.assertNotIn("runner_status", signals)
         self.assertNotIn("runner_pause", signals)
         self.assertEqual(
-            runner.RUNNER_STATUS_SOURCE_ABSENT,
+            turn_execution.RUNNER_STATUS_SOURCE_ABSENT,
             signals["runner_status_source"],
         )
         self.assertEqual(
@@ -477,10 +478,10 @@ class CommandAndConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             "complete",
-            runner._turn_status_result(
+            turn_execution.turn_status_result(
                 result=result,
                 status_changes=(
-                    runner._session_status_change_payload(
+                    plans.session_status_change_payload(
                         "9",
                         before="pending",
                         after="complete",
@@ -493,7 +494,7 @@ class CommandAndConfigTests(unittest.TestCase):
             ),
         )
 
-        trusted = runner._runner_signals(
+        trusted = turn_execution.runner_signals(
             harnesses.HarnessResult(
                 name="codex",
                 argv=["codex"],
@@ -510,13 +511,13 @@ class CommandAndConfigTests(unittest.TestCase):
 
     def test_live_action_signal_ignores_stderr_runner_pause_text(self) -> None:
         self.assertIsNone(
-            runner._live_action_signal(
+            turn_execution.live_action_signal(
                 "stderr",
                 "RUNNER_PAUSE: unsafe - quoted skill instructions\n",
             )
         )
         self.assertIsNotNone(
-            runner._live_action_signal(
+            turn_execution.live_action_signal(
                 "stderr",
                 "approval required before continuing\n",
             )
@@ -527,19 +528,19 @@ class CommandAndConfigTests(unittest.TestCase):
         # approval-handling code streamed its own diff, and the substring match
         # read it as the run stopping for a human.
         self.assertIsNone(
-            runner._live_action_signal(
+            turn_execution.live_action_signal(
                 "stderr",
                 '+    "message": "approval required before continuing",\n',
             )
         )
         self.assertIsNone(
-            runner._live_action_signal(
+            turn_execution.live_action_signal(
                 "stderr",
                 '-    "message": "needs approval",\n',
             )
         )
         self.assertIsNone(
-            runner._live_action_signal(
+            turn_execution.live_action_signal(
                 "stderr",
                 '     "detail": "requires approval"\n',
             )
@@ -547,13 +548,13 @@ class CommandAndConfigTests(unittest.TestCase):
 
     def test_a_prompt_on_its_own_line_still_asks(self) -> None:
         self.assertIsNotNone(
-            runner._live_action_signal(
+            turn_execution.live_action_signal(
                 "stderr",
                 "Approval required: run npm install?\n",
             )
         )
         self.assertIsNotNone(
-            runner._live_action_signal(
+            turn_execution.live_action_signal(
                 "stderr",
                 "building the bundle\nwaiting for approval\nstill waiting\n",
             )
@@ -571,17 +572,17 @@ class CommandAndConfigTests(unittest.TestCase):
             last_message="Runner status: complete\nRUNNER_PAUSE: none\n",
         )
 
-        signals = runner._runner_signals(result)
+        signals = turn_execution.runner_signals(result)
         self.assertEqual("complete", signals["runner_status"])
         self.assertEqual("last_message", signals["runner_status_source"])
         self.assertNotIn("runner_pause", signals)
         self.assertNotIn("runner_pause_source", signals)
         self.assertEqual(
             "complete",
-            runner._turn_status_result(
+            turn_execution.turn_status_result(
                 result=result,
                 status_changes=(
-                    runner._session_status_change_payload(
+                    plans.session_status_change_payload(
                         "9",
                         before="pending",
                         after="complete",
@@ -607,7 +608,7 @@ class CommandAndConfigTests(unittest.TestCase):
             ),
         )
 
-        signals = runner._runner_signals(result)
+        signals = turn_execution.runner_signals(result)
         self.assertEqual(
             "blocked - interactive decision gates",
             signals["runner_pause"],
@@ -615,9 +616,11 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual("last_message", signals["runner_pause_source"])
 
     def test_live_action_signal_ignores_noop_runner_pause(self) -> None:
-        self.assertIsNone(runner._live_action_signal("stdout", "RUNNER_PAUSE: none\n"))
+        self.assertIsNone(
+            turn_execution.live_action_signal("stdout", "RUNNER_PAUSE: none\n")
+        )
         self.assertIsNotNone(
-            runner._live_action_signal(
+            turn_execution.live_action_signal(
                 "stdout",
                 "RUNNER_PAUSE: blocked - needs input\n",
             )
@@ -1486,7 +1489,7 @@ class CommandAndConfigTests(unittest.TestCase):
             commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS,
             cli._COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS,
         )
-        self.assertEqual(runner.INTERRUPTED_EXIT, cli._INTERRUPTED_EXIT)
+        self.assertEqual(turn_execution.INTERRUPTED_EXIT, cli._INTERRUPTED_EXIT)
         self.assertEqual(bridge.PROTOCOL_VERSION, cli._BRIDGE_PROTOCOL_VERSION)
 
     def test_main_returns_interrupted_exit_on_keyboard_interrupt(self) -> None:
@@ -1810,17 +1813,17 @@ class CommandAndConfigTests(unittest.TestCase):
             )
 
     def test_review_session_kind_constants(self) -> None:
-        self.assertEqual("implementation", runner.SESSION_KIND_IMPLEMENTATION)
-        self.assertEqual("review", runner.SESSION_KIND_REVIEW)
+        self.assertEqual("implementation", plans.SESSION_KIND_IMPLEMENTATION)
+        self.assertEqual("review", plans.SESSION_KIND_REVIEW)
         self.assertEqual(
             (
-                runner.SESSION_KIND_IMPLEMENTATION,
-                runner.SESSION_KIND_REVIEW,
+                plans.SESSION_KIND_IMPLEMENTATION,
+                plans.SESSION_KIND_REVIEW,
             ),
-            runner.SESSION_KINDS,
+            plans.SESSION_KINDS,
         )
-        self.assertEqual("final-review.md", runner.FINAL_REVIEW_FILENAME)
-        self.assertIn("asl:generated-review-session", runner.REVIEW_SESSION_MARKER)
+        self.assertEqual("final-review.md", review.FINAL_REVIEW_FILENAME)
+        self.assertIn("asl:generated-review-session", review.REVIEW_SESSION_MARKER)
 
     def test_review_pause_reasons_are_registered(self) -> None:
         self.assertIn("review-harness-required", events.PAUSE_REASONS)
@@ -1838,7 +1841,7 @@ class CommandAndConfigTests(unittest.TestCase):
             [
                 "# Session 7: Final Review",
                 "",
-                runner.REVIEW_SESSION_MARKER,
+                review.REVIEW_SESSION_MARKER,
                 "",
                 "## Handoff",
                 "",
@@ -1868,7 +1871,7 @@ class CommandAndConfigTests(unittest.TestCase):
             review_path = plan_dir / "session-7.md"
             other_path = plan_dir / "session-1.md"
             review_path.write_text(
-                f"# Review\n\n{runner.REVIEW_SESSION_MARKER}\n",
+                f"# Review\n\n{review.REVIEW_SESSION_MARKER}\n",
                 encoding="utf-8",
             )
             other_path.write_text("# Session 1\n", encoding="utf-8")
@@ -1890,7 +1893,7 @@ class CommandAndConfigTests(unittest.TestCase):
             plan_dir = Path(tmp)
 
             self.assertEqual(
-                plan_dir / runner.FINAL_REVIEW_FILENAME,
+                plan_dir / review.FINAL_REVIEW_FILENAME,
                 review_session_contract.final_review_output_path(plan_dir),
             )
 
@@ -2010,9 +2013,9 @@ class CommandAndConfigTests(unittest.TestCase):
                 plan_dir=plan_dir,
             )
 
-            self.assertIn(runner.REVIEW_SESSION_MARKER, body)
+            self.assertIn(review.REVIEW_SESSION_MARKER, body)
             self.assertIn("claude", body)
-            self.assertIn(runner.FINAL_REVIEW_FILENAME, body)
+            self.assertIn(review.FINAL_REVIEW_FILENAME, body)
             self.assertIn("three distinct source, documentation, or test", body)
             self.assertIn("review-oriented section heading", body)
             self.assertIn("valid `Status:` verdict line", body)
@@ -2167,7 +2170,7 @@ class CommandAndConfigTests(unittest.TestCase):
             session_file, _ = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
-            (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
                 (
                     "## Findings\n"
                     "- Reviewed agent_session_loop/runner.py for generated review "
@@ -2180,7 +2183,7 @@ class CommandAndConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (plan_dir / runner.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
+            (plan_dir / review.FINAL_REVIEW_ARTIFACT_FILENAME).write_text(
                 json.dumps({"version": 2, "outcome": "all-clear", "findings": []}),
                 encoding="utf-8",
             )
@@ -2202,7 +2205,7 @@ class CommandAndConfigTests(unittest.TestCase):
             session_file, _ = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
-            (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
                 "   \n\n  \t\n", encoding="utf-8"
             )
 
@@ -2223,7 +2226,7 @@ class CommandAndConfigTests(unittest.TestCase):
             session_file, _ = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
-            (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
                 (
                     "## Findings\n"
                     "- Reviewed agent_session_loop/runner.py for generated review "
@@ -2253,7 +2256,7 @@ class CommandAndConfigTests(unittest.TestCase):
             session_file, _ = review_session_body.ensure_generated_review_session(
                 plan_dir, review_harness="claude"
             )
-            (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
                 "Looks good overall.\nNo issues found.\n", encoding="utf-8"
             )
 

@@ -45,6 +45,7 @@ from agent_session_loop import (
     state,
     supervisor_audit,
     verification,
+    verification_transitions,
 )
 from agent_session_loop.assurance_models import (
     AUDIT_MARKDOWN_FILENAME,
@@ -71,6 +72,10 @@ from agent_session_loop.assurance_projection import CatalogEntry, IdentityCatalo
 from tests.support import git_stdout, init_git_repo, write_plan
 
 RUN_ID = "20260810T101112123456Z-4242"
+
+#: Read at its owning module rather than spelled inline: the reason is 62
+#: characters and the fixture payloads that carry it nest three levels deep.
+DEFERRED_REASON = verification_transitions.REVIEW_BROAD_FAILURES_DEFERRED_REASON
 
 
 def _parse(tokens: list[str]) -> argparse.Namespace:
@@ -3368,7 +3373,7 @@ class ValidatorDiagnosticProjectionTests(_RunHistoryFixture, unittest.TestCase):
         for a gate the runner generated.
         """
         _, plan_dir, _, run_dir = history
-        review_path = plan_dir / runner.FINAL_REVIEW_FILENAME
+        review_path = plan_dir / review.FINAL_REVIEW_FILENAME
         review_path.write_text("no heading anywhere here\n", encoding="utf-8")
         payload = next(
             item
@@ -4682,7 +4687,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             "diagnostic_failures": [],
             "acceptance": {
                 "accepted": True,
-                "reason": runner.REVIEW_BROAD_FAILURES_DEFERRED_REASON,
+                "reason": DEFERRED_REASON,
                 "review_outcome": "findings",
                 "deferred_failure_count": len(names),
                 "deferred_failure_names": names,

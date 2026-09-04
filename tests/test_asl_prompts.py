@@ -19,12 +19,14 @@ from agent_session_loop import (
     claude_stream,
     harnesses,
     mailbox,
+    mailbox_rendering,
     plans,
     qna,
+    review,
     run_prompts,
     run_selection,
-    runner,
     task_packet,
+    turn_execution,
     workspaces,
 )
 from tests.support import (
@@ -157,16 +159,16 @@ class TaskPacketBuilderTests(unittest.TestCase):
         implementation = task_packet.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9"
         )
-        review = task_packet.build_task_packet(
+        review_packet = task_packet.build_task_packet(
             "codex",
             self.PLAN_DIR,
             session_id="9",
-            session_kind=runner.SESSION_KIND_REVIEW,
+            session_kind=plans.SESSION_KIND_REVIEW,
         )
 
         self.assertFalse(implementation.is_review)
-        self.assertTrue(review.is_review)
-        rendered = review.render()
+        self.assertTrue(review_packet.is_review)
+        rendered = review_packet.render()
         self.assertIn("You are an autonomous ASL reviewer", rendered)
         self.assertNotIn("You are an autonomous ASL worker", rendered)
         self.assertIn("## Read before reviewing", rendered)
@@ -175,8 +177,8 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertNotIn("## Implement\n", rendered)
         self.assertIn("Judge the work; do not repair it", rendered)
         self.assertIn("run focused read-only checks", rendered)
-        self.assertIn(runner.FINAL_REVIEW_FILENAME, rendered)
-        self.assertIn(runner.FINAL_REVIEW_ARTIFACT_FILENAME, rendered)
+        self.assertIn(review.FINAL_REVIEW_FILENAME, rendered)
+        self.assertIn(review.FINAL_REVIEW_ARTIFACT_FILENAME, rendered)
         self.assertIn("a fix is not yours to write", rendered)
         self.assertIn("as a finding with its own repair group", rendered)
 
@@ -187,7 +189,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             )
 
     def test_packet_states_runner_signal_protocol(self) -> None:
-        for kind in (runner.SESSION_KIND_IMPLEMENTATION, runner.SESSION_KIND_REVIEW):
+        for kind in (plans.SESSION_KIND_IMPLEMENTATION, plans.SESSION_KIND_REVIEW):
             with self.subTest(kind=kind):
                 rendered = task_packet.build_task_packet(
                     "codex", self.PLAN_DIR, session_id="9", session_kind=kind
@@ -501,7 +503,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             plan_dir = Path(tmp) / "plan"
             state_dir = Path(tmp) / "state"
             plan_dir.mkdir()
-            pending_count = runner.MAX_RENDERED_GUIDANCE + 3
+            pending_count = mailbox_rendering.MAX_RENDERED_GUIDANCE + 3
             appended = [
                 mailbox.append_guidance(
                     plan_dir,
@@ -530,19 +532,22 @@ class TaskPacketBuilderTests(unittest.TestCase):
             rendered_records = [json.loads(line) for line in lines[begin + 1 : end]]
 
             self.assertEqual(
-                runner.MAX_RENDERED_GUIDANCE,
+                mailbox_rendering.MAX_RENDERED_GUIDANCE,
                 len(rendered_records),
             )
             self.assertEqual(
-                [message.id for message in appended[-runner.MAX_RENDERED_GUIDANCE :]],
+                [
+                    message.id
+                    for message in appended[-mailbox_rendering.MAX_RENDERED_GUIDANCE :]
+                ],
                 [record["id"] for record in rendered_records],
             )
             self.assertNotIn(appended[0].text, rendered)
-            omitted_count = pending_count - runner.MAX_RENDERED_GUIDANCE
+            omitted_count = pending_count - mailbox_rendering.MAX_RENDERED_GUIDANCE
             self.assertIn(
                 f"{omitted_count} older pending guidance records were omitted "
-                f"from this prompt by the {runner.MAX_RENDERED_GUIDANCE}-record "
-                "rendering cap.",
+                "from this prompt by the "
+                f"{mailbox_rendering.MAX_RENDERED_GUIDANCE}-record rendering cap.",
                 rendered,
             )
             read_command = run_prompts._mailbox_read_command_text(
@@ -573,7 +578,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             plan_dir.mkdir()
             oversized = mailbox.append_guidance(
                 plan_dir,
-                "x" * (runner.MAX_RENDERED_GUIDANCE_BYTES + 1024),
+                "x" * (mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES + 1024),
                 state_dir=state_dir,
             )
             pending = run_selection._pending_guidance_snapshot(
@@ -600,7 +605,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             guidance_section = "\n".join(lines[section_begin:section_end])
             self.assertLessEqual(
                 len(guidance_section.encode("utf-8")),
-                runner.MAX_RENDERED_GUIDANCE_BYTES,
+                mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES,
             )
 
             jsonl_begin = lines.index(run_prompts.MAILBOX_GUIDANCE_BEGIN)
@@ -609,7 +614,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             self.assertNotIn(oversized.text, rendered)
             self.assertIn(
                 "1 pending guidance record exceeded the "
-                f"{runner.MAX_RENDERED_GUIDANCE_BYTES:,}-byte budget on its "
+                f"{mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES:,}-byte budget on its "
                 f"own and was omitted in full: seq {oversized.seq} "
                 f"(id {oversized.id}).",
                 rendered,
@@ -661,7 +666,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             ]
             oversized = mailbox.append_guidance(
                 plan_dir,
-                "x" * (runner.MAX_RENDERED_GUIDANCE_BYTES + 1024),
+                "x" * (mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES + 1024),
                 state_dir=state_dir,
             )
             pending = run_selection._pending_guidance_snapshot(
@@ -692,7 +697,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             self.assertNotIn(oversized.text, rendered)
             self.assertIn(
                 "1 pending guidance record exceeded the "
-                f"{runner.MAX_RENDERED_GUIDANCE_BYTES:,}-byte budget on its "
+                f"{mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES:,}-byte budget on its "
                 f"own and was omitted in full: seq {oversized.seq} "
                 f"(id {oversized.id}).",
                 rendered,
@@ -711,7 +716,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
                     f"{index:02d}-" + ("x" * 4096),
                     state_dir=state_dir,
                 )
-                for index in range(runner.MAX_RENDERED_GUIDANCE)
+                for index in range(mailbox_rendering.MAX_RENDERED_GUIDANCE)
             ]
             pending = run_selection._pending_guidance_snapshot(
                 enabled=True,
@@ -737,7 +742,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             guidance_section = "\n".join(lines[section_begin:section_end])
             self.assertLessEqual(
                 len(guidance_section.encode("utf-8")),
-                runner.MAX_RENDERED_GUIDANCE_BYTES,
+                mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES,
             )
 
             jsonl_begin = lines.index(run_prompts.MAILBOX_GUIDANCE_BEGIN)
@@ -748,7 +753,7 @@ class TaskPacketBuilderTests(unittest.TestCase):
             rendered_ids = [record["id"] for record in rendered_records]
             self.assertLess(
                 len(rendered_ids),
-                runner.MAX_RENDERED_GUIDANCE,
+                mailbox_rendering.MAX_RENDERED_GUIDANCE,
             )
             self.assertEqual(
                 [message.id for message in appended[-len(rendered_ids) :]],
@@ -1239,7 +1244,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
             context=self._make_context(),
         )
 
-        sanitized = runner._sanitize_resolution_argv(
+        sanitized = turn_execution.sanitize_resolution_argv(
             ["codex", "exec", prompt],
             full_prompt=prompt,
             action=mailbox.RESOLUTION_ACTION_CONTINUE,
@@ -1272,7 +1277,7 @@ class ResolutionPromptBuilderTests(unittest.TestCase):
 
         for resolution_source in invalid_sources:
             with self.subTest(resolution_source=resolution_source):
-                sanitized = runner._persisted_result_argv(
+                sanitized = turn_execution.persisted_result_argv(
                     ["codex", "exec", prompt],
                     live_turn={
                         "prompt_kind": "resolution",

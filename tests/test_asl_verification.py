@@ -30,11 +30,12 @@ from agent_session_loop import (
     contracts,
     plans,
     process_tree,
+    review,
     review_session_body,
     review_session_contract,
     run_persistence,
-    runner,
     verification,
+    verification_transitions,
 )
 from tests.support import (
     DEFAULT_MULTI_REPO_SPECS,
@@ -1747,7 +1748,7 @@ class VerificationExecutorTests(unittest.TestCase):
         """ASI-105 end to end against the real generated gate."""
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = plans.canonicalize_path(Path(tmp))
-            review_path = plan_dir / runner.FINAL_REVIEW_FILENAME
+            review_path = plan_dir / review.FINAL_REVIEW_FILENAME
             review_path.write_text("no heading anywhere here\n", encoding="utf-8")
             contract = self._materialized_review_contract(plan_dir)
             check = next(
@@ -1806,7 +1807,7 @@ class VerificationExecutorTests(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = plans.canonicalize_path(Path(tmp))
-            (plan_dir / runner.FINAL_REVIEW_FILENAME).write_text(
+            (plan_dir / review.FINAL_REVIEW_FILENAME).write_text(
                 "no heading\n", encoding="utf-8"
             )
             authentic = self._materialized_review_contract(plan_dir)
@@ -2329,7 +2330,7 @@ class ParallelVerificationTests(unittest.TestCase):
         def details(
             result: verification.VerificationResult, parallel_flag: bool
         ) -> dict:
-            payload = runner._verification_failure_details(
+            payload = verification_transitions.verification_failure_details(
                 result, self._contract(checks, parallel=parallel_flag)
             )
             for row in [*payload["checks"], *payload["failures"]]:
@@ -2346,10 +2347,12 @@ class ParallelVerificationTests(unittest.TestCase):
             json.dumps(parallel_details, sort_keys=True),
         )
         self.assertEqual(
-            runner._verification_fingerprint(sequential_details),
-            runner._verification_fingerprint(parallel_details),
+            verification_transitions.verification_fingerprint(sequential_details),
+            verification_transitions.verification_fingerprint(parallel_details),
         )
-        self.assertIsNotNone(runner._verification_fingerprint(parallel_details))
+        self.assertIsNotNone(
+            verification_transitions.verification_fingerprint(parallel_details)
+        )
 
     def test_keyboard_interrupt_cancels_pending_checks_and_re_raises(self) -> None:
         total = 6

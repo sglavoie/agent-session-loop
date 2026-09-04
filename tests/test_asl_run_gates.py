@@ -24,6 +24,7 @@ from typing import Any, cast
 from unittest import mock
 
 from agent_session_loop import (
+    agent_mux_delivery,
     baseline,
     cli,
     config,
@@ -4944,7 +4945,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
         ):
             exit_code, payload = self._invoke_run_locked()
 
-        self.assertEqual(runner.INTERRUPTED_EXIT, exit_code)
+        self.assertEqual(turn_execution.INTERRUPTED_EXIT, exit_code)
         self.assertTrue(payload["paused"])
         self.assertEqual("interrupted", payload["pause_reason"])
         self.assertIn("verification", payload["pause_message"])
@@ -5009,7 +5010,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
         ):
             exit_code, payload = self._invoke_run_locked()
 
-        self.assertEqual(runner.INTERRUPTED_EXIT, exit_code)
+        self.assertEqual(turn_execution.INTERRUPTED_EXIT, exit_code)
         self.assertTrue(payload["paused"])
         self.assertEqual("interrupted", payload["pause_reason"])
         self.assertEqual("run interrupted by user", payload["pause_message"])
@@ -5275,7 +5276,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         verification_heartbeats = [
             hook_payload
             for event, hook_payload in zip(notified_events, hook_payloads, strict=False)
-            if event == runner.AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT
+            if event == agent_mux_delivery.VERIFICATION_HEARTBEAT_EVENT
         ]
         self.assertGreaterEqual(
             len(verification_heartbeats),
@@ -5292,13 +5293,13 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         ]
         self.assertEqual(
             [
-                runner.AGENT_MUX_START_EVENT,
-                runner.AGENT_MUX_TURN_START_EVENT,
-                runner.AGENT_MUX_VERIFICATION_START_EVENT,
-                runner.AGENT_MUX_VERIFICATION_HEARTBEAT_EVENT,
-                runner.AGENT_MUX_VERIFICATION_FINISH_EVENT,
-                runner.AGENT_MUX_TURN_FINISH_EVENT,
-                runner.AGENT_MUX_FINISH_EVENT,
+                agent_mux_delivery.START_EVENT,
+                agent_mux_delivery.TURN_START_EVENT,
+                agent_mux_delivery.VERIFICATION_START_EVENT,
+                agent_mux_delivery.VERIFICATION_HEARTBEAT_EVENT,
+                agent_mux_delivery.VERIFICATION_FINISH_EVENT,
+                agent_mux_delivery.TURN_FINISH_EVENT,
+                agent_mux_delivery.FINISH_EVENT,
             ],
             collapsed_events,
         )
@@ -5309,7 +5310,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         for event, hook_payload in zip(notified_events, hook_payloads, strict=False):
             self.assertEqual(run_id, hook_payload["run_id"])
             self.assertEqual(
-                runner.AGENT_MUX_PHASE_BY_EVENT[event],
+                agent_mux_delivery.PHASE_BY_EVENT[event],
                 hook_payload["phase"],
             )
             self.assertEqual(

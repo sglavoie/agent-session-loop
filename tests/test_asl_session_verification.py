@@ -66,11 +66,12 @@ ENFORCEMENT_FUNCTIONS = (
     "_enforce_session_verification",
 )
 
-#: The four constants the session file listed alongside the functions. They are
-#: re-export aliases owned by the two transition modules, not definitions, so
-#: this session rewrote their readers and left the alias lines for Session 38 --
-#: the value has to keep resolving to the owner's, not to a second copy.
-REEXPORTED_CONSTANTS = {
+#: The four constants the session file listed alongside the functions, mapped
+#: to the transition module that owns each. This module defines none of them --
+#: a second copy here would fork a repair budget the owners adjudicate against
+#: theirs -- and since Session 38 retired the runner's re-export lines the
+#: runner holds none of them either, so the owner is the only place to read one.
+OWNED_CONSTANTS = {
     "MAX_VERIFICATION_REPAIR_ATTEMPTS": verification_transitions,
     "VERIFICATION_FINGERPRINT_PREFIX": verification_transitions,
     "MAX_REVIEW_VERDICT_REPAIR_ATTEMPTS": review_transitions,
@@ -172,12 +173,17 @@ class SessionVerificationBoundaryTests(unittest.TestCase):
             for target in node.targets
             if isinstance(target, ast.Name)
         }
-        self.assertEqual(set(), assigned & set(REEXPORTED_CONSTANTS))
+        self.assertEqual(set(), assigned & set(OWNED_CONSTANTS))
 
-    def test_the_runner_alias_still_resolves_to_the_owning_module(self) -> None:
-        for name, owner in REEXPORTED_CONSTANTS.items():
+    def test_the_runner_keeps_no_alias_for_the_owned_constants(self) -> None:
+        # Session 23 rewrote the readers and left the runner's alias lines
+        # standing so `runner.MAX_VERIFICATION_REPAIR_ATTEMPTS` kept resolving;
+        # Session 38 deleted them with the other 222. The owner still holds the
+        # name, so a re-export restored here to rescue a stale spelling fails.
+        for name, owner in OWNED_CONSTANTS.items():
             with self.subTest(name=name):
-                self.assertIs(getattr(runner, name), getattr(owner, name))
+                self.assertFalse(hasattr(runner, name))
+                self.assertTrue(hasattr(owner, name))
 
     def test_each_function_makes_exactly_the_durable_writes_it_declares(self) -> None:
         observed: dict[str, frozenset[str]] = {}

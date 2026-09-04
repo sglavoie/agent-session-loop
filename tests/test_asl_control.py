@@ -51,11 +51,11 @@ from agent_session_loop import (
     review_session_body,
     run_commit,
     run_control,
+    run_coordination,
     run_loop,
     run_persistence,
     run_selection,
     run_termination,
-    runner,
     state,
     supervision_liveness,
     turn_execution,
@@ -2716,7 +2716,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
 
         self.payload: dict[str, object] = {
             "run_id": "test-run",
-            "control": runner._initial_control_payload(),
+            "control": run_coordination.initial_control_payload(),
             "harness": "codex",
         }
         self.control_payload = dict(self.payload["control"])  # type: ignore[arg-type]
@@ -2733,7 +2733,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         finalization: bool = False,
     ) -> tuple[control_queue.DrainResult, set[str]]:
         seen = set() if seen_ids is None else seen_ids
-        result = runner._drain_external_control_queue(
+        result = run_coordination.drain_external_control_queue(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
             control_state=control_state,
@@ -2927,7 +2927,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         self.assertIsNotNone(action)
         assert action is not None
 
-        runner._record_run_control_action(
+        run_coordination.record_run_control_action(
             event_path=self.event_path,
             payload=self.payload,
             control_payload=self.control_payload,
@@ -2968,7 +2968,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         )
         self.assertIsNotNone(clear_action)
         assert clear_action is not None
-        runner._record_run_control_action(
+        run_coordination.record_run_control_action(
             event_path=self.event_path,
             payload=self.payload,
             control_payload=self.control_payload,
@@ -3125,7 +3125,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
             control_queue.DEFAULT_ABORT_GRACE_SECONDS,
             self.control_payload["abort_grace_seconds"],
         )
-        self.assertEqual(runner.ABORT_TURN_DEFAULT_REASON, abort.reason)
+        self.assertEqual(run_coordination.ABORT_TURN_DEFAULT_REASON, abort.reason)
 
     def test_abort_appends_mailbox_guidance_naming_the_deadline(self) -> None:
         self.queue_abort(grace_seconds=15, reason="rebooting the host")
@@ -3169,7 +3169,7 @@ class ControlQueueDrainInRunnerTests(unittest.TestCase):
         self.queue_abort(grace_seconds=5)
         abort = harnesses.AbortSignal()
         with mock.patch.object(
-            runner.mailbox,
+            mailbox,
             "append_guidance",
             side_effect=OSError("read-only mailbox"),
         ):
@@ -3327,7 +3327,7 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
                 stderr="",
             )
 
-        real_turn_paths = runner._turn_paths
+        real_turn_paths = turn_execution.turn_paths
         turn_paths_calls = 0
 
         def fake_turn_paths(*args: object, **kwargs: object):
@@ -3633,7 +3633,7 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 stderr="",
             )
 
-        real_turn_paths = runner._turn_paths
+        real_turn_paths = turn_execution.turn_paths
         turn_paths_calls = 0
 
         def fake_turn_paths(*args: object, **kwargs: object):
@@ -4023,11 +4023,11 @@ class MailboxPollTests(unittest.TestCase):
         self.event_path = self.tmp / "events.jsonl"
         self.payload: dict[str, object] = {
             "run_id": "run-1",
-            "control": runner._initial_control_payload(),
+            "control": run_coordination.initial_control_payload(),
         }
         self.control_payload = dict(self.payload["control"])  # type: ignore[arg-type]
         self.persistence = run_persistence._RunPersistence()
-        self.poll = runner._MailboxPoll(
+        self.poll = run_coordination.MailboxPoll(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
             control_state=run_control.RunControlState(current_harness="codex"),
@@ -4174,7 +4174,7 @@ class MailboxPollTests(unittest.TestCase):
             command_id="stop-1",
         )
         control_state = run_control.RunControlState(current_harness="codex")
-        poll = runner._MailboxPoll(
+        poll = run_coordination.MailboxPoll(
             plan_dir=self.plan_dir,
             state_dir_arg=str(self.state_dir),
             control_state=control_state,
@@ -4425,7 +4425,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
             active_turn=LiveTurnSchedulerTests.active_turn(),
             heartbeat_interval=30.0,
             poll_callback=poll,
-            poll_interval=runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+            poll_interval=turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
             monotonic=clock.monotonic,
             wait=clock.wait,
             wakeup=wakeup,
@@ -4456,7 +4456,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
             active_turn=LiveTurnSchedulerTests.active_turn(),
             heartbeat_interval=30.0,
             poll_callback=poll,
-            poll_interval=runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+            poll_interval=turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
             monotonic=clock.monotonic,
             wait=clock.wait,
             wakeup=wakeup,
@@ -4479,7 +4479,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
                 active_turn=LiveTurnSchedulerTests.active_turn(),
                 heartbeat_interval=60.0,
                 poll_callback=polled.set,
-                poll_interval=runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+                poll_interval=turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
                 wakeup=wakeup,
             )
             with control_signal.open_wakeup_endpoint(tmp_dir, wakeup) as path:
@@ -4492,7 +4492,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
                 self.assertTrue(polled.wait(timeout=2.0))
             self.assertLess(
                 time.monotonic() - started,
-                runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+                turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
             )
 
     def test_stop_wakes_the_poll_thread_without_a_wakeup(self) -> None:
@@ -4506,7 +4506,7 @@ class LiveTurnWakeupTests(unittest.TestCase):
                 active_turn=LiveTurnSchedulerTests.active_turn(),
                 heartbeat_interval=60.0,
                 poll_callback=lambda: None,
-                poll_interval=runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+                poll_interval=turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
                 wakeup=wakeup,
             )
             live_turn.start()
@@ -4823,7 +4823,7 @@ with control_signal.open_wakeup_endpoint(sys.argv[2], event) as path:
         self.assertEqual(0, child.wait(timeout=10))
         self.assertLess(
             time.monotonic() - started,
-            runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
+            turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS,
         )
 
     def test_a_process_wearing_the_recorded_identity_is_never_woken(
@@ -5109,7 +5109,7 @@ sys.exit(code)
         self.assertEqual([1, 2], payload["completed_sessions"])
 
 
-class _AfterEvaluateSentinel(runner._HangSentinel):
+class _AfterEvaluateSentinel(turn_execution.HangSentinel):
     """Sentinel whose ``evaluate`` runs a one-shot hook after returning.
 
     Deterministically reproduces the F-003 window: the hook fires after the
@@ -5167,7 +5167,7 @@ class HangSentinelTests(unittest.TestCase):
         samples: list[list[dict[str, object]] | None],
         *,
         monotonic=None,
-    ) -> tuple[runner._HangSentinel, list[int]]:
+    ) -> tuple[turn_execution.HangSentinel, list[int]]:
         sample_calls: list[int] = []
         queue = list(samples)
 
@@ -5175,7 +5175,7 @@ class HangSentinelTests(unittest.TestCase):
             sample_calls.append(pid)
             return queue.pop(0) if queue else None
 
-        sentinel = runner._HangSentinel(
+        sentinel = turn_execution.HangSentinel(
             sample_tree=sample_tree,
             monotonic=(lambda: 0.0) if monotonic is None else monotonic,
             trigger_idle_seconds=120.0,
@@ -5210,7 +5210,7 @@ class HangSentinelTests(unittest.TestCase):
         self.assertEqual("suspected", third.transition)
         block = third.suspected
         assert block is not None
-        self.assertEqual(runner.HANG_REASON_ZERO_CPU, block["reason"])
+        self.assertEqual(turn_execution.HANG_REASON_ZERO_CPU, block["reason"])
         self.assertEqual(123, block["harness_pid"])
         self.assertEqual(180.0, block["idle_seconds"])
         self.assertEqual(2, block["confirm_samples"])
@@ -5248,7 +5248,9 @@ class HangSentinelTests(unittest.TestCase):
         self.assertEqual("cleared", cleared.transition)
         self.assertIsNone(cleared.suspected)
         assert cleared.retracted is not None
-        self.assertEqual(runner.HANG_REASON_ZERO_CPU, cleared.retracted["reason"])
+        self.assertEqual(
+            turn_execution.HANG_REASON_ZERO_CPU, cleared.retracted["reason"]
+        )
         self.assertAlmostEqual(15.0, cleared.retracted["cpu_delta_seconds"], places=6)
 
         # The streak restarts from a fresh baseline: one zero-delta sample is
@@ -5294,7 +5296,7 @@ class HangSentinelTests(unittest.TestCase):
         self.assertEqual("suspected", assessment.transition)
         block = assessment.suspected
         assert block is not None
-        self.assertEqual(runner.HANG_REASON_RESULT_RECEIVED, block["reason"])
+        self.assertEqual(turn_execution.HANG_REASON_RESULT_RECEIVED, block["reason"])
         self.assertEqual(123, block["harness_pid"])
         self.assertEqual(123, block["process_tree"][0]["pid"])
         self.assertEqual([123] * 3, calls)
@@ -5365,7 +5367,7 @@ class HangSentinelTests(unittest.TestCase):
         refreshed = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
         block = refreshed.suspected
         assert block is not None
-        self.assertEqual(runner.HANG_REASON_RESULT_RECEIVED, block["reason"])
+        self.assertEqual(turn_execution.HANG_REASON_RESULT_RECEIVED, block["reason"])
         self.assertIsNone(block["process_tree"])
         self.assertEqual("process tree sample failed", block["process_tree_error"])
         # A failed sample publishes no CPU evidence at all.
@@ -5422,7 +5424,7 @@ class HangSentinelTests(unittest.TestCase):
         self.assertEqual("cleared", cleared.transition)
         assert cleared.retracted is not None
         self.assertEqual(
-            runner.HANG_REASON_RESULT_RECEIVED, cleared.retracted["reason"]
+            turn_execution.HANG_REASON_RESULT_RECEIVED, cleared.retracted["reason"]
         )
         assert cleared.cpu_progress is not None
         self.assertTrue(cleared.cpu_progress["progressing"])
@@ -5525,7 +5527,9 @@ class HangSentinelTests(unittest.TestCase):
 
         self.assertEqual("suspected", confirmed.transition)
         assert confirmed.suspected is not None
-        self.assertEqual(runner.HANG_REASON_ZERO_CPU, confirmed.suspected["reason"])
+        self.assertEqual(
+            turn_execution.HANG_REASON_ZERO_CPU, confirmed.suspected["reason"]
+        )
         self.assertEqual(0.0, confirmed.suspected["cpu_delta_seconds"])
 
     def test_new_descendant_cpu_clears_a_live_suspicion(self) -> None:
@@ -5684,7 +5688,7 @@ class HangSentinelTests(unittest.TestCase):
 
         retracted = sentinel.note_activity()
         assert retracted is not None
-        self.assertEqual(runner.HANG_REASON_ZERO_CPU, retracted["reason"])
+        self.assertEqual(turn_execution.HANG_REASON_ZERO_CPU, retracted["reason"])
         self.assertIsNone(sentinel.note_activity())
 
         # Counters restart: a fresh baseline plus two confirming samples are
@@ -5698,7 +5702,7 @@ class HangSentinelTests(unittest.TestCase):
 
     def test_note_activity_during_sample_discards_the_assessment(self) -> None:
         sample_calls = {"count": 0}
-        holder: list[runner._HangSentinel] = []
+        holder: list[turn_execution.HangSentinel] = []
 
         def sample_tree(pid: int):
             sample_calls["count"] += 1
@@ -5708,7 +5712,7 @@ class HangSentinelTests(unittest.TestCase):
                 holder[0].note_activity()
             return self.tree(5.0)
 
-        sentinel = runner._HangSentinel(
+        sentinel = turn_execution.HangSentinel(
             sample_tree=sample_tree,
             monotonic=lambda: 0.0,
             trigger_idle_seconds=120.0,
@@ -5872,7 +5876,7 @@ class HangSentinelTests(unittest.TestCase):
                 calls.append(pid)
                 return self.tree(1.0)
 
-            sentinel = runner._HangSentinel(
+            sentinel = turn_execution.HangSentinel(
                 sample_tree=sample_tree,
                 monotonic=time.monotonic,
                 trigger_idle_seconds=0.0,
@@ -5924,8 +5928,8 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
         ]
 
     def suspected_result(
-        self, sentinel: runner._HangSentinel
-    ) -> runner._HangAssessment:
+        self, sentinel: turn_execution.HangSentinel
+    ) -> turn_execution.HangAssessment:
         sentinel.note_harness_pid(123)
         sentinel.note_final_result()
         sentinel.evaluate(idle_seconds=60.0, now=self.NOW)
@@ -5934,8 +5938,8 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
         self.assertEqual("suspected", assessment.transition)
         return assessment
 
-    def make_sentinel(self) -> runner._HangSentinel:
-        return runner._HangSentinel(
+    def make_sentinel(self) -> turn_execution.HangSentinel:
+        return turn_execution.HangSentinel(
             sample_tree=lambda pid: self.tree(),
             monotonic=lambda: 100.0,
             trigger_idle_seconds=120.0,
@@ -5984,7 +5988,9 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
         sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
         sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
         assessment = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
-        self.assertEqual(runner.HANG_REASON_ZERO_CPU, assessment.suspected["reason"])
+        self.assertEqual(
+            turn_execution.HANG_REASON_ZERO_CPU, assessment.suspected["reason"]
+        )
 
         with mock.patch.object(
             process_tree, "prepare_verified_leaf_recovery"
@@ -6993,7 +6999,7 @@ class ControlCliWaitTests(unittest.TestCase):
         )
         payload: dict[str, object] = {
             "run_id": "20260724T100000Z-1",
-            "control": runner._initial_control_payload(),
+            "control": run_coordination.initial_control_payload(),
             "harness": "codex",
         }
         control_payload = dict(payload["control"])  # type: ignore[arg-type]
@@ -7002,7 +7008,7 @@ class ControlCliWaitTests(unittest.TestCase):
         def poll() -> None:
             try:
                 while not stop.is_set():
-                    result = runner._drain_external_control_queue(
+                    result = run_coordination.drain_external_control_queue(
                         plan_dir=self.plan_dir,
                         state_dir_arg=str(self.state_dir),
                         control_state=rc_state,
@@ -9692,7 +9698,7 @@ class MailboxCliTests(unittest.TestCase):
         rendered = stdout.getvalue()
         self.assertLessEqual(
             len(rendered.rstrip("\n").encode("utf-8")),
-            runner.MAX_RENDERED_GUIDANCE_BYTES,
+            mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES,
         )
         lines = rendered.splitlines()
         records = [
@@ -9730,7 +9736,7 @@ class MailboxCliTests(unittest.TestCase):
                 f"guidance-{index}",
                 state_dir=self.state_dir,
             )
-            for index in range(runner.MAX_RENDERED_GUIDANCE + 3)
+            for index in range(mailbox_rendering.MAX_RENDERED_GUIDANCE + 3)
         ]
         code, peek_payload = self.payload_from(
             mailbox_cli.inbox_read_from_args,
@@ -9749,7 +9755,7 @@ class MailboxCliTests(unittest.TestCase):
         self.assertEqual(0, text_code)
         rendered = stdout.getvalue()
         self.assertIn(
-            f"{len(appended) - runner.MAX_RENDERED_GUIDANCE} older pending "
+            f"{len(appended) - mailbox_rendering.MAX_RENDERED_GUIDANCE} older pending "
             "guidance records were omitted",
             rendered,
         )
@@ -9768,7 +9774,7 @@ class MailboxCliTests(unittest.TestCase):
     def test_inbox_text_omits_one_individually_oversized_record(self) -> None:
         oversized = mailbox.append_guidance(
             self.plan_dir,
-            "x" * (runner.MAX_RENDERED_GUIDANCE_BYTES + 1024),
+            "x" * (mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES + 1024),
             state_dir=self.state_dir,
         )
 
@@ -9781,7 +9787,8 @@ class MailboxCliTests(unittest.TestCase):
         self.assertNotIn(mailbox_cli.MAILBOX_MESSAGE_BEGIN, rendered)
         self.assertIn(
             "No pending guidance records fit within the "
-            f"{runner.MAX_RENDERED_GUIDANCE_BYTES:,}-byte text rendering budget.",
+            f"{mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES:,}-byte text "
+            "rendering budget.",
             rendered,
         )
         self.assertIn(
@@ -12520,17 +12527,17 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             agent_mux_delivery.WAIT_START_EVENT,
-            runner.AGENT_MUX_WAIT_START_EVENT,
+            agent_mux_delivery.WAIT_START_EVENT,
         )
         self.assertEqual(
-            agent_mux_delivery.WAIT_END_EVENT, runner.AGENT_MUX_WAIT_END_EVENT
+            agent_mux_delivery.WAIT_END_EVENT, agent_mux_delivery.WAIT_END_EVENT
         )
         self.assertEqual(
             agent_mux_delivery.WAIT_START_REASON,
-            runner.AGENT_MUX_WAIT_START_REASON,
+            agent_mux_delivery.WAIT_START_REASON,
         )
         self.assertEqual(
-            agent_mux_delivery.WAIT_END_REASON, runner.AGENT_MUX_WAIT_END_REASON
+            agent_mux_delivery.WAIT_END_REASON, agent_mux_delivery.WAIT_END_REASON
         )
 
     def test_mailbox_resolution_delivery_constants_are_distinct(self) -> None:
@@ -12562,7 +12569,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
     def test_agent_mux_notify_timeout_defaults_without_env_override(self) -> None:
         with patched_env(ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS=None):
             self.assertEqual(
-                runner.AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
+                agent_mux_delivery.NOTIFY_TIMEOUT_SECONDS,
                 run_persistence._agent_mux_notify_timeout(),
             )
 
@@ -12581,7 +12588,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 patched_env(ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS=raw),
             ):
                 self.assertEqual(
-                    runner.AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
+                    agent_mux_delivery.NOTIFY_TIMEOUT_SECONDS,
                     run_persistence._agent_mux_notify_timeout(),
                 )
 
@@ -12593,7 +12600,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             with (
                 patched_env(ASL_AGENT_MUX_NOTIFY_TIMEOUT_SECONDS="30"),
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess,
@@ -12626,7 +12633,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             hook_payload = run_persistence._agent_mux_loop_payload(
                 payload,
-                reason=runner.AGENT_MUX_TURN_START_REASON,
+                reason=agent_mux_delivery.TURN_START_REASON,
                 active_turn=active_turn,
             )
 
@@ -12662,7 +12669,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess,
@@ -12684,11 +12691,11 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 self.assertIn("--json", command)
                 self.assertIn("--strict", command)
             self.assertEqual(
-                runner.AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
+                agent_mux_delivery.NOTIFY_TIMEOUT_SECONDS,
                 start_kwargs["timeout"],
             )
             self.assertEqual(
-                runner.AGENT_MUX_NOTIFY_TIMEOUT_SECONDS,
+                agent_mux_delivery.NOTIFY_TIMEOUT_SECONDS,
                 turn_kwargs["timeout"],
             )
             start_payload = json.loads(start_kwargs["input"])
@@ -12710,7 +12717,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil,
+                    agent_mux_delivery.shutil,
                     "which",
                     return_value="/opt/amx",
                 ) as which,
@@ -12770,7 +12777,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value=None
+                    agent_mux_delivery.shutil, "which", return_value=None
                 ),
                 mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
@@ -12793,7 +12800,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                 with (
                     self.subTest(failure=type(failure).__name__),
                     mock.patch.object(
-                        runner.agent_mux_delivery.shutil,
+                        agent_mux_delivery.shutil,
                         "which",
                         return_value="/opt/amx",
                     ),
@@ -12843,7 +12850,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload = self.finish_payload(Path(tmp))
             with (
                 patched_env(ASL_AGENT_MUX_NOTIFY="off"),
-                mock.patch.object(runner.agent_mux_delivery.shutil, "which") as which,
+                mock.patch.object(agent_mux_delivery.shutil, "which") as which,
                 mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
                 run_persistence._notify_agent_mux_loop_finished(payload)
@@ -12860,7 +12867,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
                     with (
                         patched_env(ASL_AGENT_MUX_NOTIFY=raw),
                         mock.patch.object(
-                            runner.agent_mux_delivery.shutil,
+                            agent_mux_delivery.shutil,
                             "which",
                             return_value="/opt/amx",
                         ),
@@ -12901,7 +12908,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess, "run", return_value=completed
@@ -12990,7 +12997,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess,
@@ -13060,7 +13067,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload["events_path"] = str(tmp_dir / "events.jsonl")
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess, "run", return_value=duplicate
@@ -13094,7 +13101,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload["events_path"] = str(tmp_dir / "events.jsonl")
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess, "run", return_value=permanent
@@ -13127,7 +13134,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             persistence = run_persistence._RunPersistence()
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess,
@@ -13141,11 +13148,11 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             self.assertEqual(3, run.call_count)
             self.assertIn("--strict", run.call_args_list[0].args[0])
             self.assertEqual(
-                ["/opt/amx", "hook-indicator", runner.AGENT_MUX_START_EVENT],
+                ["/opt/amx", "hook-indicator", agent_mux_delivery.START_EVENT],
                 run.call_args_list[1].args[0],
             )
             self.assertEqual(
-                ["/opt/amx", "hook-indicator", runner.AGENT_MUX_FINISH_EVENT],
+                ["/opt/amx", "hook-indicator", agent_mux_delivery.FINISH_EVENT],
                 run.call_args_list[2].args[0],
             )
             outcomes = [
@@ -13179,7 +13186,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
             payload["events_path"] = str(tmp_dir / "events.jsonl")
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess, "run", return_value=retryable
@@ -13206,7 +13213,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess, "run", return_value=completed
@@ -13250,7 +13257,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess, "run", return_value=completed
@@ -13281,14 +13288,14 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
                 run_persistence._notify_agent_mux_loop(
-                    runner.AGENT_MUX_TURN_HEARTBEAT_EVENT,
+                    agent_mux_delivery.TURN_HEARTBEAT_EVENT,
                     payload,
-                    reason=runner.AGENT_MUX_TURN_HEARTBEAT_REASON,
+                    reason=agent_mux_delivery.TURN_HEARTBEAT_REASON,
                     persistence=persistence,
                     cancelled=lambda: True,
                 )
@@ -13306,7 +13313,7 @@ class AgentMuxNotificationIntegrationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value=None
+                    agent_mux_delivery.shutil, "which", return_value=None
                 ),
                 mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
@@ -13331,14 +13338,14 @@ class AgentMuxSuiteIsolationTests(unittest.TestCase):
         # nested ASL subprocess inherits it, so the full suite produces zero
         # live lifecycle events even with a real amx on PATH.
         self.assertEqual(
-            runner.AGENT_MUX_NOTIFY_OFF,
-            os.environ.get(runner.AGENT_MUX_NOTIFY_ENV_VAR),
+            agent_mux_delivery.NOTIFY_OFF,
+            os.environ.get(agent_mux_delivery.NOTIFY_ENV_VAR),
         )
         self.assertFalse(run_persistence._agent_mux_notify_enabled())
 
     def test_notify_helpers_short_circuit_under_suite_default(self) -> None:
         with (
-            mock.patch.object(runner.agent_mux_delivery.shutil, "which") as which,
+            mock.patch.object(agent_mux_delivery.shutil, "which") as which,
             mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
         ):
             run_persistence._notify_agent_mux_loop_started({"run_id": "run-x"})

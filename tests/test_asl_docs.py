@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_session_loop import (
+    agent_mux_projection,
     assurance_ledger,
     assurance_models,
     assurance_report,
@@ -31,6 +32,7 @@ from agent_session_loop import (
     install_verify,
     mailbox,
     mailbox_cli,
+    mailbox_rendering,
     metrics,
     pause_policy,
     plans,
@@ -42,13 +44,14 @@ from agent_session_loop import (
     retention,
     review,
     review_continuation,
+    run_coordination,
     run_inputs,
     run_persistence,
-    runner,
     startup_context,
     state,
     supervisor_audit,
     task_packet,
+    turn_execution,
     verification,
     workbench,
 )
@@ -833,6 +836,95 @@ class HarnessDocsRegressionTests(unittest.TestCase):
         )
 
 
+class RunnerFacadeDocsTests(unittest.TestCase):
+    """Lock the end state of the runner extraction in the package README.
+
+    The architecture section described `runner.py` as a module that keeps a
+    re-export alias for every symbol an extraction moved out of it. Session 38
+    ended both halves of that -- the runner is a facade, and the aliases are
+    gone -- so the two sentences that promised an alias are pinned here as
+    absences, and what replaced them is pinned as text. The alias promise was
+    stated twice, in the `verification_transitions` paragraph and again in the
+    `run_coordination` one, which is why the absence is asserted on the phrase
+    rather than on either paragraph.
+    """
+
+    def _normalized_readme(self) -> str:
+        readme = (REPO_ROOT / "agent_session_loop" / "README.md").read_text(
+            encoding="utf-8"
+        )
+        return " ".join(readme.split())
+
+    def test_readme_describes_the_runner_as_a_facade(self) -> None:
+        normalized = self._normalized_readme()
+
+        for marker in (
+            "What is left of `runner.py` is a facade",
+            "a docstring, its imports, and two one-line delegations",
+            "`run_from_args`, which supplies `run_loop.run_locked` as "
+            "`run_entry`'s `LockedRun` seam, and `doctor_from_args`, which "
+            "forwards to `run_doctor`",
+            "`cli.py` reaches them through `handler_ref` strings rather than "
+            "through an import",
+            "nothing else here is a boundary: the boundaries are the modules "
+            "above, each owning its own behaviour, its own tests, and its own "
+            "patch targets",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"asl README omits runner-facade marker: {marker!r}",
+            )
+
+    def test_readme_retires_the_alias_convention_with_its_reason(self) -> None:
+        normalized = self._normalized_readme()
+
+        for marker in (
+            "The alias convention is retired with the bulk",
+            "by Session 37 there were 226 of them, and they were the reason a "
+            "runner holding no logic at all was still 516 lines",
+            "a re-export table is bulk no boundary owns",
+            "a name reachable at two spellings is a name whose owner a reader "
+            "has to go and look up",
+            '`mock.patch.object(runner, "X")` degrades into a silent no-op the '
+            "moment no code reads `runner.X`, so a test can keep passing while "
+            "asserting nothing",
+            "Session 38 deleted all 226 and rewrote every reference to name "
+            "the module that owns the symbol",
+            "`RunError` is the single deliberate exception and it is an "
+            "`import` rather than an alias",
+            "`runner.RunError` has to stay the *same class object* "
+            "`run_errors.RunError` raises",
+            "`RUNNER_ALIAS_FLOOR` is kept empty rather than deleted so its two "
+            "rules read as a permanent no-new-aliases gate",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"asl README omits alias-retirement marker: {marker!r}",
+            )
+
+    def test_readme_no_longer_promises_a_runner_alias(self) -> None:
+        normalized = self._normalized_readme()
+
+        self.assertNotIn(
+            "the runner keeps a module-level alias for each moved symbol",
+            normalized,
+            msg=(
+                "the README still promises a runner re-export alias; Session "
+                "38 retired all 226, so no extraction leaves one behind"
+            ),
+        )
+        self.assertNotIn(
+            "it still imports `mailbox` for the callers that stub `runner.mailbox`",
+            normalized,
+            msg=(
+                "the README still claims the runner imports `mailbox` for "
+                "`runner.mailbox` stubs; those callers now patch `mailbox`"
+            ),
+        )
+
+
 class LiveMailboxDocsRegressionTests(unittest.TestCase):
     """Lock the final mailbox/model-control public contract."""
 
@@ -1082,7 +1174,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         normalized = " ".join(mailbox_docs.split())
 
         # Pin the documented character bound to the constant it describes.
-        self.assertEqual(16000, runner.MAILBOX_QUESTION_TEXT_MAX_CHARS)
+        self.assertEqual(16000, run_coordination.MAILBOX_QUESTION_TEXT_MAX_CHARS)
         self.assertIn(
             "The question body a waiting runner publishes is itself bounded: "
             "at most the first 16,000 characters of the last-message artifact",
@@ -1481,11 +1573,13 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         normalized = " ".join(mailbox_docs.split())
 
         self.assertIn(
-            f"newest {runner.MAX_RENDERED_GUIDANCE} pending guidance records",
+            f"newest {mailbox_rendering.MAX_RENDERED_GUIDANCE} pending guidance "
+            "records",
             normalized,
         )
         self.assertIn(
-            f"{runner.MAX_RENDERED_GUIDANCE_BYTES:,}-byte UTF-8 rendering budget",
+            f"{mailbox_rendering.MAX_RENDERED_GUIDANCE_BYTES:,}-byte UTF-8 "
+            "rendering budget",
             normalized,
         )
         self.assertIn(
@@ -1774,7 +1868,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         self.assertEqual(0.5, control_cli.CONTROL_WAIT_POLL_INTERVAL_SECONDS)
         self.assertEqual(60.0, control_cli.DEFAULT_CONTROL_WAIT_TIMEOUT_SECONDS)
         self.assertEqual(1800.0, control_cli.MAX_CONTROL_WAIT_TIMEOUT_SECONDS)
-        self.assertEqual(5.0, runner.LIVE_CONTROL_POLL_INTERVAL_SECONDS)
+        self.assertEqual(5.0, turn_execution.LIVE_CONTROL_POLL_INTERVAL_SECONDS)
 
         self.assertIn(
             "end the in-flight turn after a bounded grace window (default "
@@ -1859,12 +1953,12 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             if action != events.RUN_CONTROL_ACTION_COMMAND_OBSERVED
         )
         self.assertLessEqual(
-            set(runner.RUN_CONTROL_EVENT_ACTIONS.values()),
+            set(run_coordination.RUN_CONTROL_EVENT_ACTIONS.values()),
             set(last_action_values),
         )
         self.assertNotIn(
             events.RUN_CONTROL_ACTION_COMMAND_OBSERVED,
-            set(runner.RUN_CONTROL_EVENT_ACTIONS.values()),
+            set(run_coordination.RUN_CONTROL_EVENT_ACTIONS.values()),
         )
         last_action_docs = state_files.split("`last_action` is one of", 1)[1]
         for action in last_action_values:
@@ -2225,7 +2319,7 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
         live_wait_docs = mailbox_docs.split("### Live reply wait and fallback", 1)[
             1
         ].split("\n### ", 1)[0]
-        for reason in runner.MAILBOX_REPLY_WAIT_PREPARATION_REASONS:
+        for reason in run_coordination.MAILBOX_REPLY_WAIT_PREPARATION_REASONS:
             self.assertIn(
                 f"`{reason}`",
                 live_wait_docs,
@@ -3212,10 +3306,12 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         # The helper's escalation classes are the runner's persisted hang
         # reasons plus the helper-only idle-ceiling class.
         self.assertEqual(
-            runner.HANG_REASON_RESULT_RECEIVED,
+            turn_execution.HANG_REASON_RESULT_RECEIVED,
             autopilot.HANG_CLASS_RESULT_RECEIVED,
         )
-        self.assertEqual(runner.HANG_REASON_ZERO_CPU, autopilot.HANG_CLASS_ZERO_CPU)
+        self.assertEqual(
+            turn_execution.HANG_REASON_ZERO_CPU, autopilot.HANG_CLASS_ZERO_CPU
+        )
 
         skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
         surfaces = {
@@ -3336,13 +3432,17 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         )
 
     def test_state_schema_docs_match_authoritative_versions(self) -> None:
-        self.assertEqual(3, runner.STATE_SCHEMA_VERSION)
+        self.assertEqual(3, agent_mux_projection.STATE_SCHEMA_VERSION)
         self.assertEqual(2, run_persistence.COMPACT_STATE_SCHEMA_VERSION)
-        self.assertEqual(2, runner.RESULT_SCHEMA_VERSION)
+        self.assertEqual(2, turn_execution.RESULT_SCHEMA_VERSION)
         self.assertEqual(2, events.EVENT_SCHEMA_VERSION)
         state_files = self.docs.split("## State Files", 1)[1].split("\n## ", 1)[0]
-        self.assertIn(f"schema version {runner.STATE_SCHEMA_VERSION}", state_files)
-        self.assertIn(f"`version: {runner.STATE_SCHEMA_VERSION}`", state_files)
+        self.assertIn(
+            f"schema version {agent_mux_projection.STATE_SCHEMA_VERSION}", state_files
+        )
+        self.assertIn(
+            f"`version: {agent_mux_projection.STATE_SCHEMA_VERSION}`", state_files
+        )
 
     def test_json_output_pins_windowed_metrics_contract(self) -> None:
         section = self.docs.split("## JSON Output", 1)[1].split("\n## ", 1)[0]

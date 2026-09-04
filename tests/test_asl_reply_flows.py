@@ -25,6 +25,7 @@ from unittest import mock
 from agent_session_loop import (
     agent_mux_delivery,
     cli,
+    clock,
     config,
     control_queue,
     events,
@@ -556,10 +557,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 cwd=tmp_dir,
             )
             env = {
-                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
-                runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
-                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
-                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
+                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
             with (
                 mock.patch.dict(os.environ, env),
@@ -675,8 +676,8 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 cwd=tmp_dir,
             )
             env = {
-                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
-                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
             with (
                 mock.patch.dict(os.environ, env),
@@ -705,8 +706,8 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             # The pin the wait set is spent on that one continuation. The next
             # turn is back on the loop-top refresh, so its idle clock starts
             # after the continuation turn instead of before the human answer.
-            continuation_finished_at = runner._parse_datetime(turns[1]["finished_at"])
-            later_started_at = runner._parse_datetime(turns[2]["started_at"])
+            continuation_finished_at = clock.parse_datetime(turns[1]["finished_at"])
+            later_started_at = clock.parse_datetime(turns[2]["started_at"])
             assert continuation_finished_at is not None
             assert later_started_at is not None
             later_idle_started_at = later_started_at - timedelta(
@@ -798,10 +799,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 cwd=tmp_dir,
             )
             env = {
-                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
-                runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
-                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
-                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
+                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
             notified: list[tuple[str, dict[str, Any] | None]] = []
 
@@ -831,29 +832,31 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual(0, code, out)
             emitted = [event_name for event_name, _extra in notified]
             self.assertEqual(
-                1, emitted.count(runner.AGENT_MUX_WAIT_START_EVENT), emitted
+                1, emitted.count(agent_mux_delivery.WAIT_START_EVENT), emitted
             )
-            self.assertEqual(1, emitted.count(runner.AGENT_MUX_WAIT_END_EVENT), emitted)
-            start_index = emitted.index(runner.AGENT_MUX_WAIT_START_EVENT)
-            end_index = emitted.index(runner.AGENT_MUX_WAIT_END_EVENT)
+            self.assertEqual(
+                1, emitted.count(agent_mux_delivery.WAIT_END_EVENT), emitted
+            )
+            start_index = emitted.index(agent_mux_delivery.WAIT_START_EVENT)
+            end_index = emitted.index(agent_mux_delivery.WAIT_END_EVENT)
             self.assertLess(start_index, end_index, emitted)
             # The asking turn is never committed, so its wait is bracketed by
             # the turn start alone; the only turn finish belongs to the turn
             # that resumes after the answer.
             self.assertLess(
-                emitted.index(runner.AGENT_MUX_TURN_START_EVENT),
+                emitted.index(agent_mux_delivery.TURN_START_EVENT),
                 start_index,
                 emitted,
             )
             self.assertEqual(
-                1, emitted.count(runner.AGENT_MUX_TURN_FINISH_EVENT), emitted
+                1, emitted.count(agent_mux_delivery.TURN_FINISH_EVENT), emitted
             )
             self.assertLess(
                 end_index,
-                emitted.index(runner.AGENT_MUX_TURN_FINISH_EVENT),
+                emitted.index(agent_mux_delivery.TURN_FINISH_EVENT),
                 emitted,
             )
-            self.assertNotIn(runner.AGENT_MUX_PAUSE_EVENT, emitted)
+            self.assertNotIn(agent_mux_delivery.PAUSE_EVENT, emitted)
 
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
             questions = [
@@ -982,10 +985,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 cwd=tmp_dir,
             )
             env = {
-                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
-                runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
-                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
-                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
+                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
             with (
                 mock.patch.dict(os.environ, env),
@@ -1132,10 +1135,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 cwd=tmp_dir,
             )
             env = {
-                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
-                runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
-                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
-                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
+                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "1",
+                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "2",
+                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.01",
+                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.05",
             }
             with (
                 mock.patch.dict(os.environ, env),
@@ -1386,7 +1389,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                         state_dir=state_dir,
                     )
 
-                    matched = runner._worker_pause_resolution_for_turn(
+                    matched = run_coordination.worker_pause_resolution_for_turn(
                         plan_dir=plan_dir,
                         state_dir_arg=str(state_dir),
                         run_id="run-current",
@@ -1544,7 +1547,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             fresh=False,
             reason=mailbox.LEASE_EXPIRED,
         )
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -1574,22 +1577,22 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "mailbox_change_token",
                 return_value=(1, 2, 3, 4),
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_mailbox",
                 side_effect=read_mailbox,
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_lease",
                 side_effect=read_lease,
             ),
         ):
-            result = runner._wait_for_mailbox_reply(
+            result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -1607,7 +1610,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         self.assertIsNone(result.reply)
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         self.assertTrue(sleeps)
@@ -1650,21 +1653,21 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             fresh=False,
             reason=mailbox.LEASE_EXPIRED,
         )
-        settings = runner._mailbox_reply_wait_settings({})
+        settings = run_coordination.mailbox_reply_wait_settings({})
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_BASE_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_BASE_SECONDS,
             settings.base_seconds,
         )
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_LEASE_EXTENSION_SECONDS,
             settings.lease_extension_seconds,
         )
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_SECONDS,
             settings.unsupervised_ceiling_seconds,
         )
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_POLL_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_POLL_SECONDS,
             settings.poll_seconds,
         )
         # Four times the ceiling: long enough that any wall-clock bound would
@@ -1675,7 +1678,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             lease: mailbox.MailboxLeaseView,
             *,
             until: float | None = None,
-        ) -> tuple[runner._MailboxReplyWaitResult, float, int]:
+        ) -> tuple[run_coordination.MailboxWaitResult, float, int]:
             now = [0.0]
 
             def monotonic() -> float:
@@ -1692,22 +1695,22 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.mailbox,
+                    mailbox,
                     "mailbox_change_token",
                     return_value=(1, 2, 3, 4),
                 ),
                 mock.patch.object(
-                    runner.mailbox,
+                    mailbox,
                     "read_mailbox",
                     return_value=view,
                 ),
                 mock.patch.object(
-                    runner.mailbox,
+                    mailbox,
                     "read_lease",
                     side_effect=read_lease_seam,
                 ) as read_lease,
             ):
-                result = runner._wait_for_mailbox_reply(
+                result = run_coordination.wait_for_mailbox_reply(
                     plan_dir=Path("/tmp/plan"),
                     state_dir_arg=None,
                     payload={},
@@ -1735,7 +1738,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         # ran two hours, four times the ceiling, and ended only when the
         # supervisor stopped proving liveness.
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             fresh_result.reason,
         )
         self.assertEqual(supervision_ends, fresh_elapsed)
@@ -1779,7 +1782,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     "turn_index": 3,
                 },
             }
-            runner._clear_waiting_for_reply(
+            run_coordination.clear_waiting_for_reply(
                 event_path,
                 payload,
                 reason=stale_result.reason,
@@ -1846,7 +1849,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         # One extension outruns the ceiling, so a proved supervisor whose next
         # liveness check falls beyond the ceiling still ends at it — the only
         # way a timeout can name a lease that was fresh when last read.
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=20.0,
             unsupervised_ceiling_seconds=8.0,
@@ -1857,7 +1860,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         def run_wait(
             view: mailbox.MailboxView,
             lease: mailbox.MailboxLeaseView,
-        ) -> runner._MailboxReplyWaitResult:
+        ) -> run_coordination.MailboxWaitResult:
             now = [0.0]
 
             def sleep(seconds: float) -> None:
@@ -1865,22 +1868,22 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.mailbox,
+                    mailbox,
                     "mailbox_change_token",
                     return_value=(1, 2, 3, 4),
                 ),
                 mock.patch.object(
-                    runner.mailbox,
+                    mailbox,
                     "read_mailbox",
                     return_value=view,
                 ),
                 mock.patch.object(
-                    runner.mailbox,
+                    mailbox,
                     "read_lease",
                     return_value=lease,
                 ),
             ):
-                return runner._wait_for_mailbox_reply(
+                return run_coordination.wait_for_mailbox_reply(
                     plan_dir=Path("/tmp/plan"),
                     state_dir_arg=None,
                     payload={},
@@ -1896,10 +1899,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                     sleep=sleep,
                 )
 
-        def clear(result: runner._MailboxReplyWaitResult) -> dict:
+        def clear(result: run_coordination.MailboxWaitResult) -> dict:
             with tempfile.TemporaryDirectory() as tmp:
                 event_path = Path(tmp) / events.EVENTS_FILE_NAME
-                runner._clear_waiting_for_reply(
+                run_coordination.clear_waiting_for_reply(
                     event_path,
                     {
                         "run_id": "run-1",
@@ -1921,7 +1924,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         lost = run_wait(waiting_view, stale_lease)
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             lost.reason,
         )
         self.assertEqual(lease_updated_at, lost.lease_updated_at)
@@ -2003,7 +2006,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             ),
             fresh=True,
         )
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=8.0,
@@ -2013,7 +2016,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         def run_wait(
             failing_view: mailbox.MailboxView,
-        ) -> runner._MailboxReplyWaitResult:
+        ) -> run_coordination.MailboxWaitResult:
             now = [0.0]
             token = [0]
 
@@ -2026,24 +2029,24 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.mailbox,
+                    mailbox,
                     "mailbox_change_token",
                     side_effect=next_token,
                 ),
                 mock.patch.object(
-                    runner.mailbox,
+                    mailbox,
                     "read_mailbox",
                     side_effect=lambda *_args, **_kwargs: (
                         waiting_view if now[0] < 5.0 else failing_view
                     ),
                 ),
                 mock.patch.object(
-                    runner.mailbox,
+                    mailbox,
                     "read_lease",
                     return_value=fresh_lease,
                 ),
             ):
-                return runner._wait_for_mailbox_reply(
+                return run_coordination.wait_for_mailbox_reply(
                     plan_dir=Path("/tmp/plan"),
                     state_dir_arg=None,
                     payload={},
@@ -2104,7 +2107,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             fresh=False,
             reason=mailbox.LEASE_EXPIRED,
         )
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -2115,7 +2118,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         suspend_seconds = 8 * 3600.0
         # Well past the awake grace, so the lapse is judged on freshness alone.
         supervision_ends = 100.0
-        waiting = runner._waiting_for_reply_payload(
+        waiting = run_coordination.waiting_for_reply_payload(
             question_id=question_id,
             session_id="9",
             turn_index=3,
@@ -2150,22 +2153,22 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "mailbox_change_token",
                 return_value=(1, 2, 3, 4),
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_mailbox",
                 return_value=view,
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_lease",
                 side_effect=read_lease,
             ),
         ):
-            result = runner._wait_for_mailbox_reply(
+            result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload=payload,
@@ -2184,7 +2187,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         self.assertIsNone(result.reply)
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         self.assertEqual(suspend_seconds, result.suspend_skew_seconds)
@@ -2242,7 +2245,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / events.EVENTS_FILE_NAME
-            runner._clear_waiting_for_reply(
+            run_coordination.clear_waiting_for_reply(
                 event_path,
                 payload,
                 reason=result.reason,
@@ -2262,12 +2265,12 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     def _run_suspend_grace_wait(
         self,
         *,
-        settings: runner._MailboxReplyWaitSettings,
+        settings: run_coordination.MailboxWaitSettings,
         lease_fresh_from: float | None = None,
         lease_stale_from: float | None = None,
         reply_from: float | None = None,
         suspend_seconds: float = 3600.0,
-    ) -> tuple[runner._MailboxReplyWaitResult, float, list[float], list[float]]:
+    ) -> tuple[run_coordination.MailboxWaitResult, float, list[float], list[float]]:
         """Run a wait whose first poll sleep hides a machine suspend.
 
         The wall clock jumps ``suspend_seconds`` during the first sleep, so
@@ -2354,22 +2357,22 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "mailbox_change_token",
                 side_effect=lambda path: (now[0],),
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_mailbox",
                 side_effect=read_mailbox,
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_lease",
                 side_effect=read_lease,
             ),
         ):
-            result = runner._wait_for_mailbox_reply(
+            result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -2388,7 +2391,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         return result, now[0], probe_times, sleeps
 
     def test_stale_lease_inside_suspend_grace_keeps_wait_alive(self) -> None:
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=200.0,
@@ -2420,7 +2423,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     def test_stale_lease_after_grace_lapse_exits_supervisor_lost(
         self,
     ) -> None:
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=200.0,
@@ -2433,7 +2436,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         # Detection fired at monotonic 1.0, so the grace covered probes up
@@ -2449,14 +2452,14 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         )
         self.assertEqual(3600.0, result.suspend_skew_seconds)
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
             result.suspend_lease_grace_seconds,
         )
         self.assertTrue(all(seconds > 0.0 for seconds in sleeps), sleeps)
 
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / events.EVENTS_FILE_NAME
-            runner._clear_waiting_for_reply(
+            run_coordination.clear_waiting_for_reply(
                 event_path,
                 {
                     "run_id": "run-1",
@@ -2477,7 +2480,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             )
             [cleared_event] = read_jsonl(event_path)
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
             cleared_event["payload"]["suspend_lease_grace_seconds"],
         )
         self.assertEqual(
@@ -2488,7 +2491,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     def test_lease_turning_fresh_inside_grace_resumes_ratcheting(
         self,
     ) -> None:
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -2503,7 +2506,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         # Stale probes inside the grace stay on the poll cadence; once the
@@ -2529,13 +2532,13 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         )
         self.assertEqual(3600.0, result.suspend_skew_seconds)
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
             result.suspend_lease_grace_seconds,
         )
         self.assertTrue(all(seconds > 0.0 for seconds in sleeps), sleeps)
 
     def test_unsupervised_ceiling_fires_despite_active_grace(self) -> None:
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -2562,7 +2565,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         self.assertEqual(mailbox.LEASE_EXPIRED, result.lease_reason)
         self.assertEqual(3600.0, result.suspend_skew_seconds)
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
             result.suspend_lease_grace_seconds,
         )
         self.assertTrue(all(seconds > 0.0 for seconds in sleeps), sleeps)
@@ -2570,7 +2573,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     def test_unsupervised_seconds_tracks_freshness_not_wait_length(
         self,
     ) -> None:
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -2600,7 +2603,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         # stretch is an order of magnitude *smaller*. Wall-clock length and
         # unsupervised length are now genuinely different measurements.
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             fresh.reason,
         )
         self.assertEqual(100.0, fresh_elapsed)
@@ -2610,7 +2613,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         self.assertLess(fresh.unsupervised_seconds, stale.unsupervised_seconds)
 
     def test_unsupervised_seconds_excludes_suspended_time(self) -> None:
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=200.0,
@@ -2623,7 +2626,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         # An hour of sleeping machine is not an hour of lost supervision:
@@ -2632,7 +2635,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         self.assertEqual(3600.0, result.suspend_skew_seconds)
         self.assertEqual(91.0, elapsed)
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
+            run_coordination.MAILBOX_REPLY_WAIT_SUSPEND_LEASE_GRACE_SECONDS,
             result.unsupervised_seconds,
         )
         self.assertLess(result.unsupervised_seconds, elapsed)
@@ -2669,7 +2672,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             fresh=False,
             reason=mailbox.LEASE_EXPIRED,
         )
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -2689,22 +2692,22 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "mailbox_change_token",
                 return_value=(1, 2, 3, 4),
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_mailbox",
                 return_value=view,
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_lease",
                 side_effect=read_lease,
             ),
         ):
-            result = runner._wait_for_mailbox_reply(
+            result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -2723,7 +2726,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         # No suspend here: an unbroken run of fresh probes carried the wait
         # twice past the ceiling, so only the final extension went unproved.
         self.assertEqual(
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             result.reason,
         )
         self.assertEqual(supervision_ends, now[0])
@@ -2740,7 +2743,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / events.EVENTS_FILE_NAME
-            runner._clear_waiting_for_reply(
+            run_coordination.clear_waiting_for_reply(
                 event_path,
                 {"run_id": "run-1", "waiting_for_reply": dict(waiting)},
                 reason=result.reason,
@@ -2751,7 +2754,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 unsupervised_seconds=result.unsupervised_seconds,
                 persistence=run_persistence._RunPersistence(write_state=False),
             )
-            runner._clear_waiting_for_reply(
+            run_coordination.clear_waiting_for_reply(
                 event_path,
                 {"run_id": "run-1", "waiting_for_reply": dict(waiting)},
                 reason="reply",
@@ -2786,7 +2789,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         )
         # Base equals hard so the loop never probes the lease: the only
         # state write a rebase could cause is the one under test.
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=4.0,
@@ -2794,7 +2797,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             io_grace_seconds=1.0,
         )
         epoch = datetime(2026, 7, 24, 12, 0, 0, tzinfo=UTC)
-        waiting = runner._waiting_for_reply_payload(
+        waiting = run_coordination.waiting_for_reply_payload(
             question_id=question_id,
             session_id="9",
             turn_index=3,
@@ -2822,12 +2825,12 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "mailbox_change_token",
                 return_value=(1, 2, 3, 4),
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_mailbox",
                 return_value=view,
             ),
@@ -2836,7 +2839,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 "_write_state_payload",
             ) as write_state,
         ):
-            result = runner._wait_for_mailbox_reply(
+            result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload=payload,
@@ -2857,7 +2860,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             event_path = Path(tmp) / events.EVENTS_FILE_NAME
-            runner._clear_waiting_for_reply(
+            run_coordination.clear_waiting_for_reply(
                 event_path,
                 payload,
                 reason=result.reason,
@@ -2886,7 +2889,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             run_persistence,
             "_write_state_payload",
         ) as write_state:
-            runner._rebase_waiting_deadlines(
+            run_coordination.rebase_waiting_deadlines(
                 payload,
                 question_id="question-this-wait-expected",
                 base_deadline=epoch + timedelta(hours=8, minutes=4),
@@ -2933,7 +2936,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             ),
             fresh=True,
         )
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=4.0,
             lease_extension_seconds=2.0,
             unsupervised_ceiling_seconds=20.0,
@@ -2954,7 +2957,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "mailbox_change_token",
                 side_effect=[
                     unchanged_token,
@@ -2963,17 +2966,17 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 ],
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_mailbox",
                 side_effect=[waiting_view, replied_view],
             ) as read,
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_lease",
                 return_value=lease,
             ),
         ):
-            result = runner._wait_for_mailbox_reply(
+            result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -3013,7 +3016,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 mailbox.MAILBOX_MAX_BYTES - mailbox.MAILBOX_MIN_APPEND_BYTES + 1
             ),
         )
-        settings = runner._MailboxReplyWaitSettings(
+        settings = run_coordination.MailboxWaitSettings(
             base_seconds=300.0,
             lease_extension_seconds=60.0,
             unsupervised_ceiling_seconds=900.0,
@@ -3023,21 +3026,21 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "mailbox_change_token",
                 return_value=(1, 2, exhausted_view.size_bytes, 3),
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_mailbox",
                 return_value=exhausted_view,
             ) as read,
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_lease",
             ) as read_lease,
         ):
-            result = runner._wait_for_mailbox_reply(
+            result = run_coordination.wait_for_mailbox_reply(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 payload={},
@@ -3118,7 +3121,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 appended_reply,
                 exhausted_view.reply_for(question_id),
             )
-            settings = runner._MailboxReplyWaitSettings(
+            settings = run_coordination.MailboxWaitSettings(
                 base_seconds=300.0,
                 lease_extension_seconds=60.0,
                 unsupervised_ceiling_seconds=900.0,
@@ -3127,10 +3130,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_lease",
             ) as read_lease:
-                result = runner._wait_for_mailbox_reply(
+                result = run_coordination.wait_for_mailbox_reply(
                     plan_dir=plan_dir,
                     state_dir_arg=str(state_dir),
                     payload={},
@@ -3160,7 +3163,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             write_plan(plan_dir, ("pending",))
             created_at = "0001-01-01T00:00:00+00:00"
             question_text = "Which option?"
-            question_id = runner._mailbox_question_id(
+            question_id = run_coordination.mailbox_question_id(
                 plan_dir=plan_dir,
                 run_id="run-retry",
                 session_id="1",
@@ -3220,13 +3223,13 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertIsNotNone(exhausted_view.reply_for(question_id))
 
             with mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "append_question",
                 side_effect=AssertionError(
                     "reusing a published question must not append"
                 ),
             ) as append_question:
-                reused_question = runner._ensure_mailbox_question(
+                reused_question = run_coordination.ensure_mailbox_question(
                     plan_dir=plan_dir,
                     state_dir_arg=str(state_dir),
                     question_id=question_id,
@@ -3283,17 +3286,19 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 )
                 with (
                     mock.patch.object(
-                        runner.mailbox,
+                        mailbox,
                         "read_mailbox",
                         return_value=exhausted_view,
                     ),
                     mock.patch.object(
-                        runner.mailbox,
+                        mailbox,
                         "append_question",
                     ) as append_question,
-                    self.assertRaises(runner._MailboxReplyWaitUnavailable) as raised,
+                    self.assertRaises(
+                        run_coordination.MailboxWaitUnavailable
+                    ) as raised,
                 ):
-                    runner._ensure_mailbox_question(
+                    run_coordination.ensure_mailbox_question(
                         plan_dir=Path("/tmp/plan"),
                         state_dir_arg=None,
                         question_id=question_id,
@@ -3336,7 +3341,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
     def test_oversized_last_message_yields_bounded_retry_stable_question(
         self,
     ) -> None:
-        cap = runner.MAILBOX_QUESTION_TEXT_MAX_CHARS
+        cap = run_coordination.MAILBOX_QUESTION_TEXT_MAX_CHARS
         oversized = "".join(f"line {index}\n" for index in range(cap // 4))
         self.assertGreater(len(oversized), cap)
         artifact_path = Path("/tmp/artifacts/last-message.txt")
@@ -3344,10 +3349,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
         # Two independent preparations of the same turn read the same
         # artifact; their bodies must be byte-identical or the reuse
         # equality check in _ensure_mailbox_question degrades the retry.
-        first_text = runner._mailbox_question_text(
+        first_text = run_coordination.mailbox_question_text(
             self._question_context(oversized, artifact_path)
         )
-        retried_text = runner._mailbox_question_text(
+        retried_text = run_coordination.mailbox_question_text(
             self._question_context(oversized, artifact_path)
         )
         self.assertEqual(first_text.encode("utf-8"), retried_text.encode("utf-8"))
@@ -3363,13 +3368,13 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             plan_dir = tmp_dir / "plan"
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
-            question_id = runner._mailbox_question_id(
+            question_id = run_coordination.mailbox_question_id(
                 plan_dir=plan_dir,
                 run_id="run-bounded",
                 session_id="1",
                 turn_index=2,
             )
-            published = runner._ensure_mailbox_question(
+            published = run_coordination.ensure_mailbox_question(
                 plan_dir=plan_dir,
                 state_dir_arg=str(state_dir),
                 question_id=question_id,
@@ -3381,13 +3386,13 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual(first_text, published.text)
 
             with mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "append_question",
                 side_effect=AssertionError(
                     "a retried preparation must reuse the bounded question"
                 ),
             ) as append_question:
-                reused = runner._ensure_mailbox_question(
+                reused = run_coordination.ensure_mailbox_question(
                     plan_dir=plan_dir,
                     state_dir_arg=str(state_dir),
                     question_id=question_id,
@@ -3401,18 +3406,18 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             append_question.assert_not_called()
 
     def test_last_message_at_exact_boundary_is_not_truncated(self) -> None:
-        cap = runner.MAILBOX_QUESTION_TEXT_MAX_CHARS
+        cap = run_coordination.MAILBOX_QUESTION_TEXT_MAX_CHARS
         artifact_path = Path("/tmp/artifacts/last-message.txt")
         at_boundary = "b" * cap
         self.assertEqual(
             at_boundary,
-            runner._mailbox_question_text(
+            run_coordination.mailbox_question_text(
                 self._question_context(at_boundary, artifact_path)
             ),
         )
 
         over_boundary = "b" * (cap + 1)
-        bounded = runner._mailbox_question_text(
+        bounded = run_coordination.mailbox_question_text(
             self._question_context(over_boundary, artifact_path)
         )
         self.assertNotEqual(over_boundary, bounded)
@@ -3437,17 +3442,17 @@ class RunReplyResumeFlowTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "read_mailbox",
                 return_value=past_question_cap,
             ),
             mock.patch.object(
-                runner.mailbox,
+                mailbox,
                 "append_question",
             ) as append_question,
-            self.assertRaises(runner._MailboxReplyWaitUnavailable) as raised,
+            self.assertRaises(run_coordination.MailboxWaitUnavailable) as raised,
         ):
-            runner._ensure_mailbox_question(
+            run_coordination.ensure_mailbox_question(
                 plan_dir=Path("/tmp/plan"),
                 state_dir_arg=None,
                 question_id="00000000-0000-4000-8000-000000000042",
@@ -3469,14 +3474,14 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             state_dir = tmp_dir / "state"
             write_plan(plan_dir, ("pending",))
             run_id = "run-that-times-out"
-            question_id = runner._mailbox_question_id(
+            question_id = run_coordination.mailbox_question_id(
                 plan_dir=plan_dir,
                 run_id=run_id,
                 session_id="1",
                 turn_index=2,
             )
 
-            question = runner._ensure_mailbox_question(
+            question = run_coordination.ensure_mailbox_question(
                 plan_dir=plan_dir,
                 state_dir_arg=str(state_dir),
                 question_id=question_id,
@@ -3646,7 +3651,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess,
@@ -3680,7 +3685,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess,
@@ -3702,7 +3707,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
         for wait_reason in (
             "reply",
             "timeout",
-            runner.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
+            run_coordination.MAILBOX_REPLY_WAIT_REASON_SUPERVISOR_LOST,
             "error",
         ):
             with (
@@ -3713,7 +3718,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
 
                 with (
                     mock.patch.object(
-                        runner.agent_mux_delivery.shutil,
+                        agent_mux_delivery.shutil,
                         "which",
                         return_value="/opt/amx",
                     ),
@@ -3746,7 +3751,7 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value=None
+                    agent_mux_delivery.shutil, "which", return_value=None
                 ),
                 mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
@@ -3769,8 +3774,8 @@ class AgentMuxWaitNotificationTests(unittest.TestCase):
             ]
             self.assertEqual(
                 [
-                    runner.AGENT_MUX_WAIT_START_EVENT,
-                    runner.AGENT_MUX_WAIT_END_EVENT,
+                    agent_mux_delivery.WAIT_START_EVENT,
+                    agent_mux_delivery.WAIT_END_EVENT,
                 ],
                 [outcome["agent_mux_event"] for outcome in outcomes],
             )
@@ -3831,7 +3836,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess,
@@ -3868,7 +3873,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess,
@@ -3900,7 +3905,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value="/opt/amx"
+                    agent_mux_delivery.shutil, "which", return_value="/opt/amx"
                 ),
                 mock.patch.object(
                     agent_mux_delivery.subprocess,
@@ -3929,7 +3934,7 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    runner.agent_mux_delivery.shutil, "which", return_value=None
+                    agent_mux_delivery.shutil, "which", return_value=None
                 ),
                 mock.patch.object(agent_mux_delivery.subprocess, "run") as run,
             ):
@@ -3956,8 +3961,8 @@ class AgentMuxTurnHangNotificationTests(unittest.TestCase):
             ]
             self.assertEqual(
                 [
-                    runner.AGENT_MUX_TURN_HANG_SUSPECTED_EVENT,
-                    runner.AGENT_MUX_TURN_HANG_CLEARED_EVENT,
+                    agent_mux_delivery.TURN_HANG_SUSPECTED_EVENT,
+                    agent_mux_delivery.TURN_HANG_CLEARED_EVENT,
                 ],
                 [outcome["agent_mux_event"] for outcome in outcomes],
             )
@@ -4706,10 +4711,10 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         env = self._base_env("reply-aware")
         env.update(
             {
-                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "3",
-                runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "5",
-                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.02",
-                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.1",
+                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "3",
+                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "5",
+                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.02",
+                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.1",
             }
         )
         process = subprocess.Popen(
@@ -5099,10 +5104,10 @@ class EndToEndReplyResumeFlowTests(unittest.TestCase):
         env = self._base_env("reply-aware")
         env.update(
             {
-                runner.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "3",
-                runner.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "5",
-                runner.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.02",
-                runner.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.1",
+                run_coordination.MAILBOX_REPLY_WAIT_BASE_ENV_VAR: "3",
+                run_coordination.MAILBOX_REPLY_WAIT_UNSUPERVISED_CEILING_ENV_VAR: "5",
+                run_coordination.MAILBOX_REPLY_WAIT_POLL_ENV_VAR: "0.02",
+                run_coordination.MAILBOX_REPLY_WAIT_IO_GRACE_ENV_VAR: "0.1",
             }
         )
         argv = [
