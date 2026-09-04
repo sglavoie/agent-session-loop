@@ -20,7 +20,7 @@ from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
 from agent_session_loop import (
@@ -49,6 +49,7 @@ from agent_session_loop import (
     session_verification,
     state,
     turn_execution,
+    turn_postflight,
     turn_preflight,
     turn_preparation,
     verification,
@@ -1303,6 +1304,37 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertNotIn("baseline-missing", categories)
 
 
+#: The modules the session loop hands a step of the turn's finalization to. A
+#: step that moved into one of these still runs where the loop calls it, so the
+#: checks below read the step from the module and its position from that call.
+#: Session 34 moved the gated plan-artifact guard into `turn_postflight`; this
+#: list is what keeps the checks pointing at the guard through that move and
+#: the next one.
+DISPOSITION_DELEGATES = (turn_postflight,)
+
+
+@dataclasses.dataclass(frozen=True)
+class GuardSite:
+    """Where the session loop has run the gated plan-artifact guard.
+
+    ``loop_lineno``, ``call_end_lineno``, and ``loop_end_lineno`` are runner
+    lines: the statement that reaches the guard, where that statement ends, and
+    the last line of the delegation that carries the verdict back into the loop.
+    ``owner`` is the function holding the guard when
+    it no longer lives in the loop, ``owner_lineno`` the guard's line inside it,
+    and ``result_name`` what the loop binds the delegate's verdict to -- which is
+    how the stop the delegation propagates is told from an unguarded edge.
+    """
+
+    loop_lineno: int
+    call_end_lineno: int
+    loop_end_lineno: int
+    col_offset: int
+    owner: ast.FunctionDef | None
+    owner_lineno: int
+    result_name: str | None
+
+
 class TerminatingDispositionSourceTests(unittest.TestCase):
     """The plan-artifact guard cannot be skipped by a new terminating branch.
 
@@ -1310,6 +1342,12 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
     can end the turn. These tests hold the dispatch to that disposition so a
     branch added later is either named there — and therefore guarded — or is
     unreachable.
+
+    The guard and the dispatch no longer share a source file: the guard runs
+    inside a delegate the loop calls, and only its verdict comes back. So the
+    ordering is read across the two, in the loop's coordinates — a step the loop
+    delegates sits where the call sits — and the delegation's own edges are held
+    to propagating the delegate's stop and nothing else.
     """
 
     DISPOSITION_NAMES = (
@@ -1385,21 +1423,158 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
         self.assertEqual(1, len(loops), "expected exactly one session loop")
         return loops[0]
 
-    def gated_guard(self, loop: ast.While) -> ast.If:
-        gated = [
-            node
-            for node in ast.walk(loop)
-            if isinstance(node, ast.If)
-            and "_enforce_plan_artifact_guard(" in ast.unparse(node.test)
-            and "terminating_disposition is not None" in ast.unparse(node.test)
+    def gated_ifs(self, node: ast.AST) -> list[ast.If]:
+        """Every branch under ``node`` that runs the guard on a disposition."""
+        return [
+            child
+            for child in ast.walk(node)
+            if isinstance(child, ast.If)
+            and "_enforce_plan_artifact_guard(" in ast.unparse(child.test)
+            and "terminating_disposition is not None" in ast.unparse(child.test)
+        ]
+
+    def enclosing_statement(self, root: ast.AST, target: ast.AST) -> ast.stmt:
+        """The innermost statement under ``root`` that contains ``target``.
+
+        A call's own column is wherever its callee starts, which for a delegated
+        step is past the assignment that keeps its result. The statement is what
+        carries the loop's indentation, so it is what the mutations below anchor
+        to.
+        """
+        found: ast.stmt | None = None
+
+        def visit(node: ast.AST, statement: ast.stmt | None) -> bool:
+            nonlocal found
+            if node is target:
+                found = statement
+                return True
+            for child in ast.iter_child_nodes(node):
+                inner = child if isinstance(child, ast.stmt) else statement
+                if visit(child, inner):
+                    return True
+            return False
+
+        visit(root, None)
+        self.assertIsNotNone(found, "expected the call to sit inside a statement")
+        return cast(ast.stmt, found)
+
+    def gated_guard_site(self, tree: ast.Module) -> GuardSite:
+        """Where the loop has run the gated guard, wherever the guard lives."""
+        loop = self.session_loop(tree)
+        in_the_loop = self.gated_ifs(loop)
+        if in_the_loop:
+            self.assertEqual(
+                1,
+                len(in_the_loop),
+                "the terminating dispositions must reach the plan-artifact "
+                "guard through exactly one gated call",
+            )
+            guard = in_the_loop[0]
+            return GuardSite(
+                loop_lineno=guard.lineno,
+                call_end_lineno=cast(int, guard.end_lineno),
+                loop_end_lineno=cast(int, guard.end_lineno),
+                col_offset=guard.col_offset,
+                owner=None,
+                owner_lineno=-1,
+                result_name=None,
+            )
+
+        owners = [
+            (node, gated)
+            for module in DISPOSITION_DELEGATES
+            for node in ast.parse(
+                Path(module.__file__ or "").read_text(encoding="utf-8")
+            ).body
+            if isinstance(node, ast.FunctionDef)
+            for gated in [self.gated_ifs(node)]
+            if gated
         ]
         self.assertEqual(
             1,
-            len(gated),
+            len(owners),
+            "the terminating dispositions must reach the plan-artifact guard "
+            "through exactly one gated call, in the loop or in one delegate",
+        )
+        owner, gated_in_owner = owners[0]
+        self.assertEqual(
+            1,
+            len(gated_in_owner),
             "the terminating dispositions must reach the plan-artifact guard "
             "through exactly one gated call",
         )
-        return gated[0]
+
+        calls = [
+            node
+            for node in ast.walk(loop)
+            if isinstance(node, ast.Call)
+            and (
+                (isinstance(node.func, ast.Name) and node.func.id == owner.name)
+                or (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == owner.name
+                )
+            )
+        ]
+        self.assertEqual(
+            1,
+            len(calls),
+            f"expected the loop to reach {owner.name} exactly once, so the "
+            "guard it runs has one place in the turn",
+        )
+        statement = self.enclosing_statement(loop, calls[0])
+        self.assertIsInstance(
+            statement,
+            ast.Assign,
+            "the loop must keep the delegate's verdict, since the guard's "
+            "refusal is only visible through it",
+        )
+        target = cast(ast.Assign, statement).targets[0]
+        self.assertIsInstance(target, ast.Name)
+        result_name = cast(ast.Name, target).id
+
+        # The delegation ends where the loop takes the disposition out of the
+        # verdict: before that line the guard's answer is still in transit, and
+        # nothing in the loop has branched on it.
+        forwarded = [
+            cast(int, node.end_lineno)
+            for node in self.disposition_assignments(loop)
+            if node.lineno > statement.lineno
+        ]
+        end = min(forwarded) if forwarded else statement.end_lineno
+        return GuardSite(
+            loop_lineno=statement.lineno,
+            call_end_lineno=cast(int, statement.end_lineno),
+            loop_end_lineno=cast(int, end),
+            col_offset=statement.col_offset,
+            owner=owner,
+            owner_lineno=gated_in_owner[0].lineno,
+            result_name=result_name,
+        )
+
+    def disposition_assignments(self, node: ast.AST) -> list[ast.Assign]:
+        """Every assignment to the name the dispatch reads, under ``node``."""
+        return [
+            child
+            for child in ast.walk(node)
+            if isinstance(child, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "terminating_disposition"
+                for target in child.targets
+            )
+        ]
+
+    def stop_propagation_lines(self, loop: ast.While, result_name: str) -> set[int]:
+        """Lines of the edges that carry the delegate's own refusal outwards."""
+        lines: set[int] = set()
+        for node in ast.walk(loop):
+            if not isinstance(node, ast.If):
+                continue
+            if ast.unparse(node.test) != f"{result_name}.stopped":
+                continue
+            for edge in self.turn_edges(node):
+                lines.add(edge.lineno)
+        return lines
 
     def unconditional_guard_ends(self, loop: ast.While) -> list[int]:
         """Lines after which the plan-artifact guard has run on every path."""
@@ -1560,29 +1735,46 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
         self, tree: ast.Module
     ) -> None:
         loop = self.session_loop(tree)
-        guard_line = self.gated_guard(loop).lineno
-        assignments = [
-            node.lineno
-            for node in ast.walk(loop)
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "terminating_disposition"
-                for target in node.targets
-            )
+        site = self.gated_guard_site(tree)
+        scope: ast.AST = loop if site.owner is None else site.owner
+        guard_line = site.loop_lineno if site.owner is None else site.owner_lineno
+        # An assignment that calls something computes the disposition; one that
+        # only reads an attribute forwards a disposition already computed. Only
+        # the first may happen, and only once.
+        computed = [
+            node
+            for node in self.disposition_assignments(scope)
+            if any(isinstance(child, ast.Call) for child in ast.walk(node.value))
         ]
 
         self.assertEqual(
             1,
-            len(assignments),
+            len(computed),
             "the disposition must be computed once, so the guard and the "
             "dispatch cannot disagree about which branch ends the turn",
         )
-        self.assertLess(assignments[0], guard_line)
+        self.assertLess(computed[0].lineno, guard_line)
+        if site.owner is not None:
+            forwarded = self.disposition_assignments(loop)
+            self.assertEqual(
+                1,
+                len(forwarded),
+                "the loop must take the disposition from the delegate once",
+            )
+            value = forwarded[0].value
+            self.assertTrue(
+                isinstance(value, ast.Attribute)
+                and value.attr == "terminating_disposition"
+                and isinstance(value.value, ast.Name)
+                and value.value.id == site.result_name,
+                "the loop must dispatch on the disposition the guard was gated "
+                "on rather than compute a second one the guard never saw",
+            )
         branches = self.dispatch_branches(loop)
         self.assertTrue(branches, "expected the dispatch to name its branches")
         for node, name in branches:
             self.assertLess(
-                guard_line,
+                site.loop_end_lineno,
                 node.lineno,
                 f"the {name} branch runs before the plan-artifact guard, so a "
                 "turn that tampered with another session's packet would end "
@@ -1593,10 +1785,10 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
         self, tree: ast.Module
     ) -> None:
         loop = self.session_loop(tree)
-        guard = self.gated_guard(loop)
+        site = self.gated_guard_site(tree)
         status_line = self.status_guard_line(loop)
         self.assertLess(
-            guard.end_lineno,
+            site.loop_end_lineno,
             status_line,
             "the gated guard must run before the status guards take over",
         )
@@ -1605,8 +1797,26 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
         ]
         guarded_after = self.unconditional_guard_ends(loop)
 
+        if site.result_name is not None:
+            # The delegation runs the guard and hands back a verdict, so the
+            # only turn it may end between those two lines is the one the guard
+            # itself refused. Anything else there would leave before the loop
+            # ever holds the disposition the guard was gated on.
+            propagated = self.stop_propagation_lines(loop, site.result_name)
+            for edge in self.turn_edges(loop):
+                if not site.loop_lineno <= edge.lineno <= site.loop_end_lineno:
+                    continue
+                self.assertIn(
+                    edge.lineno,
+                    propagated,
+                    f"a {type(edge).__name__.lower()} at agent_session_loop/"
+                    f"runner.py:{edge.lineno} ends or relaunches the turn "
+                    "inside the delegation that runs the plan-artifact guard, "
+                    f"without being the refusal {site.result_name} reports",
+                )
+
         for edge in self.turn_edges(loop):
-            if not guard.end_lineno < edge.lineno < status_line:
+            if not site.loop_end_lineno < edge.lineno < status_line:
                 continue
             if any(start <= edge.lineno <= end for start, end in selected):
                 continue
@@ -1625,7 +1835,7 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
         self, tree: ast.Module
     ) -> None:
         loop = self.session_loop(tree)
-        guard_line = self.gated_guard(loop).lineno
+        guard_line = self.gated_guard_site(tree).loop_lineno
 
         for node, in_inner_loop in self.loop_ifs(loop):
             if node.lineno < guard_line:
@@ -1663,13 +1873,33 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
         self.check_no_terminating_branch_re_tests_the_raw_result(self.tree)
 
     def test_a_top_level_turn_payload_relaunch_is_rejected(self) -> None:
-        guard = self.gated_guard(self.session_loop(self.tree))
+        site = self.gated_guard_site(self.tree)
 
         for edge in ("continue", "break", "return"):
             with self.subTest(edge=edge):
                 mutated = self.mutated_tree(
-                    after_line=guard.end_lineno,
-                    column=guard.col_offset,
+                    after_line=site.loop_end_lineno,
+                    column=site.col_offset,
+                    body=('if turn_payload.get("future_retry"):', f"    {edge}"),
+                )
+
+                with self.assertRaises(AssertionError):
+                    self.check_the_dispatch_owns_every_edge_before_the_status_guards(
+                        mutated
+                    )
+
+    def test_an_unguarded_edge_inside_the_delegation_is_rejected(self) -> None:
+        site = self.gated_guard_site(self.tree)
+        if site.result_name is None:
+            self.skipTest("the guard runs in the loop, so nothing is delegated")
+        # Between the call and the line that takes the disposition out of the
+        # verdict, the guard has already run but the loop cannot yet say on
+        # which disposition; only the delegate's own refusal may leave here.
+        for edge in ("continue", "break", "return"):
+            with self.subTest(edge=edge):
+                mutated = self.mutated_tree(
+                    after_line=site.call_end_lineno,
+                    column=site.col_offset,
                     body=('if turn_payload.get("future_retry"):', f"    {edge}"),
                 )
 
@@ -1699,13 +1929,13 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
                     self.check_no_terminating_branch_re_tests_the_raw_result(mutated)
 
     def test_a_return_is_owned_by_its_callable_not_by_its_loop(self) -> None:
-        guard = self.gated_guard(self.session_loop(self.tree))
+        site = self.gated_guard_site(self.tree)
         # A helper defined here returns from itself, so neither check may claim
         # its edge; a loop body runs inside the turn, so its return still ends
         # the turn and both checks must.
         owned_by_a_callable = self.mutated_tree(
-            after_line=guard.end_lineno,
-            column=guard.col_offset,
+            after_line=site.loop_end_lineno,
+            column=site.col_offset,
             body=(
                 "def _future_helper() -> None:",
                 "    if result.returncode:",
@@ -1719,8 +1949,8 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
         self.check_no_terminating_branch_re_tests_the_raw_result(owned_by_a_callable)
 
         owned_by_the_turn = self.mutated_tree(
-            after_line=guard.end_lineno,
-            column=guard.col_offset,
+            after_line=site.loop_end_lineno,
+            column=site.col_offset,
             body=(
                 "for _ in ():",
                 '    if turn_payload.get("future_retry"):',
@@ -1734,14 +1964,14 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
             )
 
     def test_a_nested_loop_else_relaunch_is_rejected(self) -> None:
-        guard = self.gated_guard(self.session_loop(self.tree))
+        site = self.gated_guard_site(self.tree)
         # The else suite runs after the nested loop has finished, so Python
         # binds these to the session loop and they end the turn past the guard.
         for edge in ("break", "continue"):
             with self.subTest(edge=edge):
                 mutated = self.mutated_tree(
-                    after_line=guard.end_lineno,
-                    column=guard.col_offset,
+                    after_line=site.loop_end_lineno,
+                    column=site.col_offset,
                     body=(
                         "for _ in ():",
                         "    pass",
@@ -3638,7 +3868,7 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
     # ordered steps live in different files -- so each step is located by
     # search and ordered by where the loop reaches its owner, which keeps the
     # contract intact as the extraction keeps carving the loop up.
-    TURN_PATH_MODULES = (runner, turn_preparation, turn_preflight)
+    TURN_PATH_MODULES = (runner, turn_preparation, turn_preflight, turn_postflight)
 
     def setUp(self) -> None:
         self.trees = {

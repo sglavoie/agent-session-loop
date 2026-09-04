@@ -45,6 +45,9 @@ from agent_session_loop import (
     state,
     supervisor_audit,
     turn_execution,
+    turn_postflight,
+    turn_preflight,
+    turn_preparation,
 )
 from agent_session_loop import verification as verification_module
 from tests.support import (
@@ -93,6 +96,35 @@ MOVED_SYMBOLS = (
 #: allowed to write. Everything else it produces is a payload it returns for
 #: the loop to append under the run's own lock.
 COMMIT_ARTIFACT_KEYS = ("stdout", "stderr", "result")
+
+#: Every module the turn path has been sliced into. The commit-ordering
+#: contract below is an ordering one, and raw source offsets stop being
+#: comparable the moment two ordered steps live in different files -- so each
+#: guard is located by search and ordered by where the loop reaches its owner,
+#: which keeps the contract intact as the extraction keeps carving the loop up.
+TURN_PATH_MODULES = (runner, turn_preparation, turn_preflight, turn_postflight)
+
+
+def _module_tree(module: Any) -> ast.Module:
+    return ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
+
+
+def _call_lines(node: ast.AST, name: str) -> list[int]:
+    """Lines in ``node`` that call ``name``, bare or through its module.
+
+    A call site keeps its meaning when the callee is extracted into a package
+    module, so `name(...)` and `module.name(...)` both count -- otherwise an
+    ordering contract silently stops seeing a step the moment it moves.
+    """
+    return sorted(
+        call.lineno
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and (
+            (isinstance(call.func, ast.Name) and call.func.id == name)
+            or (isinstance(call.func, ast.Attribute) and call.func.attr == name)
+        )
+    )
 
 
 def _turn_finished_emitters() -> set[str]:
@@ -226,18 +258,74 @@ class TurnCommitSourceTests(unittest.TestCase):
         self.assertLess(appended, reported)
         self.assertLess(appended, notified)
 
+
+class RunLoopGuardOrderTests(unittest.TestCase):
+    """Nothing is committed before every guard that could refuse it has run.
+
+    The guards no longer all live in ``_run_locked``: the post-execution
+    sequence moved into ``turn_postflight``, and the turn-start captures into
+    ``turn_preflight``. So each guard is ordered by the pair of the line in
+    ``_run_locked`` where the loop reaches its owner and the line inside that
+    owner, with a guard the loop still performs itself sorting as ``(its own
+    line, -1)``. Owners are discovered rather than listed, so a guard that moves
+    into a new turn-path module rejoins this contract by being called from the
+    loop.
+    """
+
+    def setUp(self) -> None:
+        self.trees = {
+            module.__name__.rsplit(".", 1)[-1]: _module_tree(module)
+            for module in TURN_PATH_MODULES
+        }
+        self.run_locked = self._function("_run_locked", self.trees["runner"])
+        self.entry_points = self._entry_points()
+
+    def _function(self, name: str, tree: ast.AST) -> ast.FunctionDef:
+        matches = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        ]
+        self.assertEqual(1, len(matches), f"expected one {name} definition")
+        return matches[0]
+
+    def _entry_points(self) -> dict[str, tuple[int, ast.FunctionDef]]:
+        reached: dict[str, tuple[int, ast.FunctionDef]] = {}
+        for module_name, tree in self.trees.items():
+            if module_name == "runner":
+                continue
+            for node in ast.iter_child_nodes(tree):
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                calls = _call_lines(self.run_locked, node.name)
+                if calls:
+                    reached[node.name] = (min(calls), node)
+        return reached
+
+    def _positions(self, name: str) -> list[tuple[int, int]]:
+        positions = [(line, -1) for line in _call_lines(self.run_locked, name)]
+        for loop_line, owner in self.entry_points.values():
+            positions.extend((loop_line, line) for line in _call_lines(owner, name))
+        return sorted(positions)
+
     def test_the_run_loop_commits_after_every_guard(self) -> None:
-        source = inspect.getsource(runner._run_locked)
-        commit = source.index("turn_executor.commit(")
+        commit = self._positions("commit")
+        self.assertTrue(commit, "expected the loop to commit a turn")
         for earlier in (
-            "_enforce_workspace_write_guard(",
-            "_enforce_review_mutation_guard(",
-            "_enforce_mailbox_completion_guard(",
-            "_enforce_session_verification(",
-            "_append_progress_entry(",
-            "plans.sync_derived_status_ledgers(",
+            "_enforce_workspace_write_guard",
+            "_enforce_review_mutation_guard",
+            "_enforce_mailbox_completion_guard",
+            "_enforce_session_verification",
+            "_append_progress_entry",
+            "sync_derived_status_ledgers",
         ):
-            self.assertLess(source.index(earlier), commit, earlier)
+            with self.subTest(guard=earlier):
+                reached = self._positions(earlier)
+                self.assertTrue(reached, f"the turn path never reaches {earlier}")
+                # First reach, as the string-offset form this replaced read it:
+                # the crash handler's own copy of a write guard sits after the
+                # commit by construction and is not what this orders.
+                self.assertLess(min(reached), min(commit), earlier)
 
 
 class CommittedTurnImmutabilityTests(unittest.TestCase):

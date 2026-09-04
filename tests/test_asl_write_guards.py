@@ -40,6 +40,7 @@ from agent_session_loop import (
     run_termination,
     runner,
     session_verification,
+    turn_postflight,
     workspace_evidence,
     workspaces,
     write_guards,
@@ -290,24 +291,40 @@ class SeamTests(unittest.TestCase):
             )
 
     def test_the_loop_passes_both_seams_at_every_enforcement_call(self) -> None:
-        tree = ast.parse(Path(runner.__file__ or "").read_text(encoding="utf-8"))
-        calls = 0
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if not isinstance(func, ast.Attribute):
-                continue
-            if not isinstance(func.value, ast.Name) or func.value.id != "write_guards":
-                continue
-            if func.attr not in ENFORCEMENT_FUNCTIONS:
-                continue
-            calls += 1
-            passed = {keyword.arg for keyword in node.keywords}
-            with self.subTest(line=node.lineno, name=func.attr):
-                self.assertLessEqual(set(SEAM_PARAMETERS), passed)
-        # Two per guard: the finalization path and the crash path.
-        self.assertEqual(6, calls)
+        # The two paths live in two modules since Session 34: the finalization
+        # sequence moved into `turn_postflight`, while the crash path stayed in
+        # the runner's own `except BaseException` handler. Both are scanned, and
+        # each is counted on its own, so a call that merely moved between them
+        # cannot pass by keeping the total.
+        calls: dict[str, int] = {}
+        for module in (runner, turn_postflight):
+            tree = ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if not isinstance(func, ast.Attribute):
+                    continue
+                if (
+                    not isinstance(func.value, ast.Name)
+                    or func.value.id != "write_guards"
+                ):
+                    continue
+                if func.attr not in ENFORCEMENT_FUNCTIONS:
+                    continue
+                calls[module.__name__] = calls.get(module.__name__, 0) + 1
+                passed = {keyword.arg for keyword in node.keywords}
+                with self.subTest(module=module.__name__, line=node.lineno):
+                    self.assertLessEqual(set(SEAM_PARAMETERS), passed)
+        # One per guard on each path: the finalization sequence and the crash
+        # path each reach all three.
+        self.assertEqual(
+            {
+                "agent_session_loop.runner": 3,
+                "agent_session_loop.turn_postflight": 3,
+            },
+            calls,
+        )
 
 
 class ProtectedPathChangedPathsTests(unittest.TestCase):

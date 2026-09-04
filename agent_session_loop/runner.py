@@ -67,6 +67,7 @@ from . import (
     state,
     supervisor_audit,
     turn_execution,
+    turn_postflight,
     turn_preflight,
     turn_preparation,
     verification,
@@ -1527,6 +1528,18 @@ def _run_locked(
         guard_controller=ctx.guard_controller,
     )
     pending_exception_guard: dict[str, Any] | None = None
+
+    def disarm_exception_guard() -> None:
+        """Retire the crash-path copy of the write guard for this turn.
+
+        The post-turn sequence disarms this *before* it enforces the live
+        guard, so the handler below cannot re-enforce the same guard against
+        the same before-image if the live one raises. That ordering is why it
+        is a callback rather than a value the boundary hands back.
+        """
+        nonlocal pending_exception_guard
+        pending_exception_guard = None
+
     try:
         while True:
             if ctx.idle_baseline_pinned:
@@ -2111,204 +2124,35 @@ def _run_locked(
                         persistence=ctx.persistence,
                     )
 
-            # Ahead of every result branch: a retryable pause (timeout,
-            # transport failure) would otherwise relaunch against the turn's
-            # own mutation and adopt it as the new baseline.
-            #
-            # A finalization guard that pauses no longer leaves immediately:
-            # it records that it is ending the turn and falls through to the
-            # protected-path step below, because the operator's standing
-            # instruction is answered against the same comparison the write
-            # guard already captured, and a turn that breached both has to
-            # report both. The break moves to after that step.
-            finalization_paused = False
-            if workspace is not None:
-                assert session_scope is not None
-                assert workspace_snapshot_before is not None
-                pending_exception_guard = None
-                if write_guards._enforce_workspace_write_guard(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    workspace=workspace,
-                    scope=session_scope,
-                    before=before,
-                    after=after,
-                    snapshot_before=workspace_snapshot_before,
-                    exclude=review_guard_excludes,
-                    include_ignored=review_guard_include_ignored,
-                    session_id=session_id,
-                    session_label=session_label,
-                    session_details=session_details,
-                    turn_payload=turn_payload,
-                    paths=paths,
-                    plan_cache=ctx.plan_cache,
-                    append_handoff_note=handoff_correction._append_handoff_note,
-                    reinspect=session_verification._reinspect_after_revert,
-                    state_dir_arg=args.state_dir,
-                    run_dir=ctx.run_dir,
-                    external_digests_before=external_digests_before,
-                    turn_started_ns=turn_started_ns,
-                ):
-                    finalization_paused = True
-                elif is_review_session:
-                    try:
-                        review_bases = workspace_evidence._workspace_review_bases(
-                            workspace, workspace_snapshot_before
-                        )
-                    except RunError as error:
-                        with ctx.persistence.lock:
-                            ctx.payload["final_snapshot"] = (
-                                _snapshot_payload(after)
-                                if after is not None
-                                else _snapshot_payload(before)
-                            )
-                        ctx.pause(
-                            reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
-                            message=str(error),
-                            details={**session_details, "error": str(error)},
-                        )
-                        finalization_paused = True
-                    else:
-                        with ctx.persistence.lock:
-                            turn_payload["review_repository_bases"] = review_bases
-                            _write_json_file(paths["result"], turn_payload)
-            elif legacy_snapshot_before is not None:
-                pending_exception_guard = None
-                if write_guards._enforce_legacy_implementation_write_guard(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    cwd=cwd,
-                    before=before,
-                    after=after,
-                    snapshot_before=legacy_snapshot_before,
-                    exclude=review_guard_excludes,
-                    include_ignored=review_guard_include_ignored,
-                    session_id=session_id,
-                    session_label=session_label,
-                    session_details=session_details,
-                    turn_payload=turn_payload,
-                    paths=paths,
-                    plan_cache=ctx.plan_cache,
-                    append_handoff_note=handoff_correction._append_handoff_note,
-                    reinspect=session_verification._reinspect_after_revert,
-                    state_dir_arg=args.state_dir,
-                    run_dir=ctx.run_dir,
-                    external_digests_before=external_digests_before,
-                    turn_started_ns=turn_started_ns,
-                ):
-                    finalization_paused = True
-            elif review_fingerprint_before is not None:
-                # The turn reached its own finalization guards, which adjudicate
-                # the protected paths in line below. Disarming the crash-path
-                # copy here mirrors the two branches above and keeps one turn
-                # from recording the same verdict twice.
-                pending_exception_guard = None
-            if (
-                not finalization_paused
-                and is_review_session
-                and review_fingerprint_before is not None
-                and handoff_guards._enforce_review_mutation_guard(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    cwd=cwd,
-                    before=before,
-                    after=after,
-                    fingerprint_before=review_fingerprint_before,
-                    exclude=review_guard_excludes,
-                    include_ignored=review_guard_include_ignored,
-                    session_id=session_id,
-                    session_label=session_label,
-                    session_details=session_details,
-                    turn_payload=turn_payload,
-                    paths=paths,
-                    plan_cache=ctx.plan_cache,
-                    append_handoff_note=handoff_correction._append_handoff_note,
-                    reinspect=session_verification._reinspect_after_revert,
-                )
-            ):
-                finalization_paused = True
-
-            # After the general write guard and before every result branch, for
-            # the same reason the write guard sits there: a retryable pause
-            # would otherwise relaunch against a workspace in which the
-            # protected path has already moved, and adopt that as the baseline.
-            # It is a distinct step because it answers a distinct question —
-            # not "did the session stay in scope" but "did the run honour the
-            # standing instruction an operator gave it".
-            if write_guards._enforce_protected_path_guard(
-                event_path=ctx.event_path,
-                payload=ctx.payload,
-                persistence=ctx.persistence,
-                guard_controller=ctx.guard_controller,
+            postflight = turn_postflight.enforce_post_turn_guards(
+                ctx,
                 before=before,
                 after=after,
+                result=result,
+                turn_payload=turn_payload,
+                workspace=workspace,
+                session_scope=session_scope,
+                workspace_snapshot_before=workspace_snapshot_before,
+                legacy_snapshot_before=legacy_snapshot_before,
+                review_fingerprint_before=review_fingerprint_before,
+                external_digests_before=external_digests_before,
+                turn_started_ns=turn_started_ns,
+                plan_artifacts_before=plan_artifacts_before,
+                plan_artifacts_written_by_runner=plan_artifacts_written_by_runner,
+                is_review_session=is_review_session,
+                cwd=cwd,
                 session_id=session_id,
                 session_label=session_label,
                 session_details=session_details,
-                turn_payload=turn_payload,
+                review_guard_excludes=review_guard_excludes,
+                review_guard_include_ignored=review_guard_include_ignored,
                 paths=paths,
-                plan_cache=ctx.plan_cache,
-                append_handoff_note=handoff_correction._append_handoff_note,
-                reinspect=session_verification._reinspect_after_revert,
-                changed_paths=(
-                    write_guards._protected_path_changed_paths(
-                        turn_payload.get("workspace_write_guard")
-                    )
-                    if isinstance(turn_payload.get("workspace_write_guard"), Mapping)
-                    # A legacy review turn captures no write-guard comparison,
-                    # but a mutation guard that passed proves the worktree is
-                    # unchanged — a stronger clearance than an empty change
-                    # list, not a missing one. One that paused proves the
-                    # opposite, and names no paths, so it clears nothing.
-                    else ()
-                    if review_fingerprint_before is not None and not finalization_paused
-                    else None
-                ),
-                adjudicate_only=finalization_paused,
-            ):
-                break
-            if finalization_paused:
-                break
-
-            # Every branch below can end the turn — by pausing, by recording a
-            # clean stop, or by looping straight into another turn — and a
-            # relaunch that starts from a tampered packet adopts it as the new
-            # baseline. So the digests are compared here, before any of them
-            # runs, and each of those branches is then selected by the name
-            # computed here rather than by re-testing the result: a branch the
-            # disposition cannot name is unreachable, so none can be added
-            # below without this guard having run for it. A turn that reaches
-            # the status guards instead is left to the call site below them,
-            # which keeps the sharper wrong-session diagnosis for a tamper that
-            # moved a status.
-            terminating_disposition = handoff_guards._terminating_result_disposition(
-                result, after, turn_payload
+                state_dir_arg=args.state_dir,
+                disarm_exception_guard=disarm_exception_guard,
             )
-            if (
-                terminating_disposition is not None
-                and handoff_guards._enforce_plan_artifact_guard(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    before=before,
-                    after=after,
-                    digests_before=plan_artifacts_before,
-                    runner_written=plan_artifacts_written_by_runner,
-                    session_id=session_id,
-                    session_label=session_label,
-                    session_details=session_details,
-                    turn_payload=turn_payload,
-                    paths=paths,
-                    plan_cache=ctx.plan_cache,
-                    result_disposition=terminating_disposition,
-                    append_handoff_note=handoff_correction._append_handoff_note,
-                    reinspect=session_verification._reinspect_after_revert,
-                )
-            ):
+            if postflight.stopped:
                 break
+            terminating_disposition = postflight.terminating_disposition
 
             if terminating_disposition == "interrupted":
                 with ctx.persistence.lock:
