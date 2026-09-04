@@ -499,6 +499,35 @@ def _sentence_case(text: str) -> str:
     return text[:1].upper() + text[1:]
 
 
+#: The file name :func:`_write_paused_work_message` writes under the paused
+#: turn's artifact directory. The message is an artifact of the run, never of
+#: the workspace: written into the tree it would become part of the very dirt
+#: the commit it describes is settling, and ``--pathspec`` staging would not
+#: reliably exclude it.
+PAUSED_WORK_MESSAGE_FILE_NAME = "paused-work-commit-message.txt"
+
+
+def _write_paused_work_message(artifact_dir: Path, message: str) -> Path:
+    """Write ``message`` where ``asl commit --message-file`` can be pointed at it.
+
+    The commit ledger resolves the targets and decides that a pause owes a
+    commit, but it opens no file of its own — every durable record it owns goes
+    through the run's persistence handle. The message file is neither a state
+    write nor an event: it is the nested command's input, on the same footing as
+    the ``stdout.log``/``stderr.log``/``result.json`` triple
+    :func:`_write_commit_artifacts` leaves beside it. So it is written here,
+    where the ``--message-file`` argv is built and the message itself is
+    rendered.
+
+    It is deliberately left behind afterwards. The commit it produced says the
+    work is unverified; the file is the verbatim evidence of what was claimed,
+    next to the artifacts of the commit that claimed it.
+    """
+    path = artifact_dir / PAUSED_WORK_MESSAGE_FILE_NAME
+    durability.write_text(path, message)
+    return path
+
+
 def _asl_commit_env() -> dict[str, str]:
     """Make this checkout importable to the commit subprocess."""
     env = dict(os.environ)

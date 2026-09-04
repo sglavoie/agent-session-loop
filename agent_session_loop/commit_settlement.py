@@ -7,7 +7,7 @@ a commit group covers, drives the group through
 :mod:`agent_session_loop.commit_groups`, records every attempt that failed
 without stopping the run, and finally closes the run out.
 
-Three things live here:
+Four things live here:
 
 * **Commit target resolution.** :func:`_commit_targets` turns a verification
   context into the repository rows a group commits, and the four resolvers
@@ -23,6 +23,11 @@ Three things live here:
   :mod:`agent_session_loop.run_commit`, and persists the group at every phase.
   :func:`_commit_failure_record` and :func:`_unresolved_commit_groups` are the
   other half of the same story: what the run admits it failed to commit.
+* **The settlement of a paused turn's retained work.**
+  :func:`_settle_paused_retained_work` is the one commit this ledger makes for
+  work that was *not* accepted: :func:`_paused_work_commit_targets` picks the
+  repositories, the group runs under the ``session-paused`` scope, and the
+  outcome is recorded under :data:`PAUSED_WORK_COMMIT_KEY`.
 * **Run finish.** :func:`_finish_run` writes the run's own ending — its finish
   timestamp, its duration, the cleared live-action fields — appends
   ``run_finished`` and notifies the AgentMux loop.
@@ -70,30 +75,54 @@ Five invariants survive the move:
   paused — a paused run already notified Paused, and Finished would release the
   daemon's run lease and overwrite the paused attention icon.
 
+One more invariant arrived after them, because the ledger now settles a
+*paused* turn's retained work as well as an accepted one's, and the two commits
+make different claims. An accepted session's commit says the session completed
+and its verification passed. The retained-work commit a *recoverable* pause
+makes says only that the turn's changes were written down before the process
+exited: the session it names is back to ``pending``, nothing verified the work,
+and the next attempt may replace all of it. Three things keep that weaker claim
+from reading as the stronger one. The group is scoped ``session-paused`` rather
+than ``session``, so it is a different identity from the accepted commit the
+same session may still earn later and cannot overwrite its row. The message is
+rendered by :func:`run_commit._paused_work_commit_message` and committed with
+``--message-file`` rather than generated, both because the pause may *be* the
+harness failing and because a marking that says the work is unverified must not
+be rewordable by a model. And the record under :data:`PAUSED_WORK_COMMIT_KEY`
+names, in ``residue``, whatever the commit failed to take with it — the
+settlement re-probes every target rather than assuming a commit it launched
+left the tree clean. The commit exists so the relaunch starts on a clean tree,
+not so the run can claim the work was good.
+
 The module never imports the runner. Everything it needs is either a leaf it
 reads at the owner — ``clock``, ``commit_groups``, ``events``,
 ``turn_execution`` — or a boundary extracted before it: the git shell in
 ``review_guard``, the run's write handle in ``run_persistence``, the progress
 voice in ``run_reporting``, and the commit subprocess in ``run_commit``. The
-one thing it still needs from the loop is the readiness lifecycle
-:func:`_finish_run` closes, which Session 15 owns; it enters as the
-:data:`RunFinalizer` callback rather than as an import.
+two things it still needs from the loop enter as callbacks rather than as
+imports: the readiness lifecycle :func:`_finish_run` closes, which Session 15
+owns and which arrives as the :data:`RunFinalizer` callback, and the commit
+soft-fail whose retry budget lives on the run context, which arrives as
+:class:`CommitSoftFail`.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from . import (
     clock,
     commit_groups,
     events,
+    pause_policy,
     review_guard,
     run_commit,
     run_persistence,
     run_reporting,
+    run_selection,
     turn_execution,
     verification,
 )
@@ -118,6 +147,66 @@ STAGEABLE_CHANGE_CATEGORIES: tuple[str, ...] = (
 RunFinalizer = Callable[[dict[str, Any]], None]
 
 
+class CommitSoftFail(Protocol):
+    """Absorb a commit failure and keep the run going.
+
+    The loop keeps the implementation — its own ``_soft_fail_commit`` — because
+    the retry budget it spends lives on the run context, and because the
+    owed-group settlement at the top of the loop shares it with every other
+    commit boundary. It arrives here already bound to that context, as
+    ``functools.partial(_soft_fail_commit, ctx)``, exactly as it already does
+    for ``turn_settlement.SoftFailCommit``; that is what lets this module
+    record a loss only the loop can retry without importing the loop.
+
+    It never raises: a commit that cannot be made is a record and a warning,
+    not an ending. For the paused-work settlement that matters twice over,
+    since the run is already on its way to a pause and a raise here would
+    replace a recoverable pause with a crash.
+    """
+
+    def __call__(
+        self,
+        *,
+        scope: str,
+        session_id: str | None,
+        group: Mapping[str, Any] | None,
+        commit: Mapping[str, Any] | None,
+        error: str | None,
+        message: str,
+    ) -> None: ...
+
+
+@dataclasses.dataclass(frozen=True)
+class RetainedWorkContext:
+    """The paused turn whose retained work the settlement is about to commit.
+
+    Everything the settlement needs to know about the turn, gathered by the
+    caller so this module never reads the loop's context. ``session_label`` is
+    :func:`plans.session_label`'s rendering rather than a bare id, because the
+    commit message opens a sentence with it. ``turn_payload`` is the live
+    dictionary the run mutates in place: the settlement writes its record onto
+    it under :data:`PAUSED_WORK_COMMIT_KEY`, and reads ``workspace_write_guard``
+    off it for the registered staging scope. ``artifact_dir`` is where the
+    deterministic commit message is written, and ``result_path`` is the turn's
+    own durable artifact — re-persisting it after the settlement returns
+    belongs to the caller, which owns the file writes this module does not
+    make.
+
+    The two flags decide whether the pause owes a commit at all. A review
+    session is excluded, matching the accepted path, which never commits one
+    either. A repair session with no commit mode owns its own commit, so it is
+    included where a plain session with no commit mode is not.
+    """
+
+    session_id: str
+    session_label: str
+    turn_payload: dict[str, Any]
+    result_path: Path
+    artifact_dir: Path
+    is_review_session: bool
+    is_repair_session: bool
+
+
 def _upsert_commit_group(payload: dict[str, Any], group: Mapping[str, Any]) -> None:
     groups = payload.setdefault("commit_groups", [])
     group_id = group.get("group_id")
@@ -138,6 +227,17 @@ COMMIT_FAILURES_KEY = "commit_failures"
 #: ``terminalize``. It is the run's own admission that commits were lost, and
 #: the field the supervisor audit's commit-group-resolution check reads.
 UNRESOLVED_COMMIT_GROUPS_KEY = "unresolved_commit_groups"
+
+#: What a recoverable pause committed of the work its turn retained, written
+#: onto that turn's payload. Session 5 puts the same record on the run payload
+#: and into the pause details, where the supervisor and the audit read it.
+PAUSED_WORK_COMMIT_KEY = "paused_work_commit"
+
+#: The ``guard`` label on that record. A settled pause is not a guard refusal,
+#: but the record sits beside ``session_commit`` and ``repair_commit`` on the
+#: same turn payload, and those name the boundary that wrote them; this one
+#: does the same so a reader never has to infer which boundary spoke.
+PAUSED_WORK_COMMIT_GUARD = "paused-work-commit"
 
 #: How many times one commit group is retried inside a single run before the
 #: run stops attempting it. A transient failure heals on the first retry; a
@@ -586,6 +686,244 @@ def _run_commit_group(
         )
     except commit_groups.CommitGroupError as error:
         raise RunError(f"invalid commit group: {error}") from error
+
+
+def _paused_work_commit_targets(
+    verification_context: verification.VerificationContext,
+    *,
+    guard: Mapping[str, Any],
+    whole_workspace: bool,
+) -> list[dict[str, Any]]:
+    """Which repositories a recoverable pause owes a retained-work commit in.
+
+    No staging is invented here. The retained work is settled with exactly the
+    selection the accepted path would have used for the same boundary, because
+    a pause that stages *more* than the accepted commit would have would sweep
+    up whatever else is in the tree under a message that claims to describe one
+    turn.
+
+    Under ``--commit-at-end`` (``whole_workspace``) that selection is the
+    end-of-run sweep, which already falls back to the single dirty target when
+    there is no workspace, so the legacy case needs no branch of its own.
+    Otherwise it is the session selection: the write guard's evidence in a
+    registered workspace, and the one dirty repository in a legacy one.
+
+    ``guard`` is the paused turn's ``workspace_write_guard`` evidence. It is
+    read only on the registered session branch, and it is validated rather than
+    trusted there: a guard that did not pass raises before any group exists,
+    which is what keeps a pause from committing changes no guard ever cleared.
+    """
+    if whole_workspace:
+        return _registered_end_commit_targets(verification_context)
+    if verification_context.workspace is None:
+        return _dirty_commit_targets(verification_context)
+    return _registered_session_commit_targets(verification_context, guard)
+
+
+def _commit_target_residue(target: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Name what is still dirty in ``target`` after a commit ran against it.
+
+    ``None`` for a target the commit left clean. The staging a session commit
+    uses is derived from the write guard's evidence, and a linked worktree
+    alias falls back to a repository-wide stage instead, so neither shape is
+    guaranteed to have taken everything in the tree with it. The relaunch's
+    startup gate reads the whole tree, so anything left behind is what will
+    still block it — naming it in the record is what keeps the settlement from
+    reporting a success the next process disagrees with.
+
+    ``_commit_target_is_clean`` has already run ``git status`` in this same
+    worktree and raised if git could not answer, so the second call is not
+    re-guarded.
+    """
+    if _commit_target_is_clean(target):
+        return None
+    status = review_guard._run_git(
+        Path(str(target["root"])),
+        ["status", "--porcelain", "-z", "--untracked-files=all"],
+    )
+    alias = target.get("alias")
+    paths = review_guard._porcelain_dirty_paths(status.stdout)
+    return {
+        "alias": alias,
+        "clean": False,
+        "dirty_paths": [
+            f"{alias}:{path}" if alias is not None else path for path in paths
+        ],
+    }
+
+
+def _repair_number(value: Any) -> int | None:
+    """Read one repair counter out of the pause details, never recomputing it."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _repair_flag(value: Any) -> bool | None:
+    """Read the repair-exhausted verdict out of the pause details."""
+    return value if isinstance(value, bool) else None
+
+
+def _paused_work_commit_is_owed(
+    retained: RetainedWorkContext,
+    *,
+    pause_reason: str,
+    commit_mode: str | None,
+) -> bool:
+    """Whether this pause owes the work its turn retained a commit.
+
+    Three refusals, each of them the same rule the accepted path already
+    applies. A review session is never auto-committed. A pause a machine cannot
+    recover from is one a human is about to inspect, and the retention of its
+    dirt is the whole point of the gate that caused it. And a run with no
+    commit mode owes no commit at all — unless it is a repair child, which owns
+    its own commit precisely because its parent's mode did not reach it.
+    """
+    if retained.is_review_session:
+        return False
+    if pause_reason not in pause_policy.RECOVERABLE_PAUSE_REASONS:
+        return False
+    return commit_mode is not None or retained.is_repair_session
+
+
+def _settle_paused_retained_work(
+    *,
+    event_path: Path,
+    payload: dict[str, Any],
+    progress: run_reporting._ProgressReporter,
+    verification_context: verification.VerificationContext,
+    run_dir: Path,
+    run_id: str,
+    retained: RetainedWorkContext,
+    pause_reason: str,
+    pause_details: Mapping[str, Any],
+    commit_mode: str | None,
+    generation: run_commit._CommitGeneration,
+    soft_fail: CommitSoftFail,
+    persistence: run_persistence._RunPersistence | None = None,
+) -> dict[str, Any] | None:
+    """Commit the work a recoverable pause retained, and record what happened.
+
+    ``None`` means this pause owed nothing (see
+    :func:`_paused_work_commit_is_owed`); every other outcome — including
+    finding nothing to commit — returns the record it wrote.
+
+    The repair attempt numbers are *read* from ``pause_details`` rather than
+    recomputed. ``session_verification`` has already adjudicated them against
+    the session's failure history and merged them into the pause details, so a
+    second count here would be a second opinion about a budget that has one
+    owner. A value the details do not carry, or carry in the wrong type, reads
+    as ``None`` rather than as a number this module invented.
+
+    Nothing raises out of here. A resolution that refuses, a group that fails
+    and a commit that comes back unsuccessful all land in the same record with
+    ``result: "failed"`` and are handed to ``soft_fail``, which re-arms the
+    group for a retry when there is a durable group to retry. When there is
+    not — a guard that did not pass raises before any group is created — the
+    failure is recorded with no group at all, and the retained work stays in
+    the tree for the human that pause is already waiting on.
+    """
+    if not _paused_work_commit_is_owed(
+        retained, pause_reason=pause_reason, commit_mode=commit_mode
+    ):
+        return None
+    persistence = run_persistence._run_persistence(persistence)
+    repair_attempt = _repair_number(pause_details.get("verification_repair_attempt"))
+    repair_max_attempts = _repair_number(
+        pause_details.get("verification_repair_max_attempts")
+    )
+    repair_exhausted = _repair_flag(pause_details.get("verification_repair_exhausted"))
+
+    targets: list[dict[str, Any]] = []
+    group: dict[str, Any] | None = None
+    failed_commit: dict[str, Any] | None = None
+    error: str | None = None
+    try:
+        targets = _paused_work_commit_targets(
+            verification_context,
+            guard=retained.turn_payload.get("workspace_write_guard") or {},
+            whole_workspace=commit_mode == run_selection.COMMIT_MODE_END,
+        )
+        if targets:
+            message_file = run_commit._write_paused_work_message(
+                retained.artifact_dir,
+                run_commit._paused_work_commit_message(
+                    session_label=retained.session_label,
+                    pause_reason=pause_reason,
+                    commit_mode=commit_mode,
+                    repair_attempt=repair_attempt,
+                    repair_max_attempts=repair_max_attempts,
+                    run_id=run_id,
+                ),
+            )
+            group, failed_commit = _run_commit_group(
+                event_path=event_path,
+                payload=payload,
+                progress=progress,
+                verification_context=verification_context,
+                run_dir=run_dir,
+                run_id=run_id,
+                session_id=retained.session_id,
+                targets=targets,
+                generation=dataclasses.replace(generation, message_file=message_file),
+                scope=commit_groups.GROUP_SCOPE_SESSION_PAUSED,
+                persistence=persistence,
+            )
+    except (RunError, commit_groups.CommitGroupError) as failure:
+        error = str(failure)
+
+    failed = error is not None or failed_commit is not None
+    residue = (
+        []
+        if failed
+        else [
+            row
+            for row in (_commit_target_residue(target) for target in targets)
+            if row is not None
+        ]
+    )
+    if failed:
+        result = "failed"
+    elif not targets:
+        result = "no-changes"
+    elif residue:
+        result = "committed-with-residue"
+    else:
+        result = "committed"
+
+    record: dict[str, Any] = {
+        "guard": PAUSED_WORK_COMMIT_GUARD,
+        "pause_reason": pause_reason,
+        "commit_mode": commit_mode,
+        "result": result,
+        "verification_repair_attempt": repair_attempt,
+        "verification_repair_max_attempts": repair_max_attempts,
+        "verification_repair_exhausted": repair_exhausted,
+        "commit_group": group,
+        "commit": failed_commit,
+        "error": error,
+        "residue": {"repositories": residue},
+    }
+    with persistence.lock:
+        retained.turn_payload[PAUSED_WORK_COMMIT_KEY] = record
+        persistence.append_event(
+            event_path,
+            events.PAUSED_WORK_COMMITTED_EVENT,
+            {"run_id": run_id, "session_id": retained.session_id, **record},
+        )
+        persistence.write_state(payload)
+    if failed:
+        soft_fail(
+            scope=commit_groups.GROUP_SCOPE_SESSION_PAUSED,
+            session_id=retained.session_id,
+            group=group,
+            commit=failed_commit,
+            error=error,
+            message=(
+                "the work retained by the "
+                f"{pause_reason} pause of {retained.session_label} "
+                "could not be committed"
+            ),
+        )
+    return record
 
 
 def _finish_run(

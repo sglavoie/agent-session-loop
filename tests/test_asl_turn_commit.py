@@ -209,18 +209,22 @@ class RunCommitBoundaryTests(unittest.TestCase):
                 self.assertFalse(hasattr(runner, name))
                 self.assertTrue(hasattr(run_commit, name))
 
-    def test_only_the_artifact_writer_touches_the_filesystem(self) -> None:
+    def test_only_the_artifact_writers_touch_the_filesystem(self) -> None:
         # The subprocess this module runs can take minutes, so the run's write
         # mutex is deliberately not held across it: the commit-started and
         # commit-finished payloads are returned for the loop to persist. The
-        # one exception is the commit's own artifact directory, and it goes
-        # through the atomic writers rather than through `Path.write_text`.
+        # exceptions are the commit's own artifact directory and the message
+        # file a retained-work commit is made from -- the nested command's own
+        # input, written where its argv is built rather than in the ledger that
+        # asked for it, which owns no file writes at all. Both go through the
+        # atomic writers rather than through `Path.write_text`.
         self.assertEqual(
             {
                 "_write_commit_artifacts": {
                     "durability.write_text",
                     "durability.write_json_file",
-                }
+                },
+                "_write_paused_work_message": {"durability.write_text"},
             },
             _filesystem_writers(self.source),
         )
@@ -449,6 +453,446 @@ class PausedWorkCommitMessageTests(unittest.TestCase):
                     self.assertEqual(
                         message, commit_message.format_commit_message(message)
                     )
+
+
+class PausedRetainedWorkTests(unittest.TestCase):
+    """What a recoverable pause commits of the work its turn retained.
+
+    The settlement is driven directly here: no loop is wired to it yet, and the
+    claims are about which repositories it stages, what survives the commit,
+    and what the record it leaves says. The commit subprocess is replaced by a
+    fake that performs the real ``git add``/``git commit`` the staging asks
+    for, so the re-probe that names residue is answered by a real tree rather
+    than by the fake's own opinion of what it committed.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.workspace_root = self.tmp_path / "workspace"
+        self.repositories = init_multi_repo_workspace(self.workspace_root, SPECS)
+        self.plan_dir = self.tmp_path / "plan"
+        write_multi_repo_plan(self.plan_dir, ("pending",), specs=SPECS)
+        self.registered = verification_module.VerificationContext.from_plan(
+            self.plan_dir, self.workspace_root
+        )
+        self.legacy_root = self.tmp_path / "legacy"
+        init_git_repo(self.legacy_root)
+        self.legacy = verification_module.VerificationContext.legacy(self.legacy_root)
+        self.run_dir = self.tmp_path / "run"
+        self.event_path = self.tmp_path / "events.jsonl"
+        self.artifact_dir = self.tmp_path / "turn-0001"
+        self.payload: dict[str, Any] = {"commits": []}
+        self.launched: list[dict[str, Any]] = []
+        self.soft_failures: list[dict[str, Any]] = []
+
+    # -- fixtures ---------------------------------------------------------
+
+    def _write(self, root: Path, relative: str) -> None:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{relative}\n", encoding="utf-8")
+
+    def _guard(
+        self,
+        *,
+        alias: str = "SVC",
+        added_paths: tuple[str, ...] = (),
+        passed: bool = True,
+    ) -> dict[str, Any]:
+        """The write-guard evidence a passing registered turn leaves behind."""
+        return {
+            "passed": passed,
+            "authorized_aliases": [alias],
+            "changed": {
+                alias: {
+                    "alias": alias,
+                    "qualified_paths": [f"{alias}:{path}" for path in added_paths],
+                    "tracked": [],
+                    "untracked_added": list(added_paths),
+                    "untracked_changed": [],
+                    "worktree_of": None,
+                }
+            },
+        }
+
+    def _fake_commit(self, **kwargs: Any) -> dict[str, Any]:
+        """Stage and commit exactly what the settlement asked for."""
+        self.launched.append(dict(kwargs))
+        root = Path(str(kwargs["cwd"]))
+        staging = list(kwargs["staging_paths"])
+        if staging:
+            review_guard._run_git(
+                root, ["add", "--", *commit_message.dequalify_paths(staging)]
+            )
+        else:
+            review_guard._run_git(root, ["add", "-A"])
+        message_file = kwargs["generation"].message_file
+        assert message_file is not None
+        review_guard._run_git(root, ["commit", "--no-verify", "-F", str(message_file)])
+        head = review_guard._run_git(root, ["rev-parse", "HEAD"]).stdout.strip()
+        return {
+            "success": True,
+            "commit_sha": head,
+            "commit_index": kwargs["commit_index"],
+            "repository_key": kwargs["repository_key"],
+        }
+
+    def _refused_commit(self, **kwargs: Any) -> dict[str, Any]:
+        self.launched.append(dict(kwargs))
+        return {
+            "success": False,
+            "returncode": 1,
+            "status_result": "nonzero-exit",
+            "repository_key": kwargs["repository_key"],
+        }
+
+    def _soft_fail(self, **kwargs: Any) -> None:
+        self.soft_failures.append(dict(kwargs))
+
+    def _settle(
+        self,
+        context: verification_module.VerificationContext,
+        *,
+        guard: dict[str, Any] | None,
+        commit_mode: str | None = run_selection.COMMIT_MODE_PER_SESSION,
+        pause_reason: str = "verify-failed",
+        pause_details: dict[str, Any] | None = None,
+        is_review_session: bool = False,
+        is_repair_session: bool = False,
+        commit: Any = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        turn_payload: dict[str, Any] = {"turn_index": 1, "session": "1"}
+        if guard is not None:
+            turn_payload["workspace_write_guard"] = guard
+        retained = commit_settlement.RetainedWorkContext(
+            session_id="1",
+            session_label=plans.session_label("1"),
+            turn_payload=turn_payload,
+            result_path=self.artifact_dir / "result.json",
+            artifact_dir=self.artifact_dir,
+            is_review_session=is_review_session,
+            is_repair_session=is_repair_session,
+        )
+        with mock.patch.object(
+            run_commit, "_run_asl_commit", side_effect=commit or self._fake_commit
+        ):
+            record = commit_settlement._settle_paused_retained_work(
+                event_path=self.event_path,
+                payload=self.payload,
+                progress=mock.Mock(),
+                verification_context=context,
+                run_dir=self.run_dir,
+                run_id="run-paused",
+                retained=retained,
+                pause_reason=pause_reason,
+                pause_details=(
+                    {
+                        "verification_repair_attempt": 1,
+                        "verification_repair_max_attempts": 2,
+                        "verification_repair_exhausted": False,
+                    }
+                    if pause_details is None
+                    else pause_details
+                ),
+                commit_mode=commit_mode,
+                generation=run_commit._CommitGeneration(),
+                soft_fail=self._soft_fail,
+                persistence=run_persistence._RunPersistence(),
+            )
+        return record, turn_payload
+
+    def _message_file(self) -> Path:
+        return self.artifact_dir / run_commit.PAUSED_WORK_MESSAGE_FILE_NAME
+
+    def _events(self) -> list[dict[str, Any]]:
+        # A settlement that owed nothing appends nothing, so the log may not
+        # exist at all -- which is the same claim as an empty one.
+        if not self.event_path.exists():
+            return []
+        return [
+            record["payload"]
+            for record in read_jsonl(self.event_path)
+            if record["name"] == events.PAUSED_WORK_COMMITTED_EVENT
+        ]
+
+    def _dirty(self, root: Path) -> list[str]:
+        return review_guard._porcelain_dirty_paths(
+            review_guard._run_git(
+                root, ["status", "--porcelain", "-z", "--untracked-files=all"]
+            ).stdout
+        )
+
+    # -- the four results -------------------------------------------------
+
+    def test_a_registered_settlement_stages_the_guarded_paths_only(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        record, turn_payload = self._settle(
+            self.registered, guard=self._guard(added_paths=("worked.txt",))
+        )
+
+        assert record is not None
+        self.assertEqual("committed", record["result"])
+        self.assertEqual(["SVC"], [call["repository_key"] for call in self.launched])
+        # The staging is the write guard's evidence and nothing else: the
+        # settlement reuses the accepted path's resolver rather than sweeping
+        # the repository the way an end-of-run commit would.
+        self.assertEqual(["SVC:worked.txt"], self.launched[0]["staging_paths"])
+        self.assertEqual(
+            self.repositories["SVC"].resolve(), Path(self.launched[0]["cwd"])
+        )
+        self.assertEqual([], self._dirty(self.repositories["SVC"]))
+        self.assertEqual(record, turn_payload[commit_settlement.PAUSED_WORK_COMMIT_KEY])
+        self.assertEqual(
+            commit_groups.GROUP_SCOPE_SESSION_PAUSED, record["commit_group"]["scope"]
+        )
+        self.assertEqual({"repositories": []}, record["residue"])
+        self.assertIsNone(record["error"])
+
+    def test_the_legacy_settlement_covers_its_one_repository(self) -> None:
+        self._write(self.legacy_root, "worked.txt")
+        self._write(self.legacy_root, "also.txt")
+        record, _turn_payload = self._settle(self.legacy, guard=None)
+
+        assert record is not None
+        self.assertEqual("committed", record["result"])
+        self.assertEqual(
+            [commit_groups.LEGACY_REPOSITORY_KEY],
+            [call["repository_key"] for call in self.launched],
+        )
+        # No pathspec means `asl commit` stays on its `git add -A` default, so
+        # the file the guard never named is committed too.
+        self.assertEqual([], self.launched[0]["staging_paths"])
+        self.assertEqual([], self._dirty(self.legacy_root))
+
+    def test_the_at_end_settlement_covers_the_whole_workspace(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        self._write(self.repositories["OAK"], "elsewhere.txt")
+        record, _turn_payload = self._settle(
+            self.registered,
+            guard=self._guard(added_paths=("worked.txt",)),
+            commit_mode=run_selection.COMMIT_MODE_END,
+        )
+
+        assert record is not None
+        self.assertEqual("committed", record["result"])
+        # The guard authorized SVC alone; the at-end sweep commits every dirty
+        # repository regardless, because that is what the mode already claims.
+        self.assertEqual(
+            ["SVC", "OAK"], [call["repository_key"] for call in self.launched]
+        )
+        self.assertEqual([[], []], [call["staging_paths"] for call in self.launched])
+        self.assertEqual([], self._dirty(self.repositories["OAK"]))
+
+    def test_nothing_to_commit_records_no_changes_without_a_commit(self) -> None:
+        record, _turn_payload = self._settle(
+            self.registered, guard=self._guard(added_paths=("worked.txt",))
+        )
+
+        assert record is not None
+        self.assertEqual("no-changes", record["result"])
+        self.assertEqual([], self.launched)
+        self.assertIsNone(record["commit_group"])
+        self.assertIsNone(record["commit"])
+        self.assertIsNone(record["error"])
+        # No group was created and no message was rendered for a commit that
+        # never had a reason to run.
+        self.assertNotIn("commit_groups", self.payload)
+        self.assertFalse(self._message_file().exists())
+        self.assertEqual([], self.soft_failures)
+
+    def test_dirt_that_survives_the_commit_is_named_in_the_record(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        self._write(self.repositories["SVC"], "stray.txt")
+        record, _turn_payload = self._settle(
+            self.registered, guard=self._guard(added_paths=("worked.txt",))
+        )
+
+        assert record is not None
+        self.assertEqual("committed-with-residue", record["result"])
+        self.assertEqual(
+            {
+                "repositories": [
+                    {
+                        "alias": "SVC",
+                        "clean": False,
+                        "dirty_paths": ["SVC:stray.txt"],
+                    }
+                ]
+            },
+            record["residue"],
+        )
+        # The commit is real; what it left behind is what the relaunch's
+        # startup gate will still refuse, which is why it is reported.
+        self.assertIsNone(record["error"])
+        self.assertEqual(["stray.txt"], self._dirty(self.repositories["SVC"]))
+
+    def test_a_failed_settlement_soft_fails_and_leaves_the_group_owed(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        record, _turn_payload = self._settle(
+            self.registered,
+            guard=self._guard(added_paths=("worked.txt",)),
+            commit=self._refused_commit,
+        )
+
+        assert record is not None
+        self.assertEqual("failed", record["result"])
+        self.assertEqual(1, record["commit"]["returncode"])
+        self.assertEqual(
+            commit_groups.GROUP_STATUS_FAILED, record["commit_group"]["status"]
+        )
+        self.assertEqual({"repositories": []}, record["residue"])
+        # The durable row is what a later run recovers, and the run's own
+        # end-of-run report names it as a loss.
+        self.assertEqual(
+            [commit_groups.GROUP_STATUS_FAILED],
+            [group["status"] for group in self.payload["commit_groups"]],
+        )
+        self.assertEqual(
+            [commit_groups.GROUP_SCOPE_SESSION_PAUSED],
+            [
+                summary["scope"]
+                for summary in commit_settlement._unresolved_commit_groups(self.payload)
+            ],
+        )
+        self.assertEqual(1, len(self.soft_failures))
+        failure = self.soft_failures[0]
+        self.assertEqual(commit_groups.GROUP_SCOPE_SESSION_PAUSED, failure["scope"])
+        self.assertEqual("1", failure["session_id"])
+        self.assertEqual(record["commit_group"], failure["group"])
+        self.assertEqual(record["commit"], failure["commit"])
+
+    def test_a_guard_that_did_not_pass_fails_with_no_group_to_retry(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        record, _turn_payload = self._settle(
+            self.registered,
+            guard=self._guard(added_paths=("worked.txt",), passed=False),
+        )
+
+        assert record is not None
+        self.assertEqual("failed", record["result"])
+        self.assertIn("workspace write guard did not pass", record["error"])
+        self.assertEqual([], self.launched)
+        # Session 1's gap 1: the resolver raises before `create_group`, so the
+        # failure leaves no durable row and nothing for the loop to re-arm.
+        self.assertIsNone(record["commit_group"])
+        self.assertNotIn("commit_groups", self.payload)
+        self.assertEqual(1, len(self.soft_failures))
+        self.assertIsNone(self.soft_failures[0]["group"])
+        self.assertIsNone(self.soft_failures[0]["commit"])
+        # The run still says it lost a commit, from the failure record alone.
+        self.assertEqual(["worked.txt"], self._dirty(self.repositories["SVC"]))
+
+    # -- what the record and the message carry ----------------------------
+
+    def test_the_message_file_is_the_deterministic_marking(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        self._settle(self.registered, guard=self._guard(added_paths=("worked.txt",)))
+
+        expected = run_commit._paused_work_commit_message(
+            session_label="session 1",
+            pause_reason="verify-failed",
+            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+            repair_attempt=1,
+            repair_max_attempts=2,
+            run_id="run-paused",
+        )
+        self.assertEqual(
+            self._message_file(), self.launched[0]["generation"].message_file
+        )
+        self.assertEqual(expected, self._message_file().read_text(encoding="utf-8"))
+        # The message the settlement wrote is the message git kept.
+        committed = review_guard._run_git(
+            self.repositories["SVC"], ["log", "-1", "--pretty=%B"]
+        ).stdout
+        self.assertEqual(expected.strip(), committed.strip())
+
+    def test_the_event_carries_the_record_the_turn_payload_keeps(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        record, turn_payload = self._settle(
+            self.registered, guard=self._guard(added_paths=("worked.txt",))
+        )
+
+        assert record is not None
+        published = self._events()
+        self.assertEqual(1, len(published))
+        self.assertEqual(
+            {"run_id": "run-paused", "session_id": "1", **record}, published[0]
+        )
+        self.assertEqual(
+            commit_settlement.PAUSED_WORK_COMMIT_GUARD,
+            turn_payload[commit_settlement.PAUSED_WORK_COMMIT_KEY]["guard"],
+        )
+
+    def test_the_repair_numbers_are_read_from_the_pause_details(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        record, _turn_payload = self._settle(
+            self.registered,
+            guard=self._guard(added_paths=("worked.txt",)),
+            pause_details={
+                "verification_repair_attempt": 2,
+                "verification_repair_max_attempts": 2,
+                "verification_repair_exhausted": True,
+            },
+        )
+
+        assert record is not None
+        self.assertEqual(2, record["verification_repair_attempt"])
+        self.assertEqual(2, record["verification_repair_max_attempts"])
+        self.assertIs(True, record["verification_repair_exhausted"])
+        # Settling an exhausted repair is deliberate: the work stays
+        # inspectable through `git show` and the flag says the budget is spent.
+        self.assertEqual("committed", record["result"])
+
+    def test_details_that_carry_no_numbers_invent_none(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        record, _turn_payload = self._settle(
+            self.registered,
+            guard=self._guard(added_paths=("worked.txt",)),
+            pause_reason="timeout",
+            pause_details={},
+        )
+
+        assert record is not None
+        self.assertIsNone(record["verification_repair_attempt"])
+        self.assertIsNone(record["verification_repair_max_attempts"])
+        self.assertIsNone(record["verification_repair_exhausted"])
+        self.assertEqual("timeout", record["pause_reason"])
+        # And the message says nothing about an attempt it was never told.
+        self.assertNotIn("Repair attempt", self._message_file().read_text("utf-8"))
+
+    # -- which pauses owe a commit at all ---------------------------------
+
+    def test_a_pause_that_owes_no_commit_settles_nothing(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        guard = self._guard(added_paths=("worked.txt",))
+        for label, kwargs in (
+            ("review session", {"is_review_session": True}),
+            ("no commit mode", {"commit_mode": None}),
+            ("non-recoverable pause", {"pause_reason": "commit-preflight"}),
+        ):
+            with self.subTest(case=label):
+                record, turn_payload = self._settle(
+                    self.registered, guard=guard, **kwargs
+                )
+                self.assertIsNone(record)
+                self.assertNotIn(commit_settlement.PAUSED_WORK_COMMIT_KEY, turn_payload)
+        self.assertEqual([], self.launched)
+        self.assertEqual([], self._events())
+
+    def test_a_repair_child_owns_its_own_retained_work_commit(self) -> None:
+        self._write(self.repositories["SVC"], "worked.txt")
+        record, _turn_payload = self._settle(
+            self.registered,
+            guard=self._guard(added_paths=("worked.txt",)),
+            commit_mode=None,
+            is_repair_session=True,
+        )
+
+        assert record is not None
+        self.assertEqual("committed", record["result"])
+        self.assertIsNone(record["commit_mode"])
 
 
 class TurnCommitSourceTests(unittest.TestCase):
