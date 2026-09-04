@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import ModuleType
@@ -35,6 +36,7 @@ from agent_session_loop import (
     plans,
     preflight,
     readiness_gate,
+    repository_evidence,
     review,
     review_guard,
     review_repair,
@@ -47,6 +49,7 @@ from agent_session_loop import (
     session_verification,
     state,
     turn_execution,
+    turn_preflight,
     turn_preparation,
     verification,
     workspace_evidence,
@@ -2950,7 +2953,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             captures.append(args)
             if len(captures) == 1:
                 return real_capture(*args, **kwargs)
-            raise runner.repository_evidence.RepositoryEvidenceError("git is gone")
+            raise repository_evidence.RepositoryEvidenceError("git is gone")
 
         with (
             mock.patch.object(
@@ -3630,22 +3633,70 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
     alone would leave the file itself disagreeing with all four.
     """
 
+    # Every module the turn path has been sliced into. The contract is an
+    # ordering one, and raw line numbers stop being comparable the moment two
+    # ordered steps live in different files -- so each step is located by
+    # search and ordered by where the loop reaches its owner, which keeps the
+    # contract intact as the extraction keeps carving the loop up.
+    TURN_PATH_MODULES = (runner, turn_preparation, turn_preflight)
+
     def setUp(self) -> None:
-        self.tree = ast.parse(Path(runner.__file__).read_text(encoding="utf-8"))
-        # The contract spans two modules now that the resumption block is its
-        # own function: the widening, the re-read and the preflight sit inside
-        # `resume_repair_session`, while the packet, the persisted prompt and
-        # the guard stay in the loop that calls it.
-        self.preparation_tree = ast.parse(
-            Path(turn_preparation.__file__).read_text(encoding="utf-8")
-        )
+        self.trees = {
+            module.__name__.rsplit(".", 1)[-1]: ast.parse(
+                Path(module.__file__).read_text(encoding="utf-8")
+            )
+            for module in self.TURN_PATH_MODULES
+        }
+        self.tree = self.trees["runner"]
+        self.preparation_tree = self.trees["turn_preparation"]
         self.run_locked = self._function("_run_locked")
+        self.entry_points = self._entry_points()
         self.resume_repair = self._function(
             "resume_repair_session", tree=self.preparation_tree
         )
         self.prepare_prompt = self._function(
             "prepare_turn_prompt", tree=self.preparation_tree
         )
+
+    def _entry_points(self) -> dict[str, tuple[int, ast.FunctionDef]]:
+        """The steps the loop delegates, keyed by where the loop reaches them.
+
+        Discovered rather than listed: a step extracted into a new module
+        rejoins the order by being called from the loop, so this contract does
+        not have to be re-pointed at each module the turn path grows.
+        """
+        reached: dict[str, tuple[int, ast.FunctionDef]] = {}
+        for module_name, tree in self.trees.items():
+            if module_name == "runner":
+                continue
+            for node in ast.iter_child_nodes(tree):
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                calls = self._call_lines(self.run_locked, node.name)
+                if calls:
+                    reached[node.name] = (min(calls), node)
+        return reached
+
+    def _owners(self) -> list[ast.FunctionDef]:
+        return [self.run_locked, *(owner for _, owner in self.entry_points.values())]
+
+    def _positions(
+        self, lines_in: Callable[[ast.FunctionDef], list[int]]
+    ) -> list[tuple[int, int]]:
+        """Where the turn path performs something, in the loop's own order.
+
+        A step the loop still performs itself sorts by its own line; a step it
+        delegates sorts by where the loop reaches the owner, then by the line
+        inside it. That is what makes two ordered steps comparable after one of
+        them moves into a module of its own.
+        """
+        positions = [(line, -1) for line in lines_in(self.run_locked)]
+        for loop_line, owner in self.entry_points.values():
+            positions.extend((loop_line, line) for line in lines_in(owner))
+        return sorted(positions)
+
+    def _call_positions(self, name: str) -> list[tuple[int, int]]:
+        return self._positions(lambda node: self._call_lines(node, name))
 
     def _function(self, name: str, *, tree: ast.AST | None = None) -> ast.FunctionDef:
         matches = [
@@ -3671,26 +3722,24 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
             )
         )
 
-    def _turn_record_line(self) -> int:
+    def _turn_record_lines(self, node: ast.FunctionDef) -> list[int]:
         # The turn record is where the rendered prompt becomes durable state, so
-        # pin the literal that carries it rather than every rebinding of the name.
-        lines = sorted(
+        # pin the literal that carries it rather than every rebinding of the
+        # name. Matched on the two keys that make it the turn record rather than
+        # on the name it is bound to, which is the part that moves.
+        return sorted(
             assign.lineno
-            for assign in ast.walk(self.run_locked)
-            if isinstance(assign, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "active_turn"
-                for target in assign.targets
-            )
+            for assign in ast.walk(node)
+            if isinstance(assign, ast.Assign | ast.AnnAssign)
             and isinstance(assign.value, ast.Dict)
-            and any(
-                isinstance(key, ast.Constant) and key.value == "prompt"
-                for key in assign.value.keys
-                if key is not None
-            )
+            and {"prompt", "turn_index"}
+            <= {key.value for key in assign.value.keys if isinstance(key, ast.Constant)}
         )
-        self.assertEqual(1, len(lines), "expected one persisted turn record")
-        return lines[0]
+
+    def _turn_record_position(self) -> tuple[int, int]:
+        positions = self._positions(self._turn_record_lines)
+        self.assertEqual(1, len(positions), "expected one persisted turn record")
+        return positions[0]
 
     def test_regeneration_precedes_every_reader_of_the_child_scope(self) -> None:
         # Inside the resumption: widen, re-read, then prove the tree is clean.
@@ -3722,13 +3771,14 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
             "a second packet build in the loop would read its own scope",
         )
 
-        # In the loop: resume first, then the prompt that builds the packet,
-        # then the record that makes the prompt durable, then the guard.
-        (resumed,) = self._call_lines(self.run_locked, "resume_repair_session")
-        prompt = self._call_lines(self.run_locked, "prepare_turn_prompt")
-        prompt_persisted = self._turn_record_line()
-        guard = self._call_lines(self.run_locked, "_workspace_write_guard_evidence")
+        # Across the turn path: resume first, then the prompt that builds the
+        # packet, then the record that makes the prompt durable, then the guard.
+        (resumed,) = self._call_positions("resume_repair_session")
+        prompt = self._call_positions("prepare_turn_prompt")
+        prompt_persisted = self._turn_record_position()
+        guard = self._call_positions("_workspace_write_guard_evidence")
 
+        self.assertTrue(guard, "expected a write guard reading the child scope")
         self.assertLess(resumed, min(prompt))
         self.assertLess(min(prompt), prompt_persisted)
         self.assertLess(prompt_persisted, min(guard))
@@ -3736,7 +3786,8 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
     def test_the_retained_scope_branch_no_longer_widens_the_child_itself(self) -> None:
         branches = [
             node
-            for node in ast.walk(self.run_locked)
+            for owner in self._owners()
+            for node in ast.walk(owner)
             if isinstance(node, ast.If)
             and ast.unparse(node.test) == "retained_scope_repair is not None"
             and self._call_lines(node, "_workspace_write_guard_evidence")
@@ -3754,13 +3805,9 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
         # it re-read the file to produce it, so taking `session_scope` off its
         # result is still the file's own value rather than a computed one.
         allowed = ("_session_scope(", ".session_scope")
-        modules = {
-            "runner": self.tree,
-            "turn_preparation": self.preparation_tree,
-        }
 
         bound_anywhere = False
-        for module_name, tree in modules.items():
+        for module_name, tree in self.trees.items():
             assignments = [
                 node
                 for node in ast.walk(tree)

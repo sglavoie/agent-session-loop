@@ -16,7 +16,6 @@ import dataclasses
 import functools
 import sys
 import threading
-import time
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +29,6 @@ from . import (
     commit_settlement,
     durability,
     events,
-    external_write_evidence,
     guards,
     guidance_delivery,
     handoff_correction,
@@ -44,7 +42,6 @@ from . import (
     preflight,
     qna,
     readiness_gate,
-    repository_evidence,
     review,
     review_continuation,
     review_cycle,
@@ -70,6 +67,7 @@ from . import (
     state,
     supervisor_audit,
     turn_execution,
+    turn_preflight,
     turn_preparation,
     verification,
     verification_transitions,
@@ -1586,7 +1584,6 @@ def _run_locked(
             classification = turn_preparation.classify_session(pending_session.path)
             is_review_session = classification.is_review_session
             is_repair_session = classification.is_repair_session
-            session_kind = classification.session_kind
             review_preparation = turn_preparation.prepare_review_session(
                 ctx,
                 session=pending_session,
@@ -1751,21 +1748,11 @@ def _run_locked(
                 if workspace is not None
                 else None
             )
-            retained_scope_repair = (
-                workspace_evidence._latest_workspace_scope_repair_requirement(
-                    ctx.event_path, session_id
-                )
-                if workspace is not None
-                else None
+            retained_scope_repair = turn_preflight.resolve_retained_scope_repair(
+                event_path=ctx.event_path,
+                session_id=session_id,
+                workspace=workspace,
             )
-            if (
-                retained_scope_repair is not None
-                and retained_scope_repair.get("session_id") != session_id
-            ):
-                # The lookup also matches on the pause envelope's session, so
-                # the guard record's own identity is the narrower proof that
-                # this is the turn whose changes were retained for this child.
-                retained_scope_repair = None
             repair_resumption = turn_preparation.resume_repair_session(
                 ctx,
                 session=pending_session,
@@ -1810,72 +1797,23 @@ def _run_locked(
             if turn_prompt.paused:
                 break
             prompt = turn_prompt.prompt
-            prompt_kind = turn_prompt.prompt_kind
-            persisted_prompt = turn_prompt.persisted_prompt
             reply_source_meta = turn_prompt.reply_source
             resolution_source_meta = turn_prompt.resolution_source
-            turn_started_at = _utc_now()
-            turn_started_at_text = _isoformat(turn_started_at)
-            idle_seconds_since_previous_turn = (
-                0.0
-                if ctx.runner_work_finished_at is None
-                else _duration_seconds(ctx.runner_work_finished_at, turn_started_at)
+            turn_record = turn_preflight.build_active_turn(
+                ctx,
+                snapshot=before,
+                classification=classification,
+                prompt=turn_prompt,
+                session_identity=session_identity,
+                turn_index=turn_index,
+                paths=paths,
+                harness=turn_harness,
+                model_effort=turn_model_effort,
+                spark_route=spark_route,
+                cwd=cwd,
             )
-            total_sessions = sum(_status_counts(before).values())
-            active_turn = {
-                "run_id": ctx.run_id,
-                "turn_index": turn_index,
-                **session_identity,
-                "session_kind": session_kind,
-                **(
-                    {"repair_commit_mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD}
-                    if is_repair_session
-                    else {}
-                ),
-                "total_sessions": total_sessions,
-                "artifact_dir": str(paths["artifact_dir"]),
-                "prompt": persisted_prompt,
-                "harness": turn_harness,
-                "model": turn_model_effort["model"],
-                "model_source": turn_model_effort["model_source"],
-                "observed_model": None,
-                "observed_model_source": None,
-                "effort": turn_model_effort["effort"],
-                "effort_source": turn_model_effort["effort_source"],
-                "spark_route": spark_route,
-                "stdout_path": str(paths["stdout"]),
-                "stderr_path": str(paths["stderr"]),
-                "last_message_path": str(paths["last_message"]),
-                "result_path": str(paths["result"]),
-                "started_at": turn_started_at_text,
-                "finished_at": None,
-                "duration_seconds": None,
-                "idle_seconds_since_previous_turn": idle_seconds_since_previous_turn,
-                "last_activity_at": turn_started_at_text,
-                "last_activity_stream": None,
-                "last_activity_preview": "",
-                "last_heartbeat_at": None,
-                "elapsed_seconds": 0.0,
-                "idle_seconds": 0.0,
-                "heartbeat_count": 0,
-                "stdout_chars": 0,
-                "stderr_chars": 0,
-                "action_required": None,
-                "prompt_kind": prompt_kind,
-                "reply_source": reply_source_meta,
-                **(
-                    {
-                        "cwd": str(cwd),
-                        **run_prompts._workspace_payload_fields(
-                            ctx.verification_context
-                        ),
-                    }
-                    if ctx.verification_context.workspace is not None
-                    else {}
-                ),
-            }
-            if resolution_source_meta is not None:
-                active_turn["resolution_source"] = resolution_source_meta
+            active_turn = turn_record.payload
+            total_sessions = turn_record.total_sessions
             log_stream_callback = _prepare_stream_logs(paths)
             mailbox_poll.set_context(active_turn)
             # Handed to the turn before it starts even though nothing has
@@ -1926,331 +1864,35 @@ def _run_locked(
 
             with run_control_lock:
                 ctx.run_control_context = dict(active_turn)
-            # Captured before the reply is consumed and before `turn_started`:
-            # an unusable guard has to stop the run without spending the turn.
-            workspace_snapshot_before: repository_evidence.WorkspaceSnapshot | None = (
-                None
+            baselines = turn_preflight.capture_turn_baselines(
+                ctx,
+                snapshot=before,
+                state_dir_arg=args.state_dir,
+                cwd=cwd,
+                classification=classification,
+                workspace=workspace,
+                session_scope=session_scope,
+                review_base=prepared_review_workspace_snapshot,
+                retained_scope_repair=retained_scope_repair,
+                regenerated_write_scope=regenerated_write_scope,
+                session_id=session_id,
+                session_label=session_label,
+                session_details=session_details,
+                review_guard_excludes=review_guard_excludes,
+                review_guard_include_ignored=review_guard_include_ignored,
+                active_turn=active_turn,
+                live_turn=live_turn,
+                paths=paths,
             )
-            legacy_snapshot_before: repository_evidence.WorkspaceSnapshot | None = None
-            # The control plane is digested for both modes and unconditionally:
-            # the repository snapshot is silent about it by construction, so a
-            # permitted mutation there has no other evidence.
-            turn_started_ns = time.time_ns()
-            external_digests_before = (
-                external_write_evidence._capture_external_write_digests(
-                    external_write_evidence._control_plane_digest_roots(
-                        before.plan_dir, args.state_dir, run_dir=ctx.run_dir
-                    ),
-                    shallow_roots=(
-                        external_write_evidence._control_plane_shallow_digest_roots(
-                            args.state_dir
-                        )
-                    ),
-                )
-            )
-            if workspace is not None:
-                assert session_scope is not None
-                if is_review_session and prepared_review_workspace_snapshot is not None:
-                    workspace_snapshot_before = prepared_review_workspace_snapshot
-                    unavailable = workspace_evidence._workspace_snapshot_unavailable(
-                        workspace_snapshot_before,
-                        required_repository_paths=tuple(
-                            repository.repository.path
-                            for repository in workspace.repositories
-                        ),
-                    )
-                else:
-                    try:
-                        workspace_snapshot_before = (
-                            handoff_guards._capture_workspace_write_guard_snapshot(
-                                workspace=workspace,
-                                plan_dir=before.plan_dir,
-                                exclude=review_guard_excludes,
-                                include_ignored=review_guard_include_ignored,
-                            )
-                        )
-                    except repository_evidence.RepositoryEvidenceError as error:
-                        unavailable = {
-                            ".": {
-                                "reason": "workspace-inventory-failed",
-                                "error": str(error),
-                            }
-                        }
-                    else:
-                        unavailable = (
-                            workspace_evidence._workspace_snapshot_unavailable(
-                                workspace_snapshot_before,
-                                required_repository_paths=tuple(
-                                    repository.repository.path
-                                    for repository in workspace.repositories
-                                ),
-                            )
-                        )
-                if unavailable:
-                    unavailable_summary = (
-                        workspace_evidence._workspace_unavailable_summary(
-                            unavailable,
-                            workspace=workspace,
-                        )
-                    )
-                    guard_record = {
-                        "passed": False,
-                        "reason": (
-                            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
-                        ),
-                        "phase": "before",
-                        "unavailable": unavailable,
-                        "read_aliases": list(session_scope.reads),
-                        "write_aliases": list(session_scope.writes),
-                        "excluded": list(review_guard_excludes),
-                        "include_ignored": review_guard_include_ignored,
-                    }
-                    ctx.record_final_snapshot(before)
-                    ctx.pause(
-                        reason=events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
-                        message="workspace write guard unavailable before "
-                        f"{session_label}; evidence for a registered "
-                        "repository could not be captured safely"
-                        f"{unavailable_summary}",
-                        details={
-                            **session_details,
-                            "workspace_write_guard": guard_record,
-                        },
-                    )
-                    break
-                if retained_scope_repair is not None:
-                    # The durable file was already widened before preflight and
-                    # the task packet were built, so the guard below judges the
-                    # retained changes against exactly the scope preflight,
-                    # expansion, the contract and the prompt already read.
-                    prior_snapshot = retained_scope_repair.get("snapshot_before")
-                    if isinstance(prior_snapshot, Mapping):
-                        repair_comparison = (
-                            repository_evidence.compare_workspace_snapshots(
-                                prior_snapshot, workspace_snapshot_before
-                            )
-                        )
-                        (
-                            repair_comparison,
-                            repair_registry_delta,
-                        ) = workspace_evidence._workspace_scope_repair_comparison(
-                            repair_comparison,
-                            frozenset(
-                                repository.repository.path
-                                for repository in workspace.repositories
-                            ),
-                        )
-                        repair_evidence = (
-                            workspace_evidence._workspace_write_guard_evidence(
-                                workspace=workspace,
-                                scope=session_scope,
-                                comparison=repair_comparison,
-                                exclude=review_guard_excludes,
-                                include_ignored=review_guard_include_ignored,
-                            )
-                        )
-                        repair_evidence["repair_registry_delta"] = repair_registry_delta
-                    else:
-                        repair_evidence = {
-                            "passed": False,
-                            "unavailable": {".": {"reason": "repair-baseline-missing"}},
-                            "violations": [],
-                        }
-                    if regenerated_write_scope is not None:
-                        repair_evidence["write_scope_regeneration"] = (
-                            regenerated_write_scope
-                        )
-                    current_expansion = workspace_evidence._session_expansion_evidence(
-                        before.plan_dir, session_id
-                    )
-                    prior_expansion = retained_scope_repair.get(
-                        "expansion_before_repair"
-                    )
-                    expansion_fresh = isinstance(
-                        prior_expansion, Mapping
-                    ) and workspace_evidence._workspace_scope_repair_is_fresh(
-                        prior_expansion, current_expansion
-                    )
-                    if not repair_evidence["passed"] or not expansion_fresh:
-                        repair_record = {
-                            **retained_scope_repair,
-                            "phase": "repair-check",
-                            "current_scope_evidence": repair_evidence,
-                            "current_expansion": current_expansion,
-                            "expansion_fresh": expansion_fresh,
-                        }
-                        ctx.record_final_snapshot(before)
-                        ctx.pause(
-                            reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
-                            message=f"{session_label} still has retained changes "
-                            "outside its durable write scope or lacks a "
-                            "fresh expansion; repair scope and rerun "
-                            "expansion/preflight before continuing",
-                            details={
-                                **session_details,
-                                "workspace_write_guard": repair_record,
-                            },
-                        )
-                        break
-                    ctx.persistence.append_event(
-                        ctx.event_path,
-                        events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT,
-                        {
-                            "run_id": ctx.run_id,
-                            "details": {
-                                **session_details,
-                                "session_id": session_id,
-                                "workspace_write_guard": repair_evidence,
-                                "expansion": current_expansion,
-                            },
-                        },
-                    )
-            elif not is_review_session:
-                legacy_snapshot_before = (
-                    handoff_guards._capture_legacy_implementation_snapshot(
-                        cwd=cwd,
-                        plan_dir=before.plan_dir,
-                        exclude=review_guard_excludes,
-                        include_ignored=review_guard_include_ignored,
-                    )
-                )
-                unavailable = workspace_evidence._workspace_snapshot_unavailable(
-                    legacy_snapshot_before,
-                    required_repository_paths=(".",),
-                )
-                if unavailable:
-                    guard_record = {
-                        "passed": False,
-                        "scope_mode": "legacy-single-repository",
-                        "reason": (
-                            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
-                        ),
-                        "phase": "before",
-                        "repository_root": str(cwd),
-                        "unavailable": unavailable,
-                        "read_aliases": ["legacy"],
-                        "write_aliases": ["legacy"],
-                        "excluded": list(review_guard_excludes),
-                        "include_ignored": review_guard_include_ignored,
-                    }
-                    ctx.record_final_snapshot(before)
-                    ctx.pause(
-                        reason=events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
-                        message="implementation write guard unavailable before "
-                        f"{session_label}; the legacy Git repository scope "
-                        "could not be established safely",
-                        details={
-                            **session_details,
-                            "workspace_write_guard": guard_record,
-                        },
-                    )
-                    break
-            # Captured before the exception-guard context below, because a
-            # legacy review turn has no write-guard snapshot and this
-            # fingerprint is the only turn-start comparison it will ever hold.
-            review_fingerprint_before: dict[str, Any] | None = (
-                review_guard._capture_review_repo_fingerprint(
-                    cwd,
-                    before.plan_dir,
-                    exclude=review_guard_excludes,
-                    include_ignored=review_guard_include_ignored,
-                )
-                if is_review_session and workspace is None
-                else None
-            )
-            if review_fingerprint_before is not None:
-                unavailable = review_guard._review_guard_unavailable_detail(
-                    review_fingerprint_before
-                )
-                if unavailable is not None:
-                    ctx.record_final_snapshot(before)
-                    ctx.pause(
-                        reason=events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
-                        message="review mutation guard unavailable before "
-                        f"{session_label}: {unavailable['reason']}",
-                        details={
-                            **session_details,
-                            "review_mutation_guard": {
-                                "passed": False,
-                                "reason": events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
-                                "phase": "before",
-                                "unavailable": unavailable,
-                                "excluded": list(review_guard_excludes),
-                                "include_ignored": review_guard_include_ignored,
-                            },
-                        },
-                    )
-                    break
-            if workspace is not None:
-                assert session_scope is not None
-                assert workspace_snapshot_before is not None
-                pending_exception_guard = {
-                    "mode": "workspace",
-                    "workspace": workspace,
-                    "scope": session_scope,
-                    "before": before,
-                    "after": None,
-                    "snapshot_before": workspace_snapshot_before,
-                    "session_id": session_id,
-                    "session_label": session_label,
-                    "session_details": session_details,
-                    "turn_payload": None,
-                    "active_turn": active_turn,
-                    "live_turn": live_turn,
-                    "paths": paths,
-                    "external_digests_before": external_digests_before,
-                    "turn_started_ns": turn_started_ns,
-                }
-            elif legacy_snapshot_before is not None:
-                pending_exception_guard = {
-                    "mode": "legacy",
-                    "cwd": cwd,
-                    "before": before,
-                    "after": None,
-                    "snapshot_before": legacy_snapshot_before,
-                    "session_id": session_id,
-                    "session_label": session_label,
-                    "session_details": session_details,
-                    "turn_payload": None,
-                    "active_turn": active_turn,
-                    "live_turn": live_turn,
-                    "paths": paths,
-                    "external_digests_before": external_digests_before,
-                    "turn_started_ns": turn_started_ns,
-                }
-            elif review_fingerprint_before is not None:
-                # A legacy review turn captures no write-guard snapshot, so
-                # without this branch it enters the harness with no exception
-                # context at all and the outer handler skips protected-path
-                # adjudication entirely -- in the one moment the run's guards
-                # are still alive. The fingerprint is its turn-start
-                # comparison, so the crash path can still reach a verdict.
-                pending_exception_guard = {
-                    "mode": "review",
-                    "cwd": cwd,
-                    "before": before,
-                    "after": None,
-                    "review_fingerprint_before": review_fingerprint_before,
-                    "session_id": session_id,
-                    "session_label": session_label,
-                    "session_details": session_details,
-                    "turn_payload": None,
-                    "active_turn": active_turn,
-                    "live_turn": live_turn,
-                    "paths": paths,
-                    "external_digests_before": external_digests_before,
-                    "turn_started_ns": turn_started_ns,
-                }
-            # Whether this turn has something a protected-path guard can be
-            # compared against. The review fingerprint counts: a legacy review
-            # turn captures no write-guard snapshot, but its mutation guard
-            # proves the whole worktree is unchanged, which clears every path
-            # rule at once rather than leaving them unproven.
-            protected_path_baseline = (
-                workspace_snapshot_before is not None
-                or legacy_snapshot_before is not None
-                or review_fingerprint_before is not None
-            )
+            if baselines.paused:
+                break
+            workspace_snapshot_before = baselines.workspace_snapshot
+            legacy_snapshot_before = baselines.legacy_snapshot
+            review_fingerprint_before = baselines.review_fingerprint
+            external_digests_before = baselines.external_digests
+            turn_started_ns = baselines.turn_started_ns
+            pending_exception_guard = baselines.pending_exception_guard
+            protected_path_baseline = baselines.protected_path_baseline
             plan_artifacts_before = plans.session_artifact_digests(
                 before.plan_dir, exclude_session_id=session_id
             )
