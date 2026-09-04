@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import functools
-import json
 import sys
 import threading
 import time
@@ -49,11 +48,9 @@ from . import (
     review,
     review_continuation,
     review_cycle,
-    review_delta,
     review_guard,
     review_repair,
     review_session_body,
-    review_session_contract,
     review_transitions,
     run_commit,
     run_completion,
@@ -72,14 +69,13 @@ from . import (
     session_verification,
     state,
     supervisor_audit,
-    task_packet,
     turn_execution,
+    turn_preparation,
     verification,
     verification_transitions,
     workspace_evidence,
     write_guards,
 )
-from .review_guard import RepairCommitPreflightError
 from .run_errors import RunError
 
 # Turn timing, hang thresholds and the control-poll cadence are the turn
@@ -1587,121 +1583,24 @@ def _run_locked(
                     continue
                 break
 
-            is_review_session = (
-                review_session_contract.is_generated_review_session_file(
-                    pending_session.path
-                )
+            classification = turn_preparation.classify_session(pending_session.path)
+            is_review_session = classification.is_review_session
+            is_repair_session = classification.is_repair_session
+            session_kind = classification.session_kind
+            review_preparation = turn_preparation.prepare_review_session(
+                ctx,
+                session=pending_session,
+                snapshot=snapshot,
+                classification=classification,
+                cwd=cwd,
+                review_guard_excludes=review_guard_excludes,
+                review_guard_include_ignored=review_guard_include_ignored,
             )
-            is_repair_session = review_repair.is_generated_review_repair_session_file(
-                pending_session.path
-            )
-            session_kind = (
-                SESSION_KIND_REVIEW
-                if is_review_session
-                else SESSION_KIND_IMPLEMENTATION
-            )
-            prepared_review_workspace_snapshot: (
-                repository_evidence.WorkspaceSnapshot | None
-            ) = None
-            if is_review_session:
-                try:
-                    review_workspace = ctx.verification_context.workspace
-                    review_text = pending_session.path.read_text(encoding="utf-8")
-                    refreshed_text = (
-                        review_session_contract.refreshed_generated_review_contract(
-                            review_text,
-                            pending_session.session_id,
-                            plan_dir=snapshot.plan_dir,
-                            repository_aliases=(
-                                review_workspace.registry.aliases
-                                if review_workspace is not None
-                                else ()
-                            ),
-                        )
-                    )
-                    contract_refreshed = refreshed_text != review_text
-                    if contract_refreshed:
-                        pending_session.path.write_text(
-                            refreshed_text, encoding="utf-8"
-                        )
-                    rescoped = review_delta._refresh_pending_review_scope(
-                        session=pending_session,
-                        event_path=ctx.event_path,
-                        plan_dir=snapshot.plan_dir,
-                        cwd=cwd,
-                        workspace=ctx.verification_context.workspace,
-                        run_id=ctx.run_id,
-                        persistence=ctx.persistence,
-                    )
-                    base_refreshed = False
-                    if review_workspace is not None:
-                        try:
-                            prepared_review_workspace_snapshot = (
-                                handoff_guards._capture_workspace_write_guard_snapshot(
-                                    workspace=review_workspace,
-                                    plan_dir=snapshot.plan_dir,
-                                    exclude=review_guard_excludes,
-                                    include_ignored=(review_guard_include_ignored),
-                                )
-                            )
-                        except repository_evidence.RepositoryEvidenceError as error:
-                            raise plans.PlanError(
-                                "combined workspace review base capture "
-                                f"failed: {error}"
-                            ) from error
-                        unavailable = (
-                            workspace_evidence._workspace_snapshot_unavailable(
-                                prepared_review_workspace_snapshot,
-                                required_repository_paths=tuple(
-                                    repository.repository.path
-                                    for repository in review_workspace.repositories
-                                ),
-                            )
-                        )
-                        if unavailable:
-                            raise plans.PlanError(
-                                "combined workspace review base is unavailable: "
-                                + json.dumps(unavailable, sort_keys=True)
-                            )
-                        review_bases = workspace_evidence._workspace_review_bases(
-                            review_workspace,
-                            prepared_review_workspace_snapshot,
-                        )
-                        review_text = pending_session.path.read_text(encoding="utf-8")
-                        refreshed_text = (
-                            review_session_body.refreshed_review_repository_base(
-                                review_text, review_workspace, review_bases
-                            )
-                        )
-                        if refreshed_text != review_text:
-                            pending_session.path.write_text(
-                                refreshed_text, encoding="utf-8"
-                            )
-                            base_refreshed = True
-                    if contract_refreshed or rescoped or base_refreshed:
-                        readiness_gate._refresh_active_readiness_state(
-                            ctx.payload, snapshot.plan_dir, ctx.persistence
-                        )
-                        snapshot = ctx.plan_cache.get_fresh(snapshot.plan_dir)
-                except (plans.PlanError, OSError) as error:
-                    ctx.record_final_snapshot(snapshot)
-                    ctx.pause(
-                        reason="malformed-plan",
-                        message="the pending review session's scope could not be "
-                        f"re-derived from current Git evidence: {error}",
-                        details={
-                            **_session_details_payload(pending_session.id),
-                            "error": str(error),
-                        },
-                    )
-                    break
-            review_session_version = (
-                review_session_contract.generated_review_session_version(
-                    pending_session.path
-                )
-                if is_review_session
-                else None
-            )
+            snapshot = review_preparation.snapshot
+            if review_preparation.paused:
+                break
+            prepared_review_workspace_snapshot = review_preparation.workspace_snapshot
+            review_session_version = review_preparation.session_version
 
             if (
                 not is_review_session
@@ -1838,27 +1737,13 @@ def _run_locked(
                     details=details,
                 )
                 break
-            # Autonomous turns default to Python-built task packets (packet
-            # mode); ASL_WORKER_MODE=skill restores the legacy `session-run`
-            # skill invocation as a temporary rollback. Either way the manual
-            # `$session-run` path is unchanged.
-            worker_mode = task_packet._worker_mode()
-            predecessor_id = task_packet._predecessor_session_id(before, session_id)
-            has_expansion = task_packet._session_has_expansion(
-                before.plan_dir, session_id
-            )
-            has_progress = (before.plan_dir / plans.PROGRESS_FILE_NAME).is_file()
-            repair_references = review_delta._verification_repair_state(
-                ctx.event_path, session_id
-            )["references"]
-            if is_review_session:
-                repair_references = repair_references + (
-                    _review_verdict_repair_references(ctx.event_path, session_id)
-                )
-            pending_guidance = run_selection._pending_guidance_snapshot(
-                enabled=mailbox_enabled,
-                plan_dir=before.plan_dir,
-                state_dir_arg=args.state_dir,
+            packet_inputs = turn_preparation.collect_packet_inputs(
+                ctx,
+                snapshot=before,
+                classification=classification,
+                args=args,
+                session_id=session_id,
+                mailbox_enabled=mailbox_enabled,
             )
             workspace = ctx.verification_context.workspace
             session_scope = (
@@ -1881,262 +1766,54 @@ def _run_locked(
                 # the guard record's own identity is the narrower proof that
                 # this is the turn whose changes were retained for this child.
                 retained_scope_repair = None
-            regenerated_write_scope: dict[str, Any] | None = None
-            if is_repair_session:
-                if workspace is not None:
-                    assert session_scope is not None
-                    # The durable child file is the single description of what
-                    # this child may write. Widening it here — ahead of commit
-                    # preflight, the task packet, the persisted prompt and the
-                    # guard — is what keeps all four reading one scope instead
-                    # of preflight and the packet describing the pre-repair one.
-                    regenerated_write_scope = (
-                        workspace_evidence._regenerated_repair_child_write_scope(
-                            session=pending_session,
-                            plan_dir=before.plan_dir,
-                            workspace=workspace,
-                            scope=session_scope,
-                        )
-                    )
-                    if regenerated_write_scope is not None:
-                        readiness_gate._refresh_active_readiness_state(
-                            ctx.payload, before.plan_dir, ctx.persistence
-                        )
-                        session_scope = run_prompts._session_scope(
-                            pending_session, workspace
-                        )
-                repair_resume = write_guards._pending_repair_child_continuation(
-                    snapshot=before,
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    workspace=workspace,
-                    max_repair_group_attempts=run_inputs._max_repair_group_attempts(
-                        args
-                    ),
-                    max_review_fix_cycles=max_review_fix_cycles,
-                    review_requested=review_requested,
-                )
-                if repair_resume.action == "run-repairs" and not repair_resume.eligible:
-                    # The continuation is the only view that reconciles every
-                    # pending child with the artifact they were derived from. A
-                    # child it refuses is not launched under the scope that
-                    # refusal describes.
-                    repair_blocker = repair_resume.blocker or "unknown blocker"
-                    ctx.record_final_snapshot(before)
-                    ctx.pause(
-                        reason=events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
-                        message="generated repair child "
-                        f"{session_label} cannot be run safely: "
-                        f"{repair_blocker}.",
-                        details={
-                            **session_details,
-                            "review_resume": repair_resume.to_payload(),
-                        },
-                    )
-                    break
-                try:
-                    repair_commit_preflight = review_guard._repair_commit_preflight(
-                        cwd,
-                        verification_context=ctx.verification_context,
-                        session_scope=session_scope,
-                        workspace_evidence=(
-                            workspace_evidence._workspace_write_guard_evidence
-                        ),
-                        plan_dir=before.plan_dir,
-                        retained_scope_repair=retained_scope_repair,
-                    )
-                except RepairCommitPreflightError as error:
-                    ctx.record_final_snapshot(before)
-                    ctx.pause(
-                        reason="commit-preflight",
-                        message=f"repair commit preflight failed before "
-                        f"{session_label}: {error}",
-                        details={**session_details, **error.details},
-                    )
-                    break
-                with ctx.persistence.lock:
-                    ctx.payload.setdefault("repair_commit_preflights", []).append(
-                        {
-                            **session_identity,
-                            **repair_commit_preflight,
-                        }
-                    )
-                    ctx.persistence.append_event(
-                        ctx.event_path,
-                        events.REPAIR_COMMIT_PREFLIGHT_EVENT,
-                        {
-                            "run_id": ctx.run_id,
-                            **session_identity,
-                            **repair_commit_preflight,
-                        },
-                    )
-                    ctx.persistence.write_state(ctx.payload)
+            repair_resumption = turn_preparation.resume_repair_session(
+                ctx,
+                session=pending_session,
+                snapshot=before,
+                classification=classification,
+                args=args,
+                cwd=cwd,
+                workspace=workspace,
+                session_scope=session_scope,
+                session_label=session_label,
+                session_identity=session_identity,
+                session_details=session_details,
+                retained_scope_repair=retained_scope_repair,
+                max_review_fix_cycles=max_review_fix_cycles,
+                review_requested=review_requested,
+            )
+            session_scope = repair_resumption.session_scope
+            regenerated_write_scope = repair_resumption.regenerated_write_scope
+            if repair_resumption.paused:
+                break
             turn_reply = pending_reply
             turn_resolution = pending_resolution
-            if turn_reply is not None and turn_resolution is not None:
-                raise RuntimeError(
-                    "reply and resolution continuations are mutually exclusive"
-                )
             use_reply_prompt = turn_reply is not None
             use_resolution_prompt = turn_resolution is not None
-            if use_reply_prompt:
-                assert turn_reply is not None
-                turn_reply_context = turn_reply.context
-                turn_reply_text = turn_reply.text
-                if worker_mode == task_packet.WORKER_MODE_SKILL:
-                    prompt = run_prompts.build_reply_prompt(
-                        turn_harness,
-                        before.plan_dir,
-                        reply=turn_reply_text,
-                        context=turn_reply_context,
-                        mailbox_enabled=mailbox_enabled,
-                        state_dir=args.state_dir,
-                        pending_guidance=pending_guidance,
-                        workspace=workspace,
-                        session_scope=session_scope,
-                    )
-                else:
-                    prompt = task_packet.build_task_packet(
-                        turn_harness,
-                        before.plan_dir,
-                        session_id=session_id,
-                        session_kind=session_kind,
-                        predecessor_id=predecessor_id,
-                        has_expansion=has_expansion,
-                        has_progress=has_progress,
-                        reply=turn_reply_text,
-                        reply_context=turn_reply_context,
-                        repair_references=repair_references,
-                        mailbox_enabled=mailbox_enabled,
-                        state_dir=args.state_dir,
-                        pending_guidance=pending_guidance,
-                        workspace=workspace,
-                        session_scope=session_scope,
-                    ).render()
-                prompt_kind = "reply"
-                reply_source_meta: dict[str, Any] | None = {
-                    "run_id": turn_reply_context.run_id,
-                    "session_id": turn_reply_context.session_id,
-                    "turn_index": turn_reply_context.turn_index,
-                    "last_message_path": str(turn_reply_context.last_message_path),
-                    "reply_length": len(turn_reply_text),
-                    "origin": turn_reply.origin,
-                }
-                if turn_reply.question_id is not None:
-                    reply_source_meta["question_id"] = turn_reply.question_id
-                if turn_reply.reply_message_id is not None:
-                    reply_source_meta["reply_message_id"] = turn_reply.reply_message_id
-                if turn_reply.reply_seq is not None:
-                    reply_source_meta["reply_seq"] = turn_reply.reply_seq
-                persisted_prompt = _reply_argv_placeholder(len(turn_reply_text))
-                resolution_source_meta: dict[str, Any] | None = None
-            elif use_resolution_prompt:
-                assert turn_resolution is not None
-                turn_resolution_context = turn_resolution.context
-                if worker_mode == task_packet.WORKER_MODE_SKILL:
-                    prompt = run_prompts.build_resolution_prompt(
-                        turn_harness,
-                        before.plan_dir,
-                        action=turn_resolution.action,
-                        note=turn_resolution.note,
-                        context=turn_resolution_context,
-                        mailbox_enabled=mailbox_enabled,
-                        state_dir=args.state_dir,
-                        pending_guidance=pending_guidance,
-                        workspace=workspace,
-                        session_scope=session_scope,
-                    )
-                else:
-                    prompt = task_packet.build_task_packet(
-                        turn_harness,
-                        before.plan_dir,
-                        session_id=session_id,
-                        session_kind=session_kind,
-                        predecessor_id=predecessor_id,
-                        has_expansion=has_expansion,
-                        has_progress=has_progress,
-                        resolution_action=turn_resolution.action,
-                        resolution_note=turn_resolution.note,
-                        resolution_context=turn_resolution_context,
-                        repair_references=repair_references,
-                        mailbox_enabled=mailbox_enabled,
-                        state_dir=args.state_dir,
-                        pending_guidance=pending_guidance,
-                        workspace=workspace,
-                        session_scope=session_scope,
-                    ).render()
-                prompt_kind = "resolution"
-                reply_source_meta = None
-                resolution_source_meta = task_packet._resolution_source_metadata(
-                    turn_resolution
-                )
-                persisted_prompt = _resolution_argv_placeholder(
-                    turn_resolution.action,
-                    resolution_source_meta["note_length"],
-                )
-            else:
-                if worker_mode == task_packet.WORKER_MODE_SKILL:
-                    prompt = run_prompts.build_session_prompt(
-                        turn_harness,
-                        before.plan_dir,
-                        mailbox_enabled=mailbox_enabled,
-                        state_dir=args.state_dir,
-                        pending_guidance=pending_guidance,
-                        workspace=workspace,
-                        session_scope=session_scope,
-                    )
-                else:
-                    prompt = task_packet.build_task_packet(
-                        turn_harness,
-                        before.plan_dir,
-                        session_id=session_id,
-                        session_kind=session_kind,
-                        predecessor_id=predecessor_id,
-                        has_expansion=has_expansion,
-                        has_progress=has_progress,
-                        repair_references=repair_references,
-                        mailbox_enabled=mailbox_enabled,
-                        state_dir=args.state_dir,
-                        pending_guidance=pending_guidance,
-                        workspace=workspace,
-                        session_scope=session_scope,
-                    ).render()
-                prompt_kind = "session"
-                reply_source_meta = None
-                resolution_source_meta = None
-                persisted_prompt = prompt
-            packet_intent_report = (
-                None
-                if workspace is not None
-                else run_inputs._task_packet_repository_intent_report(
-                    prompt,
-                    root=cwd,
-                    artifact_paths=run_inputs._task_packet_artifact_paths(
-                        before.plan_dir, session_id, predecessor_id
-                    ),
-                    exempt_roots=run_inputs._runner_owned_roots(
-                        before.plan_dir, args.state_dir, run_dir=ctx.run_dir
-                    ),
-                    provenance_roots=preflight.plan_provenance_exempt_roots(
-                        before.plan_dir
-                    ),
-                )
+            turn_prompt = turn_preparation.prepare_turn_prompt(
+                ctx,
+                snapshot=before,
+                classification=classification,
+                inputs=packet_inputs,
+                args=args,
+                cwd=cwd,
+                harness=turn_harness,
+                session_id=session_id,
+                session_label=session_label,
+                session_details=session_details,
+                session_scope=session_scope,
+                workspace=workspace,
+                mailbox_enabled=mailbox_enabled,
+                reply=turn_reply,
+                resolution=turn_resolution,
             )
-            if packet_intent_report is not None:
-                ctx.record_final_snapshot(before)
-                ctx.pause(
-                    reason=events.PAUSE_REASON_REPOSITORY_REGISTRY_REQUIRED,
-                    message=run_inputs._repository_intent_message(
-                        packet_intent_report,
-                        subject=f"task packet for {session_label}",
-                    ),
-                    details={
-                        **session_details,
-                        "repository_intent": packet_intent_report,
-                    },
-                )
+            if turn_prompt.paused:
                 break
+            prompt = turn_prompt.prompt
+            prompt_kind = turn_prompt.prompt_kind
+            persisted_prompt = turn_prompt.persisted_prompt
+            reply_source_meta = turn_prompt.reply_source
+            resolution_source_meta = turn_prompt.resolution_source
             turn_started_at = _utc_now()
             turn_started_at_text = _isoformat(turn_started_at)
             idle_seconds_since_previous_turn = (
@@ -2674,14 +2351,14 @@ def _run_locked(
                             state_dir_arg=args.state_dir,
                             event_path=ctx.event_path,
                             append_event=ctx.persistence.append_event,
-                            pending_guidance=pending_guidance,
+                            pending_guidance=packet_inputs.pending_guidance,
                             harness=turn_harness,
                             run_id=ctx.run_id,
                             session_id=session_id,
                             turn_index=turn_index,
                         )
                         if (
-                            pending_guidance
+                            packet_inputs.pending_guidance
                             and harnesses.delivers_guidance_next_turn(turn_harness)
                         )
                         else None

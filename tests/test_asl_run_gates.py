@@ -47,6 +47,7 @@ from agent_session_loop import (
     session_verification,
     state,
     turn_execution,
+    turn_preparation,
     verification,
     workspace_evidence,
     workspaces,
@@ -3631,12 +3632,25 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tree = ast.parse(Path(runner.__file__).read_text(encoding="utf-8"))
+        # The contract spans two modules now that the resumption block is its
+        # own function: the widening, the re-read and the preflight sit inside
+        # `resume_repair_session`, while the packet, the persisted prompt and
+        # the guard stay in the loop that calls it.
+        self.preparation_tree = ast.parse(
+            Path(turn_preparation.__file__).read_text(encoding="utf-8")
+        )
         self.run_locked = self._function("_run_locked")
+        self.resume_repair = self._function(
+            "resume_repair_session", tree=self.preparation_tree
+        )
+        self.prepare_prompt = self._function(
+            "prepare_turn_prompt", tree=self.preparation_tree
+        )
 
-    def _function(self, name: str) -> ast.FunctionDef:
+    def _function(self, name: str, *, tree: ast.AST | None = None) -> ast.FunctionDef:
         matches = [
             node
-            for node in ast.walk(self.tree)
+            for node in ast.walk(tree if tree is not None else self.tree)
             if isinstance(node, ast.FunctionDef) and node.name == name
         ]
         self.assertEqual(1, len(matches), f"expected one {name} definition")
@@ -3679,16 +3693,14 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
         return lines[0]
 
     def test_regeneration_precedes_every_reader_of_the_child_scope(self) -> None:
+        # Inside the resumption: widen, re-read, then prove the tree is clean.
         (regenerated,) = self._call_lines(
-            self.run_locked, "_regenerated_repair_child_write_scope"
+            self.resume_repair, "_regenerated_repair_child_write_scope"
         )
-        reread = self._call_lines(self.run_locked, "_session_scope")
+        reread = self._call_lines(self.resume_repair, "_session_scope")
         (preflight_call,) = self._call_lines(
-            self.run_locked, "_repair_commit_preflight"
+            self.resume_repair, "_repair_commit_preflight"
         )
-        packet = self._call_lines(self.run_locked, "build_task_packet")
-        prompt_persisted = self._turn_record_line()
-        guard = self._call_lines(self.run_locked, "_workspace_write_guard_evidence")
 
         # The re-read is what makes the widened file the value in hand; every
         # other reader has to come after it, not merely after the rewrite.
@@ -3697,8 +3709,28 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
             "the durable file must be re-read after it is widened",
         )
         self.assertLess(regenerated, preflight_call)
-        self.assertLess(preflight_call, min(packet))
-        self.assertLess(min(packet), prompt_persisted)
+
+        # The packet is built inside the prompt step, so the loop's own call
+        # order is what keeps it downstream of the widening.
+        self.assertTrue(
+            self._call_lines(self.prepare_prompt, "build_task_packet"),
+            "the task packet must be built by the prompt step",
+        )
+        self.assertEqual(
+            [],
+            self._call_lines(self.run_locked, "build_task_packet"),
+            "a second packet build in the loop would read its own scope",
+        )
+
+        # In the loop: resume first, then the prompt that builds the packet,
+        # then the record that makes the prompt durable, then the guard.
+        (resumed,) = self._call_lines(self.run_locked, "resume_repair_session")
+        prompt = self._call_lines(self.run_locked, "prepare_turn_prompt")
+        prompt_persisted = self._turn_record_line()
+        guard = self._call_lines(self.run_locked, "_workspace_write_guard_evidence")
+
+        self.assertLess(resumed, min(prompt))
+        self.assertLess(min(prompt), prompt_persisted)
         self.assertLess(prompt_persisted, min(guard))
 
     def test_the_retained_scope_branch_no_longer_widens_the_child_itself(self) -> None:
@@ -3718,24 +3750,36 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
         )
 
     def test_session_scope_is_only_ever_read_from_the_session_file(self) -> None:
-        assignments = [
-            node
-            for node in ast.walk(self.tree)
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "session_scope"
-                for target in node.targets
-            )
-        ]
+        # The resumption is the one place allowed to hand the value back, and
+        # it re-read the file to produce it, so taking `session_scope` off its
+        # result is still the file's own value rather than a computed one.
+        allowed = ("_session_scope(", ".session_scope")
+        modules = {
+            "runner": self.tree,
+            "turn_preparation": self.preparation_tree,
+        }
 
-        self.assertTrue(assignments, "expected the runner to bind session_scope")
-        for node in assignments:
-            self.assertIn(
-                "_session_scope(",
-                ast.unparse(node.value),
-                "session_scope must stay the session file's own value; "
-                f"line {node.lineno} computes one instead",
-            )
+        bound_anywhere = False
+        for module_name, tree in modules.items():
+            assignments = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "session_scope"
+                    for target in node.targets
+                )
+            ]
+            bound_anywhere = bound_anywhere or bool(assignments)
+            for node in assignments:
+                source = ast.unparse(node.value)
+                self.assertTrue(
+                    any(allowance in source for allowance in allowed),
+                    "session_scope must stay the session file's own value; "
+                    f"{module_name} line {node.lineno} computes one instead",
+                )
+
+        self.assertTrue(bound_anywhere, "expected the run loop to bind session_scope")
 
 
 class _GeneratedRepairDispatchFixture(unittest.TestCase):
