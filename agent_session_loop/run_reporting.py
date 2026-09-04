@@ -99,6 +99,23 @@ CommitGroupLabeler = Callable[[Mapping[str, Any]], str]
 #: and ``tests/test_asl_run_reporting.py`` pins the two to the same string.
 DEFAULT_UNRESOLVED_COMMIT_GROUPS_KEY = "unresolved_commit_groups"
 
+#: What the relaunch finds, per outcome of the settlement a recoverable pause
+#: makes for the work its turn retained. Keyed by the ``result`` field of the
+#: record ``commit_settlement`` writes; an unrecognised result falls back to the
+#: only thing that is always safe to say, which is that the changes are still
+#: there. The consequence is the point of the sentence: a settlement exists so
+#: the next process's startup commit gate meets a clean tree, and an operator
+#: reading one of these lines is deciding whether to relaunch or to look.
+PAUSED_WORK_DISPOSITIONS: dict[str, str] = {
+    "committed": "the relaunch starts on a clean worktree",
+    "no-changes": "the turn retained nothing to commit",
+    "committed-with-residue": (
+        "changes the commit did not take are still in the worktree and the "
+        "relaunch will meet them at its startup commit gate"
+    ),
+    "failed": "the retained changes stay in the worktree for a human to inspect",
+}
+
 
 def default_commit_group_label(summary: Mapping[str, Any]) -> str:
     """Name one commit group the way the run's own summaries name it.
@@ -482,6 +499,42 @@ class _ProgressReporter:
 
     def commit_group_recovered(self, summary: Mapping[str, Any]) -> None:
         self._emit(f"commit group recovered: {self._commit_group_label(summary)}")
+
+    def paused_work_committed(self, record: Mapping[str, Any]) -> None:
+        """Report what became of the work a recoverable pause retained.
+
+        The outcome word alone is not the operator's question. What they are
+        about to do is relaunch, so every result carries the clause that says
+        what the relaunch will find: a clean worktree, or the same changes
+        still sitting in front of the next process's startup commit gate.
+
+        A failed settlement names its cause the way :meth:`commit_failed`
+        does, and reads the commit's own verdict when there is no exception to
+        quote — a refused commit is not an error raised around the commit, so
+        ``error`` is empty exactly when ``commit.status_result`` is the fact.
+        The group is the only part of the record that knows which session this
+        was, so the line names one only when a group was built.
+        """
+        result = str(record.get("result") or "unknown")
+        reason = record.get("pause_reason") or "unknown"
+        group = record.get("commit_group")
+        scope = (
+            f" for {self._commit_group_label(group)}"
+            if isinstance(group, Mapping)
+            else ""
+        )
+        commit = record.get("commit")
+        detail = record.get("error") or (
+            commit.get("status_result") if isinstance(commit, Mapping) else None
+        )
+        cause = f": {detail}" if detail else ""
+        disposition = PAUSED_WORK_DISPOSITIONS.get(
+            result, "leaving the retained changes in the worktree"
+        )
+        self._emit(
+            f"paused work {result}{scope} after the {reason} pause{cause}; "
+            f"{disposition}"
+        )
 
     def run_finished(self, payload: dict[str, Any]) -> None:
         verb = "run finished" if payload["ok"] else "run paused"

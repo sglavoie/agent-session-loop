@@ -827,6 +827,60 @@ def _review_resume(
     }
 
 
+def _paused_work_commit(result="committed", *, repair_exhausted=False):
+    """The record the runner's paused-work settlement writes into the pause.
+
+    Mirrored by `run_loop` under `pause_details["paused_work_commit"]`, so it
+    is nested rather than flat. That nesting is load-bearing here: the record
+    carries a `verification_repair_exhausted` field of its own, and the
+    supervisor's repair gate reads the run's flag at the top of the details.
+    """
+    return {
+        "guard": "paused-work-commit",
+        "pause_reason": "verify-failed",
+        "commit_mode": "per-session",
+        "result": result,
+        "verification_repair_attempt": 1,
+        "verification_repair_max_attempts": 2,
+        "verification_repair_exhausted": repair_exhausted,
+        "commit_group": {"group_id": "g1", "scope": "session-paused"},
+        "commit": None,
+        "error": None,
+        "residue": {"repositories": []},
+    }
+
+
+def _settled_verify_failed_pause(**record_kwargs):
+    """A verify-failed pause whose retained work the run committed on its way out."""
+    return {
+        "ok": False,
+        "paused": True,
+        "reason": "verify-failed",
+        "pause_reason": "verify-failed",
+        "pause_message": "verification failed",
+        "pause_policy": autopilot.classify_pause("verify-failed"),
+        "pause_details": {
+            "session": "1",
+            "verification_repair_attempt": 1,
+            "verification_repair_max_attempts": 2,
+            "verification_repair_exhausted": False,
+            "paused_work_commit": _paused_work_commit(**record_kwargs),
+        },
+    }
+
+
+def _commit_preflight_pause():
+    """The dead end an unsettled relaunch used to meet at its startup gate."""
+    return {
+        "ok": False,
+        "paused": True,
+        "reason": "commit-preflight",
+        "pause_reason": "commit-preflight",
+        "pause_message": "the workspace has uncommitted changes",
+        "pause_policy": autopilot.classify_pause("commit-preflight"),
+    }
+
+
 LOCK_CREATED_AT = "2026-07-24T18:59:00+00:00"
 RUN_STARTED_AT = "2026-07-24T19:00:00+00:00"
 ATTACHED_RUN_ID = "run-attached"
@@ -2394,6 +2448,87 @@ class SuperviseRunInjectedTest(unittest.TestCase):
         self.assertEqual(result["reason"], "complete")
         # Chunk 1 paused, chunk 2 (the retry) completed.
         self.assertEqual(run.chunks, [1, 2])
+
+    def test_a_verify_failed_pause_with_settled_work_is_retried_to_completion(
+        self,
+    ) -> None:
+        # The whole plan lives between these two chunks. Chunk 1 pauses
+        # `verify-failed` and the run commits what its turn retained, so chunk
+        # 2 clears its own startup commit gate and finishes the session. No
+        # human is asked anything at any point.
+        status = _StatusScript(
+            [_status_payload(1), _status_payload(1), _status_payload(0)]
+        )
+        run = _RunScript(
+            [
+                _settled_verify_failed_pause(),
+                {"ok": True, "paused": False, "reason": "all-complete"},
+            ]
+        )
+
+        result = self._supervise(status, run)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("complete", result["reason"])
+        self.assertEqual([1, 2], run.chunks)
+        self.assertIsNone(result.get("error"))
+
+    def test_an_unsettled_relaunch_still_dead_ends_on_the_commit_gate(self) -> None:
+        # The contrast that gives the test above its meaning. Left in the
+        # worktree, the retained work becomes the relaunch's problem, and the
+        # supervisor has no move: `commit-preflight` is non-recoverable and
+        # asks a human to inspect, so the run stops one chunk after the pause
+        # it was supposed to repair.
+        status = _StatusScript([_status_payload(1)])
+        run = _RunScript(
+            [
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": "verify-failed",
+                    "pause_reason": "verify-failed",
+                    "pause_policy": autopilot.classify_pause("verify-failed"),
+                },
+                _commit_preflight_pause(),
+            ]
+        )
+
+        result = self._supervise(status, run)
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("user_required", result["reason"])
+        self.assertEqual("commit-preflight", result["run"]["pause_reason"])
+        self.assertEqual("inspect", result["run"]["pause_policy"]["user_action"])
+        # Two chunks, not three: the gate is not retried, so the relaunch
+        # budget the verify-failed pause still had is unreachable.
+        self.assertEqual([1, 2], run.chunks)
+
+    def test_the_settlement_record_is_not_a_second_repair_verdict(self) -> None:
+        # The record carries the repair flag the runner adjudicated, so a
+        # settlement made after the budget was spent embeds
+        # `verification_repair_exhausted: true`. It is nested under
+        # `paused_work_commit`, and the supervisor's gate reads the run's own
+        # flag at the top of the details — a copy one level down must not stop
+        # a retry the runner did not stop.
+        payload = _settled_verify_failed_pause(repair_exhausted=True)
+        self.assertTrue(
+            payload["pause_details"]["paused_work_commit"][
+                "verification_repair_exhausted"
+            ]
+        )
+        self.assertFalse(autopilot._verification_repair_exhausted(payload))
+
+        status = _StatusScript(
+            [_status_payload(1), _status_payload(1), _status_payload(0)]
+        )
+        run = _RunScript(
+            [payload, {"ok": True, "paused": False, "reason": "all-complete"}]
+        )
+
+        result = self._supervise(status, run)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([1, 2], run.chunks)
 
     def test_recoverable_pause_retry_budget_is_exhausted(self) -> None:
         # The pause never clears, so after max_retries relaunches the supervisor

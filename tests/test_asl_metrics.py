@@ -412,6 +412,63 @@ class MetricsCollectionTests(unittest.TestCase):
         self.assertEqual(1, repair["sessions_repaired"])
         self.assertEqual(0.5, repair["repair_success_rate"])
 
+    def test_paused_work_commits_are_counted(self) -> None:
+        state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-settled")
+        for hours_ago, result in ((6, "committed"), (5, "no-changes"), (4, "failed")):
+            _append_event(
+                state_dir,
+                created_at=_iso(self.now, hours_ago=hours_ago),
+                name=events.PAUSED_WORK_COMMITTED_EVENT,
+                payload={
+                    "run_id": "run-1",
+                    "session_id": "2",
+                    "guard": "paused-work-commit",
+                    "pause_reason": "verify-failed",
+                    "commit_mode": "per-session",
+                    "result": result,
+                },
+            )
+        # Outside the window: a settlement older than the window is not this
+        # window's evidence, exactly like every other counted event.
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=24 * 9),
+            name=events.PAUSED_WORK_COMMITTED_EVENT,
+            payload={"run_id": "run-0", "result": "committed"},
+        )
+        # A settlement that recorded no result still counts as one, under the
+        # same "unknown" bucket every other grouped counter uses.
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=3),
+            name=events.PAUSED_WORK_COMMITTED_EVENT,
+            payload={"run_id": "run-1"},
+        )
+
+        report = self._collect()
+        repair = report.verification_repair
+        self.assertEqual(4, repair["paused_work_commits"])
+        self.assertEqual(
+            {"committed": 1, "failed": 1, "no-changes": 1, "unknown": 1},
+            repair["paused_work_commits_by_result"],
+        )
+        # The settlement is not a pause and not a verification failure; it must
+        # not move the counters that answer those questions.
+        self.assertEqual(0, report.pauses["total"])
+        self.assertEqual(0, repair["verify_failed_pauses"])
+        self.assertEqual(0, repair["repair_exhausted_pauses"])
+        # The event is activity, so the directory is not skipped as dormant.
+        self.assertEqual(1, report.state_dirs_active)
+
+    def test_no_settlement_reports_an_empty_breakdown_not_a_missing_key(
+        self,
+    ) -> None:
+        report = self._collect()
+        self.assertEqual(0, report.verification_repair["paused_work_commits"])
+        self.assertEqual(
+            {}, report.verification_repair["paused_work_commits_by_result"]
+        )
+
     def test_review_cycles_aggregate_dispositions_and_findings(self) -> None:
         state_dir = _make_state_dir(self.state_root, self.tmp_path / "plan-f")
         _append_event(

@@ -17,6 +17,14 @@ modules cannot state, because they exercise the run rather than the seam:
 * output never ends a run: a sink that raises is disabled for the rest of the
   run rather than propagating.
 
+The one sentence whose wording is asserted here is the paused-work settlement
+line, and it is here because no whole-run driver reaches it: a settled pause
+needs a recoverable pause *and* a dirty worktree at the moment the run gives
+up, which the integration harness cannot stage without becoming a second
+implementation of the settlement. The line is not decoration — it is the only
+place the run tells the operator whether to relaunch or to look — so its
+disposition clause is pinned per result rather than left to a substring.
+
 The stderr group is the reason this file exists. A sink bug here does not fail
 a gate: it tears one operator line across two threads, or it turns an exited
 helper's abandoned pipe into an exception that ends a healthy run, and both
@@ -326,6 +334,96 @@ class CommitVocabularySeamTests(unittest.TestCase):
             ),
         )
         self.assertNotIn("never completed", quiet)
+
+
+class PausedWorkSettlementLineTests(unittest.TestCase):
+    """What the settlement line owes the operator holding the relaunch."""
+
+    def _emitted(self, record: dict[str, Any], **kwargs: Any) -> str:
+        reporter = run_reporting._ProgressReporter(enabled=True, **kwargs)
+        stream = io.StringIO()
+        with redirect_stderr(stream):
+            reporter.paused_work_committed(record)
+        return stream.getvalue()
+
+    def test_every_result_says_what_the_relaunch_will_find(self) -> None:
+        # The outcome word is the run's vocabulary, not the operator's
+        # question. Each line is pinned to its disposition clause because the
+        # clause is the part they act on.
+        for result, disposition in run_reporting.PAUSED_WORK_DISPOSITIONS.items():
+            with self.subTest(result=result):
+                text = self._emitted(
+                    {"result": result, "pause_reason": "verify-failed"}
+                )
+                self.assertIn(f"paused work {result}", text)
+                self.assertIn("after the verify-failed pause", text)
+                self.assertIn(disposition, text)
+
+    def test_an_unknown_result_still_accounts_for_the_worktree(self) -> None:
+        text = self._emitted({"result": "invented", "pause_reason": "timeout"})
+        self.assertIn("paused work invented after the timeout pause", text)
+        self.assertIn("leaving the retained changes in the worktree", text)
+
+    def test_a_record_with_no_result_or_reason_names_both_unknown(self) -> None:
+        text = self._emitted({})
+        self.assertIn("paused work unknown after the unknown pause", text)
+
+    def test_the_group_is_named_only_when_the_settlement_built_one(self) -> None:
+        record: dict[str, Any] = {
+            "result": "committed",
+            "pause_reason": "verify-failed",
+            "commit_group": {"session_id": "8", "failed_alias": None},
+        }
+        self.assertIn("for session 8", self._emitted(record))
+        # `no-changes` and the guard refusals settle without a group, and the
+        # record is the only thing that knows which session this was.
+        self.assertNotIn("for session", self._emitted({**record, "commit_group": None}))
+
+    def test_the_group_label_is_the_injected_one(self) -> None:
+        text = self._emitted(
+            {
+                "result": "committed",
+                "pause_reason": "verify-failed",
+                "commit_group": {"session_id": "8"},
+            },
+            commit_group_label=lambda summary: f"group {summary.get('session_id')}",
+        )
+        self.assertIn("for group 8", text)
+
+    def test_a_refused_commit_reads_its_own_verdict_as_the_cause(self) -> None:
+        # A commit that refuses raises nothing, so `error` is empty exactly
+        # when the commit's status is the fact worth printing.
+        text = self._emitted(
+            {
+                "result": "failed",
+                "pause_reason": "verify-failed",
+                "commit": {"status_result": "protected path changed"},
+            }
+        )
+        self.assertIn("paused work failed after the verify-failed pause: ", text)
+        self.assertIn("protected path changed", text)
+
+    def test_a_raised_error_outranks_the_commit_status(self) -> None:
+        text = self._emitted(
+            {
+                "result": "failed",
+                "pause_reason": "verify-failed",
+                "error": "asl commit exited 1",
+                "commit": {"status_result": "refused"},
+            }
+        )
+        self.assertIn("asl commit exited 1", text)
+        self.assertNotIn("refused", text)
+
+    def test_a_settlement_that_worked_states_no_cause(self) -> None:
+        text = self._emitted(
+            {
+                "result": "committed",
+                "pause_reason": "verify-failed",
+                "commit": {"status_result": None},
+            }
+        )
+        self.assertNotIn(":", text.split("paused work", 1)[1].split(";", 1)[0])
 
 
 class CompactStatusProjectionTests(unittest.TestCase):

@@ -24,8 +24,9 @@ The charter is widened by one behaviour, deliberately: the paused-work
 settlement's *gate*. ``PausedRetainedWorkGateTests`` below decides which pauses
 reach ``commit_settlement`` and which never do, with that module's own
 settlement replaced by a recorder — so what is asserted is still a property of
-this module's shape (one arming site, one call site, one set of refusals, and
-the two source-order assertions that fail if either site moves)
+this module's shape (one arming site, one call site, one set of refusals, one
+progress line reported after the record is durable, and the two source-order
+assertions that fail if either site moves)
 rather than of a run. The commit those refusals let through is covered where it
 is made, in ``tests/test_asl_turn_commit.py``, and the cross-process behaviour
 this all exists for is covered in ``tests/test_asl_harness_integration.py``.
@@ -42,6 +43,7 @@ import json
 import tempfile
 import threading
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -196,6 +198,21 @@ class RecordingPersistence:
             self.states.append(json.loads(json.dumps(payload, default=str)))
 
 
+class RecordingProgress:
+    """The one reporter method the adapter calls, and nothing else.
+
+    Anything else the adapter reached for would raise here rather than be
+    silently absorbed, which is the point: the settlement's only output to a
+    terminal is the line it prints about what the relaunch will find.
+    """
+
+    def __init__(self) -> None:
+        self.paused_work: list[Mapping[str, Any]] = []
+
+    def paused_work_committed(self, record: Mapping[str, Any]) -> None:
+        self.paused_work.append(record)
+
+
 class FakeRunContext:
     """A :class:`run_loop.RunContext` built by hand rather than by a run.
 
@@ -203,6 +220,8 @@ class FakeRunContext:
     merely forwards are left as ``None``: the recorder standing in for
     ``commit_settlement._settle_paused_retained_work`` never calls them, so a
     ``None`` here is the assertion that the gate does not read them either.
+    ``progress`` is the exception, because the adapter reports the record
+    itself rather than forwarding the reporter.
     """
 
     def __init__(self, *, run_dir: Path, event_path: Path) -> None:
@@ -211,7 +230,7 @@ class FakeRunContext:
         self.event_path = event_path
         self.payload: dict[str, Any] = {}
         self.persistence = RecordingPersistence()
-        self.progress = None
+        self.progress = RecordingProgress()
         self.verification_context = None
         self.commit_generation = None
         self.owed_commit_group: dict[str, Any] | None = None
@@ -332,6 +351,25 @@ class PausedRetainedWorkGateTests(unittest.TestCase):
         # makes no file writes of its own.
         written = json.loads(self.result_path.read_text(encoding="utf-8"))
         self.assertEqual(record, written[key])
+
+    def test_the_settled_record_is_reported_once_after_it_is_durable(self) -> None:
+        self.arm()
+        self.pause("verify-failed")
+        self.settle(run_selection.COMMIT_MODE_PER_SESSION)
+        record = self.ctx.payload[commit_settlement.PAUSED_WORK_COMMIT_KEY]
+        # The same object, not a rendering of it: the reporter decides how the
+        # fact reads and this module decides nothing about how it prints.
+        self.assertEqual([record], self.ctx.progress.paused_work)
+        # Reported after the state write, so a terminal that never drains
+        # cannot leave the record undurable.
+        self.assertTrue(self.ctx.persistence.states)
+
+    def test_a_pause_that_settles_nothing_reports_nothing(self) -> None:
+        self.arm()
+        self.pause("guard-protected-path-changed")
+        self.settle(run_selection.COMMIT_MODE_PER_SESSION)
+        self.assertEqual([], self.calls)
+        self.assertEqual([], self.ctx.progress.paused_work)
 
     def test_a_non_recoverable_pause_never_settles(self) -> None:
         for reason in NON_RECOVERABLE_REASONS:

@@ -1129,6 +1129,10 @@ _COMMIT_STATE_KEYS = (
     "commit_failures",
     "unresolved_commit_groups",
     "commits",
+    # The one commit a run makes that no accepted turn produced. Without it the
+    # bundle shows a `session-paused` group and a commit with no explanation for
+    # either; with it, the settlement's own verdict travels beside them.
+    "paused_work_commit",
 )
 _COMMIT_DIR_PREFIX = "commit-"
 

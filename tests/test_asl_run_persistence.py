@@ -11,7 +11,11 @@ they exercise the run rather than the seam:
   every durable write takes, and it is never held across a mailbox read, a
   lease read, a sleep, or a subprocess; and
 * the two bounds a compact record has to keep: it never embeds raw verification
-  output, and it never claims a schema version for a block it does not carry.
+  output, and it never claims a schema version for a block it does not carry;
+  and
+* the converse of those bounds — a block the compaction was never told about
+  survives it verbatim, which is what lets a free-form record like
+  ``paused_work_commit`` reach its readers without a schema of its own.
 
 The lock group is the reason this file exists. A lock bug here does not fail a
 gate: it tears a ``state.json`` between two transitions, or it lets a slow
@@ -32,8 +36,11 @@ from unittest import mock
 from agent_session_loop import (
     agent_mux_delivery,
     agent_mux_projection,
+    compact_state,
     events,
     run_persistence,
+    state,
+    workbench,
 )
 from tests.support import (
     agent_mux_notify_enabled,
@@ -278,6 +285,116 @@ class CompactStateTests(unittest.TestCase):
         self.assertIsNot(turn, compact["turns"][0])
         self.assertEqual([{}], compact["pause_details"]["checks"])
         self.assertEqual("raw", payload["pause_details"]["checks"][0]["stdout"])
+
+
+class PausedWorkCommitProjectionTests(unittest.TestCase):
+    """The settlement's record reaches its readers without a schema of its own.
+
+    Session 8's observability work names ``paused_work_commit`` in three
+    places on purpose — a progress line, a metric, an audit key. This class is
+    the other half of that decision: everywhere else the record travels as an
+    ordinary member of a free-form block, and that has to be measured rather
+    than inspected. A compaction step that dropped unknown keys would leave the
+    record present in memory, absent from ``state.json``, and invisible until
+    an operator went looking for evidence that had never been written.
+    """
+
+    RECORD = {
+        "guard": "paused-work-commit",
+        "pause_reason": "verify-failed",
+        "commit_mode": "per-session",
+        "result": "committed",
+        "verification_repair_attempt": 1,
+        "verification_repair_max_attempts": 2,
+        "verification_repair_exhausted": False,
+        "commit_group": {"group_id": "g1", "scope": "session-paused"},
+        "commit": None,
+        "error": None,
+        "residue": {"repositories": []},
+    }
+
+    def test_a_compact_turn_summary_keeps_the_settlement_record(self) -> None:
+        turn = {
+            "session_id": "3",
+            "before": {"counts": {"pending": 1}, "sessions": [{"id": "3"}]},
+            "paused_work_commit": self.RECORD,
+        }
+        summary = run_persistence._compact_turn_summary(turn)
+        # Verbatim: the compaction bounds snapshots and check output by name,
+        # and passes everything it was not told about through untouched.
+        self.assertEqual(self.RECORD, summary["paused_work_commit"])
+        self.assertEqual({"counts": {"pending": 1}}, summary["before"])
+
+    def test_bounded_pause_details_keep_the_settlement_record(self) -> None:
+        details = {
+            "session": "3",
+            "checks": [{"name": "suite", "stdout": "raw"}],
+            "paused_work_commit": self.RECORD,
+        }
+        bounded = run_persistence._bounded_verification_details(details)
+        self.assertEqual([{"name": "suite"}], bounded["checks"])
+        self.assertEqual(self.RECORD, bounded["paused_work_commit"])
+
+    def test_the_compact_state_record_carries_every_place_it_was_written(
+        self,
+    ) -> None:
+        # The three mirrors `run_loop` writes, through the one seam that turns
+        # a live payload into the bytes of `state.json`.
+        payload = {
+            "paused": True,
+            "pause_reason": "verify-failed",
+            "paused_work_commit": self.RECORD,
+            "pause_details": {"paused_work_commit": self.RECORD},
+            "turns": [{"session_id": "3", "paused_work_commit": self.RECORD}],
+        }
+        compact = run_persistence._compact_state_payload(payload)
+        self.assertEqual(self.RECORD, compact["paused_work_commit"])
+        self.assertEqual(self.RECORD, compact["pause_details"]["paused_work_commit"])
+        self.assertEqual(self.RECORD, compact["turns"][0]["paused_work_commit"])
+
+    def test_the_settlement_event_survives_event_log_compaction(self) -> None:
+        record = {
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "name": events.PAUSED_WORK_COMMITTED_EVENT,
+            "payload": {"run_id": "run-1", "session_id": "3", **self.RECORD},
+            "version": 2,
+        }
+        compact = compact_state._compact_event_record(record)
+        self.assertEqual(record["payload"], compact["payload"])
+
+    def test_the_recovery_centers_pause_details_reader_names_no_key(self) -> None:
+        # `/api/recovery` and the paused-Q&A projection both reach the pause
+        # details through this one reader, which copies the block wholesale.
+        details = workbench._pause_details(
+            {"pause_details": {"paused_work_commit": self.RECORD}}
+        )
+        self.assertEqual(self.RECORD, details["paused_work_commit"])
+
+    def test_the_status_projection_carries_no_pause_details_to_extend(self) -> None:
+        # Measured, not assumed: `asl status`'s runner-state block is a fixed
+        # key list that has never carried pause details, so the record is not
+        # missing from a schema — there is no schema there for it to join.
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "paused": True,
+                        "reason": "verify-failed",
+                        "paused_work_commit": self.RECORD,
+                        "pause_details": {"paused_work_commit": self.RECORD},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            projection = state._runner_state_payload(state_path, lock_info=None)
+        self.assertNotIn("pause_details", projection)
+        self.assertNotIn("details", projection)
+        self.assertNotIn("paused_work_commit", projection)
+        # What it does carry about the pause is unchanged by the settlement.
+        self.assertTrue(projection["paused"])
+        self.assertEqual("verify-failed", projection["reason"])
 
 
 class RunFinishedEventPayloadTests(unittest.TestCase):

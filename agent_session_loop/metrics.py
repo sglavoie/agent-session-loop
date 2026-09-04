@@ -7,7 +7,8 @@ reports workflow reliability and storage numbers for a recent window
 - first-pass session completion (implementation turns),
 - runtime consumed by unsuccessful turns,
 - pause classifications (including never-retry harness failures),
-- verification repair convergence,
+- verification repair convergence, including how often a recoverable pause
+  settled the work its turn retained instead of leaving it for a human,
 - review repair-cycle closure and repetition,
 - artifact growth and projected compaction savings,
 - CLI invocation lifecycle diagnostics from the root-level trace.
@@ -446,6 +447,8 @@ def collect_metrics(
     verify_failures = 0
     verify_exhausted = 0
     verify_failed_sessions: dict[tuple[str, str], str] = {}
+    paused_work_commits = 0
+    paused_work_commit_results: dict[str, int] = {}
 
     cycle_disposition_counts: dict[str, int] = {}
     cycles_total = 0
@@ -576,6 +579,20 @@ def collect_metrics(
                             existing = verify_failed_sessions.get(key)
                             if existing is None or record_time < existing:
                                 verify_failed_sessions[key] = record_time
+            elif name == events.PAUSED_WORK_COMMITTED_EVENT:
+                active = True
+                # One event per settlement, not per commit: the run appends it
+                # for every outcome the settlement reached, including finding
+                # nothing to commit. The total answers "how often did a
+                # recoverable pause settle its own dirt instead of leaving it
+                # for a human", and the breakdown is what keeps that number
+                # from reading as "how often did a commit land".
+                paused_work_commits += 1
+                result = payload.get("result")
+                result = result if isinstance(result, str) and result else "unknown"
+                paused_work_commit_results[result] = (
+                    paused_work_commit_results.get(result, 0) + 1
+                )
             elif name == events.REVIEW_CYCLE_EVENT:
                 active = True
                 cycles_total += 1
@@ -726,6 +743,10 @@ def collect_metrics(
             "sessions_with_verify_failures": len(verify_failed_sessions),
             "sessions_repaired": verify_sessions_repaired,
             "repair_success_rate": repair_rate,
+            "paused_work_commits": paused_work_commits,
+            "paused_work_commits_by_result": dict(
+                sorted(paused_work_commit_results.items())
+            ),
         },
         review_cycles={
             "cycles_recorded": cycles_total,
@@ -981,6 +1002,17 @@ def _print_report(report: MetricsReport) -> None:
         f"sessions {repair['sessions_with_verify_failures']}, "
         f"repaired {repair['sessions_repaired']} "
         f"({_format_rate(repair['repair_success_rate'])})"
+    )
+    paused_work = repair["paused_work_commits_by_result"]
+    print(
+        f"  paused-work settlements {repair['paused_work_commits']}"
+        + (
+            " ("
+            + ", ".join(f"{result} {count}" for result, count in paused_work.items())
+            + ")"
+            if paused_work
+            else ""
+        )
     )
     cycles = report.review_cycles
     print("\nReview cycles:")

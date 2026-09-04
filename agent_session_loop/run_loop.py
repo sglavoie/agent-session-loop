@@ -428,6 +428,12 @@ def _settle_paused_retained_work(ctx: RunContext, *, commit_mode: str | None) ->
     one in-place update serves both spellings. The turn's own ``result.json``
     is rewritten last, because ``commit_settlement`` writes the record onto the
     live turn payload but makes no file writes of its own.
+
+    The progress line comes last and is the only part of this that is not
+    durable. It exists because the durable record answers a question the
+    operator has already stopped asking by the time they can read state: the
+    run is about to print ``run paused``, and whether they should relaunch or
+    look is decided by what the settlement did with the worktree.
     """
     retained = ctx.retained_work
     if retained is None:
@@ -471,6 +477,10 @@ def _settle_paused_retained_work(ctx: RunContext, *, commit_mode: str | None) ->
         details[commit_settlement.PAUSED_WORK_COMMIT_KEY] = record
         ctx.persistence.write_state(payload)
         durability.write_json_file(retained.result_path, retained.turn_payload)
+    # Outside the lock, like every other reporter call: the settlement is the
+    # last thing the run does before it prints its verdict, and a slow terminal
+    # must not hold the state lock open across it.
+    ctx.progress.paused_work_committed(record)
 
 
 def _handle_run_control_action(
