@@ -1785,7 +1785,14 @@ content-redacted.
 
 The bundle carries the run's slice of `mailbox.jsonl` beside its slice of the
 event log, under `mailbox` with `records` and a `summary` reporting
-`available`, `rejected_count`, `unscoped_count`, and a count per kind. Only a
+`available`, `unparsable_line_count`, `unscoped_count`, and a count per kind.
+That count is what schema version 2 renamed: under its old name,
+`rejected_count`, it sat beside `counts.turn_rejected` in the events summary and
+the auditing agent read the two as one number, filing "zero rejections next to a
+`turn_rejected` record" as a contradiction 46 times over runs that had all
+behaved correctly. Bundles written under version 1 keep the old spelling, so the
+reader falls back to it rather than re-judging a damaged log as an undamaged
+one. Only a
 question, a notice, a resolution and a supervision end name a run outright; a
 reply, a receipt and the wait records join their exchange through `to`,
 `wait_id` or `closure_id`, so ownership is seeded from the named records and

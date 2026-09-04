@@ -907,8 +907,24 @@ def run_restricted_audit(
 # Bounded operational evidence
 # ---------------------------------------------------------------------------
 
-#: Version of the ``supervisor-audit-input.json`` payload.
-AUDIT_INPUT_SCHEMA_VERSION = 1
+#: Version of the ``supervisor-audit-input.json`` payload. Version 2 renamed the
+#: events and mailbox summaries' ``rejected_count`` to
+#: :data:`UNPARSABLE_LINE_COUNT_KEY`.
+AUDIT_INPUT_SCHEMA_VERSION = 2
+
+#: How many lines of a JSONL log would not parse. It sat beside
+#: ``counts.turn_rejected`` under the name ``rejected_count``, and the auditing
+#: agent read the two as one number: a summary saying zero rejections next to a
+#: ``turn_rejected`` record looked like a contradiction, and was filed as one 46
+#: times over runs that had all behaved correctly. A field an auditor is asked
+#: to reason about has to say what it counts.
+UNPARSABLE_LINE_COUNT_KEY = "unparsable_line_count"
+
+#: What the same count was called before schema version 2. Bundles written under
+#: version 1 are still the corpus every replay proof is drawn from, so the
+#: reader falls back to the old spelling rather than reading a damaged log as an
+#: undamaged one.
+LEGACY_UNPARSABLE_LINE_COUNT_KEY = "rejected_count"
 
 #: Serialized cap on one audit input bundle, well under the
 #: ``assurance_models.MAX_ARTIFACT_BYTES`` ceiling the writer enforces.
@@ -2081,7 +2097,7 @@ def _read_events(
     ID outright. Lines that will not parse are counted and digested rather than
     dropped: a damaged log is itself evidence about the run that wrote it.
     """
-    summary: dict[str, Any] = {"available": False, "rejected_count": 0}
+    summary: dict[str, Any] = {"available": False, UNPARSABLE_LINE_COUNT_KEY: 0}
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
@@ -2133,7 +2149,7 @@ def _read_events(
         )
         if names_this_run and name in _TERMINAL_EVENT_NAMES:
             terminated = True
-    summary["rejected_count"] = rejected
+    summary[UNPARSABLE_LINE_COUNT_KEY] = rejected
     summary["reference"] = collector.reference(path, kind="event")
     return records, summary
 
@@ -2197,7 +2213,7 @@ def _read_mailbox(
     summary: dict[str, Any] = {
         "available": False,
         "delivered_count": 0,
-        "rejected_count": 0,
+        UNPARSABLE_LINE_COUNT_KEY: 0,
         "unscoped_count": 0,
         "counts": {},
     }
@@ -2262,7 +2278,7 @@ def _read_mailbox(
             record["ownership"] = MAILBOX_OWNERSHIP_DELIVERED
         records.append(record)
     summary["delivered_count"] = delivered
-    summary["rejected_count"] = rejected
+    summary[UNPARSABLE_LINE_COUNT_KEY] = rejected
     summary["unscoped_count"] = unscoped
     summary["counts"] = counts
     summary["reference"] = collector.reference(path, kind="event")
@@ -5347,9 +5363,11 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
         summary.get("reference"), context.section("state").get("reference")
     )
     unread: list[str] = []
-    rejected = summary.get("rejected_count")
-    if isinstance(rejected, int) and rejected > 0:
-        unread.append(f"{rejected} event log line(s) would not parse")
+    unparsable = summary.get(
+        UNPARSABLE_LINE_COUNT_KEY, summary.get(LEGACY_UNPARSABLE_LINE_COUNT_KEY)
+    )
+    if isinstance(unparsable, int) and unparsable > 0:
+        unread.append(f"{unparsable} event log line(s) would not parse")
     for omission in context.omissions:
         if omission.get("reason") in (REASON_UNREADABLE, REASON_MALFORMED):
             unread.append(

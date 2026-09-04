@@ -2050,7 +2050,12 @@ class EvidenceBundleTests(unittest.TestCase):
 
             payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
 
-            self.assertEqual(1, payload["events"]["summary"]["rejected_count"])
+            self.assertEqual(
+                1,
+                payload["events"]["summary"][
+                    supervisor_audit.UNPARSABLE_LINE_COUNT_KEY
+                ],
+            )
             self.assertTrue(
                 any(
                     entry["section"] == "events"
@@ -2132,7 +2137,12 @@ class EvidenceBundleTests(unittest.TestCase):
 
             payload = self._collect(workspace, plan_dir, state_dir, run_dir).payload
 
-            self.assertEqual(1, payload["mailbox"]["summary"]["rejected_count"])
+            self.assertEqual(
+                1,
+                payload["mailbox"]["summary"][
+                    supervisor_audit.UNPARSABLE_LINE_COUNT_KEY
+                ],
+            )
             self.assertEqual(6, len(payload["mailbox"]["records"]))
             self.assertTrue(
                 any(
@@ -6244,6 +6254,25 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 "fail",
                 supervisor_audit.lane_rollup(results.values())["unknown-anomalies"],
             )
+
+    def test_a_bundle_written_before_the_rename_still_reports_its_damage(self) -> None:
+        # Every replay proof is drawn from bundles written under schema
+        # version 1, which spell the count `rejected_count`. Reading only the
+        # new key would silently re-judge a damaged log as an undamaged one.
+        results = supervisor_audit.run_deterministic_checks(
+            {
+                "events": {
+                    "summary": {
+                        "available": True,
+                        supervisor_audit.LEGACY_UNPARSABLE_LINE_COUNT_KEY: 2,
+                    }
+                }
+            }
+        )
+        verdict = {result.check: result for result in results}["unclassified-anomalies"]
+
+        self.assertEqual("fail", verdict.status)
+        self.assertIn("2 event log line(s) would not parse", verdict.detail)
 
     def test_checks_report_unavailable_when_the_workspace_is_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
