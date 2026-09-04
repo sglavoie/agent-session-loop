@@ -94,6 +94,38 @@ settlement re-probes every target rather than assuming a commit it launched
 left the tree clean. The commit exists so the relaunch starts on a clean tree,
 not so the run can claim the work was good.
 
+Two things the settlement deliberately does not do, recorded here because a
+later reader will otherwise read them as gaps:
+
+* **Registered residue is named, not committed.** :func:`_paused_work_commit_targets`
+  stages exactly what the accepted path would have staged, which on the
+  registered session branch is derived entirely from write-guard evidence, and
+  that evidence excludes the run's own plan directory. So a registered run
+  whose plan directory is tracked inside a declared repository still meets the
+  next process's startup commit gate with a dirty tree — the difference this
+  boundary makes is that ``residue`` names the paths instead of the run going
+  silent about them. Widening the staging to cover them would mean the run
+  committing its own control plane, and the same exclusion already shapes the
+  accepted per-session commit, so this is not a limitation the settlement
+  introduced.
+* **A run with no commit mode is left alone.** :func:`_paused_work_commit_is_owed`
+  refuses ``commit_mode is None`` for anything but a repair child, so an
+  authored session's recoverable pause still leaves dirt that a later generated
+  repair child's own commit preflight refuses. That is the smaller failure.
+  Settling it would mean auto-committing on behalf of an operator who asked for
+  no auto-commit, and a commit nobody asked for is not recoverable by
+  relaunching.
+
+One consequence of the first is worth stating in the same breath: the
+``committed-with-residue`` result is not reachable through the real ``asl
+commit`` boundary. That boundary re-reads the same ``git status`` and calls a
+commit that left its worktree dirty unsuccessful, so the group fails and the
+record says ``failed`` before the residue probe can produce the fourth result.
+:func:`_commit_landed_but_left_dirt` is what keeps that branch honest anyway.
+The result is kept rather than removed because the boundary's verdict and this
+module's probe are two independent measurements, and the record must not claim
+a clean tree the run never confirmed.
+
 The module never imports the runner. Everything it needs is either a leaf it
 reads at the owner — ``clock``, ``commit_groups``, ``events``,
 ``turn_execution`` — or a boundary extracted before it: the git shell in

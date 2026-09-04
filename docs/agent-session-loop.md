@@ -1315,6 +1315,51 @@ refusal as the repository's failure with empty `staging_paths` and
 `qualified_paths`, and the resumed group then read the still-clean tree at the
 unchanged HEAD as `skipped-clean` and finalized as complete (ASI-19).
 
+A commit group's own scope is one of three values, and they are not the same
+vocabulary as a commit payload's. `session` is the accepted per-session commit,
+`end` the end-of-run sweep, and `session-paused` the retained-work commit a
+recoverable pause makes for a session that is back to `pending`. The third value
+exists because a group's durable identity is hashed from its scope, session, and
+ordered aliases: without it the paused-work group and the accepted group for the
+same session would share a `group_id`, and the later upsert would overwrite the
+completed row rather than record a second commit. The commit *payloads* a
+paused-work group produces are still stamped `scope: "session"`, deliberately —
+that field feeds the progress labels, the `tail` renderer, the run summary, and
+the workspace projection, all of which mean "per-session or end-of-run" by it.
+So a reader telling a session's two commits apart reads the group's scope, never
+the commit's.
+
+That settlement is what makes a supervised commit run recover on its own. Under
+`--commit-per-session` or `--commit-at-end`, a `verify-failed`,
+`transport-failed`, `timeout`, or `no-status-change` pause commits the work its
+turn retained before the process exits, using `asl commit --message-file` with a
+deterministic message rather than a generated one: the pause may *be* the
+harness failing, so the recovery must not spend another bounded harness turn,
+and a marking that says the work is unverified must not be rewordable by a
+model. The commit runs strictly after the session has been reverted to
+`pending`, since a legacy workspace stages repository-wide and committing any
+earlier would commit the plan file still saying `complete`. The selection is
+exactly the one the accepted path would have used at the same boundary — the
+write guard's evidence for a session commit, the end-of-run sweep under
+`--commit-at-end` — so a pause never stages more than an accepted turn would
+have under a message describing one turn. Review sessions are excluded, matching
+the accepted path; a repair child is included even with no commit mode, because
+it owns the commit its parent's mode never reached it with.
+
+Two limitations are deliberate rather than pending. **Registered residue**: the
+staging a registered session commit uses is derived entirely from write-guard
+evidence, and that evidence excludes the run's own plan directory, so a
+registered run whose plan directory is tracked inside a declared repository
+still stops at the startup commit gate — now with `paused_work_commit.residue`
+naming the paths instead of stopping silently. Committing the plan directory
+would mean the run committing its own control plane, which is why the exclusion
+is not the thing to relax; the same limitation already applies to the accepted
+per-session commit and is not new here. **No commit mode, authored session**: a
+recoverable pause in a run with no commit mode leaves its retained work
+uncommitted, and a later generated repair child's own commit preflight refuses
+that dirt. Settling it would be auto-committing on behalf of an operator who
+asked for no auto-commit, which is a worse failure than the one it would fix.
+
 The runner is the last authority on which repositories a run may reach, and it
 enforces that independently of preflight. A plan whose `**Readiness**` is
 already `loop-ready` short-circuits core preflight, and a legacy plan can skip
@@ -2876,6 +2921,19 @@ and the filesystem changes are still retained.
 *result*; it never rolls back, reverts, aborts, or restarts anything. The run
 cannot know whether the change was the valuable part of the turn, and destroying
 an agent's work to satisfy a guard would cost more than it protects.
+
+Retention answers where the work is *not* going, not where it is kept, and
+under an active commit mode a *recoverable* pause now writes it down. The four
+recoverable reasons — `verify-failed`, `transport-failed`, `timeout`, and
+`no-status-change` — settle the paused turn's retained changes into a
+`session-paused` commit before the process exits, so the relaunch meets a clean
+worktree at its startup commit gate and repairs the session without a human.
+A guard refusal is the opposite case and keeps the opposite treatment: a
+write-scope violation or a protected-path change is not recoverable, the dirt
+it retained is the evidence the gate exists to preserve, and it is left
+uncommitted for the inspection that pause is already waiting on. Nothing rolls
+back on either path, so the invariant itself is unchanged — the settlement only
+says what a recoverable pause does with the bytes it kept.
 
 Guards belong to one run and never outlive it. `add` and `remove` require an
 active run and fail with `reason: no-active-run` otherwise, before appending
@@ -4689,7 +4747,8 @@ that key for them. `events.jsonl` records
 `verification_started`, `verification_check_started`, `verification_heartbeat`,
 `verification_check_finished`, `verification_check_skipped`,
 `verification_finished`, `commit_started`,
-`commit_finished`, `run_control`, `review_scope_selected`,
+`commit_finished`, `paused_work_committed`,
+`run_control`, `review_scope_selected`,
 `review_session_created`, `review_cycle`,
 `review_repair_reopened`, `mailbox`, `reply_provided`,
 `resolution_consumed`, `process_sweep`,
@@ -4723,6 +4782,17 @@ notification follow the durable event rather than preceding it, which is why an 
 stream shows `turn-finish` after `verification-finish` — verification is a
 guard that can still refuse the turn. The committed payload is returned as a
 read-only mapping and is never rewritten afterwards.
+`paused_work_committed` is the settlement's own record, appended once when a
+recoverable pause under an active commit mode settles the work its turn
+retained. It is later than `run_paused` by construction — the commit must run
+after the session has been reverted to `pending`, and events are append-only —
+so a reader that wants the outcome beside the pause reads it from state rather
+than from the pause event. Its payload is the `run_id`, the `session_id`, and
+the `paused_work_commit` record verbatim, which is the same object written to
+the turn's `result.json`, to the run payload, and into `pause_details`. Like
+`process_sweep` it is conditional: a pause that owes no settlement — a review
+session, a non-recoverable reason, or a run with no commit mode that is not a
+repair child — appends nothing at all.
 `turn_rejected` is the terminal statement about a turn a post-execution guard
 refused; such a turn never receives `turn_finished`. Its payload names the
 `guard`, the `reason` (the same token the run pauses with), whether the session
@@ -5110,6 +5180,49 @@ recorded as failed commit attempts. A failed commit is also copied into the
 record; when a pause carries a commit at all, it is copied into
 `pause_details.commit` as well.
 
+`paused_work_commit` is the settlement record a recoverable pause writes, and it
+is the same object in three places: on the paused turn's `result.json`, on the
+run payload, and under `pause_details.paused_work_commit`, where a supervisor
+reading the pause finds it without opening a turn artifact. Its fields are
+`guard` (always `paused-work-commit`, naming the boundary that wrote it the way
+`session_commit` and `repair_commit` do), the `pause_reason` and `commit_mode`
+it settled under, `result`, the three repair counters
+`verification_repair_attempt`, `verification_repair_max_attempts`, and
+`verification_repair_exhausted` read from the pause details rather than
+recounted, the `commit_group` it ran, the failed `commit` when one came back
+unsuccessful, an `error` string when the resolution refused before any group
+existed, and `residue`. `result` is one of `committed` (the relaunch starts on a
+clean worktree), `no-changes` (the turn retained nothing to commit),
+`committed-with-residue`, or `failed` (the retained changes stay in the worktree
+for a human). `committed-with-residue` is not reachable through today's
+`asl commit` boundary: that boundary re-reads the same `git status` and calls a
+commit that left its worktree dirty unsuccessful, so the group fails and the
+settlement records `failed` first. The residue that matters in practice
+therefore arrives on the `failed` branch, where a commit whose `HEAD` advanced
+but whose tree stayed dirty is still probed for it — the record would otherwise
+read as "nothing was committed" when something was. The fourth result is kept
+because the commit boundary's cleanliness verdict and the settlement's own probe
+are two independent measurements, and a record must not claim a clean tree the
+run never confirmed. `residue.repositories` lists one row per target the commit
+left dirty, each with its `alias`, `clean: false`, and repository-qualified
+`dirty_paths` — the settlement re-probes every target rather than assuming a
+commit it launched left the tree clean, because those exact paths are what the
+next process's startup commit gate will refuse over. `error` is reserved for an
+exception raised around the commit; a commit that merely failed is carried on
+`commit` as `success: false` with its own `status_result`, and on the group as
+`status: "failed"`.
+
+The record is free-form as far as the state projections are concerned.
+`asl status`'s runner-state projection carries no `pause_details` key at all, so
+there is no status schema for it to join, and the Recovery Center's pause-detail
+copy names no keys, so it surfaces there unchanged. Turn compaction rewrites
+only `before`, `after`, and `verification`, so the record survives it intact.
+`metrics --json`'s `verification_repair` object counts the settlements it finds:
+`paused_work_commits` is the number of settlement events in the window —
+including `no-changes` and `failed`, so it is a count of settlements rather than
+of commits that landed — and the additive `paused_work_commits_by_result` breaks
+the same total down by `result`.
+
 Dry-run `planned` payloads, harness invocation payloads, active turn state,
 events, and turn `result.json` artifacts include the same model and effort
 metadata. Source values are `flag`, `codex_config`, `copilot_settings`, and
@@ -5313,7 +5426,15 @@ Common pause reasons:
   before a generated repair child,
   such as a dirty initial worktree, a non-git working
   directory, or an incompatible `--commit-at-end` and `--max-sessions`
-  combination.
+  combination. On a relaunch after a recoverable pause the dirty tree is no
+  longer the previous process's retained work — that is settled into a
+  `session-paused` commit before it exits — so the reason now means one of two
+  narrower things: residue the settlement's evidence-derived staging could not
+  take, or dirt an operator introduced between the two runs. The previous run's
+  `paused_work_commit.residue` names the first case repository by repository and
+  path by path; anything it does not name is the second. It remains distinct
+  from `commit-failed` below, which is a durable group that could not be
+  reconstructed rather than a tree that was never clean to start with.
 - `commit-failed`: a durable commit group could not be reconstructed. An
   unreadable ledger is the one commit failure that still pauses, because
   continuing would risk committing work twice or losing the record of what

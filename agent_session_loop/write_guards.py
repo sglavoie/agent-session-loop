@@ -60,7 +60,15 @@ Invariants that survive the move:
   any of them would leave a turn the run refused looking like a turn it accepted.
 * **Filesystem changes are always retained.** The run cannot know whether the
   change was the valuable part of the turn, so a violation withdraws the
-  *claim* — the session status — and never the work.
+  *claim* — the session status — and never the work. Retention is not the same
+  question as where the work is kept, and elsewhere the run now answers the
+  second one: under an active commit mode a *recoverable* pause commits the
+  changes its turn retained, so the relaunch starts on a clean worktree. No
+  refusal made here is recoverable, so none of them is ever settled that way.
+  The dirt a write-scope violation or a protected-path change leaves behind is
+  the evidence these gates exist to preserve, and it stays in the worktree,
+  uncommitted, for the human the pause is already waiting on. Nothing rolls
+  back on either path.
 * **A guard that cannot see is not a guard that saw nothing.** An unreadable
   comparison, an unavailable snapshot lane, and ``changed_paths`` of ``None`` all
   refuse the turn through the guard's own unavailable reason rather than clearing
