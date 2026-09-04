@@ -75,6 +75,7 @@ from . import (
     turn_postflight,
     turn_preflight,
     turn_preparation,
+    turn_settlement,
     verification,
     verification_transitions,
     workspace_evidence,
@@ -2320,477 +2321,41 @@ def _run_locked(
                     continue
                 break
 
-            expected_change = (
-                _session_status_change_payload(
-                    session_id,
-                    before="pending",
-                    after="complete",
-                ),
-            )
-            status_changes = _status_changes(before, after)
-            if not status_changes:
-                with ctx.persistence.lock:
-                    ctx.payload["expected_status_changes"] = list(expected_change)
-                    ctx.payload["observed_status_changes"] = []
-                    ctx.payload["final_snapshot"] = _snapshot_payload(after)
-                _record_turn_rejected(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    turn_payload=turn_payload,
-                    session_id=session_id,
-                    guard="status-change",
-                    reason="no-status-change",
-                    detail={
-                        "expected_status_changes": list(expected_change),
-                        "observed_status_changes": [],
-                    },
-                )
-                ctx.pause(
-                    reason="no-status-change",
-                    message=f"{session_label} did not change status",
-                    details={
-                        **session_details,
-                        "expected_status_changes": list(expected_change),
-                        "observed_status_changes": [],
-                    },
-                )
-                break
-            if len(status_changes) > 1:
-                with ctx.persistence.lock:
-                    ctx.payload["expected_status_changes"] = list(expected_change)
-                    ctx.payload["observed_status_changes"] = list(status_changes)
-                    ctx.payload["final_snapshot"] = _snapshot_payload(after)
-                _record_turn_rejected(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    turn_payload=turn_payload,
-                    session_id=session_id,
-                    guard="status-change",
-                    reason="multiple-status-changes",
-                    detail={
-                        "expected_status_changes": list(expected_change),
-                        "observed_status_changes": list(status_changes),
-                    },
-                )
-                ctx.pause(
-                    reason="multiple-status-changes",
-                    message="more than one session status changed during one harness "
-                    "turn",
-                    details={
-                        **session_details,
-                        "expected_status_changes": list(expected_change),
-                        "observed_status_changes": list(status_changes),
-                    },
-                )
-                break
-            if status_changes != expected_change:
-                with ctx.persistence.lock:
-                    ctx.payload["expected_status_changes"] = list(expected_change)
-                    ctx.payload["observed_status_changes"] = list(status_changes)
-                    ctx.payload["final_snapshot"] = _snapshot_payload(after)
-                _record_turn_rejected(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    turn_payload=turn_payload,
-                    session_id=session_id,
-                    guard="status-change",
-                    reason="unexpected-status-change",
-                    detail={
-                        "expected_status_changes": list(expected_change),
-                        "observed_status_changes": list(status_changes),
-                    },
-                )
-                ctx.pause(
-                    reason="unexpected-status-change",
-                    message="the changed session status did not match the expected "
-                    "pending completion",
-                    details={
-                        **session_details,
-                        "expected_status_changes": list(expected_change),
-                        "observed_status_changes": list(status_changes),
-                    },
-                )
-                break
-
-            # The turn survived every result branch, so nothing terminated it
-            # early and the comparison above was deferred to here. Behind the
-            # status guards, a turn that completed the wrong session keeps
-            # their sharper diagnosis; what is left is the tampering they
-            # cannot see, an edit that moves no status at all.
-            if handoff_guards._enforce_plan_artifact_guard(
-                event_path=ctx.event_path,
-                payload=ctx.payload,
-                persistence=ctx.persistence,
-                before=before,
-                after=after,
-                digests_before=plan_artifacts_before,
-                runner_written=plan_artifacts_written_by_runner,
-                session_id=session_id,
-                session_label=session_label,
-                session_details=session_details,
-                turn_payload=turn_payload,
-                paths=paths,
-                plan_cache=ctx.plan_cache,
-                append_handoff_note=handoff_correction._append_handoff_note,
-                reinspect=session_verification._reinspect_after_revert,
-            ):
-                break
-
-            if session_verification._enforce_session_verification(
-                event_path=ctx.event_path,
-                payload=ctx.payload,
-                persistence=ctx.persistence,
-                progress=ctx.progress,
-                before=before,
-                after=after,
+            settlement = turn_settlement.settle_turn(
+                ctx,
+                args=args,
                 cwd=cwd,
+                before=before,
+                after=after,
+                snapshot=snapshot,
                 session_id=session_id,
                 session_label=session_label,
                 session_details=session_details,
-                allow_not_loop_ready=allow_not_loop_ready,
-                turn_payload=turn_payload,
-                paths=paths,
-                plan_cache=ctx.plan_cache,
-                append_handoff_note=handoff_correction._append_handoff_note,
-                run_id=ctx.run_id,
                 turn_index=turn_index,
                 total_sessions=total_sessions,
-                verification_context=ctx.verification_context,
-                review_broad_failure_deferral=is_review_session,
-                require_review_artifact=(
-                    review_session_version is not None
-                    and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
-                ),
-                generated_review_session=is_review_session,
-            ):
-                break
-
-            if is_review_session:
-                # A retry short-circuits the loop tail, so the operator's stop
-                # request has to be visible *here* or it would be honored a
-                # whole review turn late. The queue drain is what makes an
-                # `asl control stop` observable at all on a review turn; the
-                # read below is non-consuming, like every other checkpoint —
-                # only `run_termination._honor_stop_after_current` consumes,
-                # at the moment the loop actually stops.
-                _drain_external_control_queue(
-                    plan_dir=before.plan_dir,
-                    state_dir_arg=args.state_dir,
-                    control_state=ctx.run_controls.state,
-                    seen_ids=ctx.seen_external_command_ids,
-                    payload=ctx.payload,
-                    event_path=ctx.event_path,
-                    control_payload=ctx.control_payload,
-                    context=turn_payload,
-                    persistence=ctx.persistence,
-                    run_control_lock=run_control_lock,
-                    wakeup=wakeup,
-                    guard_controller=ctx.guard_controller,
-                )
-                with run_control_lock:
-                    stop_after_current_pending = (
-                        ctx.run_controls.state.stop_after_current
-                    )
-                verdict_action, verdict_snapshot = (
-                    session_verification._enforce_review_verdict(
-                        event_path=ctx.event_path,
-                        payload=ctx.payload,
-                        persistence=ctx.persistence,
-                        before=before,
-                        after=after,
-                        session_id=session_id,
-                        session_label=session_label,
-                        session_details=session_details,
-                        turn_payload=turn_payload,
-                        paths=paths,
-                        plan_cache=ctx.plan_cache,
-                        append_handoff_note=handoff_correction._append_handoff_note,
-                        require_artifact=(
-                            review_session_version is not None
-                            and review_session_version >= STRUCTURED_REVIEW_MIN_VERSION
-                        ),
-                        stop_after_current_pending=stop_after_current_pending,
-                    )
-                )
-                if verdict_action == "pause":
-                    break
-                if verdict_action == "retry":
-                    assert verdict_snapshot is not None
-                    snapshot = verdict_snapshot
-                    continue
-
-            completed_at = _utc_iso_now()
-            progress_error: str | None = None
-            try:
-                progress_appended = handoff_guards._append_progress_entry(
-                    after, session_id, completed_at
-                )
-            except Exception as error:
-                progress_appended = False
-                progress_error = str(error)
-                ctx.persistence.append_event(
-                    ctx.event_path,
-                    "progress-journal-append-failed",
-                    {
-                        "run_id": ctx.payload.get("run_id"),
-                        "session": session_id,
-                        "session_label": session_label,
-                        "completed_at": completed_at,
-                        "error": progress_error,
-                    },
-                )
-            with ctx.persistence.lock:
-                turn_payload["progress_appended"] = progress_appended
-                if progress_error is not None:
-                    turn_payload["progress_error"] = progress_error
-                _write_json_file(paths["result"], turn_payload)
-
-            try:
-                ledger_updates = plans.sync_derived_status_ledgers(after)
-            except plans.PlanError as error:
-                ctx.record_final_snapshot(after)
-                _record_turn_rejected(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    turn_payload=turn_payload,
-                    session_id=session_id,
-                    guard="ledger-sync",
-                    reason="malformed-plan",
-                    detail={"error": str(error)},
-                )
-                ctx.pause(
-                    reason="malformed-plan",
-                    message="derived status ledgers could not be synced",
-                    details={
-                        **session_details,
-                        "error": str(error),
-                    },
-                )
-                break
-            if ledger_updates:
-                try:
-                    after = ctx.plan_cache.get_fresh(before.plan_dir)
-                except plans.PlanError as error:
-                    ctx.record_final_snapshot(after)
-                    _record_turn_rejected(
-                        event_path=ctx.event_path,
-                        payload=ctx.payload,
-                        persistence=ctx.persistence,
-                        turn_payload=turn_payload,
-                        session_id=session_id,
-                        guard="ledger-sync",
-                        reason="malformed-plan",
-                        detail={"error": str(error)},
-                    )
-                    ctx.pause(
-                        reason="malformed-plan",
-                        message="plan could not be inspected after syncing ledgers",
-                        details={
-                            **session_details,
-                            "error": str(error),
-                        },
-                    )
-                    break
-                with ctx.persistence.lock:
-                    turn_payload["ledger_updates"] = [
-                        str(path) for path in ledger_updates
-                    ]
-                    turn_payload["after"] = _snapshot_payload(after)
-                    _write_json_file(paths["result"], turn_payload)
-
-            readiness_gate._refresh_active_readiness_state(
-                ctx.payload, after.plan_dir, ctx.persistence
+                turn_payload=turn_payload,
+                paths=paths,
+                plan_artifacts_before=plan_artifacts_before,
+                plan_artifacts_written_by_runner=plan_artifacts_written_by_runner,
+                is_review_session=is_review_session,
+                is_repair_session=is_repair_session,
+                review_session_version=review_session_version,
+                allow_not_loop_ready=allow_not_loop_ready,
+                commit_mode=commit_mode,
+                max_review_fix_cycles=max_review_fix_cycles,
+                review_requested=review_requested,
+                turn_executor=turn_executor,
+                live_turn_payload=live_turn_payload,
+                run_controls=ctx.run_controls,
+                run_control_lock=run_control_lock,
+                wakeup=wakeup,
+                soft_fail_commit=functools.partial(_soft_fail_commit, ctx),
             )
-
-            repair_owned_commit = is_repair_session and commit_mode is None
-            if not is_review_session and (
-                commit_mode == run_selection.COMMIT_MODE_PER_SESSION
-                or repair_owned_commit
-            ):
-                session_targets: list[dict[str, Any]] = []
-                try:
-                    session_targets = (
-                        commit_settlement._registered_session_commit_targets(
-                            ctx.verification_context,
-                            turn_payload.get("workspace_write_guard", {}),
-                        )
-                        if ctx.verification_context.workspace is not None
-                        else commit_settlement._dirty_commit_targets(
-                            ctx.verification_context
-                        )
-                    )
-                    if repair_owned_commit:
-                        session_targets = [
-                            target
-                            for target in session_targets
-                            if not commit_settlement._commit_target_is_clean(target)
-                        ]
-                    if session_targets or not repair_owned_commit:
-                        commit_group, failed_commit = (
-                            commit_settlement._run_commit_group(
-                                event_path=ctx.event_path,
-                                payload=ctx.payload,
-                                progress=ctx.progress,
-                                verification_context=ctx.verification_context,
-                                run_dir=ctx.run_dir,
-                                run_id=ctx.run_id,
-                                session_id=session_id,
-                                targets=session_targets,
-                                generation=ctx.commit_generation,
-                                persistence=ctx.persistence,
-                            )
-                        )
-                    else:
-                        commit_group = None
-                        failed_commit = None
-                except RunError as error:
-                    commit_group = None
-                    failed_commit = None
-                    commit_error = str(error)
-                else:
-                    commit_error = None
-                if repair_owned_commit:
-                    with ctx.persistence.lock:
-                        turn_payload["repair_commit"] = {
-                            "mode": run_selection.REPAIR_COMMIT_MODE_PER_CHILD,
-                            "result": (
-                                "no-changes"
-                                if not session_targets
-                                else (
-                                    "failed"
-                                    if failed_commit is not None
-                                    or commit_error is not None
-                                    else "committed"
-                                )
-                            ),
-                            "commit_group": commit_group,
-                        }
-                        _write_json_file(paths["result"], turn_payload)
-                if failed_commit is not None or commit_error is not None:
-                    # The turn itself stands: it executed, it verified, and the
-                    # session it completed is still complete. Only the commit
-                    # of its changes failed, so the failure is recorded on the
-                    # turn and on the run, and the turn goes on to be committed
-                    # to the plan. Recording a `turn_rejected` here instead
-                    # would say a guard refused a turn the very next call
-                    # accepts.
-                    with ctx.persistence.lock:
-                        turn_payload["session_commit"] = {
-                            "guard": (
-                                "repair-session-commit"
-                                if repair_owned_commit
-                                else "session-commit"
-                            ),
-                            "reason": "commit-failed",
-                            "error": commit_error,
-                            "commit_group": commit_group,
-                            "commit": failed_commit,
-                        }
-                        _write_json_file(paths["result"], turn_payload)
-                    _soft_fail_commit(
-                        ctx,
-                        scope="session",
-                        session_id=session_id,
-                        group=commit_group,
-                        commit=failed_commit,
-                        error=commit_error,
-                        message=(
-                            f"auto-commit failed after session {session_id} completed"
-                        ),
-                    )
-
-            try:
-                commit = turn_executor.commit(
-                    payload=ctx.payload,
-                    turn_payload=turn_payload,
-                    live_turn=live_turn_payload,
-                    accepted=after,
-                )
-            except _TurnCommitRejected as rejection:
-                ctx.record_final_snapshot(after)
-                _record_turn_rejected(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    turn_payload=turn_payload,
-                    session_id=session_id,
-                    guard="ledger-sync",
-                    reason=rejection.reason,
-                    detail=rejection.detail,
-                )
-                ctx.pause(
-                    reason=rejection.reason,
-                    message=rejection.message,
-                    details={**session_details, **rejection.detail},
-                )
+            snapshot = settlement.snapshot
+            if settlement.action == turn_settlement.ACTION_STOP:
                 break
-
-            with ctx.persistence.lock:
-                ctx.payload["completed_sessions"].append(
-                    _session_compat_value(session_id)
-                )
-                ctx.payload.setdefault("completed_session_ids", []).append(session_id)
-                if is_review_session:
-                    ctx.payload["review_completed"] = True
-                    review_verdict = commit.record.get("review_verdict")
-                    if isinstance(review_verdict, dict):
-                        ctx.payload["review_verdict"] = {
-                            "status_line": review_verdict["status_line"],
-                            "outcome": review_verdict["outcome"],
-                            "total_findings": review_verdict["total_findings"],
-                            "findings_by_severity": review_verdict[
-                                "findings_by_severity"
-                            ],
-                        }
-            if not is_review_session:
-                ctx.completed_count += 1
-            snapshot = after
-            ctx.record_final_snapshot(commit.published)
-
-            if is_review_session:
-                cycle_action, snapshot = review_cycle._advance_review_cycle(
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    args=args,
-                    cwd=cwd,
-                    session_id=session_id,
-                    session_label=session_label,
-                    session_details=session_details,
-                    snapshot=snapshot,
-                    turn_payload=commit.record,
-                    max_review_fix_cycles=max_review_fix_cycles,
-                    plan_cache=ctx.plan_cache,
-                    reinspect=session_verification._reinspect_after_plan_mutation,
-                )
-                review_resume = review_cycle._set_review_resume(
-                    snapshot=snapshot,
-                    event_path=ctx.event_path,
-                    payload=ctx.payload,
-                    persistence=ctx.persistence,
-                    max_repair_group_attempts=run_inputs._max_repair_group_attempts(
-                        args
-                    ),
-                    max_review_fix_cycles=max_review_fix_cycles,
-                    review_requested=review_requested,
-                )
-                if cycle_action == "paused":
-                    break
-                if cycle_action == "complete":
-                    with ctx.persistence.lock:
-                        ctx.payload["reason"] = review_cycle._terminal_review_reason(
-                            ctx.payload
-                        )
-                    break
-                # Repair children were materialized: clear the appended flag
-                # so the loop appends the next review session once the
-                # children complete, then fall through to the control tail
-                # so operator stop requests are honored between cycles.
-                ctx.review_appended = False
+            if settlement.action == turn_settlement.ACTION_RETRY:
+                continue
 
             _drain_external_control_queue(
                 plan_dir=snapshot.plan_dir,
@@ -2800,7 +2365,7 @@ def _run_locked(
                 payload=ctx.payload,
                 event_path=ctx.event_path,
                 control_payload=ctx.control_payload,
-                context=commit.record,
+                context=settlement.turn_record,
                 persistence=ctx.persistence,
                 run_control_lock=run_control_lock,
                 wakeup=wakeup,
@@ -2821,7 +2386,7 @@ def _run_locked(
                         payload=ctx.payload,
                         event_path=ctx.event_path,
                         control_payload=ctx.control_payload,
-                        context=commit.record,
+                        context=settlement.turn_record,
                         persistence=ctx.persistence,
                     )
             if stop_now:

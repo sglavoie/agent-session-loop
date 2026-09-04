@@ -214,6 +214,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.turn_postflight",
         "agent_session_loop.turn_preflight",
         "agent_session_loop.turn_preparation",
+        "agent_session_loop.turn_settlement",
         "agent_session_loop.verification",
         "agent_session_loop.verification_transitions",
         "agent_session_loop.workbench_server",

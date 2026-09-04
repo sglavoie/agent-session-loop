@@ -53,6 +53,7 @@ from agent_session_loop import (
     run_termination,
     runner,
     session_verification,
+    turn_settlement,
 )
 from tests.support import assert_no_runner_import, write_plan
 
@@ -299,7 +300,7 @@ class HandoffGuardsBoundaryTests(unittest.TestCase):
 
 
 class VerifyThenProgressThenLedgersTests(unittest.TestCase):
-    """The ordering the journal's meaning depends on, read off the loop.
+    """The ordering the journal's meaning depends on, read off the settlement.
 
     ``_append_progress_entry`` is the middle step of a three-step sequence whose
     order is the whole guarantee: only verified work reaches the journal, and
@@ -310,7 +311,10 @@ class VerifyThenProgressThenLedgersTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.source = inspect.getsource(runner._run_locked)
+        # Read off `turn_settlement.settle_turn` since Session 36: the three
+        # steps left the loop together, and the sequence they form is now that
+        # function's whole reason for being one function.
+        self.source = inspect.getsource(turn_settlement.settle_turn)
 
     def positions(self) -> tuple[int, int, int]:
         return (
@@ -331,7 +335,7 @@ class VerifyThenProgressThenLedgersTests(unittest.TestCase):
         # The qualified call is what keeps the ordering above meaningful: a
         # runner-local reimplementation would satisfy the two assertions and
         # leave the boundary's idempotence behind.
-        self.assertNotIn("\n            _append_progress_entry(", self.source)
+        self.assertNotIn("\n    _append_progress_entry(", self.source)
 
 
 class _PlanCase(unittest.TestCase):

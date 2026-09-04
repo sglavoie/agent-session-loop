@@ -52,6 +52,7 @@ from agent_session_loop import (
     turn_postflight,
     turn_preflight,
     turn_preparation,
+    turn_settlement,
     verification,
     workspace_evidence,
     workspaces,
@@ -3868,7 +3869,13 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
     # ordered steps live in different files -- so each step is located by
     # search and ordered by where the loop reaches its owner, which keeps the
     # contract intact as the extraction keeps carving the loop up.
-    TURN_PATH_MODULES = (runner, turn_preparation, turn_preflight, turn_postflight)
+    TURN_PATH_MODULES = (
+        runner,
+        turn_preparation,
+        turn_preflight,
+        turn_postflight,
+        turn_settlement,
+    )
 
     def setUp(self) -> None:
         self.trees = {

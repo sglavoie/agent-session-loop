@@ -39,6 +39,7 @@ from agent_session_loop import (
     run_reporting,
     runner,
     session_verification,
+    turn_settlement,
     verification_transitions,
 )
 from tests.support import (
@@ -254,7 +255,12 @@ class SeamTests(unittest.TestCase):
         )
 
     def test_the_loop_passes_the_seam_at_every_gate_call(self) -> None:
-        tree = ast.parse(Path(runner.__file__ or "").read_text(encoding="utf-8"))
+        # Session 36 moved both gate calls out of the loop and into
+        # `turn_settlement`; the claim is unchanged -- every call site supplies
+        # the seam -- only the file that holds the call sites moved.
+        tree = ast.parse(
+            Path(turn_settlement.__file__ or "").read_text(encoding="utf-8")
+        )
         calls = 0
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -278,7 +284,7 @@ class SeamTests(unittest.TestCase):
 
 
 class VerifyThenProgressThenLedgersTests(unittest.TestCase):
-    """The ordering the journal's meaning depends on, read off the loop.
+    """The ordering the journal's meaning depends on, read off the settlement.
 
     This gate is the first step of a three-step sequence whose order is the
     whole guarantee: only verified work reaches ``progress.md``, and the journal
@@ -290,7 +296,10 @@ class VerifyThenProgressThenLedgersTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.source = inspect.getsource(runner._run_locked)
+        # Read off `turn_settlement.settle_turn` since Session 36: the three
+        # steps left the loop together, and the sequence they form is now that
+        # function's whole reason for being one function.
+        self.source = inspect.getsource(turn_settlement.settle_turn)
 
     def positions(self) -> tuple[int, int, int]:
         return (
@@ -311,7 +320,7 @@ class VerifyThenProgressThenLedgersTests(unittest.TestCase):
         # The qualified call is what keeps the ordering above meaningful: a
         # runner-local reimplementation would satisfy both assertions and leave
         # the state machine and the repair budget behind.
-        self.assertNotIn("\n            if _enforce_session_verification(", self.source)
+        self.assertNotIn("\n    if _enforce_session_verification(", self.source)
 
     def test_the_review_verdict_gate_runs_after_verification(self) -> None:
         # A review session is verified like any other session first; the verdict

@@ -48,6 +48,7 @@ from agent_session_loop import (
     turn_postflight,
     turn_preflight,
     turn_preparation,
+    turn_settlement,
 )
 from agent_session_loop import verification as verification_module
 from tests.support import (
@@ -102,7 +103,13 @@ COMMIT_ARTIFACT_KEYS = ("stdout", "stderr", "result")
 #: comparable the moment two ordered steps live in different files -- so each
 #: guard is located by search and ordered by where the loop reaches its owner,
 #: which keeps the contract intact as the extraction keeps carving the loop up.
-TURN_PATH_MODULES = (runner, turn_preparation, turn_preflight, turn_postflight)
+TURN_PATH_MODULES = (
+    runner,
+    turn_preparation,
+    turn_preflight,
+    turn_postflight,
+    turn_settlement,
+)
 
 
 def _module_tree(module: Any) -> ast.Module:
@@ -1610,7 +1617,9 @@ class UnregisteredCommitTargetTests(unittest.TestCase):
         # Matched structurally rather than by substring: qualifying the callee
         # with its owning module made the line long enough for the formatter to
         # wrap the argument, and a text match reads that as a behaviour change.
-        tree = ast.parse(inspect.getsource(runner._run_locked))
+        # The per-session commit moved to `turn_settlement` in Session 36; the
+        # selection it reads is the claim, not the file it is read in.
+        tree = ast.parse(inspect.getsource(turn_settlement.settle_turn))
 
         def names_the_context(node: ast.expr) -> bool:
             # The verification context is reached through the run context now,
