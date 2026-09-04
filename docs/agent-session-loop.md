@@ -5261,6 +5261,22 @@ exception raised around the commit; a commit that merely failed is carried on
 `commit` as `success: false` with its own `status_result`, and on the group as
 `status: "failed"`.
 
+The sentence recorded beside that failure is rendered from the same two facts,
+because `failed` covers two opposite outcomes. A commit that never ran, exited
+nonzero, left `HEAD` missing, or left it unchanged wrote nothing, and its
+`commit_failures[].message` still reads `the work retained by the <reason> pause
+of session <id> could not be committed`. A commit whose `HEAD` advanced —
+`dirty-after-commit`, or `status-unavailable` when the tree could not be re-read
+afterwards — did commit the turn's intended path, so its message reads `the
+<reason> pause of session <id> committed the work it retained, but the worktree
+still holds <paths>`, naming up to five repository-qualified residue paths and
+deferring any beyond that to `paused_work_commit.residue`. A landed commit whose
+probe named no path at all points at the same field instead of naming one. Which
+branch applies is read from the commit's own `status_result` rather than
+re-measured, so the message never disagrees with the commit boundary about what
+landed. The same text is what the `commit failed` progress line prints and what
+the supervisor audit bundle carries in `commit_failures`.
+
 The record is free-form as far as the state projections are concerned.
 `asl status`'s runner-state projection carries no `pause_details` key at all, so
 there is no status schema for it to join, and the Recovery Center's pause-detail

@@ -3890,6 +3890,48 @@ class SettledPauseCommitGateTests(unittest.TestCase):
             "?? check-artifact.log", self._git("SVC", "status", "--porcelain")
         )
 
+    def test_dirty_after_commit_failure_message_says_the_commit_landed(self) -> None:
+        # `failed` is one word for two opposite outcomes. Here the commit
+        # exited zero and moved HEAD -- the turn's own work is in the history
+        # -- and only the check's artifact stayed behind. A message that said
+        # the retained work could not be committed would be the one part of
+        # the evidence that disagreed with `git log`, and would say nothing
+        # about the path the relaunch's gate is about to refuse over.
+        residue_path = self.repositories["SVC"] / "check-artifact.log"
+        self._write_plan(dirt=residue_path)
+
+        exit_code, first = self._invoke("landed-message-run", self._work)
+
+        self.assertEqual(1, exit_code)
+        record = first["paused_work_commit"]
+        self.assertEqual("failed", record["result"])
+        self.assertEqual("dirty-after-commit", record["commit"]["status_result"])
+        # The commit really did land: HEAD advanced onto the turn's file.
+        self.assertNotEqual(
+            record["commit"]["head_before"], record["commit"]["head_after"]
+        )
+        self.assertEqual(
+            "worked.txt", self._git("SVC", "show", "--name-only", "--format=")
+        )
+        # The durable soft-failure message -- the same text the progress line
+        # prints and the supervisor audit bundle carries -- names the landing
+        # and the residue path, and drops the could-not-be-committed claim.
+        self.assertEqual(
+            [
+                "the verify-failed pause of session 1 committed the work it "
+                "retained, but the worktree still holds SVC:check-artifact.log"
+            ],
+            [row["message"] for row in first["commit_failures"]],
+        )
+        self.assertEqual(
+            ["SVC:check-artifact.log"],
+            [
+                path
+                for row in record["residue"]["repositories"]
+                for path in row["dirty_paths"]
+            ],
+        )
+
 
 class RepairChildWriteScopeRegenerationTests(unittest.TestCase):
     """Widen a materialized repair child whose findings were recomputed."""

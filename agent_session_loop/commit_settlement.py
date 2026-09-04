@@ -99,6 +99,16 @@ assuming a commit it launched left the tree clean or that a commit that
 refused left nothing behind. The commit exists so the relaunch starts on a
 clean tree, not so the run can claim the work was good.
 
+The sentence a failed settlement records says the same thing the record does.
+``result: "failed"`` covers both a commit that wrote nothing and a commit whose
+``HEAD`` advanced onto a tree that still held something, so
+:func:`_paused_work_failure_message` reads the commit's own classification and
+renders one of the two: work that could not be committed, or work that was
+committed with named residue left behind. It is the ``message`` the durable
+``commit_failures`` entry and the supervisor audit bundle carry, and it is the
+one part of the settlement's evidence a reader meets before the structured
+record.
+
 Two things the settlement deliberately does not do, recorded here because a
 later reader will otherwise read them as gaps:
 
@@ -902,6 +912,90 @@ def _commit_target_residue(target: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+#: The ``status_result`` values that mean the commit itself landed even though
+#: the commit boundary still called the attempt unsuccessful.
+#: ``run_commit._commit_status_result`` reaches either of them only after a zero
+#: exit that moved ``HEAD``: ``dirty-after-commit`` is a moved head over a tree
+#: that still holds something, and ``status-unavailable`` is a moved head whose
+#: tree could not be re-read. Every other unsuccessful classification —
+#: ``nonzero-exit``, ``missing-head``, ``unchanged-head`` — means nothing
+#: reached the history. The classification is read rather than re-derived from
+#: ``head_before`` and ``head_after`` so the settlement and the commit boundary
+#: never disagree about what landed; a new value there belongs in this set or
+#: deliberately outside it.
+LANDED_COMMIT_STATUS_RESULTS: frozenset[str] = frozenset(
+    {"dirty-after-commit", "status-unavailable"}
+)
+
+#: How many residue paths one soft-failure message names before it stops
+#: listing and points at the record instead. That message is durable — it is
+#: what ``commit_failures`` carries and what the supervisor audit bundle
+#: shows — so it names enough paths to act on and leaves the rest to
+#: ``paused_work_commit.residue``, which is complete by construction.
+MAX_NAMED_RESIDUE_PATHS = 5
+
+
+def _paused_work_residue_paths(residue: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Every repository-qualified path the residue probe named, in probe order."""
+    return [str(path) for row in residue for path in row.get("dirty_paths") or ()]
+
+
+def _paused_work_failure_message(
+    *,
+    pause_reason: str,
+    session_label: str,
+    commit: Mapping[str, Any] | None,
+    residue: Sequence[Mapping[str, Any]],
+) -> str:
+    """Say what a failed settlement actually did to the repository.
+
+    ``result: "failed"`` is one word about the group, and the sentence beside
+    it is what an operator acts on: it is the ``message`` on the durable
+    ``commit_failures`` entry, the text the progress line prints, and the text
+    the supervisor audit bundle carries. Two different failures produce that
+    one word and they ask for opposite things. A commit that never ran, exited
+    nonzero, or left ``HEAD`` where it found it wrote nothing, so the retained
+    work exists only in the worktree and "could not be committed" is exactly
+    true. A commit whose head advanced *did* write the turn's intended path
+    into the history and left residue behind it; telling the operator that work
+    could not be committed sends them looking for changes that are already in
+    ``git log``, and says nothing about the paths the relaunch's startup gate
+    is about to refuse over.
+
+    Which of the two happened is the commit's own classification
+    (:data:`LANDED_COMMIT_STATUS_RESULTS`), never a second reading of the
+    repository taken here.
+
+    The landed sentence names the residue the probe recorded, because those
+    paths are the operator's next action, and points at the record instead when
+    the probe named none — an undetermined target, or a tree that no longer
+    held what the commit boundary saw. A pointer rather than silence: a landed
+    commit with no named paths is the one case where the record knows more than
+    the sentence does.
+    """
+    status_result = commit.get("status_result") if commit is not None else None
+    if status_result not in LANDED_COMMIT_STATUS_RESULTS:
+        return (
+            f"the work retained by the {pause_reason} pause of "
+            f"{session_label} could not be committed"
+        )
+    landed = (
+        f"the {pause_reason} pause of {session_label} committed the work it "
+        "retained, but"
+    )
+    paths = _paused_work_residue_paths(residue)
+    if not paths:
+        return (
+            f"{landed} the commit was recorded {status_result}; see "
+            "paused_work_commit.residue for what the worktree still holds"
+        )
+    named = ", ".join(paths[:MAX_NAMED_RESIDUE_PATHS])
+    remaining = len(paths) - MAX_NAMED_RESIDUE_PATHS
+    if remaining > 0:
+        named = f"{named} and {remaining} more in paused_work_commit.residue"
+    return f"{landed} the worktree still holds {named}"
+
+
 def _repair_number(value: Any) -> int | None:
     """Read one repair counter out of the pause details, never recomputing it."""
     return value if isinstance(value, int) and not isinstance(value, bool) else None
@@ -979,6 +1073,13 @@ def _settle_paused_retained_work(
     target dirty beside targets it had already committed clean. The group's
     verdict stays the group's; which paths the next process's startup gate
     will refuse over is knowable here, and only here.
+
+    The sentence handed to ``soft_fail`` is rendered from that same pair of
+    facts by :func:`_paused_work_failure_message` rather than being one fixed
+    string, because a commit whose head advanced onto a dirty tree fails while
+    having committed the turn's intended path, and a message that told the
+    operator otherwise would be the only part of the record that disagreed
+    with the history.
     """
     if not _paused_work_commit_is_owed(
         retained, pause_reason=pause_reason, commit_mode=commit_mode
@@ -1073,10 +1174,11 @@ def _settle_paused_retained_work(
             group=group,
             commit=failed_commit,
             error=error,
-            message=(
-                "the work retained by the "
-                f"{pause_reason} pause of {retained.session_label} "
-                "could not be committed"
+            message=_paused_work_failure_message(
+                pause_reason=pause_reason,
+                session_label=retained.session_label,
+                commit=failed_commit,
+                residue=residue,
             ),
         )
     return record

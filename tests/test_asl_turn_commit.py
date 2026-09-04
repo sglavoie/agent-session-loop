@@ -882,6 +882,14 @@ class PausedRetainedWorkTests(unittest.TestCase):
         self.assertEqual("1", failure["session_id"])
         self.assertEqual(record["commit_group"], failure["group"])
         self.assertEqual(record["commit"], failure["commit"])
+        # A commit that exited nonzero moved no HEAD, so nothing reached the
+        # history and the sentence says exactly that. The landed-commit wording
+        # is the other branch's, and it must not leak into this one.
+        self.assertEqual(
+            "the work retained by the verify-failed pause of session 1 "
+            "could not be committed",
+            failure["message"],
+        )
 
     def test_a_refused_commit_names_the_retained_residue(self) -> None:
         # A commit that exits nonzero took nothing, so everything the turn
