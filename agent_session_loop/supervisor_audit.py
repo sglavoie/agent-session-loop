@@ -2946,7 +2946,9 @@ _PAUSED_TURN_EVENT_NAMES = frozenset(
 )
 
 #: Records that describe work in progress. One of these after a run's terminal
-#: record means the run kept working after it declared itself over.
+#: record means the run kept working after it declared itself over -- unless it
+#: is part of the one epilogue a run is allowed, see
+#: :func:`_paused_work_settlement_group_ids`.
 _POST_TERMINAL_WORK_EVENTS = frozenset(
     {
         events.COMMIT_FINISHED_EVENT,
@@ -2956,6 +2958,17 @@ _POST_TERMINAL_WORK_EVENTS = frozenset(
         events.VERIFICATION_CHECK_STARTED_EVENT,
         events.VERIFICATION_FINISHED_EVENT,
         events.VERIFICATION_STARTED_EVENT,
+    }
+)
+
+#: The records the paused-work settlement's own commit group writes. They carry
+#: ``scope: "session"`` like any other session commit -- the settlement scope
+#: lives on the group, not on the commit -- so they are recognized by the group
+#: they name rather than by anything on the record itself.
+_PAUSED_WORK_SETTLEMENT_COMMIT_EVENTS = frozenset(
+    {
+        events.COMMIT_FINISHED_EVENT,
+        events.COMMIT_STARTED_EVENT,
     }
 )
 
@@ -3769,6 +3782,59 @@ def _check_state_event_agreement(context: _CheckContext) -> _Verdict:
     )
 
 
+def _paused_work_settlement_group_ids(
+    tail: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """Commit-group ids the paused-work settlement opened after the terminal record.
+
+    Settling the work a recoverable pause retained is the one thing a run does
+    after it has already declared itself over. ``run_loop`` calls the
+    settlement at the point every loop break converges on, deliberately
+    downstream of the ``run_paused`` record it settles for -- the revert, the
+    plan re-read and the pause must all have happened before it can know what
+    it is committing. Its commit records are therefore post-terminal by
+    construction, and reading them as a run that kept working would fail every
+    run that settles anything.
+
+    Only a block that closed earns the exemption. The settlement writes its
+    ``paused_work_committed`` record last, so a group with no such record after
+    it is a settlement that died mid-commit. That is work after the terminal
+    record in exactly the sense this check means, and is left to fail.
+    """
+    opened: dict[str, int] = {}
+    closed_at: list[int] = []
+    for index, record in enumerate(tail):
+        name = str(record.get("name") or "")
+        if name == events.PAUSED_WORK_COMMITTED_EVENT:
+            closed_at.append(index)
+            continue
+        if name != events.COMMIT_GROUP_STARTED_EVENT:
+            continue
+        group = _mapping(_mapping(record.get("payload")).get("group"))
+        if group.get("scope") != commit_groups.GROUP_SCOPE_SESSION_PAUSED:
+            continue
+        group_id = group.get("group_id")
+        if isinstance(group_id, str) and group_id:
+            opened.setdefault(group_id, index)
+    if not opened or not closed_at:
+        return frozenset()
+    last_closed = closed_at[-1]
+    return frozenset(
+        group_id for group_id, index in opened.items() if index < last_closed
+    )
+
+
+def _settles_paused_work(
+    record: Mapping[str, Any], settlement_group_ids: frozenset[str]
+) -> bool:
+    """Whether one post-terminal record is part of a closed settlement block."""
+    if not settlement_group_ids:
+        return False
+    if str(record.get("name") or "") not in _PAUSED_WORK_SETTLEMENT_COMMIT_EVENTS:
+        return False
+    return _mapping(record.get("payload")).get("group_id") in settlement_group_ids
+
+
 def _check_terminal_artifacts(context: _CheckContext) -> _Verdict:
     problems: list[str] = []
     blind: list[str] = []
@@ -3811,11 +3877,16 @@ def _check_terminal_artifacts(context: _CheckContext) -> _Verdict:
             )
     elif len(terminal_at) > 1:
         problems.append(f"the run recorded {len(terminal_at)} terminal events")
+    settled = False
     if terminal_at:
+        tail = context.records[terminal_at[-1] + 1 :]
+        settlement_group_ids = _paused_work_settlement_group_ids(tail)
+        settled = bool(settlement_group_ids)
         trailing = [
-            name
-            for name in names[terminal_at[-1] + 1 :]
-            if name in _POST_TERMINAL_WORK_EVENTS
+            str(record.get("name") or "")
+            for record in tail
+            if str(record.get("name") or "") in _POST_TERMINAL_WORK_EVENTS
+            and not _settles_paused_work(record, settlement_group_ids)
         ]
         if trailing:
             problems.append(
@@ -3842,10 +3913,15 @@ def _check_terminal_artifacts(context: _CheckContext) -> _Verdict:
         if not terminal_at
         else "closes on exactly one terminal record"
     )
+    epilogue = (
+        ", followed only by the settlement of the work its pause retained"
+        if settled
+        else ""
+    )
     return _Verdict(
         "pass",
-        f"the run opens on {_RUN_STARTED_EVENT}, {closing}, and every turn wrote "
-        f"a readable {state.RESULT_FILE_NAME}",
+        f"the run opens on {_RUN_STARTED_EVENT}, {closing}{epilogue}, and every "
+        f"turn wrote a readable {state.RESULT_FILE_NAME}",
         evidence,
     )
 

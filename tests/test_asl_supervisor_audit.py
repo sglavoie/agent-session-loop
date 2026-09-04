@@ -25,6 +25,7 @@ from agent_session_loop import (
     assurance_models,
     assurance_projection,
     cli,
+    commit_groups,
     contracts,
     events,
     harness_failures,
@@ -3865,6 +3866,151 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             # The pause was never classified, so the lifecycle lane reports what
             # it could not see rather than reading the silence as a clean run.
             self.assertEqual("unavailable", results["retry-resume"].status)
+
+    def _settlement_epilogue(
+        self,
+        *,
+        group_id: str = "group-paused-1",
+        scope: str = commit_groups.GROUP_SCOPE_SESSION_PAUSED,
+        closed: bool = True,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """The records a paused run's settlement writes after its terminal record.
+
+        Shaped like what ``commit_settlement._settle_paused_retained_work``
+        emits: the scope lives on the group, and the commit records carry the
+        group id and the ``scope: "session"`` every session commit is stamped
+        with.
+        """
+        epilogue: list[tuple[str, dict[str, Any]]] = [
+            (
+                events.COMMIT_GROUP_STARTED_EVENT,
+                {
+                    "run_id": RUN_ID,
+                    "phase": "started",
+                    "group": {
+                        "group_id": group_id,
+                        "scope": scope,
+                        "session_id": 1,
+                    },
+                },
+            ),
+            (
+                events.COMMIT_STARTED_EVENT,
+                {"run_id": RUN_ID, "group_id": group_id, "scope": "session"},
+            ),
+            (
+                events.COMMIT_FINISHED_EVENT,
+                {
+                    "run_id": RUN_ID,
+                    "group_id": group_id,
+                    "scope": "session",
+                    "success": True,
+                },
+            ),
+        ]
+        if closed:
+            epilogue.append(
+                (
+                    events.PAUSED_WORK_COMMITTED_EVENT,
+                    {"run_id": RUN_ID, "session_id": 1, "result": "committed"},
+                )
+            )
+        return epilogue
+
+    def _paused_run(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        epilogue: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        self._write_events(
+            history[2],
+            [
+                ("run_started", {"run_id": RUN_ID}),
+                (
+                    events.RUN_PAUSED_EVENT,
+                    {"run_id": RUN_ID, "reason": "verify-failed"},
+                ),
+                *epilogue,
+            ],
+        )
+
+    def test_the_settlement_of_a_pause_is_not_work_after_the_terminal_record(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_run(history, self._settlement_epilogue())
+
+            _, results = self._audit(history)
+
+            # The settlement runs downstream of the `run_paused` record it
+            # settles for by design, so its commits are post-terminal on every
+            # run that settles anything.
+            self.assertEqual("pass", results["terminal-artifacts"].status)
+            self.assertIn(
+                "the settlement of the work its pause retained",
+                results["terminal-artifacts"].detail,
+            )
+
+    def test_a_settlement_that_died_mid_commit_is_still_work_after_the_end(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # No `paused_work_committed` record closes the block, so the run
+            # died between opening the group and recording what it committed.
+            self._paused_run(history, self._settlement_epilogue(closed=False))
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["terminal-artifacts"].status)
+            self.assertIn(
+                "2 record(s) of work follow the run's terminal record",
+                results["terminal-artifacts"].detail,
+            )
+
+    def test_a_post_terminal_commit_outside_the_settlement_still_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # A closed settlement exempts its own group and nothing else: an
+            # end-of-run group that kept committing after the pause is the
+            # unaccounted work this check exists to catch.
+            epilogue = self._settlement_epilogue()
+            epilogue.insert(
+                3,
+                (
+                    events.COMMIT_FINISHED_EVENT,
+                    {"run_id": RUN_ID, "group_id": "group-run-1", "scope": "run"},
+                ),
+            )
+            self._paused_run(history, epilogue)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["terminal-artifacts"].status)
+            self.assertIn(
+                "1 record(s) of work follow the run's terminal record",
+                results["terminal-artifacts"].detail,
+            )
+
+    def test_a_session_scoped_group_earns_no_settlement_exemption(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # The exemption is keyed on the group's own `session-paused` scope.
+            # An ordinary session group that opened after the terminal record
+            # is a run that kept working, whatever else follows it.
+            self._paused_run(
+                history,
+                self._settlement_epilogue(scope=commit_groups.GROUP_SCOPE_SESSION),
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["terminal-artifacts"].status)
+            self.assertIn(
+                "2 record(s) of work follow the run's terminal record",
+                results["terminal-artifacts"].detail,
+            )
 
     def test_a_turn_without_a_result_is_never_a_silent_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
