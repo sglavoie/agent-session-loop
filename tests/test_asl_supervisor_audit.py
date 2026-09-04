@@ -6,6 +6,7 @@ import argparse
 import ast
 import dataclasses
 import hashlib
+import inspect
 import io
 import json
 import shutil
@@ -26,6 +27,7 @@ from agent_session_loop import (
     assurance_projection,
     cli,
     commit_groups,
+    commit_settlement,
     contracts,
     events,
     harness_failures,
@@ -3702,6 +3704,19 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
     def _statuses(self, results: dict[str, DeterministicResult]) -> dict[str, str]:
         return {check: result.status for check, result in results.items()}
 
+    def test_the_settlement_vocabulary_is_mirrored_from_its_writer(self) -> None:
+        # `supervisor_audit` cannot import `commit_settlement` without dragging
+        # the commit ledger and the loop's reporting into every audit, so the
+        # key and the outcome set are literals there. This is what keeps the
+        # copies from drifting apart silently.
+        self.assertEqual(
+            commit_settlement.PAUSED_WORK_COMMIT_KEY,
+            supervisor_audit.PAUSED_WORK_COMMIT_KEY,
+        )
+        source = inspect.getsource(commit_settlement._settle_paused_retained_work)
+        for result in supervisor_audit._PAUSED_WORK_RESULTS:
+            self.assertIn(f'result = "{result}"', source)
+
     def test_a_clean_run_passes_every_lane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bundle, results = self._audit(self._history(Path(tmp)))
@@ -3867,12 +3882,28 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             # it could not see rather than reading the silence as a clean run.
             self.assertEqual("unavailable", results["retry-resume"].status)
 
+    def _settlement_record(self, **overrides: Any) -> dict[str, Any]:
+        """One ``paused_work_commit`` record, shaped like the settlement's own."""
+        record: dict[str, Any] = {
+            "guard": "paused-work-commit",
+            "pause_reason": "verify-failed",
+            "commit_mode": "session",
+            "result": "committed",
+            "commit_group": {"group_id": "group-paused-1"},
+            "commit": None,
+            "error": None,
+            "residue": {"repositories": []},
+        }
+        record.update(overrides)
+        return record
+
     def _settlement_epilogue(
         self,
         *,
         group_id: str = "group-paused-1",
         scope: str = commit_groups.GROUP_SCOPE_SESSION_PAUSED,
         closed: bool = True,
+        record: dict[str, Any] | None = None,
     ) -> list[tuple[str, dict[str, Any]]]:
         """The records a paused run's settlement writes after its terminal record.
 
@@ -3912,7 +3943,11 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             epilogue.append(
                 (
                     events.PAUSED_WORK_COMMITTED_EVENT,
-                    {"run_id": RUN_ID, "session_id": 1, "result": "committed"},
+                    {
+                        "run_id": RUN_ID,
+                        "session_id": 1,
+                        **(self._settlement_record() if record is None else record),
+                    },
                 )
             )
         return epilogue
@@ -3921,7 +3956,25 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
         self,
         history: tuple[Path, Path, Path, Path],
         epilogue: list[tuple[str, dict[str, Any]]],
+        *,
+        mirror: object = ...,
+        unresolved: list[dict[str, Any]] | None = None,
     ) -> None:
+        """Record a paused run whose state agrees with the epilogue it wrote.
+
+        ``run_loop`` mirrors the settlement record into state under
+        ``paused_work_commit`` in the same locked section that appends the
+        event, so a fixture that writes one without the other describes a run
+        that died between the two. Passing ``mirror=None`` is how a test asks
+        for exactly that run.
+        """
+        payload = self._read_state(history[2])
+        resolved = self._settlement_record() if mirror is ... else mirror
+        if resolved is not None:
+            payload[supervisor_audit.PAUSED_WORK_COMMIT_KEY] = resolved
+        if unresolved is not None:
+            payload["unresolved_commit_groups"] = unresolved
+        self._write_state(history[2], payload)
         self._write_events(
             history[2],
             [
@@ -4010,6 +4063,168 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn(
                 "2 record(s) of work follow the run's terminal record",
                 results["terminal-artifacts"].detail,
+            )
+
+    def test_a_settled_pause_is_graded_rather_than_left_to_the_catch_all(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_run(history, self._settlement_epilogue())
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["paused-work-settlement"].status)
+            self.assertIn(
+                "1 paused-work settlement(s) recorded an outcome ASL writes",
+                results["paused-work-settlement"].detail,
+            )
+            # The record carries the pause's reason, which is why the catch-all
+            # read every successful settlement as an unclassified failure. It
+            # is exempt now because the check above owns it.
+            self.assertEqual("pass", results["unclassified-anomalies"].status)
+
+    def test_a_run_that_settled_nothing_says_so(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, results = self._audit(self._history(Path(tmp)))
+
+            self.assertEqual("pass", results["paused-work-settlement"].status)
+            self.assertIn(
+                "left no paused work behind",
+                results["paused-work-settlement"].detail,
+            )
+
+    def test_a_settlement_outcome_asl_never_writes_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            record = self._settlement_record(result="partially-committed")
+            self._paused_run(
+                history,
+                self._settlement_epilogue(record=record),
+                mirror=record,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["paused-work-settlement"].status)
+            self.assertIn(
+                "'partially-committed', which is no settlement outcome ASL writes",
+                results["paused-work-settlement"].detail,
+            )
+
+    def test_a_failed_settlement_must_record_why_and_stay_owed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            record = self._settlement_record(result="failed")
+            self._paused_run(
+                history,
+                self._settlement_epilogue(record=record),
+                mirror=record,
+            )
+
+            _, results = self._audit(history)
+
+            verdict = results["paused-work-settlement"]
+            self.assertEqual("fail", verdict.status)
+            self.assertIn("failed without recording why", verdict.detail)
+            self.assertIn("owing no paused-work commit group", verdict.detail)
+
+    def test_a_failed_settlement_that_accounted_for_itself_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # The reason may be written as the caught exception or as the
+            # underlying commit's own outcome; `run_reporting` reads the pair.
+            record = self._settlement_record(
+                result="failed", commit={"status_result": "dirty-after-commit"}
+            )
+            self._paused_run(
+                history,
+                self._settlement_epilogue(record=record),
+                mirror=record,
+                unresolved=[
+                    {
+                        "group_id": "group-paused-1",
+                        "scope": commit_groups.GROUP_SCOPE_SESSION_PAUSED,
+                        "session_id": 1,
+                        "status": commit_groups.GROUP_STATUS_FAILED,
+                    }
+                ],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["paused-work-settlement"].status)
+            # The loss is still reported, by the check that owns it.
+            self.assertEqual("fail", results["commit-group-resolution"].status)
+
+    def test_a_clean_settlement_that_left_residue_contradicts_itself(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            record = self._settlement_record(
+                result="committed", residue={"repositories": [{"alias": "app"}]}
+            )
+            self._paused_run(
+                history,
+                self._settlement_epilogue(record=record),
+                mirror=record,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["paused-work-settlement"].status)
+            self.assertIn(
+                "reported a clean commit while naming 1 repository(ies) it left "
+                "dirty",
+                results["paused-work-settlement"].detail,
+            )
+
+    def test_a_residue_settlement_must_name_where_the_residue_is(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            record = self._settlement_record(result="committed-with-residue")
+            self._paused_run(
+                history,
+                self._settlement_epilogue(record=record),
+                mirror=record,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["paused-work-settlement"].status)
+            self.assertIn(
+                "reported residue while naming no repository it was left in",
+                results["paused-work-settlement"].detail,
+            )
+
+    def test_a_settlement_state_never_mirrored_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # The append and the write happen under one lock, so a record with
+            # no mirror is a run that died between them -- and every reader but
+            # this check reads the mirror.
+            self._paused_run(history, self._settlement_epilogue(), mirror=None)
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["paused-work-settlement"].status)
+            self.assertIn(
+                "was never mirrored into the run's state",
+                results["paused-work-settlement"].detail,
+            )
+
+    def test_a_mirror_that_disagrees_with_the_record_is_a_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._paused_run(
+                history,
+                self._settlement_epilogue(),
+                mirror=self._settlement_record(result="no-changes"),
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["paused-work-settlement"].status)
+            self.assertIn(
+                "recorded 'committed' while state mirrors 'no-changes'",
+                results["paused-work-settlement"].detail,
             )
 
     def test_a_turn_without_a_result_is_never_a_silent_pass(self) -> None:

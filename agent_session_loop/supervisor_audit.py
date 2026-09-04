@@ -1122,6 +1122,12 @@ _REPAIR_STATE_KEYS = (
     "review_reopen",
     "review_resume",
 )
+#: Mirrors ``commit_settlement.PAUSED_WORK_COMMIT_KEY`` as a literal. Importing
+#: that module would drag the commit ledger, the loop's reporting and turn
+#: execution into every audit; the bundle reads state as data, so a literal is
+#: what the projection needs anyway.
+PAUSED_WORK_COMMIT_KEY = "paused_work_commit"
+
 _COMMIT_STATE_KEYS = (
     "commit_mode",
     "repair_commit_mode",
@@ -1132,7 +1138,7 @@ _COMMIT_STATE_KEYS = (
     # The one commit a run makes that no accepted turn produced. Without it the
     # bundle shows a `session-paused` group and a commit with no explanation for
     # either; with it, the settlement's own verdict travels beside them.
-    "paused_work_commit",
+    PAUSED_WORK_COMMIT_KEY,
 )
 _COMMIT_DIR_PREFIX = "commit-"
 
@@ -2907,6 +2913,11 @@ _CLASSIFIED_EVENT_NAMES = frozenset(
     {
         _RUN_STARTED_EVENT,
         events.COMMIT_FINISHED_EVENT,
+        # Earned by `_check_paused_work_settlement`, which grades every field
+        # of this record. It is listed here only because that check owns it:
+        # the record carries the pause's reason, so the catch-all read every
+        # successful settlement as an unclassified failure.
+        events.PAUSED_WORK_COMMITTED_EVENT,
         events.PROCESS_SWEEP_EVENT,
         events.REVIEW_VERDICT_RETRY_EVENT,
         events.RUN_FINISHED_EVENT,
@@ -2934,6 +2945,22 @@ _COMMIT_FAILURE_RESULTS = frozenset(
     }
 )
 _COMMIT_RESULTS = _COMMIT_FAILURE_RESULTS | {"success"}
+
+#: Every verdict the paused-work settlement records under ``result``, mirrored
+#: as literals for the same reason as :data:`_COMMIT_RESULTS`. The set is
+#: closed: ``commit_settlement`` picks exactly one of these on every path, so a
+#: record naming anything else is an outcome nobody defined.
+_PAUSED_WORK_RESULT_FAILED = "failed"
+_PAUSED_WORK_RESULT_RESIDUE = "committed-with-residue"
+_PAUSED_WORK_RESULT_COMMITTED = "committed"
+_PAUSED_WORK_RESULTS = frozenset(
+    {
+        _PAUSED_WORK_RESULT_FAILED,
+        "no-changes",
+        _PAUSED_WORK_RESULT_RESIDUE,
+        _PAUSED_WORK_RESULT_COMMITTED,
+    }
+)
 
 #: The records that report one session's turn outcome. A pause names the
 #: session it died on, so these are the only names its classification can
@@ -5111,6 +5138,135 @@ def _check_commit_group_resolution(context: _CheckContext) -> _Verdict:
     )
 
 
+def _paused_work_settlement_label(payload: Mapping[str, Any]) -> str:
+    session_id = payload.get("session_id")
+    return (
+        "the paused-work settlement"
+        if session_id is None
+        else f"session {session_id}'s paused-work settlement"
+    )
+
+
+def _paused_work_settlement_reason(payload: Mapping[str, Any]) -> str | None:
+    """Where a failed settlement wrote why it failed, if it wrote it anywhere.
+
+    The two places are the pair ``run_reporting`` already reads when it prints
+    the failure to an operator: the exception the settlement caught, and the
+    outcome the underlying commit classified itself with.
+    """
+    error = payload.get("error")
+    if isinstance(error, str) and error.strip():
+        return error
+    status_result = _mapping(payload.get("commit")).get("status_result")
+    if isinstance(status_result, str) and status_result.strip():
+        return status_result
+    return None
+
+
+def _check_paused_work_settlement(context: _CheckContext) -> _Verdict:
+    """Grade the one commit a run makes that no accepted turn produced.
+
+    A recoverable pause leaves the failed turn's changes in the worktree, and
+    the settlement is the run's single chance to commit them before the process
+    exits. Nothing downstream re-derives what it did: the next run meets either
+    a clean tree or unexplained dirt at its startup commit gate, and only this
+    record says which was intended.
+
+    So the record is graded on its own terms rather than trusted. It must name
+    an outcome the settlement actually writes; a failure must say where its
+    reason was written and must leave the group among the ones the run ended
+    owing, which ``run_loop`` guarantees by ordering the settlement ahead of the
+    terminal record; and a success must agree with itself about residue, since
+    ``committed`` and ``committed-with-residue`` differ by nothing else. The
+    record must also be mirrored into state, because a record in the log with no
+    mirror is a run that died between the append and the write, and every reader
+    but this one reads the mirror.
+
+    Grading it here is what earns ``paused_work_committed`` its place in
+    :data:`_CLASSIFIED_EVENT_NAMES`. The catch-all reported every settlement as
+    an unclassified failure, because the record carries the pause's reason; the
+    exemption is only sound while this check owns the record instead.
+    """
+    problems: list[str] = []
+    settlements = [
+        _mapping(record.get("payload"))
+        for record in context.records
+        if record.get("name") == events.PAUSED_WORK_COMMITTED_EVENT
+    ]
+    commits = context.section("commits")
+    mirror = _mapping(commits.get(PAUSED_WORK_COMMIT_KEY))
+    unresolved_scopes = {
+        row.get("scope") for row in _unresolved_commit_group_rows(context)
+    }
+    for payload in settlements:
+        label = _paused_work_settlement_label(payload)
+        result = payload.get("result")
+        if not isinstance(result, str) or result not in _PAUSED_WORK_RESULTS:
+            problems.append(
+                f"{label} recorded {result!r}, which is no settlement outcome ASL "
+                "writes"
+            )
+        elif result == _PAUSED_WORK_RESULT_FAILED:
+            if _paused_work_settlement_reason(payload) is None:
+                problems.append(f"{label} failed without recording why")
+            if commit_groups.GROUP_SCOPE_SESSION_PAUSED not in unresolved_scopes:
+                problems.append(
+                    f"{label} failed, but the run ended owing no paused-work "
+                    "commit group for a later run to recover"
+                )
+        else:
+            residue = _sequence(_mapping(payload.get("residue")).get("repositories"))
+            if result == _PAUSED_WORK_RESULT_RESIDUE and not residue:
+                problems.append(
+                    f"{label} reported residue while naming no repository it was "
+                    "left in"
+                )
+            elif result == _PAUSED_WORK_RESULT_COMMITTED and residue:
+                problems.append(
+                    f"{label} reported a clean commit while naming "
+                    f"{len(residue)} repository(ies) it left dirty"
+                )
+        if not mirror:
+            problems.append(f"{label} was never mirrored into the run's state")
+        elif mirror.get("result") != result:
+            problems.append(
+                f"{label} recorded {result!r} while state mirrors "
+                f"{mirror.get('result')!r}"
+            )
+
+    evidence = context.evidence(
+        context.event_summary.get("reference"),
+        context.section("state").get("reference"),
+    )
+    if problems:
+        return _Verdict(
+            "fail",
+            f"the run's settlement of its paused work does not account for "
+            f"itself: {_joined(problems)}",
+            evidence,
+        )
+    if not settlements:
+        if context.events_shed:
+            return _Verdict(
+                "unavailable",
+                "the event log was shed under the size cap, so a settlement the "
+                "run made cannot be distinguished from one it never made",
+                evidence,
+            )
+        return _Verdict(
+            "pass",
+            "the run left no paused work behind, so it settled none",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"{len(settlements)} paused-work settlement(s) recorded an outcome ASL "
+        "writes, agreed with the run's state, and accounted for what they left "
+        "in the worktree",
+        evidence,
+    )
+
+
 def _check_resource_anomalies(context: _CheckContext) -> _Verdict:
     anomalies: list[str] = []
     references: list[str] = []
@@ -5470,6 +5626,28 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             ),
         ),
         _check_commit_group_resolution,
+    ),
+    # The settlement is graded apart from both because it is the one commit no
+    # accepted turn produced: it commits work a failed turn retained, under a
+    # pause, after the run's terminal record. Whether it explained itself and
+    # whether it landed are the same question here, and neither of the checks
+    # above reads the record that answers it.
+    (
+        CheckSpec(
+            check="paused-work-settlement",
+            lane="mutation-commit-guards",
+            category="guards",
+            component="paused-work-settlement",
+            invariant_key="guards.paused-work-settlement",
+            severity="high",
+            recommendation=(
+                "Read the run's paused_work_commit record before relaunching: "
+                "commit or discard what the pause left in the worktree, so the "
+                "next run's startup commit gate does not meet it as unexplained "
+                "dirt."
+            ),
+        ),
+        _check_paused_work_settlement,
     ),
     (
         CheckSpec(

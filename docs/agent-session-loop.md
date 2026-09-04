@@ -1903,6 +1903,31 @@ the strength of "nothing was committed" would be asserting evidence that was
 never checked. An unattributed violation alongside any commit is therefore an
 escape.
 
+The one commit a run makes that no accepted turn produced is graded by
+`guards.paused-work-settlement`. It reads the `paused_work_committed` record on
+its own terms: the outcome has to be one the settlement actually writes, a
+`failed` one has to say where its reason was recorded — the caught error or the
+underlying commit's own classification — and has to leave the group among the
+ones the run ended owing, and a success has to agree with itself about residue,
+since `committed` and `committed-with-residue` differ by nothing else. The
+record also has to be mirrored into state under `paused_work_commit`, because
+the append and the write happen under one lock and every other reader reads the
+mirror. Grading it is what earns the record its exemption from the
+unknown-anomaly catch-all, which had reported every successful settlement as a
+failure nothing classified: the record carries the pause's reason, and a reason
+is what that catch-all reads as failure.
+
+The same settlement is also the one epilogue a run is allowed after its terminal
+record. It commits deliberately downstream of `run_paused` — the revert, the
+plan re-read and the pause must all have happened before it can know what it is
+committing — so `observability.terminal-artifacts` exempts the commits of a
+`session-paused` group opened after that record, and only when the block closed
+on a `paused_work_committed` record. A settlement that died mid-commit is work
+after the terminal record in exactly the sense that check means, and so is any
+other post-terminal commit. The correlation is on the group id rather than on
+the commit payload's scope, because a paused group's commits are stamped
+`scope: "session"` like every other session commit.
+
 A run that paused on a harness failure is graded on whether its own records
 agree with each other, not on whether it retried. The lifecycle lane reads
 `pause_details.failure_classification` against the persisted `pause_policy`:
