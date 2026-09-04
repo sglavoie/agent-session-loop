@@ -752,6 +752,36 @@ def _commit_target_residue(target: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _commit_landed_but_left_dirt(commit: Mapping[str, Any] | None) -> bool:
+    """Whether an unsuccessful commit is one that landed on a still-dirty tree.
+
+    ``run_commit`` calls a commit unsuccessful when the worktree is still dirty
+    after it, and that verdict stands: the group fails, the settlement records
+    ``result: "failed"`` and soft-fails. But the commit itself happened — its
+    head advanced — so what is left in the tree is residue in exactly the sense
+    :func:`_commit_target_residue` names, and the record is the only place the
+    relaunch's operator can read which paths will meet the startup gate.
+    Without this the record says only that the commit failed, which reads as
+    "nothing was committed" when in fact something was.
+
+    ``clean_after`` is read rather than ``status_result`` because it is the
+    measurement rather than a name for it: exactly ``False`` is git having
+    answered that the tree is dirty, which is also what makes the residue probe
+    below answerable at all. A commit whose status could not be read
+    (``None``) is left alone, so nothing new can raise out of the settlement.
+    """
+    if not isinstance(commit, Mapping) or commit.get("clean_after") is not False:
+        return False
+    head_before = commit.get("head_before")
+    head_after = commit.get("head_after")
+    return (
+        isinstance(head_before, str)
+        and isinstance(head_after, str)
+        and bool(head_after)
+        and head_before != head_after
+    )
+
+
 def _repair_number(value: Any) -> int | None:
     """Read one repair counter out of the pause details, never recomputing it."""
     return value if isinstance(value, int) and not isinstance(value, bool) else None
@@ -820,6 +850,11 @@ def _settle_paused_retained_work(
     not — a guard that did not pass raises before any group is created — the
     failure is recorded with no group at all, and the retained work stays in
     the tree for the human that pause is already waiting on.
+
+    A failure still names its residue when the commit landed and left the tree
+    dirty (see :func:`_commit_landed_but_left_dirt`) — the verdict is the
+    group's to keep, but which paths survived the commit is what the next
+    process's startup gate will refuse over, and it is knowable here.
     """
     if not _paused_work_commit_is_owed(
         retained, pause_reason=pause_reason, commit_mode=commit_mode
@@ -871,14 +906,15 @@ def _settle_paused_retained_work(
         error = str(failure)
 
     failed = error is not None or failed_commit is not None
+    probe_residue = not failed or _commit_landed_but_left_dirt(failed_commit)
     residue = (
-        []
-        if failed
-        else [
+        [
             row
             for row in (_commit_target_residue(target) for target in targets)
             if row is not None
         ]
+        if probe_residue
+        else []
     )
     if failed:
         result = "failed"
