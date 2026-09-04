@@ -107,6 +107,7 @@ def create_group(
     session_id: str | None,
     targets: Sequence[Mapping[str, Any]],
     initial_heads: Mapping[str, str | None],
+    verbatim_message: str | None = None,
 ) -> dict[str, Any]:
     """Create an unresolved group whose identity is stable across restarts.
 
@@ -115,6 +116,16 @@ def create_group(
     separates the two commits one session can owe — the accepted one and the
     one settled at a recoverable pause — even though both name the same
     session and the same repositories.
+
+    ``verbatim_message`` is the message a group commits *literally*, and is
+    ``None`` for every group whose message is generated. It is durable rather
+    than derived because a group outlives the process that created it: a later
+    run recovering an unfinished group has no other route back to the exact
+    text, and re-deriving one would make the recovered commit say something
+    the original attempt did not. It is deliberately outside the identity
+    hash — the message describes the commit, it does not name which commit is
+    owed, and a group that changed identity when its text changed could no
+    longer be found by the id its own failure recorded.
     """
     _check_scope(scope, has_session_id=session_id is not None)
     target_rows = [dict(target) for target in targets]
@@ -142,6 +153,7 @@ def create_group(
         else session_id,
         "session_id": session_id,
         "ordered_aliases": ordered_aliases,
+        "verbatim_message": verbatim_message,
         "repositories": target_rows,
         "initial_heads": {alias: initial_heads.get(alias) for alias in ordered_aliases},
         "successful_repositories": [],
@@ -192,6 +204,15 @@ def validate_group(group: Mapping[str, Any]) -> dict[str, Any]:
         raise CommitGroupError("commit group repositories do not match alias order")
     if copied.get("status") not in GROUP_STATUSES:
         raise CommitGroupError("commit group status is invalid")
+    # A group written before the field existed has no key at all, which reads
+    # as a generated message and is what every group of that vintage was. A
+    # key that is present but not a usable message is evidence a reader would
+    # otherwise commit with.
+    verbatim_message = copied.get("verbatim_message")
+    if verbatim_message is not None and (
+        not isinstance(verbatim_message, str) or not verbatim_message.strip()
+    ):
+        raise CommitGroupError("commit group verbatim message is invalid")
     scope = copied.get("scope")
     session_id = copied.get("session_id")
     _check_scope(scope, has_session_id=isinstance(session_id, str))

@@ -341,6 +341,13 @@ def _settle_owed_commit_group(ctx: RunContext) -> None:
     next worker and ahead of the end-of-run commit, so a transient failure
     heals without a human. A second failure re-arms the same retry rather
     than escalating.
+
+    How the recovered commit gets its message is the group's to decide rather
+    than this run's, which is why the generation goes through
+    :func:`commit_settlement._recovered_commit_generation` instead of being
+    handed straight from the context: a ``session-paused`` group is settled
+    with the deterministic marking it already carries, and every other scope
+    keeps the run's own message harness.
     """
     group = ctx.owed_commit_group
     if group is None:
@@ -364,7 +371,9 @@ def _settle_owed_commit_group(ctx: RunContext) -> None:
             targets=commit_settlement._resolve_recovered_commit_targets(
                 group, ctx.verification_context
             ),
-            generation=ctx.commit_generation,
+            generation=commit_settlement._recovered_commit_generation(
+                group, generation=ctx.commit_generation, run_dir=ctx.run_dir
+            ),
             recovered_group=group,
             persistence=ctx.persistence,
         )

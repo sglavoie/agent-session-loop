@@ -88,7 +88,11 @@ same session may still earn later and cannot overwrite its row. The message is
 rendered by :func:`run_commit._paused_work_commit_message` and committed with
 ``--message-file`` rather than generated, both because the pause may *be* the
 harness failing and because a marking that says the work is unverified must not
-be rewordable by a model. And the record under :data:`PAUSED_WORK_COMMIT_KEY`
+be rewordable by a model — and because the group carries that text durably as
+``verbatim_message``, a settlement that failed is *recovered* the same way by
+whichever run picks it up next (:func:`_recovered_commit_generation`) rather
+than falling back to that run's message harness. And the record under
+:data:`PAUSED_WORK_COMMIT_KEY`
 names, in ``residue``, whatever the commit failed to take with it — the
 settlement re-probes every target rather than assuming a commit it launched
 left the tree clean. The commit exists so the relaunch starts on a clean tree,
@@ -588,6 +592,55 @@ def _resolve_recovered_commit_targets(
     )
 
 
+def _recovered_commit_generation(
+    group: Mapping[str, Any],
+    *,
+    generation: run_commit._CommitGeneration,
+    run_dir: Path,
+) -> run_commit._CommitGeneration:
+    """Select how a group another run left owed writes its commit message.
+
+    Recovery inherits the *group*, not the process that created it, so the
+    run's own generation — the message harness it was launched with — is the
+    wrong default for exactly one scope. A ``session-paused`` group commits a
+    marking that says its work is unverified, and
+    :func:`_settle_paused_retained_work` rendered that text rather than
+    generating it for two reasons that both outlive the first attempt: the
+    pause may be the harness itself failing, and a claim about unverified work
+    must not be rewordable by a model. Recovering it through the run's
+    generation would spend a bounded harness turn to reword the one message in
+    the ledger that must never change, and an unavailable harness would fail
+    the recovery outright — leaving the retained work in the tree for the next
+    process's startup gate to refuse, which is the dead end the settlement
+    exists to remove.
+
+    So the text the group carries is rewritten under this run's directory and
+    handed back as a ``--message-file`` generation. Every other scope keeps the
+    run's generation untouched: an accepted session's commit and the
+    end-of-run sweep are recovered exactly as they were attempted, with a
+    generated message.
+
+    A ``session-paused`` group with no message is malformed durable evidence,
+    not a group to guess a message for, so it raises rather than falling back
+    to the harness this scope exists to avoid.
+    """
+    if group.get("scope") != commit_groups.GROUP_SCOPE_SESSION_PAUSED:
+        return generation
+    message = group.get("verbatim_message")
+    if not isinstance(message, str) or not message.strip():
+        raise RunError(
+            "unresolved session-paused commit group carries no commit message"
+        )
+    return dataclasses.replace(
+        generation,
+        message_file=run_commit._write_recovered_paused_work_message(
+            run_dir,
+            group_id=str(group.get("group_id")),
+            message=message,
+        ),
+    )
+
+
 def _run_commit_group(
     *,
     event_path: Path,
@@ -600,6 +653,7 @@ def _run_commit_group(
     targets: Sequence[Mapping[str, Any]],
     generation: run_commit._CommitGeneration,
     scope: str | None = None,
+    verbatim_message: str | None = None,
     recovered_group: Mapping[str, Any] | None = None,
     persistence: run_persistence._RunPersistence | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -611,6 +665,14 @@ def _run_commit_group(
     does not care keeps today's behaviour. A caller that owes a session a
     second, differently-scoped commit passes the scope explicitly, because the
     scope is part of the group's identity and therefore of its ``group_id``.
+
+    ``verbatim_message`` is the same text ``generation.message_file`` points
+    at, recorded on the durable group so a *later* run can rebuild that argv.
+    The two are passed separately rather than derived from one another because
+    this module writes no files: the message file is written by the caller that
+    rendered the text, and the text is what the group has to keep. A caller
+    that leaves the generation on its default message harness leaves this unset
+    too, and the group records that its message was generated.
     """
     persistence = run_persistence._run_persistence(persistence)
     if recovered_group is None:
@@ -630,6 +692,7 @@ def _run_commit_group(
             session_id=session_id,
             targets=targets,
             initial_heads=initial_heads,
+            verbatim_message=verbatim_message,
         )
         _persist_commit_group(
             event_path=event_path,
@@ -910,16 +973,16 @@ def _settle_paused_retained_work(
             whole_workspace=commit_mode == run_selection.COMMIT_MODE_END,
         )
         if targets:
+            message = run_commit._paused_work_commit_message(
+                session_label=retained.session_label,
+                pause_reason=pause_reason,
+                commit_mode=commit_mode,
+                repair_attempt=repair_attempt,
+                repair_max_attempts=repair_max_attempts,
+                run_id=run_id,
+            )
             message_file = run_commit._write_paused_work_message(
-                retained.artifact_dir,
-                run_commit._paused_work_commit_message(
-                    session_label=retained.session_label,
-                    pause_reason=pause_reason,
-                    commit_mode=commit_mode,
-                    repair_attempt=repair_attempt,
-                    repair_max_attempts=repair_max_attempts,
-                    run_id=run_id,
-                ),
+                retained.artifact_dir, message
             )
             group, failed_commit = _run_commit_group(
                 event_path=event_path,
@@ -932,6 +995,7 @@ def _settle_paused_retained_work(
                 targets=targets,
                 generation=dataclasses.replace(generation, message_file=message_file),
                 scope=commit_groups.GROUP_SCOPE_SESSION_PAUSED,
+                verbatim_message=message,
                 persistence=persistence,
             )
     except (RunError, commit_groups.CommitGroupError) as failure:

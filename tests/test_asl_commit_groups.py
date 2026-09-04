@@ -366,6 +366,44 @@ class PausedWorkGroupScopeTests(unittest.TestCase):
         ):
             commit_groups.validate_group(self.reidentify(unknown))
 
+    def test_a_carried_message_survives_the_round_trip_outside_identity(self) -> None:
+        # The text a group commits verbatim has to outlive the process that
+        # rendered it -- a later run recovering the group has no other route
+        # back to it -- while staying out of the identity that names which
+        # commit is owed.
+        message = "chore: retain unverified work from session 12\n\nMarked.\n"
+        carried = commit_groups.create_group(
+            scope=commit_groups.GROUP_SCOPE_SESSION_PAUSED,
+            session_id="12",
+            targets=[target("SVC"), target("OAK")],
+            initial_heads={"SVC": "s0", "OAK": "o0"},
+            verbatim_message=message,
+        )
+        self.assertEqual(message, carried["verbatim_message"])
+        self.assertEqual(carried, commit_groups.validate_group(carried))
+        self.assertEqual(self.make_group()["group_id"], carried["group_id"])
+        self.assertNotIn("verbatim_message", carried["identity"])
+
+    def test_a_group_that_named_no_message_reads_as_generated(self) -> None:
+        # Every group made before the field existed, and every accepted or
+        # end-of-run group made after it, commits a generated message.
+        self.assertIsNone(self.make_group()["verbatim_message"])
+        legacy = self.make_group()
+        del legacy["verbatim_message"]
+        self.assertEqual(legacy, commit_groups.validate_group(legacy))
+
+    def test_an_unusable_carried_message_is_refused(self) -> None:
+        # A key that is present but not a committable message is evidence a
+        # reader would otherwise pass to `git commit` as the message.
+        for unusable in ("", "   ", 17, ["chore: x"]):
+            with self.subTest(verbatim_message=unusable):
+                group = self.make_group()
+                group["verbatim_message"] = unusable
+                with self.assertRaisesRegex(
+                    commit_groups.CommitGroupError, "verbatim message is invalid"
+                ):
+                    commit_groups.validate_group(group)
+
     def test_loader_replays_a_paused_group(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

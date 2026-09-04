@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import dataclasses
 import inspect
 import io
 import json
@@ -453,6 +454,122 @@ class PausedWorkCommitMessageTests(unittest.TestCase):
                     self.assertEqual(
                         message, commit_message.format_commit_message(message)
                     )
+
+
+class RecoveredCommitGenerationTests(unittest.TestCase):
+    """How a group another run left owed gets its message the second time.
+
+    A settlement can fail like any commit, and what recovers it is a *later*
+    process that never rendered its message. Both reasons the settlement does
+    not generate one outlive that first attempt, so the selection is the
+    group's to make rather than the recovering run's: a ``session-paused``
+    group is committed with the text it carries, and every other scope keeps
+    the run's message harness.
+    """
+
+    #: The run's own generation, which is what recovery must keep for every
+    #: scope but one -- and whose harness selection the paused scope keeps too,
+    #: since ``--message-file`` only means the nested command never uses it.
+    RUN_GENERATION = run_commit._CommitGeneration(
+        harness="codex", model="gpt-5", effort="high", timeout=60
+    )
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.run_dir = Path(self._tmp.name) / "run"
+
+    def _group(self, scope: str, **overrides: Any) -> dict[str, Any]:
+        group = commit_groups.create_group(
+            scope=scope,
+            session_id=None if scope == commit_groups.GROUP_SCOPE_END else "3",
+            targets=[
+                commit_groups.create_target(
+                    alias=None, root=Path(self._tmp.name), repository_path="."
+                )
+            ],
+            initial_heads={commit_groups.LEGACY_REPOSITORY_KEY: "abc123"},
+            verbatim_message=overrides.pop(
+                "verbatim_message",
+                "chore: retain unverified work from session 3\n\nMarked.",
+            )
+            if scope == commit_groups.GROUP_SCOPE_SESSION_PAUSED
+            else None,
+        )
+        group.update(overrides)
+        return group
+
+    def _select(self, group: Mapping[str, Any]) -> run_commit._CommitGeneration:
+        return commit_settlement._recovered_commit_generation(
+            group, generation=self.RUN_GENERATION, run_dir=self.run_dir
+        )
+
+    def test_a_paused_group_is_recovered_through_its_own_message(self) -> None:
+        group = self._group(commit_groups.GROUP_SCOPE_SESSION_PAUSED)
+        generation = self._select(group)
+        assert generation.message_file is not None
+        self.assertEqual(
+            group["verbatim_message"],
+            generation.message_file.read_text(encoding="utf-8"),
+        )
+        # The file is written under the recovering run's directory: the
+        # original lives beside a turn in a run this process may never have
+        # seen, and the group id is what keeps two recovered groups apart.
+        self.assertEqual(
+            self.run_dir
+            / run_commit.RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME
+            / group["group_id"]
+            / run_commit.PAUSED_WORK_MESSAGE_FILE_NAME,
+            generation.message_file,
+        )
+        # Everything else about the run's selection survives, so the argv the
+        # recovery builds is the run's plus the one flag pair.
+        self.assertEqual(
+            self.RUN_GENERATION,
+            dataclasses.replace(generation, message_file=None),
+        )
+        self.assertIn("--message-file", run_commit._asl_commit_argv(generation))
+
+    def test_the_accepted_and_end_scopes_still_generate_their_messages(self) -> None:
+        for scope in (
+            commit_groups.GROUP_SCOPE_SESSION,
+            commit_groups.GROUP_SCOPE_END,
+        ):
+            with self.subTest(scope=scope):
+                generation = self._select(self._group(scope))
+                self.assertIs(self.RUN_GENERATION, generation)
+                self.assertNotIn(
+                    "--message-file", run_commit._asl_commit_argv(generation)
+                )
+
+    def test_a_paused_group_with_no_message_refuses_rather_than_generates(self) -> None:
+        # Falling back to the run's harness here would be the defect in a
+        # narrower form: the one scope that must never ask a model for its
+        # message would ask one whenever its durable record was incomplete.
+        group = self._group(commit_groups.GROUP_SCOPE_SESSION_PAUSED)
+        for missing in (None, "", "   ", 17):
+            with (
+                self.subTest(verbatim_message=missing),
+                self.assertRaises(runner.RunError),
+            ):
+                self._select({**group, "verbatim_message": missing})
+        # And a group written before the field existed, which carries no key.
+        without_key = {
+            key: value for key, value in group.items() if key != "verbatim_message"
+        }
+        with self.assertRaises(runner.RunError):
+            self._select(without_key)
+
+    def test_the_message_a_group_carries_is_outside_its_identity(self) -> None:
+        # Recovery finds the group by the id its own failure recorded, so the
+        # text the group commits must not be able to change that id.
+        carried = self._group(commit_groups.GROUP_SCOPE_SESSION_PAUSED)
+        reworded = self._group(
+            commit_groups.GROUP_SCOPE_SESSION_PAUSED, verbatim_message="chore: other\n"
+        )
+        self.assertNotEqual(carried["verbatim_message"], reworded["verbatim_message"])
+        self.assertEqual(carried["group_id"], reworded["group_id"])
+        self.assertEqual(carried["identity"], reworded["identity"])
 
 
 class PausedRetainedWorkTests(unittest.TestCase):

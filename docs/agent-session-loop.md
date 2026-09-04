@@ -1346,6 +1346,20 @@ have under a message describing one turn. Review sessions are excluded, matching
 the accepted path; a repair child is included even with no commit mode, because
 it owns the commit its parent's mode never reached it with.
 
+The deterministic message survives the process that rendered it, because a
+settlement can fail like any other commit and be recovered by a later run. The
+group records the exact text it commits in `verbatim_message`, outside the
+identity hash so the group is still found by the `group_id` its failure
+recorded, and the run that recovers a `session-paused` group rewrites that text
+under its own run directory and commits it with `--message-file` again. Both
+reasons for not generating the message outlive the first attempt: the harness
+may still be the thing that failed, and the marking must read the same however
+many processes it took to land. A recovered `session` or `end` group is
+unaffected and still asks the run's message harness for a message. A
+`session-paused` group that carries no message is treated as malformed durable
+evidence — the recovery fails and is recorded, rather than falling back to the
+harness the scope exists to avoid.
+
 Two limitations are deliberate rather than pending. **Registered residue**: the
 staging a registered session commit uses is derived entirely from write-guard
 evidence, and that evidence excludes the run's own plan directory, so a

@@ -3935,6 +3935,232 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         )
         self.assertEqual("", git_stdout(repo_dir, "status", "--porcelain").strip())
 
+    def install_gated_commit_harness(
+        self, tmp_dir: Path, config_home: Path, *, enable_marker: Path
+    ) -> Path:
+        """Point the run's harness at one that answers no commit turn yet.
+
+        A run resolves the same executable for its session turns and for its
+        commit-message turns, so "the message harness is unavailable" cannot be
+        staged by breaking the executable outright -- that would break the
+        session turn with it. This wraps the fixture instead and refuses only
+        the commit-message branch, recognized by the prompt prefix the fixture
+        itself matches on, until ``enable_marker`` exists.
+
+        Every refused *and* every forwarded commit turn is appended to the
+        returned log, so a test can assert that the harness was not merely
+        unable to answer but never asked.
+        """
+        # The opening words of `commit_message.build_commit_prompt`, which is
+        # also how the fixture this wraps tells a commit turn from a session
+        # one (`COMMIT_PROMPT_PREFIX` in tests/fixtures/fake_codex.py).
+        commit_prompt_prefix = "You are a commit message generator."
+        attempts = tmp_dir / "commit-harness-attempts.log"
+        gate_dir = tmp_dir / "gated-harness"
+        gate_dir.mkdir(parents=True, exist_ok=True)
+        # The basename is what a harness executable is normally called, and the
+        # directory is what keeps it from colliding with the fixture it wraps.
+        wrapper = gate_dir / "codex"
+        wrapper.write_text(
+            "\n".join(
+                [
+                    "#!/bin/sh",
+                    'for arg in "$@"; do',
+                    '  case "$arg" in',
+                    f'    "{commit_prompt_prefix}"*)',
+                    f'      echo "commit-message turn" >> "{attempts}"',
+                    f'      if [ ! -f "{enable_marker}" ]; then',
+                    '        echo "commit-message harness unavailable" >&2',
+                    "        exit 127",
+                    "      fi",
+                    "      ;;",
+                    "  esac",
+                    "done",
+                    f'exec "{install_fake_codex(tmp_dir)}" "$@"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        config_path = config_home / config.APP_NAME / config.HARNESS_CONFIG_NAME
+        config_path.write_text(
+            json.dumps({"codex": {"executable": str(wrapper)}}),
+            encoding="utf-8",
+        )
+        return attempts
+
+    def test_recovered_paused_group_reuses_the_deterministic_message_file(
+        self,
+    ) -> None:
+        """Defect ASL-FINAL-001, now fixed: recovery does not re-generate.
+
+        The settlement commits with ``--message-file`` for two reasons that
+        both outlive the process that made it: the pause it marks may *be* the
+        message harness failing, and a marking that says the work is unverified
+        must not be rewordable by a model. Recovery of that same group used to
+        honour neither -- it passed the run's own generation, whose
+        ``message_file`` is unset, so the second process launched the
+        commit-message harness for a group whose whole point was not needing
+        one. With the harness unavailable, the recovery failed, the retained
+        work stayed in the tree, and the startup commit preflight ended the
+        relaunch with zero turns.
+
+        The lever is a harness that refuses only the commit-message branch, and
+        only until the session's own verification passes. So the harness is
+        genuinely unavailable across the whole of the recovery, and genuinely
+        available by the time the accepted session commit asks it for a message
+        -- which is what keeps this a regression about the recovered
+        ``session-paused`` group rather than about commit generation at large.
+        """
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        tmp_dir = plan_dir.parent
+        repo_dir = tmp_dir / "repo"
+        init_git_repo(repo_dir)
+        commit_log, commit_env = self.setup_commit_harness(tmp_dir)
+
+        # The check fails its first run and passes every one after it, and its
+        # passing run is also what makes the message harness available again.
+        # Both markers live outside the repository, so neither is dirt the
+        # settlement or the startup gate could trip over.
+        attempted_marker = tmp_dir / "verification-attempted"
+        enable_marker = tmp_dir / "commit-harness-enabled"
+        check_script = tmp_dir / "verify-once-then-enable.sh"
+        check_script.write_text(
+            "\n".join(
+                [
+                    "#!/bin/sh",
+                    f'if [ -f "{attempted_marker}" ]; then',
+                    f'  : > "{enable_marker}"',
+                    "  exit 0",
+                    "fi",
+                    f': > "{attempted_marker}"',
+                    "exit 1",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        harness_attempts = self.install_gated_commit_harness(
+            tmp_dir, config_home, enable_marker=enable_marker
+        )
+        write_plan(
+            plan_dir,
+            ("pending",),
+            contracts_by_id={"1": self.settlement_contract(check_script)},
+        )
+
+        # Refuse the first commit the run attempts -- the settlement's -- so a
+        # `session-paused` group is left owed for the second process to
+        # recover, and step aside for every commit after it.
+        hook_marker = tmp_dir / "hook-refused"
+        hook = repo_dir / ".git" / "hooks" / "prepare-commit-msg"
+        hook.write_text(
+            "\n".join(
+                [
+                    "#!/bin/sh",
+                    f'if [ -f "{hook_marker}" ]; then exit 0; fi',
+                    f': > "{hook_marker}"',
+                    'echo "prepare-commit-msg refused this commit" >&2',
+                    "exit 1",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+
+        first_completed, first_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            cwd=repo_dir,
+            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+            extra_env=commit_env,
+        )
+
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+        self.assertEqual("verify-failed", first_payload["pause_reason"])
+        record = first_payload[commit_settlement.PAUSED_WORK_COMMIT_KEY]
+        self.assertEqual("failed", record["result"], record)
+        owed_group = record["commit_group"]
+        self.assertEqual(commit_groups.GROUP_SCOPE_SESSION_PAUSED, owed_group["scope"])
+        # The message survives the process on the group itself, which is the
+        # only route the next run has back to the exact text.
+        expected_message = run_commit._paused_work_commit_message(
+            session_label="session 1",
+            pause_reason="verify-failed",
+            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+            repair_attempt=record["verification_repair_attempt"],
+            repair_max_attempts=record["verification_repair_max_attempts"],
+            run_id=str(first_payload["run_id"]),
+        )
+        self.assertEqual(expected_message, owed_group["verbatim_message"])
+        # Nothing has asked the harness for a message yet, and the retained
+        # work is still in the tree for the relaunch to trip over.
+        self.assertFalse(harness_attempts.exists())
+        self.assertFalse(enable_marker.exists())
+        self.assertNotEqual("", git_stdout(repo_dir, "status", "--porcelain").strip())
+
+        second_completed, second_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            cwd=repo_dir,
+            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+            extra_env=commit_env,
+        )
+
+        recovery = second_payload["commit_group_recovery"]
+        self.assertEqual(owed_group["group_id"], recovery["group_id"])
+        self.assertTrue(recovery["success"], recovery)
+        self.assertNotEqual("commit-preflight", second_payload.get("pause_reason"))
+        self.assertEqual(0, second_completed.returncode, second_completed.stderr)
+        self.assertFalse(second_payload["paused"], second_payload)
+        self.assertNotEqual([], second_payload["turns"])
+        self.assertIn(
+            "- **Status**: complete",
+            (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+        self.assertEqual("", git_stdout(repo_dir, "status", "--porcelain").strip())
+
+        # The recovery commit and the accepted one, in the order they ran. The
+        # first carries `--message-file`; the second does not, so the scope the
+        # settlement owns is the only one whose message stopped being
+        # generated.
+        recovered_commit, session_commit = second_payload["commits"]
+        self.assertEqual(owed_group["group_id"], recovered_commit["group_id"])
+        self.assertIn("--message-file", recovered_commit["argv"])
+        self.assertNotIn("--message-file", session_commit["argv"])
+        argv = recovered_commit["argv"]
+        message_path = Path(argv[argv.index("--message-file") + 1])
+        self.assertEqual(expected_message, message_path.read_text(encoding="utf-8"))
+
+        # One commit-message turn across both processes, and it is the accepted
+        # session's. The recovery never reached the harness at all -- not "was
+        # refused by it", which is what the log distinguishes.
+        self.assertEqual(
+            ["commit-message turn"],
+            harness_attempts.read_text(encoding="utf-8").splitlines(),
+        )
+        self.assertEqual(1, len(read_jsonl(commit_log)))
+        self.assertEqual(
+            [
+                "feat: add the fake codex commit branch",
+                "chore: retain unverified work from session 1",
+                "Initial commit",
+            ],
+            git_stdout(repo_dir, "log", "--format=%s").splitlines(),
+        )
+        self.assertEqual(
+            expected_message.strip(),
+            git_stdout(repo_dir, "log", "-1", "--pretty=%B", "HEAD~1").strip(),
+        )
+
     def test_the_at_end_commit_mode_also_survives_a_recoverable_pause(self) -> None:
         """``--commit-at-end`` retains and marks the same way, and says so.
 

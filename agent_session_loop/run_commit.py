@@ -528,6 +528,32 @@ def _write_paused_work_message(artifact_dir: Path, message: str) -> Path:
     return path
 
 
+#: Where a run rewrites the message file for a ``session-paused`` commit group
+#: another run left owed. The original file lives under the *paused* turn's
+#: artifact directory, which belongs to a run this process may never have seen,
+#: so recovery writes its own copy rather than reaching into another run's
+#: directory for a path that may no longer exist.
+RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME = "commit-group-recovery"
+
+
+def _write_recovered_paused_work_message(
+    run_dir: Path, *, group_id: str, message: str
+) -> Path:
+    """Rewrite a recovered paused-work group's message under this run's dir.
+
+    ``message`` is the text the group itself carries, so what recovery commits
+    is the same marking the first attempt would have committed rather than a
+    fresh rendering of it — this only decides *where* that text lives for the
+    ``--message-file`` argv. The group id names the directory because a run may
+    recover more than one group and each carries its own message, and because a
+    path derived from the group's identity is one a reader can match back to the
+    failure record that named it.
+    """
+    return _write_paused_work_message(
+        run_dir / RECOVERED_PAUSED_WORK_MESSAGE_DIR_NAME / group_id, message
+    )
+
+
 def _asl_commit_env() -> dict[str, str]:
     """Make this checkout importable to the commit subprocess."""
     env = dict(os.environ)
