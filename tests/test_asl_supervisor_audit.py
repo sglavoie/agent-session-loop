@@ -2484,6 +2484,26 @@ class EvidenceBundleTests(unittest.TestCase):
                 events.EVENT_SCHEMA_VERSION, payload["versions"]["event_schema_version"]
             )
 
+    def test_generated_bytecode_never_moves_a_tree_digest(self) -> None:
+        """Running an interpreter over a skill tree must not restate its version."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "SKILL.md"
+            source.write_text("version one\n", encoding="utf-8")
+            bytecode = root / "scripts" / "__pycache__" / "tool.cpython-314.pyc"
+            bytecode.parent.mkdir(parents=True)
+            bytecode.write_bytes(b"one")
+
+            before = supervisor_audit._tree_digest(root, patterns=("*",))
+            bytecode.write_bytes(b"two-and-rather-longer")
+            after = supervisor_audit._tree_digest(root, patterns=("*",))
+            source.write_text("version two\n", encoding="utf-8")
+            edited = supervisor_audit._tree_digest(root, patterns=("*",))
+
+            self.assertEqual(before, after)
+            self.assertEqual(1, before["file_count"])
+            self.assertNotEqual(after["sha256"], edited["sha256"])
+
     def _rewrite_result(self, run_dir: Path, **fields: Any) -> None:
         path = run_dir / "turn-0001-01" / state.RESULT_FILE_NAME
         result = json.loads(path.read_text(encoding="utf-8"))
