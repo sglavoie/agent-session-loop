@@ -3604,6 +3604,147 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 (plan_dir / "session-1.md").read_text(encoding="utf-8"),
             )
 
+    def test_a_verify_failed_session_dead_ends_on_the_relaunchs_commit_gate(
+        self,
+    ) -> None:
+        """Characterize defect ASL-PAUSED-RETAINED-WORK-COMMIT-PREFLIGHT.
+
+        Today a recoverable pause under a commit mode is a dead end for a
+        supervisor. The first process fails verification, deliberately retains
+        the turn's changes and pauses ``verify-failed`` -- recoverable, so the
+        supervisor relaunches. The second process finds the retained dirt at
+        its startup commit preflight and pauses ``commit-preflight``, which
+        classifies as non-recoverable with ``user_action: inspect``. The repair
+        attempt the first pause earned therefore never runs: a human has to
+        clear the tree by hand.
+
+        This asserts that wrong outcome on purpose so the suite stays green
+        while the fix is built. Session 7 of the settlement plan inverts *this*
+        test into the autonomy regression rather than adding a new one, so the
+        arrangement below is the contract: one session whose check fails its
+        first run and passes every one after it, two ``asl run`` processes over
+        the same plan and state, zero human input between them.
+        """
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        tmp_dir = plan_dir.parent
+        repo_dir = tmp_dir / "repo"
+        init_git_repo(repo_dir)
+        commit_log, commit_env = self.setup_commit_harness(tmp_dir)
+
+        # A check that fails its first run and passes every one after it. The
+        # marker lives outside the guarded repository so the only dirt the
+        # relaunch can trip over is the turn's own retained `worked.txt`.
+        marker = tmp_dir / "verification-attempted"
+        check_script = tmp_dir / "verify-once.sh"
+        check_script.write_text(
+            "\n".join(
+                [
+                    "#!/bin/sh",
+                    f'if [ -f "{marker}" ]; then exit 0; fi',
+                    f': > "{marker}"',
+                    "exit 1",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        contract = "\n".join(
+            [
+                "## Completion Contract",
+                "",
+                "### Done when",
+                "",
+                "- the check passes",
+                "",
+                "### Verify",
+                "",
+                "```json",
+                json.dumps(
+                    {
+                        "session": "1",
+                        "checks": [
+                            {
+                                "name": "verify-once",
+                                "type": "command",
+                                "argv": ["sh", str(check_script)],
+                                "timeout_seconds": 60,
+                            }
+                        ],
+                    },
+                    indent=2,
+                ),
+                "```",
+            ]
+        )
+        write_plan(plan_dir, ("pending",), contracts_by_id={"1": contract})
+
+        first_completed, first_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            cwd=repo_dir,
+            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+            extra_env=commit_env,
+        )
+
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+        self.assertTrue(first_payload["paused"], first_payload)
+        self.assertEqual("verify-failed", first_payload["pause_reason"])
+        # A supervisor relaunches on this classification alone, so the second
+        # process below is the one it would really start.
+        self.assertTrue(first_payload["pause_policy"]["recoverable"])
+        self.assertIsNone(first_payload["pause_policy"]["user_action"])
+        # The evidence a settlement would commit from is already on the turn
+        # when the pause is written: the write guard passed before verification
+        # ran, so the retained paths are named and authorized.
+        first_turn = first_payload["turns"][-1]
+        self.assertTrue(first_turn["workspace_write_guard"]["passed"])
+        # Verification reverted the session but kept the work, and no commit
+        # ran because the per-session commit lives only on the accepted path.
+        self.assertIn(
+            "- **Status**: pending",
+            (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+        self.assertEqual([], first_payload["commits"])
+        self.assertFalse(commit_log.exists())
+        retained = git_stdout(repo_dir, "status", "--porcelain")
+        self.assertIn("worked.txt", retained)
+
+        second_completed, second_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            cwd=repo_dir,
+            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+            extra_env=commit_env,
+        )
+
+        self.assertEqual(1, second_completed.returncode, second_completed.stderr)
+        self.assertTrue(second_payload["paused"], second_payload)
+        # The defect. The relaunch never reaches the repair attempt the first
+        # pause earned: Gate A refuses the tree the first process retained.
+        self.assertEqual("commit-preflight", second_payload["pause_reason"])
+        self.assertIn("git status --porcelain", second_payload["pause_message"])
+        self.assertFalse(second_payload["pause_policy"]["recoverable"])
+        self.assertEqual(
+            pause_policy.USER_ACTION_INSPECT,
+            second_payload["pause_policy"]["user_action"],
+        )
+        self.assertEqual(
+            pause_policy.USER_ACTION_INSPECT,
+            second_payload["action_required"]["user_action"],
+        )
+        # No turn, so the check that would now pass is never run and
+        # `verification_repair_max_attempts` can never be spent.
+        self.assertEqual([], second_payload["turns"])
+        self.assertEqual([], second_payload["commits"])
+        self.assertFalse(commit_log.exists())
+        self.assertIn("worked.txt", git_stdout(repo_dir, "status", "--porcelain"))
+
     def test_commit_per_session_commits_after_each_completed_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
