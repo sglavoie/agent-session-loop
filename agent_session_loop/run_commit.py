@@ -9,6 +9,14 @@ into what the run can honestly claim it ran. The second is *auto-commit*: the
 nested ``asl commit`` a run re-enters this checkout to spawn once a session's
 work is accepted, and every durable trace that subprocess leaves behind.
 
+Auto-commit has a second, narrower caller: the settlement that commits the
+work a *recoverable* pause deliberately retained, so the relaunch meets a
+clean tree instead of the startup commit gate. That path needs no harness and
+no generated message, and this module owns both halves of what makes it so —
+the ``message_file`` selection on :class:`_CommitGeneration`, which turns the
+nested command into a verbatim commit, and :func:`_paused_work_commit_message`,
+the deterministic text that marks the work as unverified.
+
 The module also owns :class:`_LiveTurn`, the loop's live turn holder. It is
 here rather than beside the turn boundary because the only thing it adds to
 ``turn_execution.LiveTurn`` is the run's own serialized persistence, and a
@@ -333,12 +341,22 @@ class _CommitGeneration:
     ``timeout`` is the bound the nested command puts on its own generation
     turn. It is always set: an unbounded commit turn stalls the session loop
     behind it, which is exactly the failure the run cannot absorb.
+
+    ``message_file`` takes the nested command out of generation entirely: it
+    commits that file's contents verbatim and spawns no harness at all. The
+    mode exists for the recovery paths — settling the work a *recoverable*
+    pause retained — where spending another bounded harness turn is exactly
+    wrong: the pause may be ``timeout`` or ``transport-failed``, which is to
+    say the harness itself may be the thing that failed. It also makes the
+    marking deterministic, since a model cannot reword a message it never
+    wrote. It is ``None`` for every commit a run makes on its accepted path.
     """
 
     harness: str | None = None
     model: str | None = None
     effort: str | None = None
     timeout: int = commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS
+    message_file: Path | None = None
 
 
 def _commit_generation(args: argparse.Namespace) -> _CommitGeneration:
@@ -376,6 +394,13 @@ def _asl_commit_argv(
     ``_CommitGeneration``: the bound is what keeps a stalled message harness
     from holding the whole session loop, so it must not depend on the run
     having named a harness.
+
+    ``--message-file`` appears only when the generation carries one, so a
+    default ``_CommitGeneration`` still asks for a generated message. It
+    composes with everything else this builder emits: ``asl commit`` refuses
+    it only alongside ``--from-id`` and ``--prepare-only``, neither of which
+    a run ever passes, and the message-file path stages through the same
+    ``--pathspec`` entries as the generated one.
     """
     argv = [
         sys.executable,
@@ -391,9 +416,87 @@ def _asl_commit_argv(
         argv.extend(["--model", generation.model])
     if generation.effort is not None:
         argv.extend(["--effort", generation.effort])
+    if generation.message_file is not None:
+        argv.extend(["--message-file", str(generation.message_file)])
     for path in commit_message.dequalify_paths(list(staging_paths)):
         argv.extend(["--pathspec", path])
     return argv
+
+
+#: The one recoverable pause reason that carries a repair budget. The other
+#: three — ``transport-failed``, ``timeout`` and ``no-status-change`` — send
+#: the same session back unchanged, so a retained-work commit made for them has
+#: no attempt to number and says nothing about one.
+_REPAIR_BUDGET_PAUSE_REASON = "verify-failed"
+
+
+def _paused_work_commit_message(
+    *,
+    session_label: str,
+    pause_reason: str,
+    commit_mode: str | None,
+    repair_attempt: int | None,
+    repair_max_attempts: int | None,
+    run_id: str,
+) -> str:
+    """Render the message a recoverable pause's retained work is committed with.
+
+    This is the message the settlement hands to ``asl commit --message-file``.
+    It is built here rather than generated because the pause it marks may be
+    the harness failing (see :class:`_CommitGeneration`), and because a marking
+    that says the work is *unverified* must read the same every time.
+
+    ``session_label`` is :func:`plans.session_label`'s rendering — ``"session
+    3"`` — so the subject and the sentence that opens with it agree on what
+    the session is called. ``commit_mode`` is the run's mode, or ``None`` for a
+    repair child that owns its own commit; only ``--commit-at-end`` changes
+    what the message claims, because that commit defers until after the last
+    session and — on the legacy path — stages with the repository-wide ``git
+    add -A`` this module's argv builder falls back to. It therefore genuinely
+    spans work earlier sessions left behind, and must not be described as this
+    turn's alone.
+
+    The subject is bare-type Conventional Commits (``chore:``, no scope) to
+    match this repository's log, and satisfies
+    :data:`commit_message.COMMIT_TITLE_PATTERN`; the whole message is returned
+    already normalized by :func:`commit_message.format_commit_message`, so what
+    is written to the message file is what git would keep.
+    """
+    at_end = commit_mode == run_selection.COMMIT_MODE_END
+    if at_end:
+        subject = f"chore: retain unverified work accumulated through {session_label}"
+        retained = (
+            f"{_sentence_case(session_label)} is back to `pending`; the at-end "
+            "commit spans everything the run has not committed yet, so this "
+            "records the retained work together with whatever earlier sessions "
+            "left in the tree, and the next attempt starts from a clean worktree."
+        )
+    else:
+        subject = f"chore: retain unverified work from {session_label}"
+        retained = (
+            f"{_sentence_case(session_label)} is back to `pending`; this commit "
+            "records what the turn left behind so the next attempt starts from a "
+            "clean worktree."
+        )
+
+    sentences = [
+        f"The run paused with reason `{pause_reason}` before this work was verified.",
+        retained,
+    ]
+    if (
+        pause_reason == _REPAIR_BUDGET_PAUSE_REASON
+        and repair_attempt is not None
+        and repair_max_attempts is not None
+    ):
+        sentences.append(f"Repair attempt {repair_attempt} of {repair_max_attempts}.")
+    sentences.append(f"Run: {run_id}.")
+
+    return commit_message.format_commit_message(f"{subject}\n\n{' '.join(sentences)}")
+
+
+def _sentence_case(text: str) -> str:
+    """Capitalize a label's first character, leaving the rest of it alone."""
+    return text[:1].upper() + text[1:]
 
 
 def _asl_commit_env() -> dict[str, str]:
