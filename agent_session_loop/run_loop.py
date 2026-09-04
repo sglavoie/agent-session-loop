@@ -405,6 +405,46 @@ def _settle_owed_commit_group(ctx: RunContext) -> None:
     )
 
 
+def _settle_owed_commit_group_at_startup(
+    ctx: RunContext, *, group: Mapping[str, Any]
+) -> None:
+    """Spend a paused-work group's whole retry budget before the startup gate.
+
+    A failed settlement re-arms its group, but the boundary that consumes a
+    re-armed retry is the top of the run loop -- and between here and there
+    stands the startup commit preflight, which refuses exactly the dirt the
+    failed settlement left behind. So a group that failed once here used to be
+    re-armed behind the gate that prevented its retry: the relaunch paused
+    ``commit-preflight``, which is non-recoverable, and a second transient Git
+    refusal turned a repairable pause into one that needs a human.
+
+    Repeating the attempt here is what closes that ordering. Only a
+    ``session-paused`` group repeats, because only that scope recovers without
+    a harness -- it commits the deterministic text it carries through
+    ``--message-file``, so an extra attempt costs one Git command. A ``session``
+    or ``end`` group asks the run's message harness for a message per attempt,
+    which is a bounded but real turn each time, and its retry can wait for the
+    loop boundary it has always used.
+
+    The repetition is bounded twice over. ``_soft_fail_commit`` stops re-arming
+    once the group has spent :data:`commit_settlement.MAX_COMMIT_GROUP_RETRIES`,
+    which is what normally ends this loop; the iteration cap is the backstop for
+    a recovery that somehow answers under a different ``group_id`` and would
+    otherwise never charge an attempt against the one this started with. A
+    repository that refuses every time still reaches the gate with its dirt --
+    persistent refusal is an environment fault a human should see -- it just no
+    longer gets there with a retry left unspent.
+    """
+    ctx.owed_commit_group = dict(group)
+    for _ in range(commit_settlement.MAX_COMMIT_GROUP_RETRIES + 1):
+        _settle_owed_commit_group(ctx)
+        owed = ctx.owed_commit_group
+        if owed is None:
+            return
+        if owed.get("scope") != commit_groups.GROUP_SCOPE_SESSION_PAUSED:
+            return
+
+
 def _settle_paused_retained_work(ctx: RunContext, *, commit_mode: str | None) -> None:
     """Commit what a recoverable pause is about to leave in the worktree.
 
@@ -881,10 +921,11 @@ def run_locked(
     elif unresolved_commit_group is not None:
         # The restart half of the invariant: a group another run left owed is
         # completed here, before this run launches a worker of its own. A
-        # second failure soft-fails like any other, so the group is retried
-        # again at this run's next commit boundary.
-        ctx.owed_commit_group = dict(unresolved_commit_group)
-        _settle_owed_commit_group(ctx)
+        # second failure soft-fails like any other; a paused-work group spends
+        # the retry that arms right here, because the startup commit gate below
+        # would otherwise refuse the dirt it left before the loop boundary that
+        # consumes it is ever reached.
+        _settle_owed_commit_group_at_startup(ctx, group=unresolved_commit_group)
 
     review_requested = getattr(args, "review_harness", None) is not None
     max_review_fix_cycles = run_inputs._max_review_fix_cycles(args)

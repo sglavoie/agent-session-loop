@@ -1360,6 +1360,21 @@ unaffected and still asks the run's message harness for a message. A
 evidence — the recovery fails and is recorded, rather than falling back to the
 harness the scope exists to avoid.
 
+A recovery of that group can itself be refused, and its retry is spent where it
+is armed rather than at the loop boundary every other scope uses. The boundary
+that consumes a re-armed retry is the top of the run loop, and the startup
+commit gate stands between it and the startup recovery: a paused-work group that
+failed there would leave the run facing its own unresolved dirt at a gate whose
+`commit-preflight` pause is not recoverable, so two transient refusals in a row
+would need a human where one did not. So a `session-paused` group is retried in
+place, ahead of that gate, until it lands or spends the same two retries every
+group gets. Only that scope repeats there, because only that scope recovers
+without a harness — a `session` or `end` recovery asks the message harness for a
+message per attempt, and its retry waits for the loop boundary as before. A
+repository that refuses every commit still reaches the gate and still stops the
+run for inspection; it just no longer arrives with a retry it never got to
+spend.
+
 Two limitations are deliberate rather than pending. **Registered residue**: the
 staging a registered session commit uses is derived entirely from write-guard
 evidence, and that evidence excludes the run's own plan directory, so a

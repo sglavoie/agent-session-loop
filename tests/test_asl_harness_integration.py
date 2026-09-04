@@ -3935,6 +3935,197 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         )
         self.assertEqual("", git_stdout(repo_dir, "status", "--porcelain").strip())
 
+    def refuse_first_commits_hook(
+        self, repo_dir: Path, tmp_dir: Path, *, count: int
+    ) -> Path:
+        """Refuse the first ``count`` commits this repository is asked to make.
+
+        ``git commit --no-verify`` still runs ``prepare-commit-msg``, so this is
+        the layer a settlement is really exposed at -- the commit itself,
+        failing the way a repository policy hook fails, rather than the fake
+        harness's commit-message failure mode, which a ``--message-file`` commit
+        never reaches. Every refusal is appended to the returned log so a test
+        can assert how many attempts were actually spent, and both the log and
+        the counter live outside the repository so refusing leaves no dirt of
+        its own.
+        """
+        refusals = tmp_dir / "hook-refusals.log"
+        hook = repo_dir / ".git" / "hooks" / "prepare-commit-msg"
+        hook.write_text(
+            "\n".join(
+                [
+                    "#!/bin/sh",
+                    f'attempts="{tmp_dir / "hook-attempts.log"}"',
+                    'printf "x\\n" >> "$attempts"',
+                    'seen=$(wc -l < "$attempts" | tr -d " ")',
+                    f'if [ "$seen" -le {count} ]; then',
+                    f'  printf "refused\\n" >> "{refusals}"',
+                    '  echo "prepare-commit-msg refused this commit" >&2',
+                    "  exit 1",
+                    "fi",
+                    "exit 0",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+        return refusals
+
+    def test_two_failed_paused_group_attempts_do_not_fall_into_gate_a(self) -> None:
+        """Defect ASL-FINAL-002, now fixed: the re-armed retry is spent in time.
+
+        One transient refusal already healed: the relaunch recovered the owed
+        group before its startup commit gate ran. A *second* refusal did not.
+        The failed recovery re-armed the group -- correctly, it has a retry
+        budget -- but the boundary that consumes a re-armed retry is the top of
+        the run loop, and the startup commit preflight stands between the two.
+        So the relaunch met its own unresolved dirt at a gate whose pause is
+        non-recoverable, and a supervised run stopped with zero turns and a
+        retry it never got to spend.
+
+        The lever is the same hook as the single-refusal test, refusing twice
+        instead of once: refusal one is the settlement in the first process,
+        refusal two is the recovery at the start of the second. What this pins
+        is that the second process spends the retry that refusal armed, lands
+        the commit, and reaches the pending session's turn -- and that the
+        refusals it took to get there were really two, not one.
+        """
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        tmp_dir = plan_dir.parent
+        repo_dir = tmp_dir / "repo"
+        init_git_repo(repo_dir)
+        _commit_log, commit_env = self.setup_commit_harness(tmp_dir)
+        check_script = self.settlement_check_script(tmp_dir)
+        write_plan(
+            plan_dir,
+            ("pending",),
+            contracts_by_id={"1": self.settlement_contract(check_script)},
+        )
+        refusals = self.refuse_first_commits_hook(repo_dir, tmp_dir, count=2)
+
+        first_completed, first_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            cwd=repo_dir,
+            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+            extra_env=commit_env,
+        )
+
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+        self.assertEqual("verify-failed", first_payload["pause_reason"])
+        record = first_payload[commit_settlement.PAUSED_WORK_COMMIT_KEY]
+        self.assertEqual("failed", record["result"], record)
+        owed_group = record["commit_group"]
+        self.assertEqual(commit_groups.GROUP_SCOPE_SESSION_PAUSED, owed_group["scope"])
+        self.assertTrue(first_payload["pause_policy"]["recoverable"])
+        self.assertNotEqual("", git_stdout(repo_dir, "status", "--porcelain").strip())
+
+        second_completed, second_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            cwd=repo_dir,
+            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+            extra_env=commit_env,
+        )
+
+        # Both refusals landed, so this really is the two-failure case and not
+        # the single-refusal one passing under a different name.
+        self.assertEqual(
+            2, refusals.read_text(encoding="utf-8").count("refused"), second_completed
+        )
+        # The first attempt of the second process failed and said so, and it
+        # said it was going to try again.
+        startup_failures = [
+            failure
+            for failure in second_payload[commit_settlement.COMMIT_FAILURES_KEY]
+            if failure.get("group_id") == owed_group["group_id"]
+        ]
+        self.assertNotEqual([], startup_failures, second_payload)
+        self.assertTrue(startup_failures[0]["retrying"], startup_failures[0])
+        # And the retry it armed was spent before Gate A rather than behind it:
+        # the group is resolved, the gate never fired, and the run reached the
+        # pending session's turn.
+        recovery = second_payload["commit_group_recovery"]
+        self.assertEqual(owed_group["group_id"], recovery["group_id"])
+        self.assertTrue(recovery["success"], recovery)
+        self.assertNotEqual("commit-preflight", second_payload.get("pause_reason"))
+        self.assertEqual(0, second_completed.returncode, second_completed.stderr)
+        self.assertFalse(second_payload["paused"], second_payload)
+        self.assertNotEqual([], second_payload["turns"])
+        self.assertIn(
+            "- **Status**: complete",
+            (plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        )
+        self.assertEqual("", git_stdout(repo_dir, "status", "--porcelain").strip())
+
+    def test_a_paused_group_refused_every_time_stops_at_a_bounded_gate(self) -> None:
+        """The other half of ASL-FINAL-002: bounded, not a commit loop.
+
+        Spending the retry at the startup boundary must not turn that boundary
+        into a retry loop. A repository that refuses every commit is an
+        environment fault, and the run's job is to stop for a human rather than
+        keep asking: the group spends exactly its budget --
+        ``MAX_COMMIT_GROUP_RETRIES`` retries after the first attempt -- and then
+        the startup commit gate refuses the dirt that is still there, which is
+        the correct ending for dirt no commit can clear.
+        """
+        plan_dir, state_dir, config_home, _fake_codex = self.setup_loop(
+            statuses=("pending",)
+        )
+        tmp_dir = plan_dir.parent
+        repo_dir = tmp_dir / "repo"
+        init_git_repo(repo_dir)
+        _commit_log, commit_env = self.setup_commit_harness(tmp_dir)
+        check_script = self.settlement_check_script(tmp_dir)
+        write_plan(
+            plan_dir,
+            ("pending",),
+            contracts_by_id={"1": self.settlement_contract(check_script)},
+        )
+        # Far beyond any budget this run could spend, so the hook is "always
+        # refuses" without the test having to know the bound it is measuring.
+        refusals = self.refuse_first_commits_hook(repo_dir, tmp_dir, count=99)
+
+        first_completed, first_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            cwd=repo_dir,
+            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+            extra_env=commit_env,
+        )
+
+        self.assertEqual(1, first_completed.returncode, first_completed.stderr)
+        self.assertEqual("verify-failed", first_payload["pause_reason"])
+        before = refusals.read_text(encoding="utf-8").count("refused")
+
+        second_completed, second_payload = self.run_loop_command(
+            mode="success",
+            plan_dir=plan_dir,
+            state_dir=state_dir,
+            config_home=config_home,
+            cwd=repo_dir,
+            commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
+            extra_env=commit_env,
+        )
+
+        spent = refusals.read_text(encoding="utf-8").count("refused") - before
+        self.assertEqual(
+            commit_settlement.MAX_COMMIT_GROUP_RETRIES + 1, spent, second_completed
+        )
+        self.assertFalse(second_payload["commit_group_recovery"]["success"])
+        self.assertEqual("commit-preflight", second_payload["pause_reason"])
+        self.assertEqual([], second_payload["turns"])
+        self.assertEqual(1, second_completed.returncode, second_completed.stderr)
+
     def install_gated_commit_harness(
         self, tmp_dir: Path, config_home: Path, *, enable_marker: Path
     ) -> Path:
