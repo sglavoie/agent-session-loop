@@ -30,11 +30,14 @@ Durable records this boundary writes:
 * ``payload["reason"] = "stopped"`` and ``payload["final_snapshot"]`` -- the
   clean early exit a supervisor's stop request earns.
 
-Nothing here imports the runner. Four collaborators the loop still owns enter
-through seams rather than through an import, each declared below and satisfied
-by the runner today and by a later boundary once it is extracted:
-:class:`ReadinessStateWriter`, :class:`SessionStatusReverter`,
-:data:`SnapshotReinspector` and :data:`ExistingReviewVerdictRecorder`.
+Nothing here imports the runner. Four collaborators this module does not own
+enter through seams rather than through an import, each declared below and
+satisfied by the module that owns the write:
+:class:`ReadinessStateWriter` by ``readiness_gate.write_readiness_state``,
+:class:`SessionStatusReverter` by ``handoff_guards.session_status_reverter``,
+:data:`SnapshotReinspector` by ``session_verification._reinspect_after_revert``,
+and :data:`ExistingReviewVerdictRecorder` by
+``review_cycle.existing_review_verdict_recorder``.
 
 Invariants that survive the move:
 

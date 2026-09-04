@@ -78,7 +78,8 @@ OWNED_CONSTANTS = {
     "REVIEW_VERDICT_FINGERPRINT_PREFIX": review_transitions,
 }
 
-#: The collaborator that has not left the runner yet, and the name this module
+#: The collaborator this boundary does not own -- supplied by
+#: ``handoff_correction._append_handoff_note`` -- and the name this module
 #: receives it under. It may not acquire a default: a refusal that silently
 #: skipped the note would reopen a session without saying why.
 SEAM_PARAMETERS = ("append_handoff_note",)

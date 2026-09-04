@@ -32,11 +32,12 @@ Four things live here:
 
 Nothing here imports the runner, and nothing here writes a durable record: this
 module is the one boundary in the run whose entire output is ephemeral. The two
-collaborators the loop still owns — the payload key its terminalization writes
-still-owed commit groups under, and the labeller that names one of those groups
-— enter :class:`_ProgressReporter` at construction as ``unresolved_groups_key``
-and ``commit_group_label``, which is what lets this boundary render a commit
-failure without knowing the commit lifecycle's vocabulary.
+collaborators ``commit_settlement`` owns — the payload key terminalization
+writes still-owed commit groups under, and the labeller that names one of those
+groups — are handed to :class:`_ProgressReporter` by ``run_loop`` at
+construction as ``unresolved_groups_key`` and ``commit_group_label``, which is
+what lets this boundary render a commit failure without knowing the commit
+lifecycle's vocabulary.
 
 Four invariants survive the move and are load-bearing:
 

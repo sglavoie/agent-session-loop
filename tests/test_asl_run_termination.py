@@ -10,9 +10,10 @@ exercise the run rather than the boundary:
 * the module does not import the runner, and needs nothing from it;
 * it opens no file of its own — every durable record it owns goes through the
   ``_RunPersistence`` handle the caller supplied, under that handle's lock;
-* the four collaborators the loop still owns enter as *required* parameters, so
-  a terminal path cannot silently skip the readiness close, the status revert,
-  the re-inspection, or the verdict projection by omitting an argument; and
+* the four collaborators this boundary does not own enter as *required*
+  parameters, so a terminal path cannot silently skip the readiness close, the
+  status revert, the re-inspection, or the verdict projection by omitting an
+  argument; and
 * ``set_pause`` is the single writer of the pause block, structurally, so a
   second assembly site cannot appear without failing here.
 

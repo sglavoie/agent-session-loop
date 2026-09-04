@@ -68,7 +68,7 @@ class ReviewGuardBoundaryTests(unittest.TestCase):
 
     def test_the_workspace_evidence_projection_arrives_as_a_seam(self) -> None:
         # The projection that classifies a comparison against a write scope is
-        # still owned by the loop, so it arrives as a structural callback
+        # owned by `workspace_evidence`, so it arrives as a structural callback
         # rather than as an import this module may not make.
         self.assertIn("class WorkspaceEvidenceProbe(Protocol):", self.source)
         self.assertEqual(

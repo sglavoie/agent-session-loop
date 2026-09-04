@@ -117,7 +117,7 @@ class RunContext(Protocol):
     """One locked run's own state, as the completion pass needs it.
 
     Declared structurally rather than imported so this module never depends on
-    the runner that still owns the dataclass. Only the members a completion
+    ``run_loop``, which owns the dataclass. Only the members a completion
     pass actually reaches are named, which is what makes this a boundary rather
     than a second copy of the run's shape: everything the loop carries for its
     turns — the counters, the idle baseline, the per-turn details — is absent

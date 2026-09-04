@@ -153,8 +153,8 @@ class WorkspaceEvidenceBoundaryTests(unittest.TestCase):
 
     def test_the_probe_seam_review_guard_declared_is_satisfied_here(self) -> None:
         # Session 9 typed `_repair_commit_preflight` against a structural
-        # `WorkspaceEvidenceProbe` rather than importing the projection that
-        # had not left the runner yet. This is the module that supplies it, so
+        # `WorkspaceEvidenceProbe` rather than importing the projection it may
+        # not depend on. This is the module that owns and supplies it, so
         # a signature drift on either side is caught here rather than at the
         # one runtime call site.
         from agent_session_loop import review_guard

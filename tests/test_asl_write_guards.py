@@ -73,7 +73,9 @@ ENFORCEMENT_FUNCTIONS = (
     "_enforce_protected_path_guard",
 )
 
-#: The collaborators that have not left the runner yet, and the names this
+#: The collaborators this boundary does not own -- supplied by
+#: ``handoff_correction._append_handoff_note`` and
+#: ``session_verification._reinspect_after_revert`` -- and the names this
 #: module receives them under. Neither may acquire a default: a refusal that
 #: silently skipped the note or the re-read would leave a session `complete`
 #: after the guard refused it.

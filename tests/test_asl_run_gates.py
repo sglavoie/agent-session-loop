@@ -1389,9 +1389,9 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
         self.tree = ast.parse(self.source)
-        # The dispatch lives in the runner; the disposition it dispatches on
+        # The dispatch lives in `run_loop`; the disposition it dispatches on
         # moved to `handoff_guards`, so the two are read from separate trees
-        # and only the runner's is ever mutated by these tests.
+        # and only the loop's is ever mutated by these tests.
         self.disposition_tree = ast.parse(
             Path(handoff_guards.__file__).read_text(encoding="utf-8")
         )

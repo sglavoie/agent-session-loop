@@ -109,7 +109,7 @@ class RunContext(Protocol):
     """One locked run's own state, as the settlement pass needs it.
 
     Declared structurally rather than imported so this module never depends on
-    the runner that still owns the dataclass. Only the members this pass
+    ``run_loop``, which owns the dataclass. Only the members this pass
     reaches are named: the run payload and event log every record lands in, the
     persistence seam that serializes them, the progress reporter the commit
     group writes through, the plan cache a refusal re-reads the plan from, the

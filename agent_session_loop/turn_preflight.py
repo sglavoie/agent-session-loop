@@ -110,7 +110,7 @@ class RunContext(Protocol):
     """One locked run's own state, as turn preflight needs it.
 
     Declared structurally rather than imported so this module never depends on
-    the runner that still owns the dataclass. Only the members these three
+    ``run_loop``, which owns the dataclass. Only the members these three
     steps actually reach are named: the run's identity and the two paths its
     control plane is digested from, the write seam the repair event goes
     through, the verification context the workspace payload fields are derived

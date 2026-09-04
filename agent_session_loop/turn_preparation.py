@@ -115,7 +115,7 @@ class RunContext(Protocol):
     """One locked run's own state, as turn preparation needs it.
 
     Declared structurally rather than imported so this module never depends on
-    the runner that still owns the dataclass. Only the members these four
+    ``run_loop``, which owns the dataclass. Only the members these four
     steps actually reach are named: the run's identity and its two write
     seams, the plan cache a refresh re-inspects through, the verification
     context the workspace hangs off, and the two ways a run ends. The loop's

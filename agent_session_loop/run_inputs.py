@@ -59,7 +59,7 @@ Five invariants survive the move and are load-bearing:
   workspace would pass every later gate while writing somewhere else.
 
 The module never imports the runner. The review mutation guard's allowlist
-parser still lives in the loop, so it arrives as the
+parser is owned by ``review_guard``, and it arrives as the
 :data:`ReviewGuardExcludeResolver` callback rather than as an import, which
 keeps the allowlist refusal at its original position in the validation
 sequence.

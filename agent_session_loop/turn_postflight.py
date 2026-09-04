@@ -99,7 +99,7 @@ class RunContext(Protocol):
     """One locked run's own state, as the post-turn guard sequence needs it.
 
     Declared structurally rather than imported so this module never depends on
-    the runner that still owns the dataclass. Only the members the five guards
+    ``run_loop``, which owns the dataclass. Only the members the five guards
     reach are named: the write seam every verdict is recorded through, the run
     payload and event log they record into, the plan cache each guard re-reads
     the plan from after a revert, the run directory the external-write

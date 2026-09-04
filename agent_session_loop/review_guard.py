@@ -27,11 +27,12 @@ Nothing here writes a durable record. Every function is a projection of the
 filesystem, a parsed namespace, or a prior durable record into a value or an
 exception; the run loop keeps the event log, the state payload, and the pause.
 
-Nothing here imports the runner either. The one collaborator the loop still
-owns -- the projection that classifies a workspace comparison against a
+Nothing here imports the runner either. The one collaborator this module does
+not own -- the projection that classifies a workspace comparison against a
 session's write scope -- enters through the :class:`WorkspaceEvidenceProbe`
-seam, which is what lets the retained-scope branch of commit preflight be typed
-without a cycle.
+seam, which ``workspace_evidence`` satisfies at the single call site in
+``turn_preparation``, and which is what lets the retained-scope branch of
+commit preflight be typed without a cycle.
 
 Four invariants survive the move and are load-bearing:
 
@@ -87,7 +88,8 @@ class WorkspaceEvidenceProbe(Protocol):
     """Classify a workspace comparison against one session's write scope.
 
     Declared structurally rather than imported so this module never depends on
-    the run loop that still owns the concrete projection. The retained-scope
+    ``workspace_evidence``, which owns the concrete projection. The
+    retained-scope
     branch of :func:`_repair_commit_preflight` needs exactly one thing from it:
     the per-path ``changed`` evidence, qualified by repository alias, that
     :func:`_retained_turn_changed_paths` reads. Passing the same projection the

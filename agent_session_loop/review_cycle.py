@@ -43,12 +43,13 @@ file of its own.
 
 Nothing here imports the runner. The event path, the payload, the argparse
 namespace, the plan snapshot, the snapshot cache and the persistence handle
-all enter as parameters. The two things it needs that have not left the
-runner yet enter as seams: the review verdict reader, through the
-:class:`review_delta.ReviewVerdictReader` Protocol Session 17 declared for
-exactly this second reader, and the post-mutation plan re-read, through
-:data:`PlanMutationReinspector`, which Session 23 will satisfy with the
-module that ends up owning it.
+all enter as parameters. The two things it needs from elsewhere enter as
+seams, each satisfied by the module that owns the work: the review verdict
+reader, through the :class:`review_delta.ReviewVerdictReader` Protocol
+Session 17 declared for exactly this second reader and satisfied by
+``handoff_guards._read_review_verdict``, and the post-mutation plan re-read,
+through :data:`PlanMutationReinspector`, satisfied by
+``session_verification._reinspect_after_plan_mutation``.
 
 Invariants that survive the move:
 
