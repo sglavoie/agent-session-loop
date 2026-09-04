@@ -741,6 +741,9 @@ class PausedRetainedWorkTests(unittest.TestCase):
             ).stdout
         )
 
+    def _head(self, root: Path) -> str:
+        return review_guard._run_git(root, ["rev-parse", "HEAD"]).stdout.strip()
+
     # -- the four results -------------------------------------------------
 
     def test_a_registered_settlement_stages_the_guarded_paths_only(self) -> None:
@@ -835,6 +838,7 @@ class PausedRetainedWorkTests(unittest.TestCase):
                         "alias": "SVC",
                         "clean": False,
                         "dirty_paths": ["SVC:stray.txt"],
+                        "error": None,
                     }
                 ]
             },
@@ -859,7 +863,6 @@ class PausedRetainedWorkTests(unittest.TestCase):
         self.assertEqual(
             commit_groups.GROUP_STATUS_FAILED, record["commit_group"]["status"]
         )
-        self.assertEqual({"repositories": []}, record["residue"])
         # The durable row is what a later run recovers, and the run's own
         # end-of-run report names it as a loss.
         self.assertEqual(
@@ -879,6 +882,116 @@ class PausedRetainedWorkTests(unittest.TestCase):
         self.assertEqual("1", failure["session_id"])
         self.assertEqual(record["commit_group"], failure["group"])
         self.assertEqual(record["commit"], failure["commit"])
+
+    def test_a_refused_commit_names_the_retained_residue(self) -> None:
+        # A commit that exits nonzero took nothing, so everything the turn
+        # retained is still in the tree -- and those are exactly the paths the
+        # relaunch's startup gate refuses over. Until the probe became
+        # unconditional the record reported an empty residue here, which reads
+        # as a clean tree the run never confirmed.
+        self._write(self.repositories["SVC"], "worked.txt")
+        head_before = self._head(self.repositories["SVC"])
+        record, _turn_payload = self._settle(
+            self.registered,
+            guard=self._guard(added_paths=("worked.txt",)),
+            commit=self._refused_commit,
+        )
+
+        assert record is not None
+        self.assertEqual("failed", record["result"])
+        self.assertEqual("nonzero-exit", record["commit"]["status_result"])
+        # The ordinary refusal branch: HEAD never moved, so this is not the
+        # commit-landed-on-a-dirty-tree case that was already probed.
+        self.assertEqual(head_before, self._head(self.repositories["SVC"]))
+        self.assertEqual(
+            [
+                {
+                    "alias": "SVC",
+                    "clean": False,
+                    "dirty_paths": ["SVC:worked.txt"],
+                    "error": None,
+                }
+            ],
+            record["residue"]["repositories"],
+        )
+        self.assertEqual(["worked.txt"], self._dirty(self.repositories["SVC"]))
+
+    def test_a_partial_failure_names_only_the_repository_left_dirty(self) -> None:
+        # The group's verdict is one word for the whole set, and on a partial
+        # failure that word is wrong about the repositories that committed.
+        # The residue is per target, so it separates them.
+        self._write(self.repositories["SVC"], "worked.txt")
+        self._write(self.repositories["OAK"], "elsewhere.txt")
+
+        def commit(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["repository_key"] == "OAK":
+                return self._refused_commit(**kwargs)
+            return self._fake_commit(**kwargs)
+
+        record, _turn_payload = self._settle(
+            self.registered,
+            guard=self._guard(added_paths=("worked.txt",)),
+            commit_mode=run_selection.COMMIT_MODE_END,
+            commit=commit,
+        )
+
+        assert record is not None
+        self.assertEqual("failed", record["result"])
+        self.assertEqual("OAK", record["commit_group"]["failed_alias"])
+        self.assertEqual(
+            [
+                {
+                    "alias": "OAK",
+                    "clean": False,
+                    "dirty_paths": ["OAK:elsewhere.txt"],
+                    "error": None,
+                }
+            ],
+            record["residue"]["repositories"],
+        )
+        # SVC committed before OAK refused, and the record does not accuse it
+        # of residue it does not have.
+        self.assertEqual([], self._dirty(self.repositories["SVC"]))
+        self.assertEqual(["elsewhere.txt"], self._dirty(self.repositories["OAK"]))
+
+    def test_a_target_whose_status_is_unreadable_records_undetermined(self) -> None:
+        # The commit may have failed *because* the repository became
+        # unreadable, and the settlement is on its way to a pause it must not
+        # replace with a crash. So the probe answers `clean: None` with the
+        # failure text rather than raising or reading the tree as clean.
+        self._write(self.repositories["SVC"], "worked.txt")
+        real_run_git = review_guard._run_git
+
+        def blinded(cwd: Path, args: list[str]) -> Any:
+            # Only after the commit ran: the target resolution and the group's
+            # own skip-clean check need real answers to reach the commit at all.
+            if self.launched and args[:1] == ["status"]:
+                raise runner.RunError("could not inspect git status: fatal: unreadable")
+            return real_run_git(cwd, args)
+
+        with mock.patch.object(review_guard, "_run_git", side_effect=blinded):
+            record, _turn_payload = self._settle(
+                self.registered,
+                guard=self._guard(added_paths=("worked.txt",)),
+                commit=self._refused_commit,
+            )
+
+        assert record is not None
+        self.assertEqual("failed", record["result"])
+        self.assertEqual(
+            [
+                {
+                    "alias": "SVC",
+                    "clean": None,
+                    "dirty_paths": [],
+                    "error": "could not inspect git status: fatal: unreadable",
+                }
+            ],
+            record["residue"]["repositories"],
+        )
+        # And the settlement still recorded, published and soft-failed.
+        self.assertEqual(1, len(self._events()))
+        self.assertEqual(1, len(self.soft_failures))
 
     def test_a_guard_that_did_not_pass_fails_with_no_group_to_retry(self) -> None:
         self._write(self.repositories["SVC"], "worked.txt")

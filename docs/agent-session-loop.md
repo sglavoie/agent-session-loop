@@ -5236,16 +5236,27 @@ for a human). `committed-with-residue` is not reachable through today's
 `asl commit` boundary: that boundary re-reads the same `git status` and calls a
 commit that left its worktree dirty unsuccessful, so the group fails and the
 settlement records `failed` first. The residue that matters in practice
-therefore arrives on the `failed` branch, where a commit whose `HEAD` advanced
-but whose tree stayed dirty is still probed for it — the record would otherwise
-read as "nothing was committed" when something was. The fourth result is kept
+therefore arrives on the `failed` branch, where the record would otherwise read
+as "nothing was committed" — or, worse, as a clean tree — when neither is true.
+The fourth result is kept
 because the commit boundary's cleanliness verdict and the settlement's own probe
 are two independent measurements, and a record must not claim a clean tree the
-run never confirmed. `residue.repositories` lists one row per target the commit
-left dirty, each with its `alias`, `clean: false`, and repository-qualified
-`dirty_paths` — the settlement re-probes every target rather than assuming a
-commit it launched left the tree clean, because those exact paths are what the
-next process's startup commit gate will refuse over. `error` is reserved for an
+run never confirmed. `residue.repositories` lists one row per resolved target
+the probe did not find clean, each with its `alias`, `clean`, repository-qualified
+`dirty_paths`, and an `error`. The probe is unconditional: every target the
+settlement resolved is re-probed whatever the group's verdict was, because
+`failed` is one word for the whole set and it is wrong about the repositories
+that did commit. So a commit that exited nonzero names everything its target
+still holds, a commit whose `HEAD` advanced onto a still-dirty tree names what
+it left, and a partial multi-repository failure names the dirty target while
+omitting the ones it had already committed clean — those exact paths are what
+the next process's startup commit gate will refuse over. A target whose
+`git status` cannot be read is recorded as undetermined rather than as clean:
+its row carries `clean: null`, empty `dirty_paths`, and the git failure in its
+own `error`, because the commit may have failed precisely because that
+repository is unreadable and a probe on the way to a pause must not raise. On
+every other row `error` is `null`. The record's own top-level `error` is a
+different field, reserved for an
 exception raised around the commit; a commit that merely failed is carried on
 `commit` as `success: false` with its own `status_result`, and on the group as
 `status: "failed"`.
@@ -5467,8 +5478,10 @@ Common pause reasons:
   combination. On a relaunch after a recoverable pause the dirty tree is no
   longer the previous process's retained work — that is settled into a
   `session-paused` commit before it exits — so the reason now means one of two
-  narrower things: residue the settlement's evidence-derived staging could not
-  take, or dirt an operator introduced between the two runs. The previous run's
+  narrower things: work the settlement did not take — residue its
+  evidence-derived staging could not stage, or, when its commit refused
+  outright, everything the turn retained — or dirt an operator introduced
+  between the two runs. The previous run's
   `paused_work_commit.residue` names the first case repository by repository and
   path by path; anything it does not name is the second. It remains distinct
   from `commit-failed` below, which is a durable group that could not be

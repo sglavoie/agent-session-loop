@@ -3842,6 +3842,7 @@ class SettledPauseCommitGateTests(unittest.TestCase):
                     "alias": "SVC",
                     "clean": False,
                     "dirty_paths": ["SVC:check-artifact.log"],
+                    "error": None,
                 }
             ],
             record["residue"]["repositories"],

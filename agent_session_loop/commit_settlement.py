@@ -94,9 +94,10 @@ whichever run picks it up next (:func:`_recovered_commit_generation`) rather
 than falling back to that run's message harness. And the record under
 :data:`PAUSED_WORK_COMMIT_KEY`
 names, in ``residue``, whatever the commit failed to take with it — the
-settlement re-probes every target rather than assuming a commit it launched
-left the tree clean. The commit exists so the relaunch starts on a clean tree,
-not so the run can claim the work was good.
+settlement re-probes every resolved target on every outcome, rather than
+assuming a commit it launched left the tree clean or that a commit that
+refused left nothing behind. The commit exists so the relaunch starts on a
+clean tree, not so the run can claim the work was good.
 
 Two things the settlement deliberately does not do, recorded here because a
 later reader will otherwise read them as gaps:
@@ -125,10 +126,15 @@ One consequence of the first is worth stating in the same breath: the
 commit`` boundary. That boundary re-reads the same ``git status`` and calls a
 commit that left its worktree dirty unsuccessful, so the group fails and the
 record says ``failed`` before the residue probe can produce the fourth result.
-:func:`_commit_landed_but_left_dirt` is what keeps that branch honest anyway.
 The result is kept rather than removed because the boundary's verdict and this
 module's probe are two independent measurements, and the record must not claim
-a clean tree the run never confirmed.
+a clean tree the run never confirmed. Which is also why the probe is
+unconditional: ``failed`` says the group did not finish, not that the tree is
+as the turn left it, and on a partial multi-repository failure the two claims
+differ repository by repository. :func:`_commit_target_residue` therefore runs
+against every resolved target whatever the group's verdict was, and it answers
+without raising — a target whose ``git status`` cannot be read is recorded with
+``clean: None`` rather than allowed to turn a pause into a crash.
 
 The module never imports the runner. Everything it needs is either a leaf it
 reads at the owner — ``clock``, ``commit_groups``, ``events``,
@@ -838,25 +844,53 @@ def _paused_work_commit_targets(
 def _commit_target_residue(target: Mapping[str, Any]) -> dict[str, Any] | None:
     """Name what is still dirty in ``target`` after a commit ran against it.
 
-    ``None`` for a target the commit left clean. The staging a session commit
-    uses is derived from the write guard's evidence, and a linked worktree
-    alias falls back to a repository-wide stage instead, so neither shape is
-    guaranteed to have taken everything in the tree with it. The relaunch's
-    startup gate reads the whole tree, so anything left behind is what will
-    still block it — naming it in the record is what keeps the settlement from
-    reporting a success the next process disagrees with.
+    ``None`` for a target this probe found clean, and a row for every other
+    answer. The staging a session commit uses is derived from the write guard's
+    evidence, and a linked worktree alias falls back to a repository-wide stage
+    instead, so neither shape is guaranteed to have taken everything in the
+    tree with it — and a commit that refused took nothing at all. The
+    relaunch's startup gate reads the whole tree, so anything left behind is
+    what will still block it; naming it in the record is what keeps the
+    settlement from reporting an outcome the next process disagrees with.
 
-    ``_commit_target_is_clean`` has already run ``git status`` in this same
-    worktree and raised if git could not answer, so the second call is not
-    re-guarded.
+    Three row shapes, because the probe has three answers rather than two.
+    Clean is ``None`` and is reported by omission. Dirty carries ``clean:
+    False`` and the repository-qualified ``dirty_paths``. And git failing to
+    answer carries ``clean: None`` with the failure in ``error``: the probe
+    runs after a commit that may itself have failed *because* the repository
+    is unreadable, and the settlement is on its way to a pause it must not
+    replace with a crash, so an unanswerable target is recorded as
+    undetermined rather than raised or silently read as clean. ``error`` is
+    ``None`` on the other rows so a reader never has to ask whether the key
+    exists.
+
+    ``_commit_target_is_clean`` is the cleanliness verdict rather than the
+    NUL-framed listing below it, because it is the same measurement the target
+    resolvers and the group's own skip-clean check make; the second call is
+    what names the paths the first only counted.
     """
-    if _commit_target_is_clean(target):
-        return None
-    status = review_guard._run_git(
-        Path(str(target["root"])),
-        ["status", "--porcelain", "-z", "--untracked-files=all"],
-    )
     alias = target.get("alias")
+    try:
+        if _commit_target_is_clean(target):
+            return None
+        status = review_guard._run_git(
+            Path(str(target["root"])),
+            ["status", "--porcelain", "-z", "--untracked-files=all"],
+        )
+        if status.returncode != 0:
+            detail = status.stderr.strip() or status.stdout.strip()
+            raise RunError(
+                f"could not inspect git status: {detail}"
+                if detail
+                else "could not inspect git status"
+            )
+    except RunError as failure:
+        return {
+            "alias": alias,
+            "clean": None,
+            "dirty_paths": [],
+            "error": str(failure),
+        }
     paths = review_guard._porcelain_dirty_paths(status.stdout)
     return {
         "alias": alias,
@@ -864,37 +898,8 @@ def _commit_target_residue(target: Mapping[str, Any]) -> dict[str, Any] | None:
         "dirty_paths": [
             f"{alias}:{path}" if alias is not None else path for path in paths
         ],
+        "error": None,
     }
-
-
-def _commit_landed_but_left_dirt(commit: Mapping[str, Any] | None) -> bool:
-    """Whether an unsuccessful commit is one that landed on a still-dirty tree.
-
-    ``run_commit`` calls a commit unsuccessful when the worktree is still dirty
-    after it, and that verdict stands: the group fails, the settlement records
-    ``result: "failed"`` and soft-fails. But the commit itself happened — its
-    head advanced — so what is left in the tree is residue in exactly the sense
-    :func:`_commit_target_residue` names, and the record is the only place the
-    relaunch's operator can read which paths will meet the startup gate.
-    Without this the record says only that the commit failed, which reads as
-    "nothing was committed" when in fact something was.
-
-    ``clean_after`` is read rather than ``status_result`` because it is the
-    measurement rather than a name for it: exactly ``False`` is git having
-    answered that the tree is dirty, which is also what makes the residue probe
-    below answerable at all. A commit whose status could not be read
-    (``None``) is left alone, so nothing new can raise out of the settlement.
-    """
-    if not isinstance(commit, Mapping) or commit.get("clean_after") is not False:
-        return False
-    head_before = commit.get("head_before")
-    head_after = commit.get("head_after")
-    return (
-        isinstance(head_before, str)
-        and isinstance(head_after, str)
-        and bool(head_after)
-        and head_before != head_after
-    )
 
 
 def _repair_number(value: Any) -> int | None:
@@ -966,10 +971,14 @@ def _settle_paused_retained_work(
     failure is recorded with no group at all, and the retained work stays in
     the tree for the human that pause is already waiting on.
 
-    A failure still names its residue when the commit landed and left the tree
-    dirty (see :func:`_commit_landed_but_left_dirt`) — the verdict is the
-    group's to keep, but which paths survived the commit is what the next
-    process's startup gate will refuse over, and it is knowable here.
+    A failure still names its residue, because ``result: "failed"`` says the
+    group did not finish rather than that nothing moved. Every resolved target
+    is re-probed on every outcome: a commit that refused outright left all of
+    its target's dirt behind, a commit whose head advanced onto a still-dirty
+    tree left part of it, and a partial multi-repository failure left one
+    target dirty beside targets it had already committed clean. The group's
+    verdict stays the group's; which paths the next process's startup gate
+    will refuse over is knowable here, and only here.
     """
     if not _paused_work_commit_is_owed(
         retained, pause_reason=pause_reason, commit_mode=commit_mode
@@ -1022,16 +1031,11 @@ def _settle_paused_retained_work(
         error = str(failure)
 
     failed = error is not None or failed_commit is not None
-    probe_residue = not failed or _commit_landed_but_left_dirt(failed_commit)
-    residue = (
-        [
-            row
-            for row in (_commit_target_residue(target) for target in targets)
-            if row is not None
-        ]
-        if probe_residue
-        else []
-    )
+    residue = [
+        row
+        for row in (_commit_target_residue(target) for target in targets)
+        if row is not None
+    ]
     if failed:
         result = "failed"
     elif not targets:
