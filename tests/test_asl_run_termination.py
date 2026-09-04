@@ -340,6 +340,70 @@ class PauseWriteTests(_TerminationCase):
     def test_a_reason_that_resolves_to_nothing_records_no_guesswork(self) -> None:
         self.assertEqual([], run_termination._pause_remediation({}, reason="inspect"))
 
+    def _live_signal(self, reason: str = "runner-status-paused") -> dict[str, Any]:
+        return {
+            "reason": reason,
+            "message": "the harness asked to be looked at",
+            "source": "turn",
+            "session_id": "session-1",
+        }
+
+    def test_a_runner_declared_pause_retires_the_live_ask_it_moved_past(self) -> None:
+        # `clear_live_action_required` fires only on a new turn or an unpaused
+        # finish, and a paused run reaches neither, so this is the only place
+        # the generic harness ask is retired before the run ends on a verdict
+        # of its own.
+        signal = self._live_signal()
+        self.payload["action_required"] = dict(signal)
+
+        run_termination.set_pause(
+            self.payload, reason="blocked", message="the runner refused"
+        )
+
+        superseded = self.payload[events.ACTION_REQUIRED_SUPERSEDED_KEY]
+        self.assertEqual(events.SUPERSEDED_BY_RUNNER_PAUSE, superseded["superseded_by"])
+        self.assertEqual("blocked", superseded["pause_reason"])
+        self.assertEqual(signal, superseded["record"])
+        # `blocked` requires a user, so the pause writes its own ask in place of
+        # the one it displaced rather than leaving the run asking for nothing.
+        self.assertEqual("blocked", self.payload["action_required"]["reason"])
+        self.assertEqual("pause", self.payload["action_required"]["source"])
+
+    def test_a_pause_that_is_itself_the_live_ask_keeps_the_turn_s_record(self) -> None:
+        # The turn's own signal is the more specific record of the same ask.
+        signal = self._live_signal("runner-pause")
+        self.payload["action_required"] = dict(signal)
+
+        run_termination.set_pause(
+            self.payload, reason="runner-pause", message="the harness paused"
+        )
+
+        self.assertNotIn(events.ACTION_REQUIRED_SUPERSEDED_KEY, self.payload)
+        self.assertEqual(signal, self.payload["action_required"])
+
+    def test_a_signal_the_runner_declared_is_never_retired(self) -> None:
+        # Review findings and their kin are not live signals: nothing about a
+        # later pause answers them, so they stand.
+        signal = self._live_signal("review-findings")
+        self.payload["action_required"] = dict(signal)
+
+        run_termination.set_pause(
+            self.payload, reason="unsafe", message="the runner refused"
+        )
+
+        self.assertNotIn(events.ACTION_REQUIRED_SUPERSEDED_KEY, self.payload)
+        self.assertEqual(signal, self.payload["action_required"])
+
+    def test_a_pause_with_no_standing_ask_records_no_retirement(self) -> None:
+        run_termination.set_pause(
+            self.payload, reason="malformed-contract", message="unreadable"
+        )
+
+        self.assertNotIn(events.ACTION_REQUIRED_SUPERSEDED_KEY, self.payload)
+        self.assertEqual(
+            "malformed-contract", self.payload["action_required"]["reason"]
+        )
+
 
 class HonoredStopTests(_TerminationCase):
     """The stop and the abort a supervisor asks for, and their seams."""

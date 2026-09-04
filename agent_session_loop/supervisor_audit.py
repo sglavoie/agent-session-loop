@@ -1164,6 +1164,11 @@ _COMMIT_DIR_PREFIX = "commit-"
 OBSERVED_COMMIT_ORIGIN = "observed-write-guard"
 _STATUS_STATE_KEYS = (
     "action_required",
+    # A run that superseded a live ask on its way into a runner-declared pause
+    # wrote the displaced record here. Projecting it is what stops the bundle
+    # from showing an `action_required` of null with nothing saying what stood
+    # there.
+    events.ACTION_REQUIRED_SUPERSEDED_KEY,
     "assurance",
     "command",
     "completed_session_ids",
@@ -1193,7 +1198,10 @@ _STATUS_STATE_KEYS = (
 #: otherwise a verbatim copy of the terminal state payload, so a retirement has
 #: to name what overrode the copy and keep the record it replaced: the history
 #: an auditor reads is not allowed to shrink because the current state moved on.
-_STATUS_ACTION_REQUIRED_SUPERSEDED = "action_required_superseded"
+#: Shared with ``run_termination``, which writes the same block onto the payload
+#: when a runner-declared pause supersedes a live ask, so the copy the audit
+#: makes and the copy it might inherit are spelled one way.
+_STATUS_ACTION_REQUIRED_SUPERSEDED = events.ACTION_REQUIRED_SUPERSEDED_KEY
 
 #: What retired it: the run's mailbox holds the ruling that answered the ask,
 #: and a receipt proving the ruling reached the run.

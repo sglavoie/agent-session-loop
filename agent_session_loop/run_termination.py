@@ -490,6 +490,44 @@ def _pause_remediation(
     return [] if fallback is None else [fallback]
 
 
+def _supersede_live_action_signal(payload: dict[str, Any], *, reason: str) -> None:
+    """Retire a live harness ask the pause being written has moved past.
+
+    ``action_required`` is the run's current unresolved intervention, and a
+    live signal — ``runner-pause``, ``runner-status-paused``,
+    ``approval-required`` — is only current while the run is still stopped on
+    it. A runner-declared refusal is not that: ``blocked``, ``unsafe`` and
+    ``malformed-contract`` are the runner's own verdict, strictly more specific
+    than the harness's generic ask, and the run stops on them, so the generic
+    ask can no longer be answered in this run.
+
+    Nothing else retires it. ``turn_execution.clear_live_action_required``
+    fires only when another turn starts or the run finishes unpaused, and a
+    paused run reaches neither, so the stale signal outlived every pause that
+    superseded it and reached the audit as a run still asking for something it
+    had already moved past. The signal names the same session as the pause, so
+    a same-session comparison would not have caught it either.
+
+    The displaced record is kept rather than dropped, under the key the audit
+    already uses for the retirement it performs itself.
+    """
+    signal = payload.get("action_required")
+    if not isinstance(signal, Mapping):
+        return
+    if signal.get("reason") not in events.LIVE_ACTION_REQUIRED_REASONS:
+        return
+    if reason in events.LIVE_ACTION_REQUIRED_REASONS:
+        # The pause is the ask. Retiring here would drop the more specific
+        # record the turn raised in favour of the one assembled below.
+        return
+    payload["action_required"] = None
+    payload[events.ACTION_REQUIRED_SUPERSEDED_KEY] = {
+        "superseded_by": events.SUPERSEDED_BY_RUNNER_PAUSE,
+        "pause_reason": reason,
+        "record": dict(signal),
+    }
+
+
 def set_pause(
     payload: dict[str, Any],
     *,
@@ -519,11 +557,14 @@ def set_pause(
     # the recoverable/user-required reason sets.
     policy = pause_policy.classify_pause(reason)
     payload["pause_policy"] = policy
+    _supersede_live_action_signal(payload, reason=reason)
     # A pause a machine cannot retry is by definition waiting on a human, so the
     # terminal state names that ask rather than leaving an operator to infer it
     # from the reason. A signal the turn already raised is the more specific
-    # record of the same ask and is left standing. Remediation is whatever the
-    # pause evidence carries: a reason with no command still gets a record.
+    # record of the same ask and is left standing -- unless this pause is the
+    # runner declaring its own refusal, in which case the retirement above has
+    # already displaced it. Remediation is whatever the pause evidence carries:
+    # a reason with no command still gets a record.
     if policy["requires_user"] and not isinstance(
         payload.get("action_required"), Mapping
     ):

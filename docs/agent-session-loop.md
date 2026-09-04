@@ -5930,6 +5930,21 @@ without saying where. A pause whose reason has no hint either still gets the
 block, with an empty `remediation` list; a live intervention signal the turn
 already raised is the more specific record of the same ask and is left in place.
 
+That last rule holds only while the pause *is* the ask. A pause the runner
+declared — `blocked`, `unsafe`, `malformed-contract` — is the runner's own
+verdict and is strictly more specific than the harness's generic
+`runner-status-paused` or `runner-pause`, and the run stops on it, so the
+generic ask can no longer be answered. Writing that pause therefore retires the
+live signal and keeps the displaced record under
+`action_required_superseded`, naming the pause reason that displaced it. Nothing
+else would: `clear_live_action_required` fires only when another turn starts or
+the run finishes unpaused, and a paused run reaches neither, so the stale signal
+used to outlive every pause that superseded it and reach the audit as a run
+still asking for something it had already moved past. The signal names the same
+session as the pause, so a same-session comparison would not have caught it
+either. A signal the runner itself declared, review findings above all, is not a
+live signal and still stands.
+
 When a pause genuinely needs an answer, the result carries `needs_agent_reply`
 with a `questions` block (resolver prompt, the paused agent's last message, pause
 metadata, artifact paths). The driving agent either infers a clearly defensible reply

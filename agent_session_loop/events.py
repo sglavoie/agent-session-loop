@@ -189,6 +189,19 @@ MAILBOX_ACTIONS: tuple[str, ...] = (
 LIVE_ACTION_REQUIRED_REASONS = frozenset(
     {"runner-pause", "runner-status-paused", "approval-required"}
 )
+# Where a retired ``action_required`` is kept, on the run payload and in the
+# status section the audit projects from it. Retirement never discards: the
+# record that stood is preserved beside the reason it was replaced, because the
+# history an operator or an auditor reads is not allowed to shrink because the
+# current state moved on.
+ACTION_REQUIRED_SUPERSEDED_KEY = "action_required_superseded"
+# What retired it. A runner-declared pause — ``blocked``, ``unsafe``,
+# ``malformed-contract`` — is strictly more specific than the harness's generic
+# ask, and the run has stopped on it, so the generic ask can no longer be
+# answered. Nothing else proves this: ``turn_execution.clear_live_action_required``
+# fires only on a new turn or an unpaused finish, and a paused run reaches
+# neither.
+SUPERSEDED_BY_RUNNER_PAUSE = "runner-declared-pause"
 # Stable, evidence-based harness-failure categories produced by
 # ``agent_session_loop.harness_failures.classify_harness_failure``. A nonzero
 # harness exit is classified into exactly one of these; ``nonzero-exit`` remains
