@@ -962,6 +962,84 @@ class PausedRetainedWorkTests(unittest.TestCase):
         self.assertEqual([], self._dirty(self.repositories["SVC"]))
         self.assertEqual(["elsewhere.txt"], self._dirty(self.repositories["OAK"]))
 
+    def test_a_partial_failure_message_reports_both_committed_and_retained_work(
+        self,
+    ) -> None:
+        # The failing commit landed nothing, but the group had already
+        # committed SVC before OAK refused. The all-or-nothing sentence sent
+        # the operator looking for work that is already in `git log`, so the
+        # message now names what committed and what did not.
+        self._write(self.repositories["SVC"], "worked.txt")
+        self._write(self.repositories["OAK"], "elsewhere.txt")
+
+        def commit(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["repository_key"] == "OAK":
+                return self._refused_commit(**kwargs)
+            return self._fake_commit(**kwargs)
+
+        record, _turn_payload = self._settle(
+            self.registered,
+            guard=self._guard(added_paths=("worked.txt",)),
+            commit_mode=run_selection.COMMIT_MODE_END,
+            commit=commit,
+        )
+
+        assert record is not None
+        self.assertEqual("failed", record["result"])
+        # The commit the message reads landed nothing; the correction comes
+        # from the group, not from a second reading of the commit.
+        self.assertEqual("nonzero-exit", record["commit"]["status_result"])
+        committed = record["commit_group"]["successful_repositories"]
+        self.assertEqual(["SVC"], [row["alias"] for row in committed])
+        self.assertEqual(1, len(self.soft_failures))
+        self.assertEqual(
+            "the verify-failed pause of session 1 committed the work it "
+            "retained in SVC, but the work it retained in OAK could not be "
+            "committed; the worktree still holds OAK:elsewhere.txt",
+            self.soft_failures[0]["message"],
+        )
+
+    def test_a_partial_failure_message_survives_an_unreadable_residue_probe(
+        self,
+    ) -> None:
+        # With no residue path to name, the sentence still must not deny SVC's
+        # commit -- the correction lives on the group, and the probe's silence
+        # only drops the trailing clause.
+        self._write(self.repositories["SVC"], "worked.txt")
+        self._write(self.repositories["OAK"], "elsewhere.txt")
+        real_run_git = review_guard._run_git
+
+        def commit(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["repository_key"] == "OAK":
+                return self._refused_commit(**kwargs)
+            return self._fake_commit(**kwargs)
+
+        def blinded(cwd: Path, args: list[str]) -> Any:
+            if len(self.launched) == 2 and args[:1] == ["status"]:
+                raise runner.RunError("could not inspect git status: fatal: unreadable")
+            return real_run_git(cwd, args)
+
+        with mock.patch.object(review_guard, "_run_git", side_effect=blinded):
+            record, _turn_payload = self._settle(
+                self.registered,
+                guard=self._guard(added_paths=("worked.txt",)),
+                commit_mode=run_selection.COMMIT_MODE_END,
+                commit=commit,
+            )
+
+        assert record is not None
+        self.assertEqual("failed", record["result"])
+        self.assertEqual(
+            [None, None],
+            [row["clean"] for row in record["residue"]["repositories"]],
+        )
+        self.assertEqual(
+            "the verify-failed pause of session 1 committed the work it "
+            "retained in SVC, but the work it retained in OAK could not be "
+            "committed",
+            self.soft_failures[0]["message"],
+        )
+
     def test_a_target_whose_status_is_unreadable_records_undetermined(self) -> None:
         # The commit may have failed *because* the repository became
         # unreadable, and the settlement is on its way to a pause it must not

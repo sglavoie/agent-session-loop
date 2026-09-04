@@ -5261,21 +5261,43 @@ exception raised around the commit; a commit that merely failed is carried on
 `commit` as `success: false` with its own `status_result`, and on the group as
 `status: "failed"`.
 
-The sentence recorded beside that failure is rendered from the same two facts,
-because `failed` covers two opposite outcomes. A commit that never ran, exited
-nonzero, left `HEAD` missing, or left it unchanged wrote nothing, and its
-`commit_failures[].message` still reads `the work retained by the <reason> pause
-of session <id> could not be committed`. A commit whose `HEAD` advanced —
-`dirty-after-commit`, or `status-unavailable` when the tree could not be re-read
-afterwards — did commit the turn's intended path, so its message reads `the
-<reason> pause of session <id> committed the work it retained, but the worktree
-still holds <paths>`, naming up to five repository-qualified residue paths and
-deferring any beyond that to `paused_work_commit.residue`. A landed commit whose
-probe named no path at all points at the same field instead of naming one. Which
-branch applies is read from the commit's own `status_result` rather than
-re-measured, so the message never disagrees with the commit boundary about what
-landed. The same text is what the `commit failed` progress line prints and what
-the supervisor audit bundle carries in `commit_failures`.
+The sentence recorded beside that failure is rendered from the same record,
+because `failed` covers outcomes that ask the operator for different things. Two
+facts select it: whether the failing commit itself landed, and whether the group
+had already committed other repositories before it.
+
+A commit that never ran, exited nonzero, left `HEAD` missing, or left it
+unchanged wrote nothing. When it was also the group's first repository, nothing
+reached the history and `commit_failures[].message` still reads `the work
+retained by the <reason> pause of session <id> could not be committed`.
+
+A commit whose `HEAD` advanced — `dirty-after-commit`, or `status-unavailable`
+when the tree could not be re-read afterwards — did commit the turn's intended
+path, so its message reads `the <reason> pause of session <id> committed the
+work it retained, but the worktree still holds <paths>`, naming up to five
+repository-qualified residue paths and deferring any beyond that to
+`paused_work_commit.residue`. A landed commit whose probe named no path at all
+points at the same field instead of naming one.
+
+A multi-repository group can also commit some of its repositories cleanly before
+a later one refuses. The group's verdict is `failed` and the refusing commit
+landed nothing, but the all-or-nothing sentence would deny commits that are
+already in `git log`. So a refusal that follows successful repositories reads
+`the <reason> pause of session <id> committed the work it retained in <names>,
+but the work it retained in <name> could not be committed`, naming up to three
+repositories from the group's own `successful_repositories` and deferring any
+beyond that to the same field, and naming the repository the group stopped on
+from its `failed_alias`. The residue clause `; the worktree still holds <paths>`
+is appended when the probe named any path, and dropped when it named none — an
+unreadable target leaves the correction about what committed intact. A group
+that failed with successful repositories but no recorded `failed_alias` points
+at `commit_group.remaining_aliases` for what is still owed.
+
+Which branch applies is read from the commit's own `status_result` and the
+group's own outcome lists rather than re-measured, so the message never
+disagrees with the commit boundary about what landed or with the group about
+which repositories moved. The same text is what the `commit failed` progress
+line prints and what the supervisor audit bundle carries in `commit_failures`.
 
 The record is free-form as far as the state projections are concerned.
 `asl status`'s runner-state projection carries no `pause_details` key at all, so
