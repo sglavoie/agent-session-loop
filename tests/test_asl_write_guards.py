@@ -36,6 +36,7 @@ from agent_session_loop import (
     review_continuation,
     review_cycle,
     review_guard,
+    run_loop,
     run_prompts,
     run_termination,
     runner,
@@ -292,12 +293,13 @@ class SeamTests(unittest.TestCase):
 
     def test_the_loop_passes_both_seams_at_every_enforcement_call(self) -> None:
         # The two paths live in two modules since Session 34: the finalization
-        # sequence moved into `turn_postflight`, while the crash path stayed in
-        # the runner's own `except BaseException` handler. Both are scanned, and
+        # sequence moved into `turn_postflight`, while the crash path stayed
+        # with the loop's own `except BaseException` handler -- which Session
+        # 37 carried out of the runner into `run_loop`. Both are scanned, and
         # each is counted on its own, so a call that merely moved between them
         # cannot pass by keeping the total.
         calls: dict[str, int] = {}
-        for module in (runner, turn_postflight):
+        for module in (run_loop, turn_postflight):
             tree = ast.parse(Path(module.__file__ or "").read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
@@ -320,7 +322,7 @@ class SeamTests(unittest.TestCase):
         # path each reach all three.
         self.assertEqual(
             {
-                "agent_session_loop.runner": 3,
+                "agent_session_loop.run_loop": 3,
                 "agent_session_loop.turn_postflight": 3,
             },
             calls,

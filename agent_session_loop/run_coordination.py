@@ -1652,10 +1652,11 @@ class MailboxWaitCoordinator:
         self._persistence = persistence
         self._notifier = notifier
         self._poll_controls = poll_controls
-        # Injected rather than called directly so the runner keeps owning both
-        # names: in-tree callers and tests patch ``runner._wait_for_mailbox_reply``
-        # to assert a wait was or was not entered, and a coordinator that reached
-        # past that alias would silently ignore the patch.
+        # Injected rather than called directly so a caller's patch is heard:
+        # in-tree callers and tests patch ``wait_for_mailbox_reply`` on this
+        # module to assert a wait was or was not entered, and a coordinator that
+        # bound the function at construction would ignore the patch. The run
+        # loop resolves both names here at the call site for the same reason.
         self._wait_for_reply = wait_for_reply
         self._finish_lifecycle = finish_lifecycle
 

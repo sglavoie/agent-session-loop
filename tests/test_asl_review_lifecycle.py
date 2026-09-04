@@ -41,6 +41,8 @@ from agent_session_loop import (
     review_session_body,
     review_session_contract,
     review_transitions,
+    run_coordination,
+    run_loop,
     run_persistence,
     run_selection,
     runner,
@@ -2851,16 +2853,14 @@ class RevertSnapshotCacheIntegrationTests(unittest.TestCase):
                 + os.environ.get("PYTHONPATH", ""),
             ),
             mock.patch.object(plans, "inspect_plan", counting_inspect_plan),
-            mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=fake_run_harness
-            ),
+            mock.patch.object(harnesses, "run_harness", side_effect=fake_run_harness),
             mock.patch.object(
                 session_verification, "_reinspect_after_revert", recording_reinspect
             ),
         ):
             lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
             try:
-                _exit_code, payload = runner._run_locked(
+                _exit_code, payload = run_loop.run_locked(
                     args=args,
                     cwd=self.repo_root,
                     timeout=None,
@@ -3004,9 +3004,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
                 + os.pathsep
                 + os.environ.get("PYTHONPATH", ""),
             ),
-            mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=fake_run_harness
-            ),
+            mock.patch.object(harnesses, "run_harness", side_effect=fake_run_harness),
             mock.patch.object(
                 review_guard,
                 "_capture_review_repo_fingerprint",
@@ -3015,7 +3013,7 @@ class ReviewGuardUnavailableRunTests(unittest.TestCase):
         ):
             lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
             try:
-                _exit_code, payload = runner._run_locked(
+                _exit_code, payload = run_loop.run_locked(
                     args=args,
                     cwd=self.repo_root,
                     timeout=None,
@@ -3201,7 +3199,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch.object(
-                    runner.harnesses, "run_harness", side_effect=fake_run_harness
+                    harnesses, "run_harness", side_effect=fake_run_harness
                 )
             )
             if forbid_mailbox_wait:
@@ -3212,8 +3210,8 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
                 )
                 stack.enter_context(
                     mock.patch.object(
-                        runner,
-                        "_prepare_mailbox_reply_wait",
+                        run_coordination,
+                        "prepare_mailbox_reply_wait",
                         side_effect=AssertionError(
                             "the mailbox reply wait must not be reachable "
                             "after the review mutation guard trips"
@@ -3222,7 +3220,7 @@ class ReviewGuardFailedTurnOutcomeTests(unittest.TestCase):
                 )
             lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
             try:
-                _exit_code, payload = runner._run_locked(
+                _exit_code, payload = run_loop.run_locked(
                     args=args,
                     cwd=self.repo_root,
                     timeout=None,

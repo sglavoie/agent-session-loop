@@ -47,6 +47,7 @@ from agent_session_loop import (
     review_session_body,
     run_commit,
     run_control,
+    run_loop,
     run_payloads,
     run_persistence,
     run_reporting,
@@ -82,8 +83,12 @@ from tests.support import (
 #: modules the idle-baseline guard below has to search alongside the loop
 #: itself. Session 35 moved the mailbox reply wait -- the run's one sanctioned
 #: opt-out from the structural idle refresh -- out of the loop and into
-#: ``turn_dispositions``; a guard that kept searching only ``runner`` would
-#: have passed by finding no opt-out at all.
+#: ``turn_dispositions``; a guard that kept searching only the loop would have
+#: passed by finding no opt-out at all. The list stays at one entry after
+#: Session 37: ``run_loop`` and ``turn_dispositions`` are still the only two
+#: modules that *write* ``runner_work_finished_at`` or ``idle_baseline_pinned``
+#: -- ``turn_preflight`` reads the stamp to measure the gap but never sets it --
+#: and the loop itself is searched as the guard's own root rather than listed.
 IDLE_BASELINE_DELEGATES = (turn_dispositions,)
 
 # Bounds a wedged child so it cannot hang the suite; it is not a latency
@@ -330,14 +335,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         with (
             patched_env(**env_updates),
             mock.patch.object(
-                runner.run_control.RunControlListener,
+                run_control.RunControlListener,
                 "for_run",
                 side_effect=fake_for_run,
             ),
         ):
             lock_info = state.acquire_lock(plan_dir, state_dir)
             try:
-                exit_code, payload = runner._run_locked(
+                exit_code, payload = run_loop.run_locked(
                     args=args,
                     cwd=run_cwd,
                     timeout=None,
@@ -391,7 +396,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=fake_run_harness,
         ):
@@ -550,14 +555,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 + os.environ.get("PYTHONPATH", ""),
             ),
             mock.patch.object(
-                runner.run_control.RunControlListener,
+                run_control.RunControlListener,
                 "for_run",
                 side_effect=fake_for_run,
             ),
         ):
             lock_info = state.acquire_lock(plan_dir, state_dir)
             try:
-                return runner._run_locked(
+                return run_loop.run_locked(
                     args=args,
                     cwd=run_cwd,
                     timeout=None,
@@ -2300,7 +2305,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         state_dir_box.append(state_dir)
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=fake_run_harness,
         ):
@@ -2340,14 +2345,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     + os.environ.get("PYTHONPATH", ""),
                 ),
                 mock.patch.object(
-                    runner.run_control.RunControlListener,
+                    run_control.RunControlListener,
                     "for_run",
                     side_effect=fake_for_run,
                 ),
             ):
                 lock_info = state.acquire_lock(plan_dir, state_dir)
                 try:
-                    exit_code, payload = runner._run_locked(
+                    exit_code, payload = run_loop.run_locked(
                         args=args,
                         cwd=REPO_ROOT,
                         timeout=None,
@@ -2436,7 +2441,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         state_dir_box.append(state_dir)
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=fake_run_harness,
         ):
@@ -2475,14 +2480,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     + os.environ.get("PYTHONPATH", ""),
                 ),
                 mock.patch.object(
-                    runner.run_control.RunControlListener,
+                    run_control.RunControlListener,
                     "for_run",
                     side_effect=fake_for_run,
                 ),
             ):
                 lock_info = state.acquire_lock(plan_dir, state_dir)
                 try:
-                    exit_code, payload = runner._run_locked(
+                    exit_code, payload = run_loop.run_locked(
                         args=args,
                         cwd=REPO_ROOT,
                         timeout=None,
@@ -2563,7 +2568,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         state_dir_box.append(state_dir)
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=fake_run_harness,
         ):
@@ -2602,19 +2607,19 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                     + os.environ.get("PYTHONPATH", ""),
                 ),
                 mock.patch.object(
-                    runner.run_control.RunControlListener,
+                    run_control.RunControlListener,
                     "for_run",
                     side_effect=fake_for_run,
                 ),
                 mock.patch.object(
-                    runner,
+                    turn_execution,
                     "LIVE_CONTROL_POLL_INTERVAL_SECONDS",
                     0.01,
                 ),
             ):
                 lock_info = state.acquire_lock(plan_dir, state_dir)
                 try:
-                    exit_code, _payload = runner._run_locked(
+                    exit_code, _payload = run_loop.run_locked(
                         args=args,
                         cwd=REPO_ROOT,
                         timeout=None,
@@ -2792,7 +2797,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             )
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=fake_run_harness,
         ):
@@ -2990,7 +2995,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
                 )
 
             with mock.patch.object(
-                runner.harnesses,
+                harnesses,
                 "run_harness",
                 side_effect=fake_run_harness,
             ):
@@ -5716,12 +5721,12 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
             events.REVIEW_VERDICT_RETRY_EVENT,
         )
         # Rejecting the verdict and reverting the review session is
-        # runner-owned work on a path that returns to the loop top with a
+        # loop-owned work on a path that returns to the loop top with a
         # bare `continue`, so the retried turn's idle clock starts after it.
         self.assertGreaterEqual(self.idle_started_at(turns[2]), retried_at)
 
-    def runner_source(self) -> str:
-        return Path(runner.__file__).read_text(encoding="utf-8")
+    def loop_source(self) -> str:
+        return Path(run_loop.__file__ or "").read_text(encoding="utf-8")
 
     def names_loop_state(self, node: ast.AST, field: str) -> bool:
         """Is this node the loop's ``field``, held bare or on the run context?
@@ -5743,7 +5748,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
 
     def session_loop_node(self, tree: ast.Module | None = None) -> ast.While:
         if tree is None:
-            tree = ast.parse(self.runner_source())
+            tree = ast.parse(self.loop_source())
         loops = [
             node
             for node in ast.walk(tree)
@@ -5861,7 +5866,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         )
 
     def tree_with_pinned_arm_body(self, body: tuple[str, ...]) -> ast.Module:
-        source = self.runner_source()
+        source = self.loop_source()
         arm = self.pinned_loop_head_arm(self.session_loop_node(ast.parse(source)))
         first, last = arm.body[0], arm.body[-1]
         assert last.end_lineno is not None
@@ -5872,7 +5877,7 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         return ast.parse("\n".join(lines))
 
     def test_idle_baseline_is_refreshed_where_the_loop_cannot_bypass_it(self) -> None:
-        tree = ast.parse(self.runner_source())
+        tree = ast.parse(self.loop_source())
         self.check_the_pinned_arm_clears_the_pin(tree)
         for mutation in (
             ("pass",),

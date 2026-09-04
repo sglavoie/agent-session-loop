@@ -52,8 +52,8 @@ from agent_session_loop import (
     model_availability,
     plans,
     run_coordination,
+    run_loop,
     run_termination,
-    runner,
     turn_dispositions,
     turn_execution,
 )
@@ -95,13 +95,15 @@ MOVED_CALLS = frozenset(
     }
 )
 
-#: The mailbox wait seams the loop still resolves and passes in as callbacks,
-#: because in-tree callers patch them on the runner to assert a wait was or was
-#: not entered.
+#: The mailbox wait seams the loop still resolves and passes in as callbacks.
+#: Session 37 moved the loop out of the runner, so they are now read at the
+#: module that owns them; in-tree callers patch them there to assert a wait was
+#: or was not entered, which only works while the loop resolves them at the
+#: call site rather than binding them once at import.
 INJECTED_SEAMS = (
-    "_prepare_mailbox_reply_wait",
-    "_wait_for_mailbox_reply",
-    "_finish_mailbox_reply_wait_lifecycle",
+    "run_coordination.prepare_mailbox_reply_wait",
+    "run_coordination.wait_for_mailbox_reply",
+    "run_coordination.finish_mailbox_reply_wait_lifecycle",
 )
 
 
@@ -235,7 +237,7 @@ class BoundaryTests(unittest.TestCase):
         )
 
     def test_the_context_protocol_matches_the_runner_s_own_context(self) -> None:
-        fields = {field.name for field in dataclasses.fields(runner.RunContext)}
+        fields = {field.name for field in dataclasses.fields(run_loop.RunContext)}
         for name in turn_dispositions.RunContext.__annotations__:
             with self.subTest(member=name):
                 self.assertIn(name, fields)
@@ -244,11 +246,11 @@ class BoundaryTests(unittest.TestCase):
                 self.assertIn(name, fields)
 
 
-class RunnerDelegationTests(unittest.TestCase):
-    """The runner reaches this boundary and keeps none of the branch work."""
+class RunLoopDelegationTests(unittest.TestCase):
+    """The run loop reaches this boundary and keeps none of the branch work."""
 
-    def runner_calls(self) -> set[str]:
-        source = Path(runner.__file__ or "").read_text(encoding="utf-8")
+    def loop_calls(self) -> set[str]:
+        source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
         return {
             ast.unparse(node.func)
             for node in ast.walk(ast.parse(source))
@@ -257,42 +259,33 @@ class RunnerDelegationTests(unittest.TestCase):
 
     def test_the_loop_reaches_exactly_the_declared_entry_points(self) -> None:
         reached = {
-            name
-            for name in self.runner_calls()
-            if name.startswith("turn_dispositions.")
+            name for name in self.loop_calls() if name.startswith("turn_dispositions.")
         }
         self.assertEqual(set(ENTRY_POINTS), reached)
 
     def test_the_loop_no_longer_performs_the_branch_work_itself(self) -> None:
         self.assertEqual(
             set(),
-            MOVED_CALLS & self.runner_calls(),
+            MOVED_CALLS & self.loop_calls(),
             "the terminating branches belong to turn_dispositions now; a "
             "surviving call is work that escaped",
         )
 
-    def test_the_runner_still_owns_the_three_mailbox_wait_names(self) -> None:
-        # The counterpart to the assertion above: these are resolved at the
-        # call site and passed in, because callers patch them on the runner to
-        # assert a wait was or was not entered. An over-eager sweep that read
-        # them at ``run_coordination`` instead would silently ignore the patch.
-        source = Path(runner.__file__ or "").read_text(encoding="utf-8")
+    def test_the_loop_still_hands_in_the_three_mailbox_wait_seams(self) -> None:
+        # The counterpart to the assertion above: these three are deliberately
+        # *not* imported by the boundary. The loop resolves each one as an
+        # attribute of its owning module and passes it in, which is what makes
+        # a caller's patch on ``run_coordination`` take effect; binding them to
+        # a module-level name here would freeze the pre-patch function instead.
+        source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
         tree = ast.parse(source)
-        assigned = {
-            target.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Assign)
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        }
         loaded = {
-            node.id
+            ast.unparse(node)
             for node in ast.walk(tree)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)
         }
         for name in INJECTED_SEAMS:
             with self.subTest(seam=name):
-                self.assertIn(name, assigned)
                 self.assertIn(name, loaded)
 
 

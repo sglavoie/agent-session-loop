@@ -35,9 +35,10 @@ the **review repair children** and the reopen record that accounts for them
 (``readiness_gate``), and the run state and event stream every one of those
 writes through :attr:`RunContext.persistence`. It creates no record of its own.
 
-Nothing here imports the runner. ``RunContext`` is still runner-resident until
-session 37 moves it, so it enters as the structural :class:`RunContext`
-Protocol below — the ``CoordinationPersistence``/``LockedRun`` pattern applied
+Nothing here imports the runner, and since session 37 it does not import the
+loop that owns ``RunContext`` either: the context enters as the structural
+:class:`RunContext` Protocol below — the ``CoordinationPersistence``/
+``LockedRun`` pattern applied
 to the loop's own context object. The two collaborators the context does not
 carry enter beside it: the run-control listener, which is non-optional here
 because a completion pass only happens after the loop bound it, and

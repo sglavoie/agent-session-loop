@@ -47,8 +47,8 @@ from agent_session_loop import (
     plans,
     repository_evidence,
     review_guard,
+    run_loop,
     run_prompts,
-    runner,
     turn_preflight,
     turn_preparation,
     workspace_evidence,
@@ -332,26 +332,26 @@ class PreflightBoundaryTests(unittest.TestCase):
             name for name in vars(turn_preflight.RunContext) if not name.startswith("_")
         }
         self.assertTrue(declared)
-        fields = {field.name for field in dataclasses.fields(runner.RunContext)}
+        fields = {field.name for field in dataclasses.fields(run_loop.RunContext)}
         for name in sorted(declared):
             with self.subTest(member=name):
                 self.assertTrue(
-                    name in fields or hasattr(runner.RunContext, name),
+                    name in fields or hasattr(run_loop.RunContext, name),
                     f"turn_preflight.RunContext declares {name!r}, which the "
                     "run loop's own context does not provide",
                 )
 
 
-class RunnerDelegationTests(unittest.TestCase):
-    """The runner reaches this boundary and keeps none of its work."""
+class RunLoopDelegationTests(unittest.TestCase):
+    """The run loop reaches this boundary and keeps none of its work."""
 
-    def runner_source(self) -> str:
-        return Path(runner.__file__).read_text(encoding="utf-8")
+    def loop_source(self) -> str:
+        return Path(run_loop.__file__ or "").read_text(encoding="utf-8")
 
     def test_the_loop_reaches_exactly_the_three_entry_points(self) -> None:
         calls = {
             ast.unparse(node.func)
-            for node in ast.walk(ast.parse(self.runner_source()))
+            for node in ast.walk(ast.parse(self.loop_source()))
             if isinstance(node, ast.Call)
             and ast.unparse(node.func).startswith("turn_preflight.")
         }
@@ -360,7 +360,7 @@ class RunnerDelegationTests(unittest.TestCase):
     def test_the_loop_no_longer_captures_a_baseline_itself(self) -> None:
         calls = {
             ast.unparse(node.func)
-            for node in ast.walk(ast.parse(self.runner_source()))
+            for node in ast.walk(ast.parse(self.loop_source()))
             if isinstance(node, ast.Call)
         }
         self.assertEqual(
@@ -375,7 +375,7 @@ class RunnerDelegationTests(unittest.TestCase):
         # second literal in the loop would be a second description of one turn.
         literals = [
             assign.lineno
-            for assign in ast.walk(ast.parse(self.runner_source()))
+            for assign in ast.walk(ast.parse(self.loop_source()))
             if isinstance(assign, ast.Assign | ast.AnnAssign)
             and isinstance(assign.value, ast.Dict)
             and {"prompt", "turn_index"}

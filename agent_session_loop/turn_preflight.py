@@ -32,9 +32,10 @@ recorded by ``run_termination`` through ``ctx.pause``, and every snapshot this
 module captures is an in-memory value handed back to the loop. Nothing else
 here reaches disk.
 
-Nothing here imports the runner. ``RunContext`` is still runner-resident until
-Session 37 moves it, so it enters as the structural :class:`RunContext`
-Protocol below, naming only the members these three steps reach.
+Nothing here imports the runner, and since Session 37 it does not import
+``run_loop``, which owns ``RunContext``, either: the context enters as the
+structural :class:`RunContext` Protocol below, naming only the members these
+three steps reach.
 
 Each step hands back a frozen result rather than performing the loop's
 ``break``: the branches this replaced ended in one, and a boundary cannot break

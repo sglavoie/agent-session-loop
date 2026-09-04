@@ -6,7 +6,7 @@ turn survives it, and — when it does not — performs the identical five-step
 refusal that makes the refusal durable. A guard that only computed a verdict
 would leave the run free to publish the turn anyway; a guard that computed one
 inline in the loop would make each refusal a fresh transcription of the same five
-steps. Both are why this is a boundary rather than a stretch of ``_run_locked``.
+steps. Both are why this is a boundary rather than a stretch of ``run_locked``.
 
 It owns three things:
 

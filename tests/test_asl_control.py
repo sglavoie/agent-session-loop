@@ -51,6 +51,7 @@ from agent_session_loop import (
     review_session_body,
     run_commit,
     run_control,
+    run_loop,
     run_persistence,
     run_selection,
     run_termination,
@@ -3370,19 +3371,19 @@ class PreTurnStopCheckpointTests(unittest.TestCase):
                 + os.pathsep
                 + os.environ.get("PYTHONPATH", ""),
             ),
+            mock.patch.object(harnesses, "run_harness", side_effect=fake_run_harness),
             mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=fake_run_harness
+                turn_execution, "turn_paths", side_effect=fake_turn_paths
             ),
-            mock.patch.object(runner, "_turn_paths", side_effect=fake_turn_paths),
             mock.patch.object(
-                runner.run_control.RunControlListener,
+                run_control.RunControlListener,
                 "for_run",
                 side_effect=fake_for_run,
             ),
         ):
             lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
             try:
-                exit_code, payload = runner._run_locked(
+                exit_code, payload = run_loop.run_locked(
                     args=args,
                     cwd=self.repo_root,
                     timeout=None,
@@ -3677,20 +3678,22 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 + os.pathsep
                 + os.environ.get("PYTHONPATH", ""),
             ),
-            mock.patch.object(runner, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02),
             mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=fake_run_harness
+                turn_execution, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02
             ),
-            mock.patch.object(runner, "_turn_paths", side_effect=fake_turn_paths),
+            mock.patch.object(harnesses, "run_harness", side_effect=fake_run_harness),
             mock.patch.object(
-                runner.run_control.RunControlListener,
+                turn_execution, "turn_paths", side_effect=fake_turn_paths
+            ),
+            mock.patch.object(
+                run_control.RunControlListener,
                 "for_run",
                 side_effect=fake_for_run,
             ),
         ):
             lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
             try:
-                exit_code, payload = runner._run_locked(
+                exit_code, payload = run_loop.run_locked(
                     args=args,
                     cwd=self.repo_root,
                     timeout=None,
@@ -3932,19 +3935,19 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
                 FAKE_CODEX_MODE="timeout",
                 FAKE_CODEX_SLEEP="60",
             ),
-            mock.patch.object(runner, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02),
             mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=spy_run_harness
+                turn_execution, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02
             ),
+            mock.patch.object(harnesses, "run_harness", side_effect=spy_run_harness),
             mock.patch.object(
-                runner.run_control.RunControlListener,
+                run_control.RunControlListener,
                 "for_run",
                 side_effect=fake_for_run,
             ),
         ):
             lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
             try:
-                exit_code, payload = runner._run_locked(
+                exit_code, payload = run_loop.run_locked(
                     args=args,
                     cwd=self.repo_root,
                     timeout=None,

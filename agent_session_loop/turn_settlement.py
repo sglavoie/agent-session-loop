@@ -43,9 +43,10 @@ commit group, the published turn record, and the review cycle's own events.
 Every pause goes through ``ctx.pause`` and every state write through the run's
 persistence seam.
 
-Nothing here imports the runner. ``RunContext`` is still runner-resident until
-Session 37 moves it, so it enters as the structural :class:`RunContext` Protocol
-below, naming only the members this pass reaches. ``run_controls`` is a
+Nothing here imports the runner, and since Session 37 it does not import
+``run_loop``, which owns ``RunContext``, either: the context enters as the
+structural :class:`RunContext` Protocol below, naming only the members this
+pass reaches. ``run_controls`` is a
 parameter rather than a context member for the reason ``run_completion`` already
 states: it is ``RunControlListener | None`` on the dataclass and mypy narrows it
 inside the loop, and that narrowing does not travel across a call. The commit

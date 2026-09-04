@@ -28,13 +28,16 @@ event and re-written result artifact for a retry, and the mailbox wait's own
 lifecycle. Every pause is recorded by ``run_termination`` through ``ctx.pause``,
 and every write goes through the run's persistence seam.
 
-Nothing here imports the runner. ``RunContext`` is still runner-resident until
-Session 37 moves it, so it enters as the structural :class:`RunContext` Protocol
-below, naming only the members these branches reach. The three mailbox wait
+Nothing here imports the runner, and since Session 37 it does not import
+``run_loop``, which owns ``RunContext``, either: the context enters as the
+structural :class:`RunContext` Protocol below, naming only the members these
+branches reach. The three mailbox wait
 functions enter as callbacks rather than being called on ``run_coordination``
 directly, for the reason ``MailboxWaitCoordinator`` already states: callers
-patch those names on the runner to assert a wait was or was not entered, and a
-branch that reached past the alias would silently ignore the patch.
+patch them to assert a wait was or was not entered. Session 37 repointed those
+patches from the runner's retired aliases to ``run_coordination`` itself, which
+is where the loop now resolves them; a branch that imported them here instead
+would bind them once and silently ignore the patch.
 
 Each of the three branches the loop can survive returns ``None`` when it ended
 the run and a continuation object when it did not, rather than performing the

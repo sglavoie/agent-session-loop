@@ -28,9 +28,10 @@ review turn projects. Every other write here belongs to the guard that makes it
 run's persistence seam -- and every refusal is recorded by ``run_termination``
 through ``ctx.pause``.
 
-Nothing here imports the runner. ``RunContext`` is still runner-resident until
-Session 37 moves it, so it enters as the structural :class:`RunContext` Protocol
-below, naming only the members this sequence reaches.
+Nothing here imports the runner, and since Session 37 it does not import
+``run_loop``, which owns ``RunContext``, either: the context enters as the
+structural :class:`RunContext` Protocol below, naming only the members this
+sequence reaches.
 
 The step hands back a frozen :class:`PostTurnGuards` rather than performing the
 loop's ``break``: the three refusal paths this replaced each ended in one, and a

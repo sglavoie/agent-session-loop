@@ -37,6 +37,7 @@ from agent_session_loop import (
     review_guard,
     review_repair,
     run_commit,
+    run_loop,
     run_persistence,
     run_reporting,
     run_selection,
@@ -49,6 +50,7 @@ from agent_session_loop import (
     turn_preflight,
     turn_preparation,
     turn_settlement,
+    verification,
 )
 from agent_session_loop import verification as verification_module
 from tests.support import (
@@ -104,7 +106,7 @@ COMMIT_ARTIFACT_KEYS = ("stdout", "stderr", "result")
 #: guard is located by search and ordered by where the loop reaches its owner,
 #: which keeps the contract intact as the extraction keeps carving the loop up.
 TURN_PATH_MODULES = (
-    runner,
+    run_loop,
     turn_preparation,
     turn_preflight,
     turn_postflight,
@@ -137,12 +139,12 @@ def _call_lines(node: ast.AST, name: str) -> list[int]:
 def _turn_finished_emitters() -> set[str]:
     """Names of the functions that mention the turn_finished event.
 
-    Both the runner and the turn-execution boundary are scanned: the emitter
+    Both the run loop and the turn-execution boundary are scanned: the emitter
     moved behind the boundary, and the invariant is that it stayed singular
     across the split rather than gaining a second copy in the run loop.
     """
     emitters: set[str] = set()
-    for scanned in (runner, turn_execution):
+    for scanned in (run_loop, turn_execution):
         source = Path(inspect.getsourcefile(scanned) or "").read_text("utf-8")
         for node in ast.walk(ast.parse(source)):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -269,10 +271,10 @@ class TurnCommitSourceTests(unittest.TestCase):
 class RunLoopGuardOrderTests(unittest.TestCase):
     """Nothing is committed before every guard that could refuse it has run.
 
-    The guards no longer all live in ``_run_locked``: the post-execution
+    The guards no longer all live in ``run_locked``: the post-execution
     sequence moved into ``turn_postflight``, and the turn-start captures into
     ``turn_preflight``. So each guard is ordered by the pair of the line in
-    ``_run_locked`` where the loop reaches its owner and the line inside that
+    ``run_locked`` where the loop reaches its owner and the line inside that
     owner, with a guard the loop still performs itself sorting as ``(its own
     line, -1)``. Owners are discovered rather than listed, so a guard that moves
     into a new turn-path module rejoins this contract by being called from the
@@ -284,7 +286,7 @@ class RunLoopGuardOrderTests(unittest.TestCase):
             module.__name__.rsplit(".", 1)[-1]: _module_tree(module)
             for module in TURN_PATH_MODULES
         }
-        self.run_locked = self._function("_run_locked", self.trees["runner"])
+        self.run_locked = self._function("run_locked", self.trees["run_loop"])
         self.entry_points = self._entry_points()
 
     def _function(self, name: str, tree: ast.AST) -> ast.FunctionDef:
@@ -299,7 +301,7 @@ class RunLoopGuardOrderTests(unittest.TestCase):
     def _entry_points(self) -> dict[str, tuple[int, ast.FunctionDef]]:
         reached: dict[str, tuple[int, ast.FunctionDef]] = {}
         for module_name, tree in self.trees.items():
-            if module_name == "runner":
+            if module_name == "run_loop":
                 continue
             for node in ast.iter_child_nodes(tree):
                 if not isinstance(node, ast.FunctionDef):
@@ -467,7 +469,7 @@ class TurnCommitRunTests(unittest.TestCase):
         )
         lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
         try:
-            return runner._run_locked(
+            return run_loop.run_locked(
                 args=args,
                 cwd=self.workspace_root,
                 timeout=None,
@@ -523,7 +525,7 @@ class TurnCommitRunTests(unittest.TestCase):
 
     def _run_accepted(self) -> dict[str, Any]:
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=self._harness(writes="SVC:README.md", declares="SVC:README.md"),
         ):
@@ -605,7 +607,7 @@ class TurnCommitRunTests(unittest.TestCase):
         with (
             mock.patch.dict(os.environ, env),
             mock.patch.object(
-                runner.harnesses,
+                harnesses,
                 "run_harness",
                 side_effect=self._harness(
                     writes="SVC:repair.txt", declares="SVC:repair.txt"
@@ -1040,7 +1042,7 @@ class TurnCommitRunTests(unittest.TestCase):
 
         with (
             mock.patch.dict(os.environ, env),
-            mock.patch.object(runner.harnesses, "run_harness", side_effect=run),
+            mock.patch.object(harnesses, "run_harness", side_effect=run),
         ):
             exit_code, payload = self._invoke("ignored-evidence-commit")
 
@@ -1086,7 +1088,7 @@ class TurnCommitRunTests(unittest.TestCase):
 
     def test_scope_violation_is_rejected_and_reopened_without_acceptance(self) -> None:
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=self._harness(writes="OAK:README.md", declares="(none)"),
         ):
@@ -1120,14 +1122,14 @@ class TurnCommitRunTests(unittest.TestCase):
     def test_unverifiable_turn_is_rejected_and_reopened(self) -> None:
         with (
             mock.patch.object(
-                runner.harnesses,
+                harnesses,
                 "run_harness",
                 side_effect=self._harness(
                     writes="SVC:README.md", declares="SVC:README.md"
                 ),
             ),
             mock.patch.object(
-                runner.verification,
+                verification,
                 "run_verification",
                 side_effect=OSError("verifier unavailable"),
             ),
@@ -1153,7 +1155,7 @@ class TurnCommitRunTests(unittest.TestCase):
         )
         with (
             mock.patch.object(
-                runner.harnesses,
+                harnesses,
                 "run_harness",
                 side_effect=self._harness(
                     writes="SVC:README.md", declares="SVC:README.md"
@@ -1179,7 +1181,7 @@ class TurnCommitRunTests(unittest.TestCase):
                 name="codex", argv=["fake"], returncode=0, stdout="", stderr=""
             )
 
-        with mock.patch.object(runner.harnesses, "run_harness", side_effect=idle):
+        with mock.patch.object(harnesses, "run_harness", side_effect=idle):
             exit_code, payload = self._invoke("idle-run")
 
         self.assertNotEqual(0, exit_code)
@@ -1358,11 +1360,9 @@ class CommitFailureSoftFailTests(unittest.TestCase):
         try:
             with (
                 mock.patch.dict(os.environ, env),
-                mock.patch.object(
-                    runner.harnesses, "run_harness", side_effect=self._harness
-                ),
+                mock.patch.object(harnesses, "run_harness", side_effect=self._harness),
             ):
-                exit_code, payload = runner._run_locked(
+                exit_code, payload = run_loop.run_locked(
                     args=args,
                     cwd=self.workspace_root,
                     timeout=None,

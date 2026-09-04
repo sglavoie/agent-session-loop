@@ -43,8 +43,8 @@ from agent_session_loop import (
     plans,
     qna,
     review_guard,
+    run_loop,
     run_prompts,
-    runner,
     task_packet,
     turn_preparation,
 )
@@ -287,26 +287,26 @@ class PreparationBoundaryTests(unittest.TestCase):
             if not name.startswith("_")
         }
         self.assertTrue(declared)
-        fields = {field.name for field in dataclasses.fields(runner.RunContext)}
+        fields = {field.name for field in dataclasses.fields(run_loop.RunContext)}
         for name in sorted(declared):
             with self.subTest(member=name):
                 self.assertTrue(
-                    name in fields or hasattr(runner.RunContext, name),
+                    name in fields or hasattr(run_loop.RunContext, name),
                     f"turn_preparation.RunContext declares {name!r}, which the "
                     "run loop's own context does not provide",
                 )
 
 
-class RunnerDelegationTests(unittest.TestCase):
-    """The runner reaches this boundary and keeps none of its work."""
+class RunLoopDelegationTests(unittest.TestCase):
+    """The run loop reaches this boundary and keeps none of its work."""
 
-    def runner_source(self) -> str:
-        return Path(runner.__file__).read_text(encoding="utf-8")
+    def loop_source(self) -> str:
+        return Path(run_loop.__file__ or "").read_text(encoding="utf-8")
 
     def test_the_loop_reaches_exactly_the_five_entry_points(self) -> None:
         calls = {
             ast.unparse(node.func)
-            for node in ast.walk(ast.parse(self.runner_source()))
+            for node in ast.walk(ast.parse(self.loop_source()))
             if isinstance(node, ast.Call)
             and ast.unparse(node.func).startswith("turn_preparation.")
         }
@@ -324,7 +324,7 @@ class RunnerDelegationTests(unittest.TestCase):
         }
         calls = {
             ast.unparse(node.func)
-            for node in ast.walk(ast.parse(self.runner_source()))
+            for node in ast.walk(ast.parse(self.loop_source()))
             if isinstance(node, ast.Call)
         }
         self.assertEqual(

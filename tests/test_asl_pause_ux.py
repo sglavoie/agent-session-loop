@@ -32,6 +32,7 @@ from agent_session_loop import (
     runner,
     state,
     task_packet,
+    turn_execution,
 )
 from tests.support import (
     init_git_repo,
@@ -1141,7 +1142,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=fake_run_harness
+                harnesses, "run_harness", side_effect=fake_run_harness
             ):
                 out, err = io.StringIO(), io.StringIO()
                 with redirect_stdout(out), redirect_stderr(err):
@@ -1251,7 +1252,7 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=fake_run_harness
+                harnesses, "run_harness", side_effect=fake_run_harness
             ):
                 out, err = io.StringIO(), io.StringIO()
                 with redirect_stdout(out), redirect_stderr(err):
@@ -1341,9 +1342,11 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
 
             with (
-                mock.patch.object(runner, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02),
                 mock.patch.object(
-                    runner.harnesses, "run_harness", side_effect=fake_run_harness
+                    turn_execution, "LIVE_CONTROL_POLL_INTERVAL_SECONDS", 0.02
+                ),
+                mock.patch.object(
+                    harnesses, "run_harness", side_effect=fake_run_harness
                 ),
             ):
                 out, err = io.StringIO(), io.StringIO()

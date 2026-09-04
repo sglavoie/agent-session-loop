@@ -38,11 +38,13 @@ every producer that can find the path finds this process holding the read end.
 The run state, the events and the turn records all belong to the locked run;
 this module hands them a lock and reads back an exit code and a payload.
 
-Nothing here imports the runner. ``_run_locked`` is still runner-resident until
-sessions 30-37 move it, so it enters :func:`run_from_args` as a required
-keyword-only :class:`LockedRun` seam that ``runner.run_from_args`` supplies —
-the ``CoordinationPersistence``/``WaitNotifier`` pattern, applied to the one
-edge this extraction cannot yet resolve to an owner. Every other collaborator
+Nothing here imports the runner, and nothing here imports the loop either.
+``run_locked`` lives in ``run_loop`` since session 37, and it still enters
+:func:`run_from_args` as a required keyword-only :class:`LockedRun` seam that
+``runner.run_from_args`` supplies — the ``CoordinationPersistence``/
+``WaitNotifier`` pattern, kept after the move because a direct import here
+would put the admission gate and the run it admits back in one cycle. Every
+other collaborator
 is read at its true owner: admission at ``run_inputs``, the review-guard
 allowlist at ``review_guard``, the reply at ``run_prompts``, the final emission
 and the error payload at ``run_outcome``, the flag spec at ``run_flags``, the
@@ -115,7 +117,7 @@ class LockedRun(Protocol):
     """The locked run, as the entry point needs it.
 
     Declared structurally rather than imported so this module never depends on
-    the runner that still owns ``_run_locked``. The caller has already taken
+    ``run_loop``, which owns ``run_locked``. The caller has already taken
     the plan's lock and opened the wakeup endpoint before this is invoked, and
     it returns the run's exit code paired with the payload the final emission
     prints; it never emits that payload itself.

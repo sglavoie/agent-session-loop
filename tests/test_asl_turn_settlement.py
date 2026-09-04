@@ -50,8 +50,8 @@ from agent_session_loop import (
     review_cycle,
     run_coordination,
     run_inputs,
+    run_loop,
     run_selection,
-    runner,
     session_verification,
     turn_execution,
     turn_settlement,
@@ -365,7 +365,7 @@ class BoundaryTests(unittest.TestCase):
         )
 
     def test_the_context_protocol_matches_the_runner_s_own_context(self) -> None:
-        fields = {field.name for field in dataclasses.fields(runner.RunContext)}
+        fields = {field.name for field in dataclasses.fields(run_loop.RunContext)}
         members = set(turn_settlement.RunContext.__annotations__) | {
             "run_id",
             "run_dir",
@@ -385,11 +385,11 @@ class BoundaryTests(unittest.TestCase):
                 self.assertIn(name, fields)
 
 
-class RunnerDelegationTests(unittest.TestCase):
-    """The runner reaches this boundary and keeps none of the settlement."""
+class RunLoopDelegationTests(unittest.TestCase):
+    """The run loop reaches this boundary and keeps none of the settlement."""
 
-    def runner_tree(self) -> ast.Module:
-        source = Path(runner.__file__ or "").read_text(encoding="utf-8")
+    def loop_tree(self) -> ast.Module:
+        source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
         return ast.parse(source)
 
     def calls_in(self, root: ast.AST) -> set[str]:
@@ -404,7 +404,7 @@ class RunnerDelegationTests(unittest.TestCase):
         # body reads the turn's terminating disposition.
         loops = [
             node
-            for node in ast.walk(self.runner_tree())
+            for node in ast.walk(self.loop_tree())
             if isinstance(node, ast.While)
             and any(
                 isinstance(name, ast.Name) and name.id == "terminating_disposition"
@@ -418,7 +418,7 @@ class RunnerDelegationTests(unittest.TestCase):
     def test_the_loop_reaches_exactly_the_declared_entry_points(self) -> None:
         reached = {
             name
-            for name in self.calls_in(self.runner_tree())
+            for name in self.calls_in(self.loop_tree())
             if name.startswith("turn_settlement.")
         }
         self.assertEqual(set(ENTRY_POINTS), reached)

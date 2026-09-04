@@ -32,6 +32,7 @@ from agent_session_loop import (
     mailbox,
     plans,
     qna,
+    run_coordination,
     run_persistence,
     run_prompts,
     runner,
@@ -358,7 +359,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             args = self._build_args(plan_dir, state_dir, reply="use 1a", cwd=tmp_dir)
 
             with mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=fake_run_harness
+                harnesses, "run_harness", side_effect=fake_run_harness
             ) as patched:
                 code, out, _err = self._run_capture(args)
 
@@ -563,7 +564,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, env),
                 mock.patch.object(
-                    runner.harnesses,
+                    harnesses,
                     "run_harness",
                     side_effect=fake_run_harness,
                 ),
@@ -680,7 +681,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, env),
                 mock.patch.object(
-                    runner.harnesses,
+                    harnesses,
                     "run_harness",
                     side_effect=fake_run_harness,
                 ),
@@ -810,7 +811,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, env),
                 mock.patch.object(
-                    runner.harnesses,
+                    harnesses,
                     "run_harness",
                     side_effect=fake_run_harness,
                 ),
@@ -989,7 +990,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, env),
                 mock.patch.object(
-                    runner.harnesses,
+                    harnesses,
                     "run_harness",
                     side_effect=fake_run_harness,
                 ),
@@ -1139,7 +1140,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, env),
                 mock.patch.object(
-                    runner.harnesses,
+                    harnesses,
                     "run_harness",
                     side_effect=fake_run_harness,
                 ),
@@ -1257,13 +1258,13 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             )
             with (
                 mock.patch.object(
-                    runner.harnesses,
+                    harnesses,
                     "run_harness",
                     side_effect=fake_run_harness,
                 ),
                 mock.patch.object(
-                    runner,
-                    "_prepare_mailbox_reply_wait",
+                    run_coordination,
+                    "prepare_mailbox_reply_wait",
                     side_effect=AssertionError(
                         "a correlated worker pause must not publish a second question"
                     ),
@@ -1440,13 +1441,13 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             )
             with (
                 mock.patch.object(
-                    runner.harnesses,
+                    harnesses,
                     "run_harness",
                     side_effect=fake_run_harness,
                 ),
                 mock.patch.object(
-                    runner,
-                    "_wait_for_mailbox_reply",
+                    run_coordination,
+                    "wait_for_mailbox_reply",
                     side_effect=AssertionError(
                         "mailbox wait entered without a fresh lease"
                     ),
@@ -3547,7 +3548,7 @@ class RunReplyResumeFlowTests(unittest.TestCase):
                 cwd=tmp_dir,
             )
             with mock.patch.object(
-                runner.harnesses,
+                harnesses,
                 "run_harness",
                 side_effect=fake_run_harness,
             ):
@@ -4019,7 +4020,7 @@ class RunResumeConfigTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             if stdin_text is not None:
                 stack.enter_context(
-                    mock.patch.object(runner.sys, "stdin", io.StringIO(stdin_text))
+                    mock.patch.object(sys, "stdin", io.StringIO(stdin_text))
                 )
             stack.enter_context(redirect_stdout(out))
             stack.enter_context(redirect_stderr(err))
@@ -4299,7 +4300,7 @@ class RunResumeConfigTests(unittest.TestCase):
             out, err = io.StringIO(), io.StringIO()
             with (
                 mock.patch.object(
-                    runner.harnesses, "run_harness", side_effect=fake_run_harness
+                    harnesses, "run_harness", side_effect=fake_run_harness
                 ),
                 redirect_stdout(out),
                 redirect_stderr(err),
@@ -4366,7 +4367,7 @@ class RunReplyStdinFlowTests(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         fake_stdin = io.StringIO(stdin_text)
         with (
-            mock.patch.object(runner.sys, "stdin", fake_stdin),
+            mock.patch.object(sys, "stdin", fake_stdin),
             redirect_stdout(out),
             redirect_stderr(err),
         ):
@@ -4526,7 +4527,7 @@ class RunReplyStdinFlowTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=fake_run_harness
+                harnesses, "run_harness", side_effect=fake_run_harness
             ) as patched:
                 code, out, _err = self._run_with_stdin(args, reply_text)
 

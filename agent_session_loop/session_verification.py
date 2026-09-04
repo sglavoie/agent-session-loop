@@ -5,7 +5,7 @@ is trustworthy until this boundary has run the session's own ``Verify`` recipe â
 or, for a review session, adjudicated the verdict it produced â€” and only a claim
 that survives here is allowed to reach the progress journal, the derived status
 ledgers, and the commit. That is the whole reason this is a boundary rather than
-two stretches of ``_run_locked``: the loop decides *when* to gate, and this
+two stretches of ``run_locked``: the loop decides *when* to gate, and this
 module decides *whether the turn stands* and performs the identical durable
 bookkeeping either way.
 

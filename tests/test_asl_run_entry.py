@@ -22,7 +22,7 @@ Four contracts:
   `skills/asl/scripts/asl_autopilot.py` call it by name. The shim's whole job is
   to supply the one collaborator this module may not import.
 * The seam contract -- `run_locked` is required and keyword-only, and
-  `runner._run_locked` satisfies the `LockedRun` shape. It is required rather
+  `run_loop.run_locked` satisfies the `LockedRun` shape. It is required rather
   than defaulted because it is called only once the plan's lock is held, and a
   default would let a caller start a run this module cannot finish.
 * The admission contract -- the ordered gate: a refusal before the lock never
@@ -56,6 +56,7 @@ from agent_session_loop import (
     events,
     run_entry,
     run_flags,
+    run_loop,
     runner,
     state,
 )
@@ -266,7 +267,7 @@ class DelegationContractTests(unittest.TestCase):
         self.assertEqual("run_entry", call.func.value.id)  # type: ignore[union-attr]
         seam = {keyword.arg: keyword.value for keyword in call.keywords}  # type: ignore[union-attr]
         self.assertEqual({"run_argv", "run_locked"}, set(seam))
-        self.assertEqual("_run_locked", seam["run_locked"].id)  # type: ignore[union-attr]
+        self.assertEqual("run_loop.run_locked", ast.unparse(seam["run_locked"]))
 
 
 class LockedRunSeamTests(unittest.TestCase):
@@ -279,7 +280,7 @@ class LockedRunSeamTests(unittest.TestCase):
 
     def test_the_runners_locked_run_satisfies_the_declared_shape(self) -> None:
         declared = inspect.signature(run_entry.LockedRun.__call__).parameters
-        actual = inspect.signature(runner._run_locked).parameters
+        actual = inspect.signature(run_loop.run_locked).parameters
         expected = {name for name in declared if name != "self"}
         self.assertTrue(expected)
         for name in expected:

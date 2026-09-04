@@ -21,6 +21,7 @@ from agent_session_loop import (
     review_continuation,
     review_session_body,
     review_session_contract,
+    run_loop,
     run_persistence,
     run_termination,
     runner,
@@ -80,7 +81,7 @@ class TurnFinalizationShapeTests(unittest.TestCase):
         # so the two calls no longer sit in one function. The claim is the
         # same: the loop finalizes execution before it reaches the boundary
         # that publishes, and that boundary is where the publication lives.
-        loop = inspect.getsource(runner._run_locked)
+        loop = inspect.getsource(run_loop.run_locked)
         finalize = loop.index("turn_executor.finalize(")
         settle = loop.index("turn_settlement.settle_turn(")
         self.assertLess(finalize, settle)

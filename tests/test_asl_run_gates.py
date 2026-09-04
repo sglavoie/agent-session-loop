@@ -44,6 +44,7 @@ from agent_session_loop import (
     review_session_contract,
     run_entry,
     run_inputs,
+    run_loop,
     runner,
     session_overview,
     session_verification,
@@ -1377,7 +1378,7 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
     )
 
     # Every edge inside one of these — including a return — belongs to that
-    # callable rather than to _run_locked.
+    # callable rather than to run_locked.
     INNER_CALLABLES = (
         ast.FunctionDef,
         ast.AsyncFunctionDef,
@@ -1385,7 +1386,7 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
     )
 
     def setUp(self) -> None:
-        self.source = Path(runner.__file__).read_text(encoding="utf-8")
+        self.source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
         self.tree = ast.parse(self.source)
         # The dispatch lives in the runner; the disposition it dispatches on
         # moved to `handoff_guards`, so the two are read from separate trees
@@ -1641,7 +1642,7 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
     ) -> list[ast.Break | ast.Continue | ast.Return]:
         """Every edge under ``node`` that ends or relaunches the current turn.
 
-        A return leaves ``_run_locked`` outright, so it ends the turn from
+        A return leaves ``run_locked`` outright, so it ends the turn from
         inside a nested loop just as a top-level one does; only a nested
         callable takes ownership of it. A break or continue is claimed by the
         nearest enclosing loop instead, which for a nested loop's else suite is
@@ -1811,7 +1812,7 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
                     edge.lineno,
                     propagated,
                     f"a {type(edge).__name__.lower()} at agent_session_loop/"
-                    f"runner.py:{edge.lineno} ends or relaunches the turn "
+                    f"run_loop.py:{edge.lineno} ends or relaunches the turn "
                     "inside the delegation that runs the plan-artifact guard, "
                     f"without being the refusal {site.result_name} reports",
                 )
@@ -1825,7 +1826,7 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
                 continue
             self.fail(
                 f"a {type(edge).__name__.lower()} at agent_session_loop/"
-                f"runner.py:{edge.lineno} ends or relaunches the turn between "
+                f"run_loop.py:{edge.lineno} ends or relaunches the turn between "
                 "the plan-artifact guard and the status guards without being "
                 "selected by terminating_disposition; the guard is gated on a "
                 "disposition this edge does not have, so a turn that tampered "
@@ -2508,7 +2509,7 @@ class LegacyImplementationGuardTests(unittest.TestCase):
     def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
         lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
         try:
-            return runner._run_locked(
+            return run_loop.run_locked(
                 args=self._args(),
                 cwd=self.repo_root,
                 timeout=None,
@@ -2552,7 +2553,7 @@ class LegacyImplementationGuardTests(unittest.TestCase):
             return self._mark_complete()
 
         with mock.patch.object(
-            runner.harnesses, "run_harness", side_effect=commit_then_complete
+            harnesses, "run_harness", side_effect=commit_then_complete
         ):
             exit_code, payload = self._invoke("legacy-worker-commit")
 
@@ -2611,7 +2612,7 @@ class LegacyImplementationGuardTests(unittest.TestCase):
             return self._mark_complete()
 
         with mock.patch.object(
-            runner.harnesses, "run_harness", side_effect=rewrite_then_complete
+            harnesses, "run_harness", side_effect=rewrite_then_complete
         ):
             exit_code, payload = self._invoke("legacy-history-rewrite")
 
@@ -2645,9 +2646,7 @@ class LegacyImplementationGuardTests(unittest.TestCase):
                 last_message=f"Done. I edited {other_root / 'README.md'}.\n",
             )
 
-        with mock.patch.object(
-            runner.harnesses, "run_harness", side_effect=edit_elsewhere
-        ):
+        with mock.patch.object(harnesses, "run_harness", side_effect=edit_elsewhere):
             exit_code, payload = self._invoke("legacy-unobserved-repository")
 
         self.assertEqual(1, exit_code)
@@ -2673,7 +2672,7 @@ class LegacyImplementationGuardTests(unittest.TestCase):
         shutil.rmtree(self.repo_root / ".git")
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=AssertionError("harness must not start without Git scope"),
         ):
@@ -2883,7 +2882,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
     def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
         lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
         try:
-            return runner._run_locked(
+            return run_loop.run_locked(
                 args=self._args(),
                 cwd=self.cwd,
                 timeout=None,
@@ -2913,7 +2912,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
         )
 
     def _run_with(self, run_id: str, turn: Any) -> tuple[int, dict[str, Any]]:
-        with mock.patch.object(runner.harnesses, "run_harness", side_effect=turn):
+        with mock.patch.object(harnesses, "run_harness", side_effect=turn):
             return self._invoke(run_id)
 
     def test_a_changed_protected_path_rejects_the_turn_and_keeps_the_change(
@@ -3083,9 +3082,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             raise RuntimeError("synthetic harness crash")
 
         with (
-            mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=edit_then_raise
-            ),
+            mock.patch.object(harnesses, "run_harness", side_effect=edit_then_raise),
             self.assertRaisesRegex(RuntimeError, "synthetic harness crash"),
         ):
             self._invoke(run_id)
@@ -3128,9 +3125,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             raise RuntimeError("synthetic review crash")
 
         with (
-            mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=edit_then_raise
-            ),
+            mock.patch.object(harnesses, "run_harness", side_effect=edit_then_raise),
             self.assertRaisesRegex(RuntimeError, "synthetic review crash"),
         ):
             self._invoke(run_id)
@@ -3187,9 +3182,7 @@ class ProtectedPathGuardRunTests(unittest.TestCase):
             raise repository_evidence.RepositoryEvidenceError("git is gone")
 
         with (
-            mock.patch.object(
-                runner.harnesses, "run_harness", side_effect=edit_then_raise
-            ),
+            mock.patch.object(harnesses, "run_harness", side_effect=edit_then_raise),
             mock.patch.object(
                 review_guard,
                 "_capture_review_repo_fingerprint",
@@ -3277,7 +3270,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
     def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
         lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
         try:
-            return runner._run_locked(
+            return run_loop.run_locked(
                 args=self._args(),
                 cwd=self.workspace_root,
                 timeout=None,
@@ -3330,7 +3323,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.harnesses,
+                harnesses,
                 "run_harness",
                 side_effect=mutate_then_raise,
             ),
@@ -3361,7 +3354,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
         self.assertIn("snapshot_before", guard)
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=AssertionError("rerun must stop before the harness"),
         ):
@@ -3385,7 +3378,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             return self._completed_harness_result(*args, **kwargs)
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=mutate_sibling,
         ):
@@ -3410,7 +3403,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             return self._completed_harness_result(*args, **kwargs)
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=remove_then_complete,
         ):
@@ -3447,7 +3440,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             return self._completed_harness_result(*args, **kwargs)
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=swap_then_complete,
         ):
@@ -3476,7 +3469,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.harnesses,
+                harnesses,
                 "run_harness",
                 side_effect=self._completed_harness_result,
             ),
@@ -3508,7 +3501,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                runner.harnesses,
+                harnesses,
                 "run_harness",
                 side_effect=self._completed_harness_result,
             ),
@@ -3596,7 +3589,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             )
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=complete_session,
         ):
@@ -3619,7 +3612,7 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
         reached.clear()
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=complete_session,
         ):
@@ -3870,7 +3863,7 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
     # search and ordered by where the loop reaches its owner, which keeps the
     # contract intact as the extraction keeps carving the loop up.
     TURN_PATH_MODULES = (
-        runner,
+        run_loop,
         turn_preparation,
         turn_preflight,
         turn_postflight,
@@ -3884,9 +3877,9 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
             )
             for module in self.TURN_PATH_MODULES
         }
-        self.tree = self.trees["runner"]
+        self.tree = self.trees["run_loop"]
         self.preparation_tree = self.trees["turn_preparation"]
-        self.run_locked = self._function("_run_locked")
+        self.run_locked = self._function("run_locked")
         self.entry_points = self._entry_points()
         self.resume_repair = self._function(
             "resume_repair_session", tree=self.preparation_tree
@@ -3904,7 +3897,7 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
         """
         reached: dict[str, tuple[int, ast.FunctionDef]] = {}
         for module_name, tree in self.trees.items():
-            if module_name == "runner":
+            if module_name == "run_loop":
                 continue
             for node in ast.iter_child_nodes(tree):
                 if not isinstance(node, ast.FunctionDef):
@@ -4069,7 +4062,7 @@ class RepairScopeRegenerationOrderSourceTests(unittest.TestCase):
 class _GeneratedRepairDispatchFixture(unittest.TestCase):
     """A completed multi-repository review whose repair children can be run.
 
-    Both dispatch gates only exist inside a real ``_run_locked`` turn, so these
+    Both dispatch gates only exist inside a real ``run_locked`` turn, so these
     tests build the whole artifact chain -- registry, final review artifact,
     materialized children -- and drive the runner rather than the helpers.
     """
@@ -4221,9 +4214,9 @@ class _GeneratedRepairDispatchFixture(unittest.TestCase):
         try:
             with (
                 patched_env(**self.commit_env),
-                mock.patch.object(runner.harnesses, "run_harness", side_effect=harness),
+                mock.patch.object(harnesses, "run_harness", side_effect=harness),
             ):
-                return runner._run_locked(
+                return run_loop.run_locked(
                     args=args,
                     cwd=self.workspace_root,
                     timeout=None,
@@ -4776,7 +4769,7 @@ class RunRepositoryContentionGateTests(unittest.TestCase):
         with (
             patched_env(XDG_CONFIG_HOME=str(self.config_home)),
             mock.patch.object(
-                runner.harnesses,
+                harnesses,
                 "run_harness",
                 side_effect=harness_side_effect,
             ),
@@ -4860,7 +4853,7 @@ class RunRepositoryContentionGateTests(unittest.TestCase):
 
 
 class RunVerificationInterruptTests(unittest.TestCase):
-    """Direct ``_run_locked`` invocation tests covering KeyboardInterrupt
+    """Direct ``run_locked`` invocation tests covering KeyboardInterrupt
     handling for the post-turn verification phase and the outer session loop.
 
     These exercise the cleanup contract: any KeyboardInterrupt raised after a
@@ -4919,7 +4912,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
         with patched_env(**env_updates):
             lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
             try:
-                exit_code, payload = runner._run_locked(
+                exit_code, payload = run_loop.run_locked(
                     args=args,
                     cwd=self.repo_root,
                     timeout=None,
@@ -4945,7 +4938,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
             raise KeyboardInterrupt
 
         with mock.patch.object(
-            runner.verification,
+            verification,
             "run_verification",
             side_effect=raise_keyboard_interrupt,
         ):
@@ -4993,7 +4986,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
     def test_keyboard_interrupt_after_turn_finished_pauses_cleanly(
         self,
     ) -> None:
-        """Cover the outer ``_run_locked`` KeyboardInterrupt wrapper.
+        """Cover the outer ``run_locked`` KeyboardInterrupt wrapper.
 
         When a KeyboardInterrupt escapes the post-turn bookkeeping helpers
         (here, ``_append_progress_entry``), the outer ``try/except`` must call
@@ -5050,7 +5043,7 @@ class RunVerificationInterruptTests(unittest.TestCase):
 class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
     """End-to-end coverage for the full post-turn verification lifecycle.
 
-    Drives ``_run_locked`` directly with a synthetic long-running verification
+    Drives ``run_locked`` directly with a synthetic long-running verification
     command and a shortened heartbeat interval so at least one
     ``verification_heartbeat`` event fires inside the check window. Also locks
     in the documented post-turn event ordering: ``turn_finished`` precedes the
@@ -5111,7 +5104,7 @@ class LongVerificationHeartbeatIntegrationTests(unittest.TestCase):
         with patched_env(**env_updates):
             lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
             try:
-                exit_code, payload = runner._run_locked(
+                exit_code, payload = run_loop.run_locked(
                     args=args,
                     cwd=self.repo_root,
                     timeout=None,
@@ -5669,7 +5662,7 @@ class HandoffCorrectionTests(unittest.TestCase):
     def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
         lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
         try:
-            return runner._run_locked(
+            return run_loop.run_locked(
                 args=self._args(),
                 cwd=self.workspace_root,
                 timeout=None,
@@ -5726,7 +5719,7 @@ class HandoffCorrectionTests(unittest.TestCase):
 
     def test_unqualified_entry_is_corrected_within_one_extra_turn(self) -> None:
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=self._harness("README.md", "SVC:README.md"),
         ):
@@ -5752,7 +5745,7 @@ class HandoffCorrectionTests(unittest.TestCase):
 
     def test_execution_event_precedes_each_accepted_turn(self) -> None:
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=self._harness("README.md", "SVC:README.md"),
         ):
@@ -5784,7 +5777,7 @@ class HandoffCorrectionTests(unittest.TestCase):
 
     def test_repeated_defect_exhausts_the_correction_and_pauses(self) -> None:
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=self._harness("README.md", "README.md"),
         ):
@@ -5808,7 +5801,7 @@ class HandoffCorrectionTests(unittest.TestCase):
 
     def test_scope_violation_is_not_treated_as_a_correctable_defect(self) -> None:
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=self._harness("OAK:README.md"),
         ) as run_harness:
@@ -5823,7 +5816,7 @@ class HandoffCorrectionTests(unittest.TestCase):
 
     def test_uninspectable_completed_handoff_is_reopened_as_repairable(self) -> None:
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=self._harness("OAK:README.md"),
         ):
@@ -5878,7 +5871,7 @@ class HandoffCorrectionTests(unittest.TestCase):
         digest = review.final_review_artifact_sha256(self.plan_dir)
 
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=self._harness("README.md", "SVC:README.md"),
         ):
@@ -5926,7 +5919,7 @@ class PausedHandoffStatusTests(unittest.TestCase):
     def _invoke(self, run_id: str) -> tuple[int, dict[str, Any]]:
         lock_info = state.acquire_lock(self.plan_dir, self.state_dir)
         try:
-            return runner._run_locked(
+            return run_loop.run_locked(
                 args=self._args(),
                 cwd=self.repo_root,
                 timeout=None,
@@ -5970,7 +5963,7 @@ class PausedHandoffStatusTests(unittest.TestCase):
 
     def test_structured_pause_outranks_a_paused_handoff_status(self) -> None:
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=self._harness(
                 "paused",
@@ -6011,7 +6004,7 @@ class PausedHandoffStatusTests(unittest.TestCase):
 
     def test_unstructured_pause_leaves_an_invalid_status_terminal(self) -> None:
         with mock.patch.object(
-            runner.harnesses,
+            harnesses,
             "run_harness",
             side_effect=self._harness(
                 "paused",

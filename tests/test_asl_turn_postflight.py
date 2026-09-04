@@ -43,7 +43,7 @@ from agent_session_loop import (
     handoff_guards,
     harnesses,
     plans,
-    runner,
+    run_loop,
     turn_postflight,
     workspace_evidence,
     write_guards,
@@ -349,26 +349,26 @@ class PostflightBoundaryTests(unittest.TestCase):
             if not name.startswith("_")
         }
         self.assertTrue(declared)
-        fields = {field.name for field in dataclasses.fields(runner.RunContext)}
+        fields = {field.name for field in dataclasses.fields(run_loop.RunContext)}
         for name in sorted(declared):
             with self.subTest(member=name):
                 self.assertTrue(
-                    name in fields or hasattr(runner.RunContext, name),
+                    name in fields or hasattr(run_loop.RunContext, name),
                     f"turn_postflight.RunContext declares {name!r}, which the "
                     "run loop's own context does not provide",
                 )
 
 
-class RunnerDelegationTests(unittest.TestCase):
-    """The runner reaches this boundary and keeps none of its sequencing."""
+class RunLoopDelegationTests(unittest.TestCase):
+    """The run loop reaches this boundary and keeps none of its sequencing."""
 
-    def runner_source(self) -> str:
-        return Path(runner.__file__).read_text(encoding="utf-8")
+    def loop_source(self) -> str:
+        return Path(run_loop.__file__ or "").read_text(encoding="utf-8")
 
     def test_the_loop_reaches_exactly_the_one_entry_point(self) -> None:
         calls = {
             ast.unparse(node.func)
-            for node in ast.walk(ast.parse(self.runner_source()))
+            for node in ast.walk(ast.parse(self.loop_source()))
             if isinstance(node, ast.Call)
             and ast.unparse(node.func).startswith("turn_postflight.")
         }
@@ -377,7 +377,7 @@ class RunnerDelegationTests(unittest.TestCase):
     def test_the_loop_no_longer_sequences_the_guards_itself(self) -> None:
         calls = {
             ast.unparse(node.func)
-            for node in ast.walk(ast.parse(self.runner_source()))
+            for node in ast.walk(ast.parse(self.loop_source()))
             if isinstance(node, ast.Call)
         }
         self.assertEqual(
@@ -393,7 +393,7 @@ class RunnerDelegationTests(unittest.TestCase):
         # that deleted them would be caught here rather than at runtime.
         calls = {
             ast.unparse(node.func)
-            for node in ast.walk(ast.parse(self.runner_source()))
+            for node in ast.walk(ast.parse(self.loop_source()))
             if isinstance(node, ast.Call)
         }
         for name in (WORKSPACE_WRITE, LEGACY_WRITE, PROTECTED_PATH):

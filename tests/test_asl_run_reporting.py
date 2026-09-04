@@ -33,11 +33,18 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import commit_settlement, run_reporting, runner, turn_execution
+from agent_session_loop import (
+    commit_settlement,
+    run_loop,
+    run_reporting,
+    runner,
+    turn_execution,
+)
 from tests.support import assert_no_runner_import
 
-#: The runner functions that write ``sys.stderr`` directly: none, since session
-#: 28. All three writers of this kind have left for boundaries that run where
+#: The functions in the runner and its run loop that write ``sys.stderr``
+#: directly: none, since session 28. All three writers of this kind have left
+#: for boundaries that run where
 #: no coordinator exists -- ``_print_text_outcome`` to ``run_outcome`` in
 #: session 26, and ``_not_implemented`` and ``_print_doctor_error`` to
 #: ``run_doctor`` in session 28 -- and each is pinned at its new owner by
@@ -112,15 +119,17 @@ class StderrOwnershipTests(unittest.TestCase):
         source = Path(run_reporting.__file__ or "").read_text(encoding="utf-8")
         self.assertEqual({"_StderrOutputCoordinator"}, _stderr_owners(source))
 
-    def test_the_runner_keeps_no_second_live_output_writer(self) -> None:
-        source = Path(runner.__file__ or "").read_text(encoding="utf-8")
-        self.assertEqual(RUNNER_STDERR_WRITERS, _stderr_owners(source))
+    def test_the_run_keeps_no_second_live_output_writer(self) -> None:
+        for module in (runner, run_loop):
+            with self.subTest(module=module.__name__):
+                source = Path(module.__file__ or "").read_text(encoding="utf-8")
+                self.assertEqual(RUNNER_STDERR_WRITERS, _stderr_owners(source))
 
     def test_the_control_listener_and_tail_are_handed_the_proxy(self) -> None:
         # `run_control.RunControlListener` and `tail.TailFollower` both default
         # to the real `sys.stderr`; the run never lets them, because a second
         # unserialized writer is exactly what tears a line.
-        source = Path(runner.__file__ or "").read_text(encoding="utf-8")
+        source = Path(run_loop.__file__ or "").read_text(encoding="utf-8")
         self.assertIn("stderr=output.stream", source)
         reporting_source = Path(run_reporting.__file__ or "").read_text(
             encoding="utf-8"

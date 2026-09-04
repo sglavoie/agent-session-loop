@@ -999,7 +999,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
             return _summary() if summary is None else summary
 
         self._stage_outcome(payload, outcome)
-        with mock.patch.object(runner.supervisor_audit, "audit_terminal_run", record):
+        with mock.patch.object(supervisor_audit, "audit_terminal_run", record):
             code = run_termination._terminalize_run(
                 exit_code=exit_code,
                 event_path=Path(str(payload["events_path"])),
@@ -1180,9 +1180,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                 return _summary()
 
             self._stage_outcome(payload, "complete")
-            with mock.patch.object(
-                runner.supervisor_audit, "audit_terminal_run", record
-            ):
+            with mock.patch.object(supervisor_audit, "audit_terminal_run", record):
                 run_termination._terminalize_run(
                     exit_code=0,
                     event_path=event_path,
@@ -1257,9 +1255,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                 raise KeyboardInterrupt
 
             self._stage_outcome(payload, "paused")
-            with mock.patch.object(
-                runner.supervisor_audit, "audit_terminal_run", interrupt
-            ):
+            with mock.patch.object(supervisor_audit, "audit_terminal_run", interrupt):
                 code = run_termination._terminalize_run(
                     exit_code=runner.INTERRUPTED_EXIT,
                     event_path=Path(str(payload["events_path"])),
@@ -1324,9 +1320,7 @@ class TerminalizationCoordinatorTests(unittest.TestCase):
                 return _summary()
 
             self._stage_outcome(payload, "stopped")
-            with mock.patch.object(
-                runner.supervisor_audit, "audit_terminal_run", record
-            ):
+            with mock.patch.object(supervisor_audit, "audit_terminal_run", record):
                 run_termination._terminalize_run(
                     exit_code=0,
                     event_path=event_path,
@@ -1512,7 +1506,7 @@ class TerminalBranchRoutingTests(unittest.TestCase):
                 FAKE_CODEX_MODE=mode,
                 FAKE_CODEX_SLEEP="5",
             ),
-            mock.patch.object(runner.supervisor_audit, "audit_terminal_run", record),
+            mock.patch.object(supervisor_audit, "audit_terminal_run", record),
             redirect_stdout(out),
             redirect_stderr(err),
         ):
