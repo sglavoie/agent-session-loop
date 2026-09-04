@@ -2982,6 +2982,15 @@ class CheckSpec:
     The invariant key is the check's contract with the issue inbox: it feeds
     the finding fingerprint, so the same defect in two runs deduplicates into
     one issue with two occurrences. Renaming one splits an issue's history.
+
+    ``replayable`` records whether the check's verdict is a function of the
+    bundle alone. Almost every check reads nothing else, which is what lets
+    ``audit_replay`` re-judge a recorded bundle at HEAD and call the answer
+    proof. A check that also consults the live filesystem answers about the
+    tree as it stands now, not as the run left it, so replaying it can report a
+    transition no commit caused. Those checks still run and still report on the
+    live audit path; they are excluded from the replay matrix, where a verdict
+    that cannot be reproduced is worse than no verdict at all.
     """
 
     check: str
@@ -2991,6 +3000,7 @@ class CheckSpec:
     invariant_key: str
     severity: assurance_models.Severity
     recommendation: str
+    replayable: bool = True
 
 
 @dataclass(frozen=True)
@@ -5194,6 +5204,11 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
                 "Declare a `## Repositories` table in manifest.md naming every "
                 "repository the plan reaches, then re-run preflight."
             ),
+            # The only check that replays the gate rather than reading its
+            # recorded verdict: it walks the plan directory as it stands now.
+            # A plan edited, published or deleted after the run answers for the
+            # tree the replay is standing in, not for the run being judged.
+            replayable=False,
         ),
         _check_repository_intent,
     ),

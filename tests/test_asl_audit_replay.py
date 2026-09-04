@@ -12,7 +12,9 @@ from pathlib import Path
 from agent_session_loop import audit_replay, supervisor_audit
 
 INVARIANT_KEYS = tuple(
-    spec.invariant_key for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS
+    spec.invariant_key
+    for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS
+    if spec.replayable
 )
 
 
@@ -99,6 +101,32 @@ class BundleDiscoveryTests(unittest.TestCase):
 
         with self.assertRaises(audit_replay.BundleUnreadable):
             audit_replay.replay_bundle(missing)
+
+    def test_a_check_that_reads_outside_the_bundle_is_left_out_of_the_matrix(
+        self,
+    ) -> None:
+        unreproducible = tuple(
+            spec.invariant_key
+            for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS
+            if not spec.replayable
+        )
+        self.assertIn("identity.repository-intent", unreproducible)
+        bundle = self._write_bundle("plan-a", "20260812T000000000000Z-1")
+
+        row = audit_replay.replay_bundle(bundle)
+        replay = audit_replay.replay_corpus(self.state_root)
+
+        for key in unreproducible:
+            self.assertNotIn(key, row)
+            self.assertNotIn(key, replay.invariant_keys)
+
+    def test_the_live_audit_still_runs_the_checks_replay_leaves_out(self) -> None:
+        results = supervisor_audit.run_deterministic_checks({})
+
+        self.assertIn(
+            "identity.repository-intent",
+            {result.invariant_key for result in results},
+        )
 
 
 class MatrixStorageTests(unittest.TestCase):

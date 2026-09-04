@@ -1,9 +1,13 @@
 """Replay the recorded audit corpus against this working tree's checks.
 
-Every deterministic check in :mod:`agent_session_loop.supervisor_audit` is a
-pure function of one recorded evidence bundle, so each
-``supervisor-audit-input.json`` a run ever wrote is a reusable test case.
-Sweeping the whole corpus answers two questions the assurance ledger cannot:
+Almost every deterministic check in :mod:`agent_session_loop.supervisor_audit`
+is a pure function of one recorded evidence bundle, so each
+``supervisor-audit-input.json`` a run ever wrote is a reusable test case. The
+exceptions are declared, not assumed: a check whose ``CheckSpec`` sets
+``replayable=False`` reads something outside the bundle and is left out of the
+matrix entirely, because a cell that can flip between two sweeps of the same
+bytes is not evidence. Sweeping the corpus then answers two questions the
+assurance ledger cannot:
 
 * **Is a recorded finding still live?** An issue whose occurrences all replay
   ``pass`` at HEAD was fixed by some later commit, and can be closed on that
@@ -146,15 +150,33 @@ def bundle_paths(state_root: Path) -> list[Path]:
     return sorted(state_root.glob(BUNDLE_GLOB), key=lambda path: path.parent.name)
 
 
+def replayable_invariant_keys() -> tuple[str, ...]:
+    """The invariant keys whose verdict is a function of the bundle alone.
+
+    A check that also reads the live filesystem answers about the tree the
+    replay is standing in, so its cell can flip between two sweeps that judged
+    the same bytes with the same code. Left in, it would let a matrix diff
+    report a transition no commit caused, which is exactly the claim a
+    disposition note makes when it closes an issue on replay evidence.
+    """
+    return tuple(
+        spec.invariant_key
+        for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS
+        if spec.replayable
+    )
+
+
 def replay_bundle(path: Path) -> dict[str, str]:
-    """Judge one recorded bundle with this working tree's deterministic checks."""
+    """Judge one recorded bundle with this working tree's reproducible checks."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise BundleUnreadable(f"{type(exc).__name__}: {exc}") from exc
+    reproducible = set(replayable_invariant_keys())
     return {
         result.invariant_key: result.status
         for result in supervisor_audit.run_deterministic_checks(payload)
+        if result.invariant_key in reproducible
     }
 
 
@@ -171,9 +193,7 @@ def replay_corpus(state_root: Path) -> CorpusReplay:
             # so one half-written bundle must not abandon the whole sweep.
             errors[run_id] = str(exc)
     return CorpusReplay(
-        invariant_keys=tuple(
-            spec.invariant_key for spec in supervisor_audit.DETERMINISTIC_CHECK_SPECS
-        ),
+        invariant_keys=replayable_invariant_keys(),
         matrix=matrix,
         errors=errors,
     )
