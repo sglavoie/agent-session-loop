@@ -5300,6 +5300,114 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
     )
 
 
+def _worker_commits_added(guard: Mapping[str, Any]) -> list[str] | None:
+    """Name what a worker turn put on HEAD, or ``None`` if that is unreadable.
+
+    ``None`` is not "nothing". A guard that saw the tip move but recorded no
+    count for it knows a commit happened and cannot say how many, and reading
+    that as none would turn the one case worth reporting into a clean answer.
+
+    The relation travels with the count because the two say different things.
+    A ``fast-forward`` counts commits the worker wrote; a ``rewrite`` counts
+    every commit the new tip reaches that the old one did not, which is the
+    whole rewritten range rather than the turn's own work. Both outlive a
+    refused turn, and a sentence that reported them as the same number would
+    overstate one of them.
+    """
+    added: list[str] = []
+    for raw_changes in _mapping(guard.get("changed")).values():
+        changes = _mapping(raw_changes)
+        if changes.get("head_changed") is not True:
+            continue
+        transition = _mapping(changes.get("head_transition"))
+        count = transition.get("commits_added")
+        relation = transition.get("relation")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        if not isinstance(relation, str) or not relation:
+            return None
+        if count:
+            added.append(f"{count} commit(s) by {relation}")
+    return added
+
+
+def _check_commit_after_verification(context: _CheckContext) -> _Verdict:
+    """Grade whether a turn the run refused left commits of its own behind.
+
+    ASL commits a session's work after verification accepts it, which is what
+    makes the history a record of work that passed. A worker that runs ``git
+    commit`` inside its own turn moves that commit ahead of the gate, and
+    nothing walks it back: the write guard's before/after comparison is taken
+    before the runner would commit anything, so a tip that moved there moved
+    under the worker. When the turn is then refused -- the harness exited
+    nonzero, the guard reverted it, or authoritative verification failed --
+    the session goes back to ``pending`` while the commit stays on the branch,
+    and the next attempt rebuilds the same work on top of it (ASI-142).
+
+    The run's own mutation check counts those moves and reports them as having
+    stayed inside the declared write scope, which is true and is not this
+    question. Scope asks *where* the worker wrote; this asks whether what it
+    wrote outlived the turn that was rejected. Both belong to the same lane, so
+    the rollup keeps the worse of the two.
+
+    Never ``unavailable``. A turn that recorded no write guard at all recorded
+    no HEAD telemetry either, and demanding it here would be a second opinion
+    about a gap ``_check_mutation_commit_guards`` already owns -- its
+    recommendation is precisely to capture fingerprints around every
+    implementation turn. What blindness costs is stated in the clear verdict
+    instead, so the report never answers for a place it did not look.
+    """
+    references: list[str] = []
+    retained: list[str] = []
+    blind: list[str] = []
+    for turn in context.turns:
+        result = _mapping(turn.get("result"))
+        if result.get("available") is False:
+            continue
+        name = str(turn.get("name"))
+        if isinstance(turn.get("directory"), str):
+            references.append(turn["directory"])
+        guard = _mapping(result.get("workspace_write_guard"))
+        if not guard:
+            blind.append(name)
+            continue
+        # `anomalous` is the loop's own refusal, correlated from the event
+        # stream by `_mark_rejected_turns`; `_turn_shows_failure` is the turn
+        # result's. A verification that failed after a clean exit is only in
+        # the second, and it is the shape ASI-142 was reported for.
+        if not (turn.get("anomalous") is True or _turn_shows_failure(result)):
+            continue
+        added = _worker_commits_added(guard)
+        if added is None:
+            blind.append(name)
+            continue
+        if added:
+            retained.append(f"{name} left {_joined(added)} on HEAD")
+
+    evidence = context.evidence(*references, context.section("state").get("reference"))
+    if retained:
+        return _Verdict(
+            "fail",
+            "the run refused a turn and kept the commits it had already made: "
+            f"{_joined(retained)}",
+            evidence,
+        )
+    if blind:
+        return _Verdict(
+            "pass",
+            "no turn the run refused kept a commit this check could read off a "
+            f"write-guard record, but {_joined(blind)} recorded no readable "
+            "HEAD telemetry, so whether a refused turn committed there is "
+            "mutation-and-commit's to report",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        "no turn the run refused left a commit of its own on HEAD",
+        evidence,
+    )
+
+
 def _commit_record_label(payload: Mapping[str, Any]) -> str:
     """Name a commit record by the artifact it wrote, else by its index."""
     for key in ("artifact_dir", "result_path"):
@@ -5469,12 +5577,20 @@ def _unresolved_group_label(row: Mapping[str, Any]) -> str:
 def _check_commit_group_resolution(context: _CheckContext) -> _Verdict:
     """Grade whether the run committed everything it set out to commit.
 
-    A failed commit no longer pauses the run: the group is marked failed,
-    retried at the next commit boundary, and the run carries on. That is only
-    safe while a group still owed when the run ends is impossible to miss, so
-    this check is where the loss is named. Without it the one failure mode
-    soft-fail introduces — a run that finishes reporting success while a
+    A failed commit does not pause the run where it fails: the group is marked
+    failed, retried at the next commit boundary, and the run carries on. That
+    is only safe while a group still owed when the run ends is impossible to
+    miss, so this check is where the loss is named. Without it the one failure
+    mode soft-fail introduces — a run that finishes reporting success while a
     session's changes were never committed — would be graded by nothing.
+
+    A run that spent the whole retry budget now pauses at its next selection
+    boundary rather than working past the loss, and it still reaches here
+    owing the group, which is deliberate: the barrier decides that nothing
+    further is built on top of the missing commit, not that the commit was
+    made. The changes are still uncommitted and an operator still has to
+    settle them or relaunch into the recovery path, so a paused run earns the
+    same failing verdict a finished one does (ASI-138).
     """
     unresolved = _unresolved_commit_group_rows(context)
     references = [
@@ -5961,6 +6077,28 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             ),
         ),
         _check_mutation_commit_guards,
+    ),
+    # The check above asks where a worker's writes landed; this one asks
+    # whether the commits among them outlived the turn that was refused. The
+    # fingerprint is deliberately the one the agent lane already reports this
+    # under, so a run graded by both lanes still folds into one issue.
+    (
+        CheckSpec(
+            check="commit-after-verification",
+            lane="mutation-commit-guards",
+            category="guards",
+            component="commit-promotion",
+            invariant_key="guards.commit-after-verification",
+            severity="high",
+            recommendation=(
+                "Decide what the commits a refused turn left are: re-running "
+                "the session builds the same work again on top of them, so "
+                "either remove them before the next attempt or accept that the "
+                "branch carries work no gate passed. Keeping the commit out of "
+                "the worker's turn is what stops the choice from recurring."
+            ),
+        ),
+        _check_commit_after_verification,
     ),
     (
         CheckSpec(

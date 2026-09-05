@@ -5169,6 +5169,133 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 results["scope-guard-catch"].detail,
             )
 
+    def _worker_commit(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        *,
+        relation: str = "fast-forward",
+        commits_added: int = 1,
+        refused: bool = True,
+        transition: bool = True,
+    ) -> None:
+        """Record a turn whose worker moved HEAD before the runner could commit.
+
+        The guard's comparison is taken after the harness exits and before the
+        runner commits anything, so a tip that moved inside it moved under the
+        worker. ``refused`` is what decides whether the commit outlived a turn
+        the run kept: verification failing after a clean exit is the shape
+        ASI-142 was reported for, and it shows up nowhere but here.
+        """
+        changes: dict[str, Any] = {
+            "head_changed": True,
+            "head_before": "a" * 40,
+            "head_after": "b" * 40,
+        }
+        if transition:
+            changes["head_transition"] = {
+                "before": "a" * 40,
+                "after": "b" * 40,
+                "relation": relation,
+                "commits_added": commits_added,
+                "commits_removed": 0,
+                "history_rewrite": relation in {"rewrite", "rewind", "deleted"},
+            }
+        payload = self._read_result(history[3])
+        payload["workspace_write_guard"]["changed"] = {"app": changes}
+        if refused:
+            payload["verification"] = {
+                "passed": False,
+                "checks": [{"name": "tests", "passed": False, "returncode": 1}],
+                "skipped_checks": [],
+            }
+        self._write_result(history[3] / "turn-0001-01", payload)
+
+    def test_a_refused_turn_that_kept_its_own_commits_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._worker_commit(history)
+
+            _, results = self._audit(history)
+
+            result = results["commit-after-verification"]
+            self.assertEqual("fail", result.status)
+            self.assertIn("turn-0001-01", result.detail)
+            self.assertIn("1 commit(s) by fast-forward", result.detail)
+            findings = {
+                finding.invariant_key: finding
+                for finding in supervisor_audit.findings_from_results(results.values())
+            }
+            # The fingerprint is the one the agent lane already reports this
+            # under, so a run both lanes grade folds into one issue rather than
+            # into two spellings of the same defect (ASI-142).
+            self.assertEqual(
+                "commit-promotion",
+                findings["guards.commit-after-verification"].component,
+            )
+            self.assertEqual(
+                "high", findings["guards.commit-after-verification"].severity
+            )
+
+    def test_a_commit_the_run_accepted_is_not_a_retained_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._worker_commit(history, refused=False)
+
+            _, results = self._audit(history)
+
+            # The complaint is about a commit outliving a refusal, not about a
+            # worker committing. A turn the run kept has its work in the
+            # history the run's own verification passed.
+            result = results["commit-after-verification"]
+            self.assertEqual("pass", result.status)
+            self.assertEqual(
+                "no turn the run refused left a commit of its own on HEAD",
+                result.detail,
+            )
+
+    def test_a_rewritten_history_is_named_as_a_rewrite_not_as_new_work(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._worker_commit(history, relation="rewrite", commits_added=94)
+
+            _, results = self._audit(history)
+
+            # A rewrite's count is every commit the new tip reaches that the old
+            # one did not, which is the rewritten range rather than the turn's
+            # own work. Both outlive the refusal; reporting them as the same
+            # kind of number would overstate one of them.
+            self.assertEqual("fail", results["commit-after-verification"].status)
+            self.assertIn(
+                "94 commit(s) by rewrite",
+                results["commit-after-verification"].detail,
+            )
+
+    def test_a_head_move_with_no_transition_is_blindness_this_check_says_out_loud(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._worker_commit(history, transition=False)
+
+            _, results = self._audit(history)
+
+            # A guard that saw the tip move and recorded no count for it knows a
+            # commit happened and cannot say how many. Reading that as none
+            # would turn the one case worth reporting into a clean answer, and
+            # grading it `unavailable` here would be a second opinion about a
+            # gap the mutation check already owns.
+            result = results["commit-after-verification"]
+            self.assertEqual("pass", result.status)
+            self.assertIn("no readable", result.detail)
+            self.assertIn("mutation-and-commit", result.detail)
+            findings = {
+                finding.invariant_key
+                for finding in supervisor_audit.findings_from_results(results.values())
+            }
+            self.assertNotIn("guards.commit-after-verification", findings)
+
     def _shed_events(
         self, bundle: supervisor_audit.AuditInput
     ) -> dict[str, DeterministicResult]:
