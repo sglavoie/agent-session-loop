@@ -5402,6 +5402,160 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertEqual(payload["pause_message"], recovery.summary)
         self.assertEqual(payload["review_resume"], recovery.review_resume)
 
+    def _resplit_repair_child(
+        self,
+        plan_dir: Path,
+        repair_id: str,
+        child_statuses: tuple[tuple[str, str], ...],
+    ) -> None:
+        """Archive a repair child out of the plan and nest children under it.
+
+        What ``session-resplit`` leaves behind: the parent is gone from the
+        plan root and the children are authored fresh, so they carry no repair
+        marker of their own.
+        """
+        (plan_dir / f"session-{repair_id}.md").unlink()
+        for child_id, status in child_statuses:
+            body = (plan_dir / "session-1.md").read_text(encoding="utf-8")
+            (plan_dir / f"session-{child_id}.md").write_text(
+                body.replace("# Session 1:", f"# Session {child_id}:").replace(
+                    "- **Status**: complete", f"- **Status**: {status}"
+                ),
+                encoding="utf-8",
+            )
+
+    def _append_repair_lineage(self, repair_ids: tuple[str, ...]) -> Path:
+        """Record the reopen that names the repair children history requires."""
+        event_path = self._events_path()
+        events.append_event(
+            event_path,
+            events.Event(
+                events.REVIEW_REPAIR_REOPENED_EVENT,
+                {
+                    "source_cycle": None,
+                    "source_review_session_id": "2",
+                    "source_disposition": None,
+                    "repair_session_ids": list(repair_ids),
+                    "materialized": True,
+                    "result": "ok",
+                    "after_max_review_fix_cycles": 1,
+                },
+            ),
+        )
+        return event_path
+
+    def test_a_resplit_repair_child_is_satisfied_by_its_descendants(self) -> None:
+        """A repair too big for one turn is resplit; the lineage still names it.
+
+        Read literally that lineage describes a child set the plan lost, and the
+        projection reported `repair-sessions-missing` on a plan whose every
+        repair had in fact completed -- withholding the rereview the findings
+        still required (ASI-146).
+        """
+        self._write_completed_review_history(
+            self.plan_dir,
+            review_ids=("2",),
+            repair_ids=("2.1",),
+        )
+        self._resplit_repair_child(
+            self.plan_dir,
+            "2.1",
+            (("2.1.1", "complete"), ("2.1.2", "complete")),
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            self._append_repair_lineage(("2.1",)),
+            max_review_fix_cycles=1,
+        )
+
+        self.assertEqual("rereview", projected.action)
+        self.assertTrue(projected.eligible)
+        self.assertIsNone(projected.blocker)
+        # The lineage is reported as recorded; the descendants are what the
+        # completion accounting actually read.
+        self.assertEqual(("2.1",), projected.repair_session_ids)
+        self.assertEqual(("2.1.1", "2.1.2"), projected.completed_repair_session_ids)
+
+    def test_a_pending_resplit_descendant_still_has_to_run(self) -> None:
+        self._write_completed_review_history(
+            self.plan_dir,
+            review_ids=("2",),
+            repair_ids=("2.1",),
+        )
+        self._resplit_repair_child(
+            self.plan_dir,
+            "2.1",
+            (("2.1.1", "complete"), ("2.1.2", "pending")),
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            self._append_repair_lineage(("2.1",)),
+            max_review_fix_cycles=1,
+        )
+
+        self.assertEqual("run-repairs", projected.action)
+        self.assertTrue(projected.eligible)
+        self.assertEqual(("2.1.2",), projected.pending_repair_session_ids)
+
+    def test_a_repair_child_lost_without_a_resplit_still_fails_closed(
+        self,
+    ) -> None:
+        """Deleting the parent alone is the loss the blocker exists for."""
+        self._write_completed_review_history(
+            self.plan_dir,
+            review_ids=("2",),
+            repair_ids=("2.1",),
+        )
+        (self.plan_dir / "session-2.1.md").unlink()
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            self._append_repair_lineage(("2.1",)),
+            max_review_fix_cycles=1,
+        )
+
+        self.assertEqual("terminal", projected.action)
+        self.assertFalse(projected.eligible)
+        self.assertEqual("repair-sessions-missing", projected.blocker)
+
+    def test_a_repair_child_that_lost_its_marker_still_fails_closed(self) -> None:
+        """A parent still in the plan is never handed to its descendants.
+
+        Only a plan that no longer holds the parent at all can have resplit it.
+        A parent still present but stripped of its marker is a different
+        failure, and it keeps the blocker it already had.
+        """
+        self._write_completed_review_history(
+            self.plan_dir,
+            review_ids=("2",),
+            repair_ids=("2.1",),
+        )
+        repair_path = self.plan_dir / "session-2.1.md"
+        repair_path.write_text(
+            "\n".join(
+                line
+                for line in repair_path.read_text(encoding="utf-8").splitlines()
+                if "asl:generated-review-repair-session" not in line
+            ),
+            encoding="utf-8",
+        )
+        body = (self.plan_dir / "session-1.md").read_text(encoding="utf-8")
+        (self.plan_dir / "session-2.1.1.md").write_text(
+            body.replace("# Session 1:", "# Session 2.1.1:"),
+            encoding="utf-8",
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir),
+            self._append_repair_lineage(("2.1",)),
+            max_review_fix_cycles=1,
+        )
+
+        self.assertEqual("terminal", projected.action)
+        self.assertEqual("repair-sessions-missing", projected.blocker)
+
     def test_findings_repairs_all_clear_completes_in_one_invocation(
         self,
     ) -> None:

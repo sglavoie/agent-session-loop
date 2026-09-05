@@ -1227,6 +1227,57 @@ def _repair_ids_for_source(
     return tuple(sorted(ids, key=sort_key))
 
 
+def _resplit_repair_children(
+    snapshot: plans.PlanSnapshot,
+    repair_ids: Sequence[str],
+    generated: Mapping[str, plans.SessionStatus],
+) -> tuple[dict[str, plans.SessionStatus], frozenset[str]]:
+    """Descendants standing in for a repair child the plan no longer holds.
+
+    A repair session too large to run in one turn is resplit: the parent is
+    archived out of the plan and nested children take its place. Event lineage
+    still names the parent, and the children are authored fresh, so they need
+    not carry the repair marker their parent had. Read literally, that lineage
+    describes a child set the plan lost, which is what
+    ``repair-sessions-missing`` is for -- and a plan whose every repair had in
+    fact completed was reported terminal instead of being sent to the rereview
+    its findings still required (ASI-146).
+
+    The reconciliation stays fail-closed. A parent still present in the plan is
+    never treated as superseded, whatever it looks like inside: a repair child
+    that lost its own marker is a different failure and keeps the blocker it
+    already had. Only a parent the plan no longer holds at all, and only when
+    the plan holds sessions nested strictly beneath it, hands its place to
+    those descendants -- which then have to satisfy the same completion
+    accounting the parent would have.
+
+    Returns the descendants to account for and the parent ids they stand in
+    for; the parent ids stay in ``repair_session_ids`` because event lineage is
+    what the projection reports, not what it re-derives.
+    """
+    present = {session.id for session in snapshot.sessions}
+    children: dict[str, plans.SessionStatus] = {}
+    superseded: set[str] = set()
+    for repair_id in repair_ids:
+        if repair_id in generated or repair_id in present:
+            continue
+        parsed = _parse_session_id_or_none(repair_id)
+        if parsed is None:
+            continue
+        prefix = parsed.components
+        descendants = {
+            session.id: session
+            for session in snapshot.sessions
+            if session.session_id.components[: len(prefix)] == prefix
+            and len(session.session_id.components) > len(prefix)
+        }
+        if not descendants:
+            continue
+        children.update(descendants)
+        superseded.add(repair_id)
+    return children, frozenset(superseded)
+
+
 def _repair_group_records_from_children(
     generated: Mapping[str, plans.SessionStatus],
 ) -> tuple[Mapping[str, Any], ...] | None:
@@ -1706,11 +1757,22 @@ def evaluate_review_continuation(
     source_output_digest, source_artifact_digest = _source_digests(source_cycle_record)
     generated_for_source = generated_repairs.get(source_id, {})
     repair_ids = _repair_ids_for_source(source_id, records, generated_for_source)
+    # The children that have to run and finish, which is the marker-bearing set
+    # plus whatever stands in for a repair the plan archived under a resplit.
+    # Durable scope recovery below deliberately keeps reading the marker-bearing
+    # set alone: a resplit child carries no repair-group marker to recover from.
+    resplit_children, superseded_repair_ids = _resplit_repair_children(
+        snapshot, repair_ids, generated_for_source
+    )
+    accounted_for_source: dict[str, plans.SessionStatus] = {
+        **generated_for_source,
+        **resplit_children,
+    }
     pending_ids = tuple(
         sorted(
             (
                 session_id
-                for session_id, status in generated_for_source.items()
+                for session_id, status in accounted_for_source.items()
                 if status.status == "pending"
             ),
             key=lambda item: plans.parse_session_id(item).sort_key,
@@ -1720,7 +1782,7 @@ def evaluate_review_continuation(
         sorted(
             (
                 session_id
-                for session_id, status in generated_for_source.items()
+                for session_id, status in accounted_for_source.items()
                 if status.status == "complete"
             ),
             key=lambda item: plans.parse_session_id(item).sort_key,
@@ -1778,17 +1840,22 @@ def evaluate_review_continuation(
         return result("terminal", False, disposition)
 
     if (
-        generated_for_source
+        accounted_for_source
         and not pending_ids
-        and len(completed_ids) != len(generated_for_source)
+        and len(completed_ids) != len(accounted_for_source)
     ):
         return result("terminal", False, "repair-sessions-not-runnable")
 
-    if not set(repair_ids).issubset(generated_for_source):
+    if any(
+        repair_id not in accounted_for_source and repair_id not in superseded_repair_ids
+        for repair_id in repair_ids
+    ):
         # Event lineage is the durable record of every repair that must run.
         # A partially deleted child set must fail closed just like a fully
         # deleted one; otherwise the surviving children could incorrectly
-        # advance this source to rereview.
+        # advance this source to rereview. A repair the plan archived under a
+        # resplit is the one exception, and only because its descendants took
+        # over the same accounting.
         return result("terminal", False, "repair-sessions-missing")
     # ASI-6: a ``not-loop-ready`` cycle whose children the executability gate
     # withdrew materialized nothing at all, so there is no child set for
@@ -1799,12 +1866,12 @@ def evaluate_review_continuation(
     # cannot restore a cycle already projected terminal. Such a cycle stays a
     # materialization candidate, gated below on the refusal being cleared.
     withdrawn_materialization = (
-        not generated_for_source
+        not accounted_for_source
         and not materialization_count
         and disposition == REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
     )
     if (
-        not generated_for_source
+        not accounted_for_source
         and disposition in MATERIALIZED_REVIEW_DISPOSITIONS
         and not withdrawn_materialization
     ):
@@ -1816,7 +1883,7 @@ def evaluate_review_continuation(
         or disposition is None
         or withdrawn_materialization
     )
-    if not generated_for_source and not candidate:
+    if not accounted_for_source and not candidate:
         # Preserve an unfamiliar recorded value in ``source_disposition`` for
         # diagnostics, but keep the public blocker vocabulary stable for
         # operator-facing continuations.
@@ -1851,7 +1918,7 @@ def evaluate_review_continuation(
                 scope_gaps=scope_gaps,
             )
         return result("run-repairs", True, None, planning=planning)
-    if generated_for_source and len(completed_ids) == len(generated_for_source):
+    if accounted_for_source and len(completed_ids) == len(accounted_for_source):
         return result("rereview", True, None, planning=planning)
     if (
         selected_group_attempt_cap is not None

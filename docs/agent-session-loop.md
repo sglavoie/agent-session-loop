@@ -5211,7 +5211,20 @@ it projects `materialize-repairs` with `eligible: false` and blocker
 `not-loop-ready` until the refusal that withdrew the children is cleared, at
 which point the same findings re-materialize. `repair-sessions-missing` remains
 what it always meant — a child set deleted out from under a cycle that really
-did materialize one. Children
+did materialize one. A repair child that `session-resplit` archived out of the
+plan is not that loss: the parent is gone by design and nested children took its
+place, authored fresh and so carrying no repair marker of their own. Event
+lineage still names the parent, so the projection reconciles it — a lineage
+repair id the plan no longer holds hands its place to the sessions nested
+strictly beneath it, which then have to satisfy the same completion accounting
+the parent would have, and appear in `pending_repair_session_ids` and
+`completed_repair_session_ids` in its stead. `repair_session_ids` still reports
+the lineage as recorded. The reconciliation is fail-closed on both sides: a
+parent still present in the plan is never handed to its descendants, whatever it
+looks like inside, and a parent with no descendants at all is the deletion the
+blocker exists for. Without it a plan whose every repair had completed was
+reported terminal instead of being sent to the rereview its findings still
+required (ASI-146). Children
 retained under `--allow-not-loop-ready`, and children authored by an older ASL
 that stranded them, still look runnable while the plan is not loop-ready: a
 `run-repairs` continuation for such a plan reports `eligible: false` with
