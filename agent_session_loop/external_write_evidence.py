@@ -46,7 +46,11 @@ Invariants that survive the move:
 * **Named is not written.** ``turn_started_ns`` bounds the unclassified lane to
   writes that actually landed during the turn, so a path merely mentioned, or
   one last written before the turn began, is classified and counted but never
-  charged to the turn as a mutation.
+  charged to the turn as a mutation. It is still named: those rows go to
+  ``unclassified_unwritten`` rather than nowhere, because a nonzero
+  ``classified.unclassified`` count beside an empty ``unclassified`` lane reads
+  as a guard that observed something it then declined to say anything about
+  (ASI-120).
 * **A root the turn never named is still compared.** The whole point is that a
   control-plane write leaves no trace in the paths a turn declares, so every
   pre-turn digest is re-read and diffed even when no artifact mentions it.
@@ -92,6 +96,13 @@ EXTERNAL_WRITE_UNCLASSIFIED = "unclassified"
 
 #: Reported as the ``unavailable`` reason for each unclassified mutation.
 EXTERNAL_WRITE_UNCLASSIFIED_REASON = "external-write-unclassified"
+
+#: Reported for an unclassified path the turn named but did not write. It is
+#: not an ``unavailable`` reason: these rows never reach the guard's
+#: fail-closed lane, and exist so a nonzero ``classified.unclassified`` count
+#: beside an empty ``unclassified`` lane is explained rather than contradictory
+#: (ASI-120).
+EXTERNAL_WRITE_UNCLASSIFIED_UNWRITTEN_REASON = "external-write-unclassified-unwritten"
 
 #: Every bucket :func:`_classify_external_path` can return. Ordered from the
 #: most specific authority to the least so the enumeration reads as the
@@ -366,6 +377,7 @@ def _external_write_evidence(
     counts = dict.fromkeys(EXTERNAL_WRITE_CLASSES, 0)
     control_plane: dict[str, dict[str, Any]] = {}
     unclassified: dict[str, dict[str, Any]] = {}
+    unclassified_unwritten: dict[str, dict[str, Any]] = {}
     mentioned: dict[str, str] = {}
     seen: set[str] = set()
     for resolved in intent.candidates:
@@ -403,7 +415,16 @@ def _external_write_evidence(
         )
         if not mutated:
             # Named but not written during this turn: classified, recorded in
-            # the counts, and not charged to the turn as a mutation.
+            # the counts, and not charged to the turn as a mutation. Kept by
+            # name rather than as a bare tally, because a nonzero
+            # ``classified.unclassified`` beside an empty ``unclassified`` lane
+            # reads as a guard that saw something and then said nothing about
+            # it (ASI-120).
+            unclassified_unwritten[key] = {
+                "reason": EXTERNAL_WRITE_UNCLASSIFIED_UNWRITTEN_REASON,
+                "surface": resolved.candidate.surface,
+                "after": after,
+            }
             continue
         unclassified[key] = {
             "reason": EXTERNAL_WRITE_UNCLASSIFIED_REASON,
@@ -440,6 +461,11 @@ def _external_write_evidence(
         "control_plane": {key: control_plane[key] for key in reported},
         "control_plane_mutated": mutated_control_plane[:limit],
         "unclassified": unclassified,
+        "unclassified_unwritten": {
+            key: unclassified_unwritten[key]
+            for key in sorted(unclassified_unwritten)[:limit]
+        },
+        "unclassified_unwritten_omitted": max(0, len(unclassified_unwritten) - limit),
         "paths": {key: mentioned[key] for key in sorted(mentioned)[:limit]},
     }
     if omitted:

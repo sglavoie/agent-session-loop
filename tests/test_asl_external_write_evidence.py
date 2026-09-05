@@ -452,6 +452,30 @@ class UnclassifiedLaneTests(unittest.TestCase):
         self.assertEqual(
             {}, external_write_evidence._external_write_unavailable(evidence)
         )
+        # ASI-120: the count is explained by name rather than left as a tally
+        # the guard passed over in silence.
+        unwritten = evidence["unclassified_unwritten"]
+        self.assertEqual([self._canonical(self.foreign_record)], list(unwritten))
+        self.assertEqual(
+            external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_UNWRITTEN_REASON,
+            unwritten[self._canonical(self.foreign_record)]["reason"],
+        )
+
+    def test_a_charged_write_is_not_also_reported_as_unwritten(self) -> None:
+        started = time.time_ns()
+        os.utime(self.foreign_record, ns=(started + 10**9, started + 10**9))
+
+        evidence = self._evidence(
+            f"Recorded a disposition in {self.foreign_record}.\n",
+            turn_started_ns=started,
+        )
+
+        self.assertEqual(1, evidence["classified"]["unclassified"])
+        self.assertEqual(
+            [self._canonical(self.foreign_record)], list(evidence["unclassified"])
+        )
+        self.assertEqual({}, evidence["unclassified_unwritten"])
+        self.assertEqual(0, evidence["unclassified_unwritten_omitted"])
 
     def test_a_control_plane_root_the_turn_never_named_is_still_compared(
         self,

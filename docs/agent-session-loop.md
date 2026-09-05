@@ -5660,7 +5660,13 @@ Common pause reasons:
   `plan-provenance`, `system-path`, `ephemeral-path`, `unresolved`, or
   `unclassified`, and an `unclassified` path whose mtime shows it was written
   during the turn enters the `unavailable` lane under
-  `external-write-unclassified`. The verdict rides on the guard evidence as
+  `external-write-unclassified`. One merely named, or last written before the
+  turn began, is not charged and does not enter that lane, but it is still
+  named: it is reported under `unclassified_unwritten` with the reason
+  `external-write-unclassified-unwritten`, so a nonzero
+  `classified.unclassified` count beside an empty `unclassified` lane is
+  explained rather than reading as a guard that saw something and then said
+  nothing about it. The verdict rides on the guard evidence as
   `external_writes`, carrying the per-class counts, the classification of each
   named path, and before/after digests for every control-plane location plus
   the `control_plane_mutated` list — so a permitted control-plane mutation is
