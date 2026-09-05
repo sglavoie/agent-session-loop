@@ -138,6 +138,18 @@ OBSERVED_AUTH_EXPIRY = (
     "Failed to authenticate: OAuth session expired and could not be refreshed"
 )
 
+# The exact message the harness returned in run 20260903T172322002830Z-1846
+# (turn-0001-session-1/last-message.txt). The provider says the failure is
+# temporary and asks the caller to try again; the classifier had no rule for a
+# 500 -- the broad transport rule deliberately covers only 502/503/504 -- so it
+# fell through to the fail-closed ``nonzero-exit``, allowed zero retries, and
+# paused for a reply nobody could usefully give (ASI-135).
+OBSERVED_PROVIDER_SERVER_ERROR = (
+    "API Error: 500 Unable to complete this request right now. Please try "
+    "again. This is a server-side issue, usually temporary — try again in a "
+    "moment. If it persists, check https://status.claude.com."
+)
+
 # The launch-time diagnostic every observed Codex turn opens with: its MCP
 # client dies, the turn runs to completion anyway (ASI-1).
 OBSERVED_LAUNCH_CLOSURE = (
@@ -9406,6 +9418,61 @@ class HarnessTransportClassificationTests(unittest.TestCase):
 
         capacity = harness_failures.classify_harness_failure(
             self._result(stderr="model is at capacity; the connection was closed")
+        )
+        self.assertEqual(harness_failures.MODEL_CAPACITY_MARKER, capacity.marker)
+
+    def test_the_observed_provider_500_is_a_retryable_transport_failure(self) -> None:
+        classification = harness_failures.classify_harness_failure(
+            self._result(last_message=OBSERVED_PROVIDER_SERVER_ERROR)
+        )
+
+        self.assertEqual(events.PAUSE_REASON_TRANSPORT_FAILED, classification.reason)
+        self.assertEqual("provider-server-error", classification.marker)
+        self.assertTrue(classification.retryable)
+        policy = pause_policy.classify_pause(classification.reason)
+        self.assertTrue(policy["recoverable"])
+        self.assertFalse(policy["requires_user"])
+
+    def test_the_provider_error_envelope_is_what_matches_not_the_number(self) -> None:
+        for text in (
+            'API Error: 500 {"type":"error"}',
+            'the provider returned {"type": "api_error", "message": "boom"}',
+            "Internal Server Error",
+        ):
+            with self.subTest(text=text):
+                classification = harness_failures.classify_harness_failure(
+                    self._result(stderr=text)
+                )
+                self.assertEqual("provider-server-error", classification.marker)
+                self.assertTrue(classification.retryable)
+
+    def test_prose_that_merely_contains_500_is_not_retried(self) -> None:
+        # The point of anchoring on the envelope: a turn whose input is a
+        # transcript of ASL itself says "500" constantly, and a bare `\b500\b`
+        # would relaunch a session that failed for an unrelated reason.
+        for text in (
+            "the file is 500 lines long",
+            "listening on port 5000",
+            "the budget is $500 per month",
+            "reduced the suite from 500 to 200 cases",
+        ):
+            with self.subTest(text=text):
+                classification = harness_failures.classify_harness_failure(
+                    self._result(stderr=text)
+                )
+                self.assertEqual(
+                    events.PAUSE_REASON_NONZERO_EXIT, classification.reason
+                )
+                self.assertFalse(classification.retryable)
+
+    def test_the_rules_that_outrank_the_provider_error_still_win(self) -> None:
+        quota = harness_failures.classify_harness_failure(
+            self._result(stderr="429 too many requests; API Error: 500")
+        )
+        self.assertEqual(events.PAUSE_REASON_QUOTA_EXHAUSTED, quota.reason)
+
+        capacity = harness_failures.classify_harness_failure(
+            self._result(stderr="overloaded_error; API Error: 500")
         )
         self.assertEqual(harness_failures.MODEL_CAPACITY_MARKER, capacity.marker)
 

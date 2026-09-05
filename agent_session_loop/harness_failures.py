@@ -154,6 +154,27 @@ _FAILURE_CLASSIFICATION_RULES: tuple[tuple[str, str, bool, re.Pattern[str]], ...
         ),
     ),
     (
+        # ASI-135. A provider 500 is the one server-side status the broad
+        # transport rule below cannot claim: `\b500\b` matches a line count, a
+        # dollar figure, and a port number, and a turn whose input is a
+        # transcript of ASL itself will contain all three. So this rule is
+        # anchored on the envelope the provider writes rather than on the
+        # number -- `API Error: 5xx`, the JSON `api_error` type, or the literal
+        # server-error phrase -- which application prose does not produce by
+        # accident. Placed after `model-capacity` because 529 is the more
+        # specific outage, and before `transport` because a provider that
+        # answered with an error is not a socket that failed.
+        "provider-server-error",
+        events.PAUSE_REASON_TRANSPORT_FAILED,
+        True,
+        re.compile(
+            r"api error:?\s*5\d{2}\b|"
+            r"\"type\"\s*:\s*\"api_error\"|"
+            r"\binternal server error\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "transport",
         events.PAUSE_REASON_TRANSPORT_FAILED,
         True,
