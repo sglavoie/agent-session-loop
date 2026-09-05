@@ -2105,7 +2105,12 @@ def _observed_repository_writes(
     runner intended", which is the question an auditor is asking.
 
     A moved ref counts even when HEAD stayed put: a commit written to a branch
-    the worktree does not have checked out still landed.
+    the worktree does not have checked out still landed. A moved *remote-tracking*
+    ref does not, because it is a cache of another repository that ``git fetch``
+    rewrites and nothing a turn writes touches. Projecting one as a commit put a
+    commit the session never made in front of the checks that read this
+    projection, and one of them read it as the write-scope guard having failed to
+    hold a violation it did hold (ASI-9).
     """
     observed: list[dict[str, Any]] = []
     for turn in turns:
@@ -2117,6 +2122,9 @@ def _observed_repository_writes(
                 str(_mapping(entry).get("ref"))
                 for entry in _sequence(changes.get("refs_changed"))
                 if _mapping(entry).get("ref")
+                and not str(_mapping(entry)["ref"]).startswith(
+                    _REMOTE_TRACKING_REF_PREFIX
+                )
             ]
             head_changed = changes.get("head_changed") is True
             if not head_changed and not refs:
@@ -3637,6 +3645,15 @@ def _write_scope_violated_aliases(guard: Mapping[str, Any]) -> list[str]:
     ]
 
 
+#: The pause reasons a write-guard record can arrive under. Both stop the run on
+#: the guard's own verdict; the unavailable one is chosen when the same record
+#: also failed to inventory something, which does not make the violations it
+#: does name any less paused-upon.
+_WRITE_SCOPE_PAUSE_REASONS = (
+    events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+    events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+)
+
 _ViolationFingerprint = tuple[tuple[str, str, str, tuple[str, ...]], ...]
 
 
@@ -3686,17 +3703,58 @@ def _commit_records(context: _CheckContext) -> list[Mapping[str, Any]]:
     return [record for record in records if record]
 
 
-def _committed_sessions(context: _CheckContext) -> set[str]:
-    """Every session a commit record names.
+def _commit_repository_alias(record: Mapping[str, Any]) -> str | None:
+    """The repository one commit record names, or ``None`` when it names none.
 
-    Reads the same records as :func:`_commit_records` so the attributed and
-    unattributed readings of "did a commit follow" cannot drift apart.
+    A record filed under a linked worktree is reduced to the repository the
+    worktree belongs to, because a commit in a worktree lands in that
+    repository's history and that is the repository a write-scope question asks
+    about.
     """
-    named = {
-        _write_scope_session(record.get("session_id"))
-        for record in _commit_records(context)
-    }
-    return {session for session in named if session is not None}
+    for key in ("repository_alias", "repo", "alias", "repository_key", "key"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value.split(_WORKTREE_KEY_SEPARATOR, 1)[0]
+    return None
+
+
+def _commit_attributions(context: _CheckContext) -> list[tuple[str | None, str | None]]:
+    """The session and repository every commit in the bundle names.
+
+    Either half may be ``None`` when the record does not say, and both readings
+    matter: an unnamed session cannot be matched to a violation, and an unnamed
+    repository cannot be ruled out of one.
+
+    A commit group is descended into rather than read whole. The group is a
+    container -- its per-repository detail lives in the entries beneath it, and
+    the group itself names no repository -- so reading it whole would report a
+    commit of unknown repository, which is the one shape that can never be
+    ruled out (ASI-9). A group that names no repository anywhere committed
+    nothing and contributes nothing.
+    """
+    pairs: list[tuple[str | None, str | None]] = []
+    for record in _commit_records(context):
+        session = _write_scope_session(record.get("session_id"))
+        nested = [_mapping(item) for item in _sequence(record.get("repositories"))]
+        if nested:
+            pairs.extend(
+                (
+                    _write_scope_session(entry.get("session_id"), session),
+                    _commit_repository_alias(entry),
+                )
+                for entry in nested
+            )
+            continue
+        aliases = [
+            alias
+            for alias in _sequence(record.get("ordered_aliases"))
+            if isinstance(alias, str) and alias
+        ]
+        if aliases:
+            pairs.extend((session, alias) for alias in aliases)
+        elif "repositories" not in record and "ordered_aliases" not in record:
+            pairs.append((session, _commit_repository_alias(record)))
+    return pairs
 
 
 @dataclass(frozen=True)
@@ -3720,8 +3778,10 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
 
     A write is *caught* only when the guard recorded the violation, reverted
     the session to pending, paused the run on
-    ``workspace-write-scope-violation``, and no commit for that session
-    followed: that is a working guard, not a containment failure. Anything
+    ``workspace-write-scope-violation``, and no commit that could have carried
+    the write followed: that is a working guard, not a containment failure. A
+    commit could have carried it when it names the offending session and either
+    a repository the violation names or no repository at all. Anything
     weaker is an *escape* — the change reached the tree unauthorized. Blindness
     is neither, because a guard that could not look proves nothing either way.
 
@@ -3816,8 +3876,20 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
                 )
         elif name != events.RUN_PAUSED_EVENT:
             continue
-        elif reason == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION:
+        elif reason in _WRITE_SCOPE_PAUSE_REASONS:
             observed += 1
+            if reason == events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE:
+                blind.append("the write guard reported itself unavailable")
+            aliases = _write_scope_violated_aliases(guard)
+            # A guard that both found violations and failed to inventory
+            # something pauses under the unavailable reason, because that is the
+            # worse of the two. The pause is still the run stopping on this guard
+            # record, and reading only the scope-violation reason reported a run
+            # that did pause as one that never did (ASI-9). An unavailable pause
+            # naming no violation is only blindness, and corroborates nothing.
+            scope_pause = reason == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
+            if not (aliases or scope_pause):
+                continue
             paused_any = True
             session = _write_scope_session(
                 guard.get("session_id"),
@@ -3826,7 +3898,6 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
             )
             if session is not None:
                 paused_sessions.add(session)
-            aliases = _write_scope_violated_aliases(guard)
             if aliases:
                 fingerprint = _write_scope_violation_fingerprint(guard)
                 if session is not None:
@@ -3837,12 +3908,9 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
                     fingerprint,
                     guard.get("reverted_to_pending") is True,
                 )
-        elif reason == events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE:
-            observed += 1
-            blind.append("the write guard reported itself unavailable")
 
-    committed = _committed_sessions(context)
-    any_commit = bool(_commit_records(context))
+    attributions = _commit_attributions(context)
+    any_commit = bool(attributions)
 
     # The runner writes one guard record into the turn result and the same
     # record into the pause it raises, so a bundle where only the pause carries
@@ -3873,17 +3941,22 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
             return session in paused_sessions
         return paused_any
 
+    pause_unknown = context.events_shed and not paused_any
     caught: list[str] = []
     for session, aliases in sorted(offenders.items(), key=lambda item: item[0] or ""):
         who = f"session {session}" if session is not None else "an unnamed session"
         claim = f"{who} wrote outside its declared scope ({_names(aliases)})"
         # A commit naming the offending session cannot predate the guard, which
         # runs after the turn it judges, so its presence says the run carried
-        # the out-of-scope write forward instead of holding it. A violation no
-        # record attributes cannot be matched against a commit by session at
-        # all, so every commit in the bundle is a candidate for having carried
-        # it and the catch is conceded rather than claimed on evidence that
-        # was never checked.
+        # the out-of-scope write forward instead of holding it. The commit must
+        # also be able to carry *this* write: a commit writes one repository's
+        # history, so one in a repository the violation does not name cannot
+        # have carried it and does not defeat the catch (ASI-9). A commit whose
+        # repository the record does not say still can, and is counted. A
+        # violation no record attributes cannot be matched against a commit by
+        # session at all, so every commit in the bundle is a candidate for
+        # having carried it and the catch is conceded rather than claimed on
+        # evidence that was never checked.
         if session is None:
             uncommitted = not any_commit
             commit_note = (
@@ -3891,19 +3964,44 @@ def _analyze_write_scope(context: _CheckContext) -> _WriteScopeAnalysis:
                 "the unattributed violation"
             )
         else:
-            uncommitted = session not in committed
-            commit_note = "a commit for that session followed"
+            uncommitted = not any(
+                committed_session == session
+                and (committed_alias is None or committed_alias in aliases)
+                for committed_session, committed_alias in attributions
+            )
+            commit_note = (
+                "a commit for that session followed that could have carried the write"
+            )
         missing = [
-            note
-            for note, held in (
-                ("the session was not reverted to pending", session in reverted),
-                ("the run never paused on the violation", _paused_for(session)),
-                (commit_note, uncommitted),
+            (key, note)
+            for key, note, held in (
+                (
+                    "reverted",
+                    "the session was not reverted to pending",
+                    session in reverted,
+                ),
+                (
+                    "paused",
+                    "the run never paused on the violation",
+                    _paused_for(session),
+                ),
+                ("committed", commit_note, uncommitted),
             )
             if not held
         ]
-        if missing:
-            escaped.append(f"{claim} and {', '.join(missing)}")
+        # The pause is the one fact here that lives only in the event log, so a
+        # bundle whose event records the size cap dropped cannot say the run
+        # never paused -- only that this bundle does not hold the record. Where
+        # that is the sole thing standing between the guard and a catch, the
+        # honest reading is that containment could not be judged, not that a
+        # write escaped (ASI-9).
+        if pause_unknown and [key for key, _ in missing] == ["paused"]:
+            blind.append(
+                f"{claim}, and the event records the size cap dropped are where "
+                "the pause that would settle it would be"
+            )
+        elif missing:
+            escaped.append(f"{claim} and {', '.join(note for _, note in missing)}")
         else:
             caught.append(
                 f"{claim}, and the guard reverted it to pending and paused the "

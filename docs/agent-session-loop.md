@@ -1892,12 +1892,29 @@ past the guard; `packet.write-scope-guard-catch` is medium and owns the ones it
 stopped, recommending that the child's durable write scope be widened to the
 aliases its own findings name before expansion and preflight are rerun and the
 run resumed. A write counts as caught only when the guard recorded the
-violation, reverted the session to pending, paused the run on
-`workspace-write-scope-violation`, and no commit for that session followed;
-anything weaker is an escape, including a `workspace-write-scope-repair` whose
-own guard evidence still lists violations. A guard that could not inventory a
-repository is neither, and stays on the critical check, because blindness is not
-a catch. Severity lives on the check rather than on the verdict, so one
+violation, reverted the session to pending, paused the run on that guard record,
+and no commit that could have carried the write followed; anything weaker is an
+escape, including a `workspace-write-scope-repair` whose own guard evidence still
+lists violations. A guard that could not inventory a repository is neither, and
+stays on the critical check, because blindness is not a catch.
+
+Each of those three conditions is read for what it can actually prove. The pause
+counts under `workspace-write-guard-unavailable` as well as
+`workspace-write-scope-violation` whenever the paused guard record names the
+violations, because a guard that both found violations and failed to inventory
+something stops the run under the worse of the two reasons and the run still
+paused on that record. A commit only defeats a catch when it could have carried
+the write: a commit writes one repository's history, so one recorded in a
+repository the violation does not name cannot be what carried it, while one whose
+record does not say where it landed still counts. A commit group names no
+repository of its own — its aliases live in the entries beneath it — so it is
+read through those entries, and a group with none committed nothing. And because
+the pause is the one condition that lives only in the event log, a bundle whose
+event records the size cap dropped cannot report its absence as proof: where the
+pause is the only thing standing between the guard and a catch, containment is
+`unavailable` rather than failed.
+
+Severity lives on the check rather than on the verdict, so one
 invariant key can never report critical on one occurrence and medium on the
 next and split its own issue history in the inbox, and since both checks answer
 `pass` when their case is absent, the lane rollup keeping the worse of them is

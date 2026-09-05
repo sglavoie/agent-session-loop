@@ -1622,6 +1622,9 @@ class PinnedAuditWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
             head = self._head(workspace / "app")
+            self._record_commit(
+                run_dir, index=1, repository_path="app", head_after=head
+            )
             fake = _RecordingHarness(
                 action=lambda: self._git(
                     workspace / "app",
@@ -1652,6 +1655,9 @@ class PinnedAuditWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
             head = self._head(workspace / "app")
+            self._record_commit(
+                run_dir, index=1, repository_path="app", head_after=head
+            )
             fake = _RecordingHarness(
                 action=lambda: self._git(
                     workspace / "app", "update-ref", "refs/heads/sneaky", head
@@ -4868,6 +4874,8 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
         paused: bool = True,
         attributed: bool = True,
         pause_session: int | None = 1,
+        pause_reason: str = events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+        pause_violations: list[dict[str, Any]] | None = None,
     ) -> None:
         """Record one out-of-scope write the way a real run records it.
 
@@ -4876,6 +4884,10 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
         ``attributed`` drops the session id from the guard and the turn result,
         leaving ``pause_session`` as the only record that can name the
         offender — or, at ``None``, leaving the violation unattributable.
+        ``pause_reason`` is the reason the run stopped under, and
+        ``pause_violations`` replaces what the pause's own guard record says was
+        violated, so a pause that stopped on something else can be told apart
+        from one that stopped on this write.
         """
         guard = self._violating_guard(reverted=reverted, attributed=attributed)
         payload = self._read_result(history[3])
@@ -4883,7 +4895,10 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
         if attributed:
             payload["session_id"] = "01"
         self._write_result(history[3] / "turn-0001-01", payload)
-        details: dict[str, Any] = {"workspace_write_guard": guard}
+        paused_guard = dict(guard)
+        if pause_violations is not None:
+            paused_guard["violations"] = pause_violations
+        details: dict[str, Any] = {"workspace_write_guard": paused_guard}
         if pause_session is not None:
             details["session"] = pause_session
         records: list[tuple[str, dict[str, Any]]] = [
@@ -4895,7 +4910,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                     events.RUN_PAUSED_EVENT,
                     {
                         "run_id": RUN_ID,
-                        "reason": events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+                        "reason": pause_reason,
                         "details": details,
                     },
                 )
@@ -4904,18 +4919,48 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             records.append((events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}))
         self._write_events(history[2], records)
 
-    def _write_commit(self, run_dir: Path, *, session_id: str) -> None:
-        commit_dir = run_dir / "commit-0001-session-01-app"
+    def _write_commit(
+        self, run_dir: Path, *, session_id: str, repository_alias: str = "docs"
+    ) -> None:
+        """Record one commit, by default in the repository the violation names.
+
+        A commit only defeats a catch when it could have carried the write, so
+        the default is the repository under test; passing another alias is how
+        a test says the commit landed somewhere the violation cannot be in.
+        """
+        commit_dir = run_dir / f"commit-0001-session-01-{repository_alias}"
         commit_dir.mkdir()
         self._write_result(
             commit_dir,
             {
                 "success": True,
                 "returncode": 0,
-                "repository_alias": "app",
+                "repository_alias": repository_alias,
                 "session_id": session_id,
             },
         )
+
+    def _write_commit_group(
+        self, state_dir: Path, *, session_id: str, aliases: list[str]
+    ) -> None:
+        """Record one commit group the way the runner's state records it.
+
+        The group names no repository of its own; the aliases it committed live
+        in the entries beneath it, each keyed the way the runner keys them.
+        """
+        payload = self._read_state(state_dir)
+        payload["commit_groups"] = [
+            {
+                "group_id": "group-0001",
+                "scope": "session",
+                "session": int(session_id),
+                "session_id": session_id,
+                "status": "complete",
+                "ordered_aliases": list(aliases),
+                "repositories": [{"alias": alias, "key": alias} for alias in aliases],
+            }
+        ]
+        self._write_state(state_dir, payload)
 
     def test_a_write_the_guard_caught_is_medium_and_never_a_containment_failure(
         self,
@@ -4995,6 +5040,99 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             )
             self.assertEqual("pass", results["scope-guard-catch"].status)
 
+    def test_an_unavailable_pause_carrying_the_violation_is_still_a_pause(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # A guard that both found violations and failed to inventory
+            # something stops the run under the unavailable reason, which is the
+            # worse of the two. The run still paused on this guard record.
+            self._scope_violation(
+                history,
+                pause_reason=events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            )
+
+            _, results = self._audit(history)
+
+            self.assertNotIn(
+                "never paused on the violation", results["scope-escape"].detail
+            )
+            self.assertEqual("fail", results["scope-guard-catch"].status)
+            self.assertIn(
+                "before anything was committed", results["scope-guard-catch"].detail
+            )
+
+    def test_an_unavailable_pause_naming_no_violation_corroborates_nothing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            # The run stopped because the guard could not look, not because it
+            # found this write, so nothing here says the write was held.
+            self._scope_violation(
+                history,
+                pause_reason=events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+                pause_violations=[],
+            )
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn(
+                "never paused on the violation", results["scope-escape"].detail
+            )
+
+    def _shed_events(
+        self, bundle: supervisor_audit.AuditInput
+    ) -> dict[str, DeterministicResult]:
+        """Drop the bundle's event records the way the size cap drops them."""
+        bundle.payload["events"]["records"] = []
+        bundle.payload.setdefault("omissions", []).append(
+            {
+                "section": "events",
+                "reason": supervisor_audit.REASON_SIZE_CAP,
+                "count": 2,
+            }
+        )
+        return {
+            result.check: result
+            for result in supervisor_audit.run_deterministic_checks(bundle)
+        }
+
+    def test_a_pause_the_size_cap_dropped_is_not_a_pause_that_never_happened(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+
+            bundle, _ = self._audit(history)
+            results = self._shed_events(bundle)
+
+            # The pause is the one fact that lives only in the event log, so a
+            # bundle that shed those records cannot report its absence as proof.
+            self.assertEqual("unavailable", results["scope-escape"].status)
+            self.assertIn(
+                "the pause that would settle it", results["scope-escape"].detail
+            )
+            self.assertEqual("pass", results["scope-guard-catch"].status)
+
+    def test_shed_events_do_not_excuse_a_violation_that_also_went_unreverted(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history, reverted=False)
+
+            bundle, _ = self._audit(history)
+            results = self._shed_events(bundle)
+
+            # The revert is recorded in the turn result, which the cap did not
+            # touch, and a pause could not have made up for its absence.
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn("not reverted to pending", results["scope-escape"].detail)
+
     def test_a_commit_for_the_offending_session_undoes_the_catch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
@@ -5006,6 +5144,79 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("fail", results["scope-escape"].status)
             self.assertIn("a commit for that session", results["scope-escape"].detail)
             self.assertEqual("pass", results["scope-guard-catch"].status)
+
+    def test_a_commit_in_another_repository_leaves_the_catch_standing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+            # Same session, but a commit writes one repository's history and
+            # this one is not the repository the violation names, so it cannot
+            # be what carried the out-of-scope write.
+            self._write_commit(history[3], session_id="01", repository_alias="app")
+
+            _, results = self._audit(history)
+
+            self.assertEqual("pass", results["scope-escape"].status)
+            self.assertEqual("fail", results["scope-guard-catch"].status)
+
+    def test_a_commit_naming_no_repository_still_undoes_the_catch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+            commit_dir = history[3] / "commit-0001-session-01-unknown"
+            commit_dir.mkdir()
+            self._write_result(
+                commit_dir, {"success": True, "returncode": 0, "session_id": "01"}
+            )
+
+            _, results = self._audit(history)
+
+            # A commit whose record does not say where it landed cannot be
+            # ruled out of the violated repository.
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn("could have carried", results["scope-escape"].detail)
+
+    def test_a_commit_group_is_read_by_the_repositories_beneath_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+            self._write_commit_group(history[2], session_id="01", aliases=["app"])
+
+            _, results = self._audit(history)
+
+            # The group names no repository of its own; reading it whole would
+            # make it an unlocatable commit that no violation can be cleared of.
+            self.assertEqual("pass", results["scope-escape"].status)
+            self.assertEqual("fail", results["scope-guard-catch"].status)
+
+    def test_a_commit_group_naming_the_violated_repository_undoes_the_catch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history)
+            self._write_commit_group(history[2], session_id="01", aliases=["docs"])
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["scope-escape"].status)
+            self.assertIn("could have carried", results["scope-escape"].detail)
+
+    def test_a_commit_group_that_committed_nothing_is_not_a_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._scope_violation(history, attributed=False, pause_session=None)
+            self._write_commit_group(history[2], session_id="01", aliases=[])
+
+            _, results = self._audit(history)
+
+            # An empty group is barrier bookkeeping for a session that committed
+            # nothing, so even the unattributed reading has nothing to concede.
+            self.assertEqual("pass", results["scope-escape"].status)
+            self.assertEqual("fail", results["scope-guard-catch"].status)
+            self.assertIn(
+                "before anything was committed", results["scope-guard-catch"].detail
+            )
 
     def test_a_commit_for_another_session_leaves_the_catch_standing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
