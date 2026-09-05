@@ -1483,6 +1483,97 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         self.assertFalse(self.state_dir.exists())
         self.assertEqual([], sorted(self.plan_dir.glob("session-2.*.md")))
 
+    def _plan_artifact_path(self, name: str) -> str:
+        return str(plans.canonicalize_path(self.plan_dir) / name)
+
+    def test_a_finding_aimed_at_another_session_artifact_is_refused(self) -> None:
+        finding = self._finding(
+            "F1",
+            "runner",
+            evidence=[
+                {
+                    "path": self._plan_artifact_path("session-1.md"),
+                    "symbol": "completion check",
+                }
+            ],
+        )
+        self._write_plan([finding])
+        before = self._plan_bytes()
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertFalse(repair_plan.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_MALFORMED, repair_plan.reason
+        )
+        self.assertIn("session-1.md", repair_plan.error)
+        self.assertIn("only rewrite its own session file", repair_plan.error)
+        self.assertEqual(before, self._plan_bytes())
+
+    def test_a_check_reading_another_session_artifact_is_refused(self) -> None:
+        artifact = self._plan_artifact_path("session-1.md")
+        finding = self._finding(
+            "F1",
+            "runner",
+            verification_checks=[
+                {
+                    "type": "command",
+                    "name": "verify-F1",
+                    "argv": [
+                        "python3",
+                        "-c",
+                        "from pathlib import Path\n"
+                        f"raise SystemExit(0 if 'x' in Path({artifact!r})"
+                        ".read_text() else 1)",
+                    ],
+                }
+            ],
+        )
+        self._write_plan([finding])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertFalse(repair_plan.ok)
+        self.assertEqual(
+            review_repair.REVIEW_REPAIR_REASON_MALFORMED, repair_plan.reason
+        )
+        self.assertIn("session-1.md", repair_plan.error)
+
+    def test_a_findings_reference_to_the_childs_own_artifact_is_allowed(self) -> None:
+        finding = self._finding(
+            "F1",
+            "runner",
+            evidence=[{"path": self._plan_artifact_path("session-2.1.md")}],
+        )
+        self._write_plan([finding])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        self.assertEqual(
+            ["2.1"],
+            [session_id.value for session_id in repair_plan.proposed_child_ids],
+        )
+
+    def test_a_repository_file_sharing_a_session_artifact_name_is_allowed(self) -> None:
+        finding = self._finding(
+            "F1",
+            "runner",
+            evidence=[{"path": "docs/session-1.md"}],
+            verification_checks=[
+                {
+                    "type": "command",
+                    "name": "verify-F1",
+                    "argv": ["cat", "docs/session-1.md"],
+                }
+            ],
+        )
+        self._write_plan([finding])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+
     def test_registered_groups_read_all_repositories_and_write_finding_aliases(
         self,
     ) -> None:

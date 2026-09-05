@@ -29,9 +29,11 @@ from agent_session_loop import (
 )
 from tests.support import assert_no_runner_import
 
-#: The symbols this module took from the runner. The program's no-alias rule
-#: says the runner keeps none of them behind, so a re-export added later to
-#: rescue a stale patch target fails here rather than in review.
+#: The symbols this module took from the runner, plus the ones authored here
+#: since. The program's no-alias rule says the runner keeps none of them, so a
+#: re-export added later to rescue a stale patch target fails here rather than
+#: in review, and a function that grows in this boundary without being declared
+#: fails the ownership assertion below.
 MOVED_SYMBOLS = (
     "_annotate_history_transitions",
     "_workspace_review_bases",
@@ -43,6 +45,7 @@ MOVED_SYMBOLS = (
     "_session_expansion_evidence",
     "_latest_workspace_scope_repair_requirement",
     "_workspace_scope_repair_is_fresh",
+    "_workspace_scope_repair_still_unauthorized",
     "_workspace_scope_repair_comparison",
     "_regenerated_repair_child_write_scope",
 )
@@ -392,6 +395,90 @@ class WorkspaceScopeRepairFreshnessTests(unittest.TestCase):
         self.assertFalse(
             workspace_evidence._workspace_scope_repair_is_fresh(
                 {"present": True}, {"present": True}
+            )
+        )
+
+
+class WorkspaceScopeRepairReconciliationTests(unittest.TestCase):
+    """Whether a retained violation still names something out of scope."""
+
+    def _record(self, *aliases: str | None, **extra: object) -> dict[str, object]:
+        return {
+            "violations": [
+                {
+                    "kind": "outside-read-scope",
+                    "alias": alias,
+                    "repository": alias or "unregistered",
+                    "qualified_paths": [],
+                }
+                for alias in aliases
+            ],
+            **extra,
+        }
+
+    def _scope(self, *aliases: str) -> plans.SessionScope:
+        return plans.SessionScope(reads=aliases, writes=aliases)
+
+    def test_a_violation_the_widened_scope_now_writes_is_reconciled(self) -> None:
+        self.assertFalse(
+            workspace_evidence._workspace_scope_repair_still_unauthorized(
+                self._record("scripts"), self._scope("brainnotes", "scripts")
+            )
+        )
+
+    def test_a_violation_the_scope_still_excludes_is_not_reconciled(self) -> None:
+        self.assertTrue(
+            workspace_evidence._workspace_scope_repair_still_unauthorized(
+                self._record("scripts"), self._scope("brainnotes")
+            )
+        )
+
+    def test_one_unreconciled_violation_holds_the_whole_record(self) -> None:
+        self.assertTrue(
+            workspace_evidence._workspace_scope_repair_still_unauthorized(
+                self._record("scripts", "vendor"),
+                self._scope("brainnotes", "scripts"),
+            )
+        )
+
+    def test_a_read_only_alias_is_not_reconciled(self) -> None:
+        # The violation is about writing, so widening reads alone answers
+        # nothing.
+        self.assertTrue(
+            workspace_evidence._workspace_scope_repair_still_unauthorized(
+                self._record("scripts"),
+                plans.SessionScope(reads=("brainnotes", "scripts"), writes=()),
+            )
+        )
+
+    def test_an_unregistered_repository_can_never_be_reconciled(self) -> None:
+        self.assertTrue(
+            workspace_evidence._workspace_scope_repair_still_unauthorized(
+                self._record(None), self._scope("brainnotes", "scripts")
+            )
+        )
+
+    def test_an_incomplete_observation_is_not_reconciled(self) -> None:
+        self.assertTrue(
+            workspace_evidence._workspace_scope_repair_still_unauthorized(
+                self._record("scripts", unavailable={".": {"reason": "unreadable"}}),
+                self._scope("scripts"),
+            )
+        )
+
+    def test_a_record_with_nothing_to_judge_is_not_reconciled(self) -> None:
+        for record in ({}, {"violations": []}, {"violations": "scripts"}):
+            with self.subTest(record=record):
+                self.assertTrue(
+                    workspace_evidence._workspace_scope_repair_still_unauthorized(
+                        record, self._scope("scripts")
+                    )
+                )
+
+    def test_an_unreadable_scope_is_not_reconciled(self) -> None:
+        self.assertTrue(
+            workspace_evidence._workspace_scope_repair_still_unauthorized(
+                self._record("scripts"), None
             )
         )
 

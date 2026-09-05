@@ -234,6 +234,26 @@ def _finish_run_locked(
     return exit_code, result_payload
 
 
+def _current_session_scope_or_none(
+    ctx: RunContext,
+    session: plans.SessionStatus | None,
+) -> plans.SessionScope | None:
+    """Read a session's durable repository scope, or ``None`` if it cannot be.
+
+    The run-start refusal below judges a retained scope violation against the
+    scope now on disk, and a scope it cannot read is one it cannot clear a
+    violation with, so an unreadable or invalid one reads as absent and the
+    refusal stands.
+    """
+    workspace = ctx.verification_context.workspace
+    if workspace is None or session is None:
+        return None
+    try:
+        return run_prompts._session_scope(session, workspace)
+    except plans.PlanError:
+        return None
+
+
 def _terminalize(
     ctx: RunContext,
     exit_code: int,
@@ -1103,7 +1123,14 @@ def run_locked(
         and snapshot.next_pending is not None
         else None
     )
-    if initial_workspace_scope_repair is not None and not ctx.gate_passed:
+    if (
+        initial_workspace_scope_repair is not None
+        and not ctx.gate_passed
+        and workspace_evidence._workspace_scope_repair_still_unauthorized(
+            initial_workspace_scope_repair,
+            _current_session_scope_or_none(ctx, snapshot.next_pending),
+        )
+    ):
         session_id = snapshot.next_pending.id
         details = {
             **plans.session_details_payload(session_id),

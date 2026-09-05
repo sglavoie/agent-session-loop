@@ -1461,7 +1461,21 @@ evidence pauses as
 `workspace-write-guard-unavailable`. Both post-turn failures retain repository
 contents, restore the handoff to pending, record qualified evidence, and run
 before verification or commit. Scope violations require a durable scope repair
-and fresh expansion/preflight before continuing. When the retained session is
+and fresh expansion/preflight before continuing. A later run that finds such a
+violation still uncleared, and a readiness gate that did not pass, refuses
+before the loop starts and names the retained record rather than the gate —
+but only while the durable scope still excludes what the violation named. The
+retained record froze the aliases the session held when the guard rejected it,
+so reading it alone can never observe the widening the refusal itself asked
+for, and the retained changes are what keep the gate red: the run refused
+forever on evidence about the past. Every violation naming an alias the session
+may now write is therefore treated as answered, and the run proceeds to the
+turn-level repair check, which re-derives the whole verdict from freshly
+captured evidence and still pauses when the retained changes really are out of
+scope. Nothing else clears the refusal: an unregistered repository, which no
+scope edit can authorize, an incomplete observation, a scope that cannot be
+read, and a record with no violations to judge all keep it. When the retained
+session is
 an ASL-generated repair child, the runner performs part of that repair itself:
 before the turn starts — ahead of repair commit preflight, task-packet
 rendering, the persisted active-turn prompt and the write guard — it widens the
@@ -2298,7 +2312,16 @@ gate that resolves every proposed check against the same
 `VerificationContext` preflight builds. A repair check naming a `repo`/`cwd`
 the plan's registry cannot resolve is refused there, with the plan untouched,
 rather than authored and then rejected by preflight — which is what used to
-strand a pending child no run could select or clear. Everything past that point
+strand a pending child no run could select or clear. Planning itself refuses a
+third case, before either gate: a group whose evidence paths or verification
+checks name a `session-<id>.md` or `session-<id>.expand.md` **inside this plan
+directory** other than the child's own is `malformed-review-repair`. A task
+packet makes exactly one session file writable and the plan artifact guard
+pauses any turn that changes another, so such a child cannot win either way —
+the check either already passes and proves nothing, or it demands the very edit
+the guard exists to refuse. Only plan-directory-anchored references count: a
+repository file that happens to be named `session-<id>.md` is an ordinary work
+target, and nothing but its location distinguishes it. Everything past that point
 runs inside a rollback window: `<plan>/.asl-review-repair-publication/` holds
 the fsynced pre-publication image of every path the publication may change (the
 staged files, `manifest.md`, and `baseline-results.json`) plus a

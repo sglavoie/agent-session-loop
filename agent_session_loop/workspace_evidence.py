@@ -25,7 +25,9 @@ It owns four things that the run loop used to hold inline:
   expansion file, :func:`_latest_workspace_scope_repair_requirement` recovers the
   latest uncleared scope violation for a session from the event log,
   :func:`_workspace_scope_repair_is_fresh` decides whether the operator actually
-  re-expanded since that violation, and
+  re-expanded since that violation,
+  :func:`_workspace_scope_repair_still_unauthorized` decides whether the aliases
+  that violation named are still outside the scope now on disk, and
   :func:`_workspace_scope_repair_comparison` acknowledges the topology a
   registry repair legitimately moved.
 
@@ -532,6 +534,51 @@ def _latest_workspace_scope_repair_requirement(
         ):
             return dict(guard) if isinstance(guard, dict) else None
     return None
+
+
+def _workspace_scope_repair_still_unauthorized(
+    record: Mapping[str, Any],
+    scope: plans.SessionScope | None,
+) -> bool:
+    """Whether a retained scope violation is still outside the session's scope.
+
+    The retained record freezes the aliases the session held when the guard
+    rejected the turn, and the pause it raises tells the operator to widen the
+    durable scope. Re-reading that record alone can therefore never observe
+    that they did (ASI-134): the violating aliases are still listed exactly as
+    they were, so a run-start refusal built on it refuses again on evidence
+    that describes only the past -- and it does so while the retained changes
+    are what keep the readiness gate red, which is a deadlock rather than a
+    diagnosis.
+
+    Reconciliation is judged per violation against the scope on disk now. A
+    violation naming an alias the session may now write is answered here, and
+    only far enough to let the run reach the turn-level repair check, which
+    re-derives the whole verdict from freshly captured evidence and still
+    pauses when the retained changes really are out of scope.
+
+    Everything else keeps the refusal: a scope that could not be read at all,
+    an unregistered repository, which no scope edit can authorize; a record
+    whose observation was incomplete; and a record carrying no violations to
+    judge at all.
+    """
+    if scope is None:
+        return True
+    if record.get("unavailable"):
+        return True
+    raw_violations = record.get("violations")
+    if not isinstance(raw_violations, Sequence) or isinstance(
+        raw_violations, (str, bytes)
+    ):
+        return True
+    violations = [entry for entry in raw_violations if isinstance(entry, Mapping)]
+    if not violations:
+        return True
+    writable = frozenset(scope.writes)
+    return any(
+        not isinstance(entry.get("alias"), str) or entry["alias"] not in writable
+        for entry in violations
+    )
 
 
 def _workspace_scope_repair_is_fresh(

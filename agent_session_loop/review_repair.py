@@ -21,6 +21,10 @@ Planning is read-only, and materialization is deterministic and atomic:
   criteria, and whose ``## Completion Contract`` embeds the findings'
   ``verification_checks`` verbatim (deduped by name and by identical command
   execution).
+- A group whose evidence or verification checks point the child at a session
+  artifact in this plan directory other than its own is refused outright: the
+  plan artifact guard makes exactly one session file writable per turn, so such
+  a child is launched against work it is forbidden to do (ASI-134).
 - Every child carries the versioned review-repair marker so later cycles can
   recognize generated repair sessions.
 - Before anything is staged, the rendered children are judged against the bound
@@ -382,6 +386,50 @@ def required_write_repositories(
     )
 
 
+def foreign_plan_artifact_references(
+    plan_dir: Path,
+    child_id: SessionId,
+    group_findings: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return the plan session artifacts a repair group points its child at.
+
+    A task packet makes exactly one session file writable, and the plan
+    artifact guard pauses the run when a turn changes any other one. Both
+    channels that carry a finding's work into a child can name a plan artifact
+    anyway: :func:`_render_child_body` prints every ``evidence[].path`` as the
+    child's work list, and :func:`_merge_verification_checks` copies the
+    findings' ``verification_checks`` verbatim into its completion contract. A
+    child launched against one of those cannot win either way -- the check
+    either already passes and proves nothing, or it demands the very edit the
+    guard exists to refuse, and the child burns its retries reporting that it
+    was not allowed to do the work (ASI-134).
+
+    Only references anchored to ``plan_dir`` count. A repository file that
+    happens to be named ``session-<id>.md`` is an ordinary work target, and
+    nothing but its location distinguishes it from a plan artifact.
+
+    The child's own artifacts are excluded: those are the one session file the
+    packet does make writable.
+    """
+    pattern = re.compile(
+        re.escape(str(plan_dir))
+        + rf"/session-({plans.SESSION_ID_PATTERN})\.(?:expand\.)?md"
+    )
+    referenced: dict[str, SessionId] = {}
+    for finding in group_findings:
+        haystacks = [json.dumps(finding.get("verification_checks", ()))]
+        haystacks.extend(
+            str(evidence.get("path", "")) for evidence in finding.get("evidence", ())
+        )
+        for text in haystacks:
+            for match in pattern.finditer(text):
+                if match.group(1) == child_id.value:
+                    continue
+                name = match.group(0).rsplit("/", 1)[-1]
+                referenced[name] = parse_session_id(match.group(1))
+    return tuple(sorted(referenced, key=lambda name: (referenced[name].sort_key, name)))
+
+
 def repair_group_from_session_text(text: str) -> str | None:
     """Return the repair group a materialized child declares, if any.
 
@@ -622,6 +670,7 @@ def _render_child_body(
 
 
 def _build_repair_group_plans(
+    plan_dir: Path,
     review_id: SessionId,
     grouped: Sequence[tuple[str, tuple[dict[str, Any], ...]]],
     *,
@@ -632,6 +681,18 @@ def _build_repair_group_plans(
     previous_id = review_id
     for index, (group, group_findings) in enumerate(grouped, start=1):
         child_id = parse_session_id(f"{review_id.value}.{index}")
+        foreign_artifacts = foreign_plan_artifact_references(
+            plan_dir, child_id, group_findings
+        )
+        if foreign_artifacts:
+            raise ReviewRepairError(
+                f"repair group {group!r} would send repair child "
+                f"{child_id.value} at plan session artifacts it is not "
+                f"authorized to change: {', '.join(foreign_artifacts)}; a "
+                "repair child may only rewrite its own session file, so apply "
+                "a plan-contract repair outside the repair cycle rather than "
+                "materializing a child that cannot perform it"
+            )
         title = f"Review repair: {group}"
         finding_ids = tuple(finding["id"] for finding in group_findings)
         done_when = tuple(
@@ -1569,6 +1630,7 @@ def plan_review_repair_sessions(
     try:
         repair_groups = tuple(
             _build_repair_group_plans(
+                canonical_dir,
                 review_id,
                 grouped,
                 repository_registry=repository_registry,

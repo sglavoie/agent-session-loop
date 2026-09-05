@@ -5095,6 +5095,44 @@ class RepairScopeRegenerationIntegrationTests(_GeneratedRepairDispatchFixture):
         )
         self.assertNotIn("retained_scope_repair", details)
 
+    #: The run-start refusal's own message, which is what distinguishes it from
+    #: the turn-level repair check that also pauses on this reason.
+    RUN_START_REFUSAL = "has retained changes to registered repositories"
+
+    def test_a_red_gate_refuses_a_violation_the_durable_scope_still_excludes(
+        self,
+    ) -> None:
+        # The plan the retained turn left behind no longer matches its
+        # readiness stamp, so the gate is red and the child's scope still
+        # excludes the alias the violation named.
+        self._retain_a_violation()
+
+        exit_code, payload = self._run("retained-still-narrow", self._refuse)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("SVC, OAK", self._write_scope(self.child))
+        self.assertEqual("workspace-write-scope-violation", payload["pause_reason"])
+        self.assertIn(self.RUN_START_REFUSAL, payload["pause_message"])
+
+    def test_a_red_gate_does_not_refuse_a_violation_the_widened_scope_answers(
+        self,
+    ) -> None:
+        # ASI-134: widening the durable scope is exactly what the refusal above
+        # tells the operator to do, and the retained changes are themselves what
+        # keeps the gate red. Reading the frozen record alone can never notice
+        # the repair, so the run refused forever on evidence about the past.
+        self._retain_a_violation()
+        self._narrow(self.child, "SVC, OAK, OWL")
+
+        _exit_code, payload = self._run("retained-widened", self._record_prompt)
+
+        # The run reaches the turn-level repair check, which re-derives the
+        # verdict from freshly captured evidence. That check is free to pause on
+        # the same reason -- and here it does, because nothing re-expanded the
+        # child -- but it says so about the present rather than the past.
+        self.assertNotIn(self.RUN_START_REFUSAL, payload["pause_message"] or "")
+        self.assertIn("lacks a fresh expansion", payload["pause_message"])
+
 
 class RunRepositoryContentionGateTests(unittest.TestCase):
     """Startup refusal when another live run already claims a registered repo."""
