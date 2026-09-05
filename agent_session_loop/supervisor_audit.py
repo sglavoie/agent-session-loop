@@ -31,6 +31,13 @@ checks turn known failure modes into reproducible verdicts: each answers
 the evidence it read. Evidence a check needed but could not see is
 ``unavailable``, never ``pass``, so a shed log or an unwritten result file
 reads as a gap in the audit rather than as a clean run.
+
+The same rule runs the other way for a claim built on a record's *absence*. The
+size cap sheds by usefulness, not at random, so the records it keeps are the
+ones that read as evidence of a problem and the records it drops are often the
+ones that would refute them. A check that infers a fault from a record it
+cannot find must therefore ask whether the log was shed before it counts the
+absence as evidence.
 """
 
 from __future__ import annotations
@@ -4334,7 +4341,12 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
             f"{len(unexplained_records)} verification check(s) recorded themselves "
             "as skipped without a condition that explains the skip"
         )
-    elif skipped_records:
+    elif skipped_records and not context.events_shed:
+        # Absence of a ``verification_check_finished`` record is only evidence
+        # in a log the cap kept whole. Shedding is not neutral here: a skipped
+        # record outranks a finished one, so a shed bundle keeps exactly the
+        # half of the pair that reads as a coverage gap and drops the half that
+        # would refute it (ASI-23).
         executed_turns = {
             _mapping(record.get("payload")).get("turn_index")
             for record in context.records

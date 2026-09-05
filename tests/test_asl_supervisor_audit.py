@@ -5782,6 +5782,64 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 "nothing gated the changes", results["misleading-success"].detail
             )
 
+    def _events_recording_only_a_skip(self) -> list[tuple[str, dict[str, object]]]:
+        """A log whose sole verification record for turn 1 is a skip."""
+        return [
+            ("run_started", {"run_id": RUN_ID}),
+            (
+                events.VERIFICATION_CHECK_SKIPPED_EVENT,
+                {
+                    "run_id": RUN_ID,
+                    "turn_index": 1,
+                    "name": "diagnose",
+                    "kind": "command",
+                    "on_failure_of": ["tests"],
+                    "reason": verification.SKIP_REASON_CONDITION_NOT_MET,
+                },
+            ),
+            (events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}),
+        ]
+
+    def test_a_log_recording_only_skips_contradicts_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(history[2], self._events_recording_only_a_skip())
+
+            _, results = self._audit(history)
+
+            self.assertEqual("fail", results["misleading-success"].status)
+            self.assertIn(
+                "every verification check recorded for turn(s) 1 was skipped",
+                results["misleading-success"].detail,
+            )
+
+    def test_a_shed_log_cannot_prove_a_verification_gap(self) -> None:
+        # Shedding is not neutral for this claim: a skipped record outranks a
+        # finished one, so the cap keeps exactly the half of the pair that reads
+        # as a coverage gap and drops the half that would refute it.
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_events(history[2], self._events_recording_only_a_skip())
+            bundle, _ = self._audit(history)
+
+            shed = supervisor_audit.tighten_audit_input(bundle, max_bytes=1)
+            results = {
+                result.check: result
+                for result in supervisor_audit.run_deterministic_checks(shed.payload)
+            }
+
+            self.assertTrue(
+                any(
+                    entry["section"] == "events"
+                    and entry["reason"] == supervisor_audit.REASON_SIZE_CAP
+                    for entry in shed.omissions
+                )
+            )
+            self.assertNotIn(
+                "was skipped, so nothing gated the changes they made",
+                results["misleading-success"].detail,
+            )
+
     def _paused_on_harness_failure(
         self,
         history: tuple[Path, Path, Path, Path],
