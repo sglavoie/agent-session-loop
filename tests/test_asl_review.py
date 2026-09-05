@@ -3251,6 +3251,71 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
                 self.assertIsNone(terminal.current_review_output_sha256)
                 self.assertIsNone(terminal.current_review_artifact_sha256)
 
+    def _withdrawn_cycle_events(self) -> Path:
+        """The cycle a `not-loop-ready` gate withdrew every child from."""
+        return self._write_review_events(
+            {
+                "cycle": 1,
+                "review_session_id": "2",
+                "disposition": "not-loop-ready",
+                "fingerprints": [],
+                "repair_session_ids": [],
+                "repair_groups": [],
+                "withdrawn_repair_session_ids": ["2.1"],
+                "repair_children_rolled_back": True,
+                "max_review_fix_cycles": 8,
+            }
+        )
+
+    def test_a_withdrawn_cycle_waits_for_the_refusal_to_be_cleared(self) -> None:
+        """ASI-6: withdrawn children are not a deleted child set."""
+        self._write_plan([self._finding("F1", "runner")])
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), self._withdrawn_cycle_events()
+        )
+
+        self.assertEqual("materialize-repairs", projected.action)
+        self.assertFalse(projected.eligible)
+        self.assertEqual("not-loop-ready", projected.blocker)
+        self.assertEqual("not-loop-ready", projected.source_disposition)
+        self.assertEqual(0, projected.historical_materializations)
+
+    def test_a_withdrawn_cycle_resumes_once_the_plan_is_loop_ready(self) -> None:
+        """Clearing the blockers is what the operator was told to do."""
+        self._write_plan([self._finding("F1", "runner")])
+        authoring.refresh_readiness_metadata(self.plan_dir, state="loop-ready")
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), self._withdrawn_cycle_events()
+        )
+
+        self.assertEqual("materialize-repairs", projected.action)
+        self.assertTrue(projected.eligible)
+        self.assertIsNone(projected.blocker)
+
+    def test_a_cycle_that_did_materialize_still_fails_closed(self) -> None:
+        """A child set deleted from a real materialization is still missing."""
+        self._write_plan([self._finding("F1", "runner")])
+        authoring.refresh_readiness_metadata(self.plan_dir, state="loop-ready")
+        event_path = self._write_review_events(
+            {
+                "cycle": 1,
+                "review_session_id": "2",
+                "disposition": "not-loop-ready",
+                "fingerprints": [],
+                "repair_session_ids": ["2.1"],
+                "max_review_fix_cycles": 8,
+            }
+        )
+
+        projected = review_continuation.evaluate_review_continuation(
+            plans.inspect_plan(self.plan_dir), event_path
+        )
+
+        self.assertEqual("terminal", projected.action)
+        self.assertEqual("repair-sessions-missing", projected.blocker)
+
 
 class _SimulatedCrash(BaseException):
     """Stands in for a process death: nothing in-process gets to clean up."""

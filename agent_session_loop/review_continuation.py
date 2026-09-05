@@ -1790,13 +1790,31 @@ def evaluate_review_continuation(
         # deleted one; otherwise the surviving children could incorrectly
         # advance this source to rereview.
         return result("terminal", False, "repair-sessions-missing")
-    if not generated_for_source and disposition in MATERIALIZED_REVIEW_DISPOSITIONS:
+    # ASI-6: a ``not-loop-ready`` cycle whose children the executability gate
+    # withdrew materialized nothing at all, so there is no child set for
+    # anything to have deleted. ``repair-sessions-missing`` is meant for a cycle
+    # that really did materialize one and then lost it; reporting it here
+    # retires findings that still carry executable repair checks, and offers a
+    # remediation -- clear the blockers and mark the plan loop-ready -- that
+    # cannot restore a cycle already projected terminal. Such a cycle stays a
+    # materialization candidate, gated below on the refusal being cleared.
+    withdrawn_materialization = (
+        not generated_for_source
+        and not materialization_count
+        and disposition == REVIEW_CYCLE_DISPOSITION_NOT_LOOP_READY
+    )
+    if (
+        not generated_for_source
+        and disposition in MATERIALIZED_REVIEW_DISPOSITIONS
+        and not withdrawn_materialization
+    ):
         return result("terminal", False, "repair-sessions-missing")
 
     candidate = (
         disposition in BUDGET_REVIEW_DISPOSITIONS
         or disposition == REVIEW_CYCLE_DISPOSITION_MALFORMED
         or disposition is None
+        or withdrawn_materialization
     )
     if not generated_for_source and not candidate:
         # Preserve an unfamiliar recorded value in ``source_disposition`` for
@@ -1916,4 +1934,12 @@ def evaluate_review_continuation(
             "higher-cap-required",
             planning=planning,
         )
+    if withdrawn_materialization:
+        # The same readiness gate a retained child set answers to. Re-authoring
+        # into the plan that refused the last attempt would only reproduce the
+        # withdrawal, so the cycle waits for the refusal to be cleared rather
+        # than spending another materialization on it (ASI-6).
+        standing = _unresolved_materialization_blocker(snapshot.plan_dir, disposition)
+        if standing is not None:
+            return result("materialize-repairs", False, standing, planning=planning)
     return result("materialize-repairs", True, None, planning=planning)

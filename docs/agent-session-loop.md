@@ -5175,7 +5175,15 @@ reason (`commit-preflight`, `commit-failed`, `repository-registry-required`, or
 a non-disposition terminal blocker (`repair-sessions-missing`,
 `repair-sessions-not-runnable`, or `unknown-disposition`). Repair children the
 executability gate refuses are withdrawn by the publication rollback described
-above, so an ordinary refusal now leaves no pending sessions at all. Children
+above, so an ordinary refusal now leaves no pending sessions at all. That cycle
+stays a materialization candidate rather than becoming terminal: a
+`not-loop-ready` cycle with no surviving children and no historical
+materialization never materialized a child set for anything to have deleted, so
+it projects `materialize-repairs` with `eligible: false` and blocker
+`not-loop-ready` until the refusal that withdrew the children is cleared, at
+which point the same findings re-materialize. `repair-sessions-missing` remains
+what it always meant — a child set deleted out from under a cycle that really
+did materialize one. Children
 retained under `--allow-not-loop-ready`, and children authored by an older ASL
 that stranded them, still look runnable while the plan is not loop-ready: a
 `run-repairs` continuation for such a plan reports `eligible: false` with
