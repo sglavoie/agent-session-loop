@@ -5083,6 +5083,92 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 "never paused on the violation", results["scope-escape"].detail
             )
 
+    def _unclassified_external_write(
+        self, history: tuple[Path, Path, Path, Path]
+    ) -> None:
+        """Record the refusal a legacy turn earns for an unclassified write.
+
+        This is the shape the runner writes when a turn touched a path the
+        external-write pass could not name: ``violations`` stays empty because
+        no repository alias is implicated, and the guard still fails the turn,
+        reverts it to pending, and stops the run under its unavailable reason.
+        """
+        guard = {
+            "passed": False,
+            "session_id": "01",
+            "reason": events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            "phase": "after",
+            "reverted_to_pending": True,
+            "write_aliases": ["app"],
+            "authorized_aliases": ["app"],
+            "violations": [],
+            "unavailable": {
+                "/tmp/asl-audit-scratch": {"reason": "external-write-unclassified"}
+            },
+        }
+        payload = self._read_result(history[3])
+        payload["workspace_write_guard"] = guard
+        payload["session_id"] = "01"
+        self._write_result(history[3] / "turn-0001-01", payload)
+        self._write_events(
+            history[2],
+            [
+                ("run_started", {"run_id": RUN_ID}),
+                (
+                    events.RUN_PAUSED_EVENT,
+                    {
+                        "run_id": RUN_ID,
+                        "reason": events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+                        "details": {
+                            "session": 1,
+                            "workspace_write_guard": dict(guard),
+                        },
+                    },
+                ),
+            ],
+        )
+
+    def test_a_turn_stopped_for_an_unattributable_write_is_not_reported_as_none(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._unclassified_external_write(history)
+
+            _, results = self._audit(history)
+
+            # The guard has nothing this check can attribute to a declared
+            # scope, so the critical reading stays scope-escape's and the status
+            # here stays clear. What must not survive is the sentence: a session
+            # was stopped, and reporting that none was states the opposite of
+            # what the run recorded (ASI-140).
+            self.assertEqual("unavailable", results["scope-escape"].status)
+            self.assertEqual("pass", results["scope-guard-catch"].status)
+            detail = results["scope-guard-catch"].detail
+            self.assertIn("this check could attribute", detail)
+            self.assertIn("could not be inventoried", detail)
+            self.assertIn("scope-escape", detail)
+            findings = {
+                finding.invariant_key
+                for finding in supervisor_audit.findings_from_results(results.values())
+            }
+            self.assertNotIn("packet.write-scope-guard-catch", findings)
+
+    def test_a_run_with_nothing_to_report_still_says_so_plainly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+
+            _, results = self._audit(history)
+
+            # The narrowed sentence is for a blind guard only. A run the guard
+            # read end to end keeps the flat claim, which is the one an operator
+            # should be able to take at face value.
+            self.assertEqual("pass", results["scope-guard-catch"].status)
+            self.assertEqual(
+                "no session had to be stopped for writing outside its declared scope",
+                results["scope-guard-catch"].detail,
+            )
+
     def _shed_events(
         self, bundle: supervisor_audit.AuditInput
     ) -> dict[str, DeterministicResult]:

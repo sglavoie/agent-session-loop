@@ -4060,10 +4060,28 @@ def _check_scope_guard_catch(context: _CheckContext) -> _Verdict:
     Never ``unavailable``: a guard that could not look is reported by
     :func:`_check_scope_escape`, which owns the critical reading, and both
     checks share one lane so the rollup keeps the worse of the two.
+
+    That division decides the *status* and must not decide the *sentence*. A
+    guard can refuse a turn through its blind lane alone -- an unclassified
+    external write leaves ``violations`` empty while the turn is still reverted
+    to pending and the run still paused -- and a clear verdict reading "no
+    session had to be stopped" then states the opposite of what the run
+    recorded (ASI-140). The clear reading is therefore narrowed to what this
+    check can actually name, and blindness is said out loud along with which
+    check owns it, so the report never answers for a place it did not look.
     """
     analysis = _analyze_write_scope(context)
     if analysis.caught:
         return _Verdict("fail", _joined(analysis.caught), analysis.evidence)
+    if analysis.blind:
+        return _Verdict(
+            "pass",
+            "no session had to be stopped for a write this check could "
+            f"attribute to a declared scope, but {_joined(analysis.blind)}, so "
+            "whether one was stopped for an unattributable write is "
+            "scope-escape's to report",
+            analysis.evidence,
+        )
     return _Verdict(
         "pass",
         "no session had to be stopped for writing outside its declared scope",
