@@ -65,11 +65,15 @@ Five invariants survive the move:
   :func:`_unresolved_commit_groups` summarizes that failure in place. Otherwise
   the one commit failure with no durable evidence would also be the only one a
   run could end silent about.
-* **Retries are bounded and the loss is inherited rather than looped on.**
+* **Retries are bounded, and the run stops rather than working past the loss.**
   :data:`MAX_COMMIT_GROUP_RETRIES` caps how many times one group is retried
   inside a single run; past that the group is left owed, in ``failed``, for a
   later run to recover. Each attempt is a real harness call that writes a
-  commit message, which is why the budget is small.
+  commit message, which is why the budget is small. Exhausting the budget ends
+  the run: ``run_loop._pause_for_unsettled_commit_group`` pauses at the next
+  selection boundary, because a session launched over an uncommitted one builds
+  on changes no commit describes and hands them to whichever message is written
+  next (ASI-138, ASI-139).
 * **A paused run does not announce that it finished.** :func:`_finish_run`
   emits the AgentMux Finished notification only when the payload is not
   paused — a paused run already notified Paused, and Finished would release the
@@ -274,9 +278,11 @@ def _upsert_commit_group(payload: dict[str, Any], group: Mapping[str, Any]) -> N
 
 
 #: Every soft-failed commit attempt this run made, in the order it made them.
-#: A commit failure no longer pauses the run, so this is the durable trace that
-#: one happened at all — including the attempt that failed before a durable
-#: group existed, which leaves no ``commit_groups`` row behind.
+#: A commit failure does not pause the run where it fails, so this is the
+#: durable trace that one happened at all — including the attempt that failed
+#: before a durable group existed, which leaves no ``commit_groups`` row behind,
+#: and the last attempt of a spent budget, which is what the loop's barrier
+#: pauses on.
 COMMIT_FAILURES_KEY = "commit_failures"
 
 #: The commit groups still owed when the run ended, written once by
@@ -300,7 +306,9 @@ PAUSED_WORK_COMMIT_GUARD = "paused-work-commit"
 #: repository that refuses every time must not turn the session loop into a
 #: commit loop, so the group is left owed for a later run to recover. Each
 #: attempt is a real harness call that writes the commit message, so the budget
-#: is small on purpose.
+#: is small on purpose. Spending it stops the run as well as the retries: the
+#: loop pauses at its next selection boundary rather than launching a session
+#: over the commit this run could not make.
 MAX_COMMIT_GROUP_RETRIES = 2
 
 

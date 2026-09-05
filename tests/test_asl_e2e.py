@@ -1468,10 +1468,14 @@ class MultiRepositoryEndToEndQATests(unittest.TestCase):
                 "FAKE_CODEX_COMMIT_FAIL_CWD_BASENAME": repositories["OAK"].name,
             },
         )
-        # The refused commit no longer stops the run; it leaves the group owed
-        # and says so, which is what the next process recovers from.
-        self.assertEqual(0, first.returncode, first.stderr)
-        self.assertFalse(first_payload["paused"])
+        # The refused commit does not stop the run where it fails: it is retried
+        # to the end of the group's budget first. Spending that budget is what
+        # stops it, because the alternative is selecting the next session over a
+        # commit this run could not make. The group is still left owed and said
+        # out loud, which is what the next process recovers from.
+        self.assertEqual(1, first.returncode, first.stderr)
+        self.assertTrue(first_payload["paused"])
+        self.assertEqual("commit-failed", first_payload["pause_reason"])
         self.assertEqual(
             ["OAK"],
             [

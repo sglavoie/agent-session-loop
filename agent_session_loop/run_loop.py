@@ -189,6 +189,11 @@ class RunContext:
     #: Retries already spent per group, so a repository that fails the same way
     #: every time cannot turn the run loop into a commit loop.
     owed_commit_group_attempts: dict[str, int] = dataclasses.field(default_factory=dict)
+    #: The group that spent its whole retry budget without settling, armed by
+    #: :func:`_soft_fail_commit` and read at the loop's selection boundary.
+    #: ``None`` means nothing durable is owed past its budget, which is the
+    #: only state in which this run may start another session.
+    unsettled_commit_group: dict[str, Any] | None = None
     #: The turn whose filesystem changes a pause would leave behind, armed
     #: only once that turn has cleared the post-turn write guards. A pause is
     #: not a place the loop can rebuild a turn's identity from, so the turn
@@ -325,6 +330,14 @@ def _soft_fail_commit(
     left owed rather than attempted forever; either way the group stays
     ``failed`` in ``commit_groups``, so ``terminalize`` reports it and a
     later run can still recover it.
+
+    Spending the budget is where the run keeps going but stops working. A
+    durable group that is still owed past its last retry arms
+    :attr:`RunContext.unsettled_commit_group`, which
+    :func:`_pause_for_unsettled_commit_group` reads at the next selection
+    boundary. Arming is deliberately limited to a group: an attempt that never
+    built one has nothing durable a later run could recover, so pausing on it
+    would refuse the first commit failure without ever retrying it.
     """
     record = commit_settlement._commit_failure_record(
         scope=scope,
@@ -348,9 +361,75 @@ def _soft_fail_commit(
     ctx.progress.commit_failed(record)
     if not retrying:
         ctx.owed_commit_group = None
+        if group is not None:
+            ctx.unsettled_commit_group = {
+                "scope": record["scope"],
+                "session_id": record["session_id"],
+                "group_id": record["group_id"],
+                "failed_alias": record["failed_alias"],
+                "retries_spent": spent,
+                "message": record["message"],
+                "error": record["error"],
+            }
         return
     ctx.owed_commit_group_attempts[str(group_id)] = spent + 1
     ctx.owed_commit_group = dict(group) if group is not None else None
+
+
+def _pause_for_unsettled_commit_group(
+    ctx: RunContext, *, snapshot: plans.PlanSnapshot
+) -> bool:
+    """Stop the run before it selects work on top of a commit it never made.
+
+    A commit failure soft-fails so a transient Git refusal can heal at the next
+    commit boundary, and that retry is bounded. What used to happen past the
+    bound was that the loss was simply inherited: the group stayed ``failed``
+    for a later run, and *this* run went on selecting sessions over a worktree
+    whose last accepted session was never committed. Everything after it then
+    builds on changes no commit describes, and the end-of-run sweep folds them
+    into a message written for different work (ASI-138, ASI-139).
+
+    So the bound now ends the run rather than only ending the retries. The
+    reason is ``commit-failed``, which the pause policy already classes as
+    environment-blocked -- the working tree, or the commit harness, has to
+    change on disk before the same gate can pass -- and which the Recovery
+    Center already renders from the commit-failure rows this run wrote. The
+    group is still left owed in ``commit_groups``, so the restart half of the
+    invariant recovers it exactly as before; what changed is that no further
+    session runs first.
+
+    This is checked at the top of the loop rather than at each failure because
+    the selection boundary is what the barrier is about, and one place covers
+    every way a run reaches it: the settlement ahead of the next worker, the
+    settlement a startup recovery already spent, the per-turn commit, and the
+    completion branch that would otherwise append a review or materialize
+    repair children over the same uncommitted tree.
+
+    Reusing that reason also settles what happens to the dirt, without this
+    barrier deciding anything about it. ``commit-failed`` is environment
+    blocked rather than recoverable, so the retained-work settlement below
+    refuses this pause the way it refuses every other one a machine cannot
+    retry -- which is the outcome that is wanted here, and for the reason the
+    policy already gives. The turn's changes belong to a session that
+    completed and to a durable ``failed`` group still owed a retry; committing
+    them under the paused-work marking would say the session is back to
+    ``pending`` when it is not, and would leave the owed group a clean tree
+    that the next run reads back as ``skipped-clean`` (ASI-19).
+    """
+    unsettled = ctx.unsettled_commit_group
+    if unsettled is None:
+        return False
+    ctx.record_final_snapshot(snapshot)
+    ctx.pause(
+        reason="commit-failed",
+        message=(
+            "an auto-commit group could not be completed within "
+            f"{commit_settlement.MAX_COMMIT_GROUP_RETRIES} retries, so no "
+            "further session is selected until it is settled"
+        ),
+        details=dict(unsettled),
+    )
+    return True
 
 
 def _settle_owed_commit_group(ctx: RunContext) -> None:
@@ -1339,6 +1418,8 @@ def run_locked(
                 # first pass is excluded because the recovery above the loop
                 # is that pass's boundary and has just run.
                 _settle_owed_commit_group(ctx)
+            if _pause_for_unsettled_commit_group(ctx, snapshot=snapshot):
+                break
             pending_session = snapshot.next_pending
 
             if pending_session is None:
