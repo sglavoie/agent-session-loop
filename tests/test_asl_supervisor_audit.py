@@ -3135,6 +3135,115 @@ class TurnAnomalyClassificationTests(_RunHistoryFixture, unittest.TestCase):
             self.assertFalse(turn["anomalous"])
             self.assertNotIn("rejected", turn)
 
+    def _deferred_turn(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        *,
+        pause_details: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Write a turn whose broad-check failures a findings review deferred."""
+        workspace, _, state_dir, run_dir = history
+        turn_dir = run_dir / "turn-0002-01"
+        turn_dir.mkdir()
+        result = self._clean_result(workspace, turn_dir)
+        result["turn_index"] = 2
+        result["status_result"] = "complete"
+        result["verification"] = {
+            "passed": False,
+            "session": "2",
+            "checks": [{"name": "broad:tests", "passed": False, "returncode": 1}],
+            "skipped_checks": [],
+            "deferred_failures": [{"name": "broad:tests"}],
+            "acceptance": {
+                "accepted": True,
+                "reason": "findings-defer-broad-failures",
+                "review_outcome": "findings",
+                "deferred_failure_names": ["broad:tests"],
+                "deferred_failure_count": 1,
+            },
+        }
+        self._write_result(turn_dir, result)
+        state_payload = self._clean_state(workspace)
+        records: list[tuple[str, dict[str, Any]]] = [
+            ("run_started", {"run_id": RUN_ID})
+        ]
+        if pause_details is None:
+            records.append((events.RUN_FINISHED_EVENT, {"run_id": RUN_ID, "ok": True}))
+        else:
+            state_payload["ok"] = False
+            state_payload["paused"] = True
+            state_payload["pause_reason"] = (
+                events.PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE
+            )
+            state_payload["pause_details"] = pause_details
+            records.append(
+                (
+                    events.RUN_PAUSED_EVENT,
+                    {
+                        "run_id": RUN_ID,
+                        "reason": events.PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE,
+                        "details": pause_details,
+                    },
+                )
+            )
+        self._write_state(state_dir, state_payload)
+        self._write_events(state_dir, records)
+        return self._bundle(history).payload["turns"][1]
+
+    def test_a_deferral_the_run_never_redeemed_is_anomalous(self) -> None:
+        """ASI-15: the exemption dies with the promise that bought it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            turn = self._deferred_turn(
+                self._history(Path(tmp)),
+                pause_details={
+                    "deferred_unresolved": [
+                        {
+                            "run_id": RUN_ID,
+                            "session_id": "2",
+                            "turn_index": 2,
+                            "checks": ["broad:tests"],
+                            "review_outcome": "findings",
+                        }
+                    ],
+                    "unpassed_verifications": [],
+                },
+            )
+
+            self.assertEqual(0, turn["result"]["returncode"])
+            self.assertTrue(turn["anomalous"])
+            self.assertTrue(turn["deferral_unredeemed"])
+            self.assertEqual(["broad:tests"], turn["unredeemed_checks"])
+
+    def test_a_deferral_no_pause_disputes_stays_unremarkable(self) -> None:
+        """A run that never declared the deferral unresolved keeps the exemption."""
+        with tempfile.TemporaryDirectory() as tmp:
+            turn = self._deferred_turn(self._history(Path(tmp)), pause_details=None)
+
+            self.assertFalse(turn["anomalous"])
+            self.assertNotIn("deferral_unredeemed", turn)
+
+    def test_another_runs_unredeemed_deferral_leaves_this_turn_alone(self) -> None:
+        """Turn indexes are per-run, so a foreign entry may not select by one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            turn = self._deferred_turn(
+                self._history(Path(tmp)),
+                pause_details={
+                    "deferred_unresolved": [
+                        {
+                            "run_id": "20260101T000000000000Z-0001",
+                            "session_id": "2",
+                            "turn_index": 2,
+                            "checks": ["broad:tests"],
+                            "review_outcome": "findings",
+                        }
+                    ],
+                    "unpassed_verifications": [],
+                },
+            )
+
+            self.assertFalse(turn["anomalous"])
+            self.assertNotIn("deferral_unredeemed", turn)
+
 
 class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
     """A commit the guard saw is projected even when the runner made none."""
@@ -4181,8 +4290,7 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
 
             self.assertEqual("fail", results["paused-work-settlement"].status)
             self.assertIn(
-                "reported a clean commit while naming 1 repository(ies) it left "
-                "dirty",
+                "reported a clean commit while naming 1 repository(ies) it left dirty",
                 results["paused-work-settlement"].detail,
             )
 

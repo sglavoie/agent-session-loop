@@ -1872,6 +1872,93 @@ def _mark_rejected_turns(
             turn["rejected"] = True
 
 
+def _unredeemed_deferral_turn_indexes(
+    state_payload: Mapping[str, Any],
+    event_records: Sequence[Mapping[str, Any]],
+    *,
+    run_id: str,
+) -> dict[int, list[str]]:
+    """Turn indexes whose accepted deferral the run then declared unredeemed.
+
+    Read from the pause the run actually took rather than re-derived: the
+    ``required-checks-incomplete`` blocker already resolved every deferral
+    against the review cycles that could have closed it, and it names the ones
+    that reached no all-clear. Entries carrying another run's id are skipped,
+    because this bundle's turn indexes mean nothing in that run's numbering.
+    """
+    sources: list[Mapping[str, Any]] = []
+    status_details = _mapping(state_payload.get("pause_details"))
+    if state_payload.get("pause_reason") == (
+        events.PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE
+    ):
+        sources.append(status_details)
+    for record in event_records:
+        if record.get("name") != events.RUN_PAUSED_EVENT:
+            continue
+        payload = _mapping(record.get("payload"))
+        if payload.get("reason") == events.PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE:
+            sources.append(_mapping(payload.get("details")))
+    indexes: dict[int, list[str]] = {}
+    for details in sources:
+        for item in _sequence(details.get("deferred_unresolved")):
+            entry = _mapping(item)
+            entry_run = entry.get("run_id")
+            if isinstance(entry_run, str) and entry_run and entry_run != run_id:
+                continue
+            index = entry.get("turn_index")
+            if not isinstance(index, int):
+                continue
+            checks = [
+                check
+                for check in _sequence(entry.get("checks"))
+                if isinstance(check, str)
+            ]
+            indexes.setdefault(index, [])
+            for check in checks:
+                if check not in indexes[index]:
+                    indexes[index].append(check)
+    return indexes
+
+
+def _mark_unredeemed_deferral_turns(
+    turns: list[dict[str, Any]],
+    state_payload: Mapping[str, Any],
+    event_records: Sequence[Mapping[str, Any]],
+    *,
+    run_id: str,
+) -> None:
+    """Mark turns whose deferred broad-check failures were never redeemed.
+
+    A findings review may finish with the plan's own gates failing, because
+    those failures are the repair specification. What the deferral buys is a
+    delay, redeemed only by a later all-clear review -- so an accepted deferral
+    exempts the turn from :func:`_turn_shows_failure` on the promise that the
+    redemption is still coming. When the run then pauses as
+    ``required-checks-incomplete`` naming those same checks, the promise is
+    broken and the exemption outlived its premise: the turn was projected
+    healthy while the run it belongs to was refusing to report success for
+    exactly its verification (ASI-15). Marked here rather than inside
+    ``_turn_shows_failure`` for the same reason a guard refusal is: the fact
+    that settles it is recorded after the turn, not on its result.
+    """
+    indexes = _unredeemed_deferral_turn_indexes(
+        state_payload, event_records, run_id=run_id
+    )
+    if not indexes:
+        return
+    for turn in turns:
+        result = _mapping(turn.get("result"))
+        index = result.get("turn_index")
+        if not isinstance(index, int) or index not in indexes:
+            continue
+        if _mapping(result.get("verification")).get("passed") is not False:
+            continue
+        turn["anomalous"] = True
+        turn["deferral_unredeemed"] = True
+        if indexes[index]:
+            turn["unredeemed_checks"] = list(indexes[index])
+
+
 def _guard_shows_failure(guard: Any) -> bool:
     """Whether a workspace write guard refused the turn or could not judge it.
 
@@ -2812,6 +2899,9 @@ def collect_audit_input(
         _turn_section(collector, directory) for directory in _turn_directories(run_dir)
     ]
     _mark_rejected_turns(turns, event_records)
+    _mark_unredeemed_deferral_turns(
+        turns, state_payload, event_records, run_id=str(run_id)
+    )
 
     payload: dict[str, Any] = {
         "schema_version": AUDIT_INPUT_SCHEMA_VERSION,
