@@ -26,6 +26,9 @@ than as a walk through one happy path:
 * the Spark retry is refused unless the failed turn left no trace, and its
   run-scoped suppression is set only when the shared ledger could not be
   written;
+* a nonzero exit that pauses takes back a completion claim the turn never
+  settled, publishes the reconciled plan image rather than the claimed one,
+  and says so in the pause when the reversion itself could not be written;
 * the module owns no loop statement, because the loop is not its to break;
 * the runner's own body reaches these entry points and no longer performs any
   of the branch work itself.
@@ -756,6 +759,79 @@ class NonzeroExitTests(DispositionTestCase):
             f"harness exited with status 2 for {SESSION_LABEL}",
             self.ctx.pauses[0]["message"],
         )
+
+    def claimed_complete(self) -> plans.PlanSnapshot:
+        """The after-image of a turn that claimed the session and then died."""
+        write_plan(self.plan_dir, ("complete",))
+        return plans.inspect_plan(self.plan_dir)
+
+    def test_an_unsettled_completion_is_taken_back_before_the_run_pauses(
+        self,
+    ) -> None:
+        self.settle(after=self.claimed_complete(), decision="baseline")
+        reverted = plans.inspect_plan(self.plan_dir)
+        self.assertEqual("pending", reverted.sessions[0].status)
+        record = self.turn_payload["completion_reconciliation"]
+        self.assertIs(True, record["reverted"])
+        self.assertEqual("complete", record["claimed_status"])
+        self.assertEqual("pending", record["restored_status"])
+        self.assertEqual(2, record["returncode"])
+        self.assertEqual(
+            record, self.ctx.pauses[0]["details"]["completion_reconciliation"]
+        )
+
+    def test_the_published_snapshot_is_the_reconciled_one(self) -> None:
+        self.settle(after=self.claimed_complete(), decision="baseline")
+        published = self.ctx.final_snapshots[0]
+        self.assertEqual("pending", published.sessions[0].status)
+        self.assertEqual(
+            plans.snapshot_payload(published), self.ctx.payload["final_snapshot"]
+        )
+
+    def test_the_reversion_is_recorded_as_a_reopen(self) -> None:
+        self.settle(after=self.claimed_complete(), decision="baseline")
+        reopens = [
+            payload
+            for name, payload in self.ctx.persistence.events
+            if name == events.SESSION_REOPENED_EVENT
+        ]
+        self.assertEqual(1, len(reopens))
+        self.assertEqual("complete", reopens[0]["from_status"])
+        self.assertEqual("pending", reopens[0]["to_status"])
+        self.assertEqual("turn-completion-reconciliation", reopens[0]["guard"])
+        self.assertEqual(
+            plans.inspect_plan(self.plan_dir).content_sha256,
+            reopens[0]["content_sha256"],
+        )
+
+    def test_a_session_that_claimed_nothing_is_left_alone(self) -> None:
+        self.settle(decision="baseline")
+        self.assertNotIn("completion_reconciliation", self.turn_payload)
+        self.assertNotIn("completion_reconciliation", self.ctx.pauses[0]["details"])
+        self.assertEqual([], [name for name, _ in self.ctx.persistence.events])
+        self.assertEqual([self.after], self.ctx.final_snapshots)
+
+    def test_an_unwritable_session_file_still_reports_the_claim_it_kept(
+        self,
+    ) -> None:
+        after = self.claimed_complete()
+        with mock.patch.object(
+            turn_dispositions.handoff_guards,
+            "_revert_session_status_to_pending",
+            return_value=None,
+        ):
+            self.settle(after=after, decision="baseline")
+        record = self.turn_payload["completion_reconciliation"]
+        self.assertIs(False, record["reverted"])
+        self.assertEqual("complete", record["restored_status"])
+        self.assertIsNone(record["session_path"])
+        self.assertEqual([], [name for name, _ in self.ctx.persistence.events])
+        self.assertEqual([after], self.ctx.final_snapshots)
+
+    def test_a_retryable_spark_failure_reconciles_nothing(self) -> None:
+        outcome = self.settle(cooldown=self.cooldown())
+        self.assertIsNotNone(outcome)
+        self.assertNotIn("completion_reconciliation", self.turn_payload)
 
 
 if __name__ == "__main__":

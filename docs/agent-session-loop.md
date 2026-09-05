@@ -5534,7 +5534,14 @@ the same command after resolving the issue.
 
 Common pause reasons:
 
-- `nonzero-exit`: harness command exited nonzero.
+- `nonzero-exit`: harness command exited nonzero. A failed exit ends the turn
+  ahead of verification and the handoff guards, so if the session file still
+  claims `complete` the runner takes that claim back before it publishes the
+  final snapshot: the status line returns to `pending` with a Handoff note, a
+  `session_reopened` event is appended, and the turn result carries a
+  `completion_reconciliation` block the pause details repeat. The work the
+  session already wrote is left in place — only the unadjudicated claim is
+  withdrawn, so a resume selects the session the turn actually left unfinished.
 - `quota-exhausted`: the provider rejected the turn for quota and supplied a
   recognized or unrecognized reset hint; ordinary runs stop for operator
   action, while Autopilot may wait only under its explicit bounded quota policy.

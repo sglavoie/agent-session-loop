@@ -20,13 +20,19 @@ module owns:
   can be answered mid-run, and an answer turns the pause back into a turn.
 * **nonzero-exit** carries the spark retry: a Spark turn that died on an
   exhausted quota or a rejected model falls back to the baseline model and
-  retries the same session, provided the turn left the plan untouched.
+  retries the same session, provided the turn left the plan untouched. When it
+  pauses instead, it first reconciles the session's status: this branch ends
+  the turn ahead of verification and the handoff guards, so a session left
+  ``complete`` holds a claim nothing adjudicated, and the claim is taken back
+  before the final snapshot is published.
 
 Durable records this boundary writes: the run's final snapshot on every path
 that ends the run, the rejection event for a refused turn, the spark fallback
-event and re-written result artifact for a retry, and the mailbox wait's own
-lifecycle. Every pause is recorded by ``run_termination`` through ``ctx.pause``,
-and every write goes through the run's persistence seam.
+event and re-written result artifact for a retry, the reopen event and
+``completion_reconciliation`` result block for a withdrawn completion claim,
+and the mailbox wait's own lifecycle. Every pause is recorded by
+``run_termination`` through ``ctx.pause``, and every write goes through the
+run's persistence seam.
 
 Nothing here imports the runner, and since Session 37 it does not import
 ``run_loop``, which owns ``RunContext``, either: the context enters as the
@@ -45,8 +51,12 @@ loop's ``break``: a boundary cannot break a loop it does not own, and "no
 continuation" is the more honest name for a run that stopped than an action
 enum whose other half would have to carry a snapshot that is never read.
 
-Three invariants survive the move:
+Four invariants survive the move:
 
+* **A session advances to ``complete`` only through a settled turn.** A nonzero
+  exit is not a settlement, so the completion claim in its after-image is
+  withdrawn through the same reverter every guard refusal uses, leaving the
+  work on disk untouched and only the claim taken back.
 * **The loop still names its own branch.** The six ``if terminating_disposition
   == ...`` tests stay in the loop, each delegating its body here and then taking
   its own edge. The dispatch is the loop's contract with the disposition; only
@@ -599,6 +609,76 @@ def _record_spark_fallback(
         ctx.persistence.write_state(ctx.payload)
 
 
+def _reconcile_unsettled_completion(
+    ctx: RunContext,
+    *,
+    after: plans.PlanSnapshot,
+    selected_after: plans.SessionStatus | None,
+    session_id: str,
+    turn_index: int,
+    result: harnesses.HarnessResult,
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+) -> tuple[plans.PlanSnapshot, dict[str, Any] | None]:
+    """Take back a completion claim the failed turn never settled.
+
+    A nonzero exit ends the turn ahead of verification and the handoff guards,
+    so a session left ``complete`` in the after-image holds a claim nothing
+    adjudicated. Publishing that image would make the unverified completion
+    permanent across a resume and advance the plan's next pending session past
+    work no check ever passed. The revert is the same one every guard refusal
+    uses, so the work on disk is untouched and only the claim is withdrawn.
+
+    Returns the snapshot to publish and the reconciliation record, or the
+    unchanged snapshot and ``None`` when the session claimed nothing.
+    """
+    if selected_after is None or selected_after.status != "complete":
+        return after, None
+    reverted = handoff_guards._revert_session_status_to_pending(
+        after,
+        session_id,
+        failure_note=(
+            f"harness exited with status {result.returncode} before this turn "
+            "reached an accepted settlement; the completion claim is withdrawn "
+            "and the work this session already wrote is left in place"
+        ),
+        append_handoff_note=handoff_correction._append_handoff_note,
+    )
+    snapshot_after = session_verification._reinspect_after_revert(
+        after.plan_dir, after, reverted, ctx.plan_cache
+    )
+    record = {
+        "session_id": session_id,
+        "claimed_status": "complete",
+        "restored_status": "pending" if reverted is not None else "complete",
+        "reason": "unsettled-completion-after-nonzero-exit",
+        "returncode": result.returncode,
+        "reverted": reverted is not None,
+        "session_path": str(reverted) if reverted is not None else None,
+    }
+    with ctx.persistence.lock:
+        turn_payload["completion_reconciliation"] = record
+        durability.write_json_file(paths["result"], turn_payload)
+        if reverted is not None:
+            ctx.persistence.append_event(
+                ctx.event_path,
+                events.SESSION_REOPENED_EVENT,
+                {
+                    "run_id": ctx.run_id,
+                    "turn_index": turn_index,
+                    **plans.session_identity_payload(session_id),
+                    "from_status": "complete",
+                    "to_status": "pending",
+                    "guard": "turn-completion-reconciliation",
+                    "reason": "unsettled-completion-after-nonzero-exit",
+                    **turn_execution.reopened_snapshot_identity(
+                        plans.snapshot_payload(snapshot_after)
+                    ),
+                },
+            )
+    return snapshot_after, record
+
+
 def settle_nonzero_exit(
     ctx: RunContext,
     *,
@@ -689,7 +769,20 @@ def settle_nonzero_exit(
             f"{session_label} failed: {classification.reason} "
             f"(harness exit {result.returncode})"
         )
-    ctx.record_final_snapshot(after)
+    # Before the snapshot is published, not after: the final image this run
+    # ends on is the reconciled one, so a resume selects the session the turn
+    # actually left unfinished rather than the one it claimed to finish.
+    reconciled, reconciliation = _reconcile_unsettled_completion(
+        ctx,
+        after=after,
+        selected_after=selected_after,
+        session_id=session_id,
+        turn_index=turn_index,
+        result=result,
+        turn_payload=turn_payload,
+        paths=paths,
+    )
+    ctx.record_final_snapshot(reconciled)
     ctx.pause(
         reason=classification.reason,
         message=pause_message,
@@ -700,6 +793,11 @@ def settle_nonzero_exit(
             **(
                 {"spark_fallback_unsafe": True}
                 if spark_failure and not safely_retryable
+                else {}
+            ),
+            **(
+                {"completion_reconciliation": reconciliation}
+                if reconciliation is not None
                 else {}
             ),
         },
