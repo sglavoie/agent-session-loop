@@ -399,6 +399,17 @@ def build_generated_review_session_body(
                 "while it is still there."
             ),
             (
+                "- Every check must be able to fail while the finding is "
+                "still open. A check that a record can satisfy by describing "
+                "the required work — including one that says the work was not "
+                "performed — proves nothing, because the repair session is "
+                "handed these checks verbatim and closes the finding when they "
+                "pass. Gate on the state the `done_criteria` require, not on "
+                "text about that state; when the only available evidence is a "
+                "document, match the wording that can be written solely after "
+                "the work is done."
+            ),
+            (
                 "- Set `review_replay: true` only on durable current-state "
                 "verification gates that should be rerun by every later "
                 "generated review. Leave HEAD, dirty-tree, intermediate-file, "

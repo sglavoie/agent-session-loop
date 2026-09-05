@@ -722,6 +722,29 @@ class StructuredReviewArtifactTests(unittest.TestCase):
                 contract.verify.checks[1].argv[2],
             )
 
+    def test_generated_review_session_body_requires_falsifiable_checks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = review_session_body.build_generated_review_session_body(
+                plans.SessionId((7,)),
+                review_harness="claude",
+                plan_dir=Path(tmp),
+            )
+
+            # The repair session is handed these checks verbatim, so a gate a
+            # record headed "NOT PERFORMED" can satisfy closes the finding it
+            # was written to prove (ASI-136).
+            self.assertIn(
+                "Every check must be able to fail while the finding is still open.",
+                body,
+            )
+            self.assertIn(
+                "Gate on the state the `done_criteria` require, not on text "
+                "about that state",
+                body,
+            )
+
     def test_generated_artifact_contract_check_gates_consistency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plan_dir = Path(tmp)
