@@ -1237,6 +1237,24 @@ def compare_repository_fingerprints(
     return _review_guard_changed_paths(before, after)
 
 
+def unchanged_head_transition(head: str) -> dict[str, Any]:
+    """The transition verdict for a tip that did not move.
+
+    Named rather than inlined because it is the one verdict that needs no
+    repository to reach: there is no ancestry to probe, so a caller that cannot
+    resolve a checkout root can still classify the tip honestly instead of
+    reporting the whole entry unobservable.
+    """
+    return {
+        "before": head,
+        "after": head,
+        "relation": "unchanged",
+        "commits_added": 0,
+        "commits_removed": 0,
+        "history_rewrite": False,
+    }
+
+
 def classify_head_transition(
     cwd: str | Path,
     before_head: str,
@@ -1278,14 +1296,7 @@ def classify_head_transition(
                 ) from error
 
         if before_head == after_head:
-            return {
-                "before": before_head,
-                "after": after_head,
-                "relation": "unchanged",
-                "commits_added": 0,
-                "commits_removed": 0,
-                "history_rewrite": False,
-            }
+            return unchanged_head_transition(before_head)
         if not before_head:
             return {
                 "before": before_head,

@@ -498,6 +498,80 @@ class RegisteredSnapshotTests(unittest.TestCase):
             "fast-forward", comparison["changed"][key]["head_transition"]["relation"]
         )
 
+    def test_unchanged_linked_worktrees_are_classified_without_a_root(self) -> None:
+        """ASI-19: an unmoved tip is conclusive evidence, not missing evidence.
+
+        A shared ignore configuration moves every checkout of the repository at
+        once, so each linked worktree lands in ``changed`` with its HEAD exactly
+        where it was. Nothing here needs an ancestry probe, and the annotator
+        used to report all of them ``repository-scope-unresolved`` anyway
+        because it demanded a checkout root before it would say so.
+        """
+        alpha = self.workspace / "alpha"
+        init_git_repo(alpha)
+        first = self.root / "alpha-one"
+        second = self.root / "alpha-two"
+        self._git(alpha, "worktree", "add", "-b", "one", str(first))
+        self._git(alpha, "worktree", "add", "-b", "two", str(second))
+        before = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        (alpha / ".git" / "info" / "exclude").write_text("*.log\n", encoding="utf-8")
+        after = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        comparison = repository_evidence.compare_workspace_snapshots(before, after)
+        keys = [
+            repository_evidence.linked_worktree_key("alpha", path.resolve())
+            for path in (first, second)
+        ]
+        for key in keys:
+            self.assertIn(key, comparison["changed"])
+            changes = comparison["changed"][key]
+            self.assertEqual(changes["head_before"], changes["head_after"])
+
+        # The owning alias is deliberately absent from the map, which is the
+        # only condition the old fail-closed branch needed.
+        workspace_evidence._annotate_history_transitions(
+            comparison, repository_roots={}
+        )
+
+        for key in keys:
+            self.assertNotIn(key, comparison["unavailable"])
+            self.assertEqual(
+                "unchanged",
+                comparison["changed"][key]["head_transition"]["relation"],
+            )
+
+    def test_a_moved_tip_with_no_resolvable_root_stays_unavailable(self) -> None:
+        """The fail-closed branch still covers the case that needs a probe."""
+        alpha = self.workspace / "alpha"
+        init_git_repo(alpha)
+        linked = self.root / "alpha-hardening"
+        self._git(alpha, "worktree", "add", "-b", "hardening", str(linked))
+        before = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        (linked / "README.md").write_text("hardened\n", encoding="utf-8")
+        self._git(linked, "commit", "-am", "harden")
+        after = repository_evidence.capture_registered_snapshot(
+            self.workspace, self.plan_dir, ["alpha"]
+        )
+
+        comparison = repository_evidence.compare_workspace_snapshots(before, after)
+        workspace_evidence._annotate_history_transitions(
+            comparison, repository_roots={}
+        )
+
+        key = repository_evidence.linked_worktree_key("alpha", linked.resolve())
+        self.assertEqual(
+            "repository-scope-unresolved",
+            comparison["unavailable"][key]["after"]["reason"],
+        )
+
     def test_a_registered_sibling_worktree_keeps_its_own_key(self) -> None:
         alpha = self.workspace / "alpha"
         init_git_repo(alpha)

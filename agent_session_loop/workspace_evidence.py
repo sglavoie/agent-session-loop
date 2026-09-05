@@ -118,6 +118,16 @@ def _annotate_history_transitions(
                 "after": {"reason": "history-transition-evidence-missing"}
             }
             continue
+        if before_head == after_head:
+            # ASI-19: a tip that did not move has no ancestry to probe, so it
+            # needs no checkout root. Demanding one marked every unchanged
+            # linked worktree unavailable purely because its composite key is
+            # absent from the registered-root map -- a fail-closed verdict
+            # about evidence that is already conclusive.
+            raw_changes["head_transition"] = (
+                repository_evidence.unchanged_head_transition(before_head)
+            )
+            continue
         root = repository_roots.get(str(repository))
         if root is None:
             linked = repository_evidence.split_linked_worktree_key(str(repository))
