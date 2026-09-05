@@ -118,7 +118,25 @@ REASON_NO_INDEPENDENT_ROLE = "no-independent-role"
 REASON_WORKSPACE_MUTATED = "workspace-mutated"
 REASON_WORKSPACE_EVIDENCE_UNAVAILABLE = "workspace-evidence-unavailable"
 REASON_HARNESS_FAILED = "harness-failed"
+REASON_QUOTA_EXHAUSTED = "quota-exhausted"
 REASON_TIMEOUT = "timeout"
+
+#: Classifier reasons that earn an availability class of their own rather than
+#: landing in :data:`REASON_HARNESS_FAILED`. The set is deliberately one entry
+#: wide. ``harness-failed`` is the class for "the auditor was launched and the
+#: launch broke", and every issue filed under it is read as an ASL defect worth
+#: investigating. A provider refusing the request because the account is out of
+#: quota is not that: nothing about the audit, the run, or ASL is wrong, the
+#: condition clears on a clock nobody here controls, and the standing
+#: recommendation to re-run the audit cannot be followed until it does (ASI-127).
+#: A second entry belongs here only for a condition with the same three
+#: properties -- not ASL's doing, not retryable, and cleared by an operator or a
+#: clock rather than by a re-run -- and only once a run has actually recorded it,
+#: because an availability class nothing files is a name with no evidence behind
+#: it.
+_DISTINCT_AVAILABILITY_REASONS: Mapping[str, str] = {
+    events.PAUSE_REASON_QUOTA_EXHAUSTED: REASON_QUOTA_EXHAUSTED,
+}
 
 #: Why an audit produced no verdict before any auditor could be launched.
 REASON_EVIDENCE_UNAVAILABLE = "evidence-unavailable"
@@ -945,15 +963,19 @@ def run_restricted_audit(
     if result.returncode != 0:
         # A bare "harness-failed" is unreadable a week later, so the launch is
         # classified with the same rules the session loop uses and the streams
-        # that carried the provider's own words are kept alongside it.
+        # that carried the provider's own words are kept alongside it. A few of
+        # those classifications name a condition that is not a failure of the
+        # audit at all, and those keep an availability class of their own rather
+        # than being filed as one -- see `_DISTINCT_AVAILABILITY_REASONS`.
+        classification = _redacted_classification(result)
         return AuditAttemptResult(
             outcome="transport-error",
             state="unavailable",
-            reason=REASON_HARNESS_FAILED,
+            reason=_availability_reason(classification),
             argv=argv,
             returncode=result.returncode,
             last_message=result.last_message,
-            classification=_redacted_classification(result),
+            classification=classification,
             stdout_tail=_harness_tail(result.stdout),
             stderr_tail=_harness_tail(result.stderr),
         )
@@ -1297,6 +1319,26 @@ def _redacted_classification(
     """Classify a failed launch, with credentials stripped from its evidence."""
     classification = harness_failures.classify_harness_failure(result)
     return replace(classification, evidence=_redact_secrets(classification.evidence))
+
+
+def _availability_reason(
+    classification: harness_failures.FailureClassification,
+) -> str:
+    """Name the availability class a failed launch belongs in.
+
+    Most failed launches are ``harness-failed``, which is the class for "the
+    auditor was launched and the launch broke" and is read as an ASL defect
+    worth investigating. A handful of classifications say something else
+    entirely -- the account is out of quota -- and filing those as harness
+    failures reported an outage nobody here caused as a defect, under a
+    recommendation to re-run the audit that could not be followed until the
+    quota reset (ASI-127). The class is taken from the classifier's own reason
+    rather than re-matched here, so the audit and the session loop cannot
+    disagree about what the provider said.
+    """
+    return _DISTINCT_AVAILABILITY_REASONS.get(
+        classification.reason, REASON_HARNESS_FAILED
+    )
 
 
 def _harness_tail(text: str) -> str:

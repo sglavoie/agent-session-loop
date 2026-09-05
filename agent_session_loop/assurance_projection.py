@@ -145,6 +145,30 @@ SYSTEM_ISSUE_LANE: RubricLane = "unknown-anomalies"
 SYSTEM_ISSUE_SEVERITY: Severity = "medium"
 UNAVAILABLE_INVARIANT_PREFIX = "audit.availability"
 
+#: What an operator is told to do about an audit that could not be judged. The
+#: default fits a failure a re-run could clear, which is most of them.
+DEFAULT_UNAVAILABLE_RECOMMENDATION = (
+    "Re-run the audit for this run with `asl assurance process-pending` and "
+    "read the named attempt artifacts if it fails the same way."
+)
+
+#: Reason classes the default would be wrong for. A quota exhaustion is one:
+#: re-running changes nothing until the provider's own limit resets, and reading
+#: a defect's recommendation over an outage is part of what made this class look
+#: like an ASL bug across nine runs (ASI-127). The key is spelled literally
+#: because ``supervisor_audit`` imports this module and not the other way round;
+#: it is ``supervisor_audit.REASON_QUOTA_EXHAUSTED``.
+UNAVAILABLE_RECOMMENDATIONS: Mapping[str, str] = MappingProxyType(
+    {
+        "quota-exhausted": (
+            "Nothing here is broken: the audit was refused because the account "
+            "is out of provider quota. Re-run it with `asl assurance "
+            "process-pending` once the limit resets, and read the named attempt "
+            "artifacts if it then fails for some other reason."
+        )
+    }
+)
+
 
 UNKNOWN_ISSUE = "unknown-issue"
 UNKNOWN_RUN = "unknown-run"
@@ -423,9 +447,8 @@ class AuditPublication:
                 "The supervisor audit could not be judged; its reason class is "
                 f"{self.reason}."
             ),
-            recommendation=(
-                "Re-run the audit for this run with `asl assurance process-pending` "
-                "and read the named attempt artifacts if it fails the same way."
+            recommendation=UNAVAILABLE_RECOMMENDATIONS.get(
+                self.reason or "", DEFAULT_UNAVAILABLE_RECOMMENDATION
             ),
             evidence=evidence,
         )

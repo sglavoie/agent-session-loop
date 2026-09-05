@@ -1717,6 +1717,27 @@ class UnavailableAuditTests(ProjectionTestCase):
         )
         self.assertEqual(("supervisor-audit-attempt-1",), issue.finding.evidence)
 
+    def test_a_reason_a_rerun_cannot_clear_is_not_told_to_rerun(self) -> None:
+        # The standing advice is to re-run the audit, which is right for a
+        # failure a re-run could clear. An exhausted quota is not one, and
+        # telling an operator to re-run it is what made an outage read as a
+        # defect they were expected to chase (ASI-127).
+        default = self.publish(
+            self._unavailable(RUN_ID, "harness-transport", "socket hangup")
+        )
+        quota = self.publish(
+            self._unavailable(OTHER_RUN_ID, "quota-exhausted", "weekly limit"),
+            recorded_at=LATER_TIMESTAMP,
+        )
+        view = self.read()
+        self.assertEqual(
+            projection.DEFAULT_UNAVAILABLE_RECOMMENDATION,
+            view.issue(default.issue_ids[0]).finding.recommendation,
+        )
+        advice = view.issue(quota.issue_ids[0]).finding.recommendation
+        self.assertNotEqual(projection.DEFAULT_UNAVAILABLE_RECOMMENDATION, advice)
+        self.assertIn("once the limit resets", advice)
+
     def test_one_reason_class_deduplicates_across_distinct_exception_text(self) -> None:
         self.publish(
             self._unavailable(RUN_ID, "harness-transport", "socket hangup at 0x7ffe")

@@ -7446,6 +7446,32 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual({auditor.prompts[0]}, set(auditor.prompts))
             self.assertNotIn("Your previous answer was rejected", auditor.prompts[-1])
 
+    def test_an_exhausted_quota_is_not_filed_as_a_harness_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            auditor = _ScriptedAuditor(
+                {
+                    "message": "",
+                    "returncode": 1,
+                    "stderr": "You've hit your weekly limit · resets Sep 6 at 1am",
+                }
+            )
+            sleeps: list[float] = []
+
+            outcome = self._run(history, auditor, sleeps=sleeps)
+
+            self.assertEqual("unavailable", outcome.audit.state)
+            # Its own class, not `harness-failed`: nothing about the audit broke,
+            # and the class an operator reads decides whether they go looking for
+            # a defect that is not there (ASI-127).
+            self.assertEqual(
+                supervisor_audit.REASON_QUOTA_EXHAUSTED, outcome.audit.reason
+            )
+            # A refusal the provider will repeat is not waited out: the launch is
+            # classified non-retryable, so no delivery budget is spent on it.
+            self.assertEqual(1, len(auditor.prompts))
+            self.assertEqual([], sleeps)
+
     def test_a_capacity_outage_that_clears_still_earns_a_verdict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
