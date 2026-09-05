@@ -139,10 +139,7 @@ MUTATION_ARTIFACT_NAME = "supervisor-audit-mutation.json"
 PINNED_WORKSPACE_PREFIX = "asl-audit-pinned-"
 
 #: Why a boundary check was judged on the live workspace rather than on a
-#: checkout pinned to a fixed commit. ``no-recorded-commit`` keeps its name from
-#: when the run's own commits were the only pin source, and now covers a
-#: registered repository that offers no commit at all -- not one the run
-#: recorded, and no current ``HEAD`` either.
+#: checkout pinned to a fixed commit.
 PIN_REASON_NOT_REQUESTED = "not-requested"
 PIN_REASON_NO_RECORDED_COMMIT = "no-recorded-commit"
 PIN_REASON_CHECKOUT_FAILED = "checkout-failed"
@@ -636,45 +633,6 @@ def run_commits(
     return {relative: latest[relative][1] for relative in repositories}
 
 
-def pin_commits(
-    run_dir: Path | str,
-    workspace_root: Path | str,
-    repositories: Sequence[str],
-) -> dict[str, str] | None:
-    """The commit each registered repository is pinned at for the boundary check.
-
-    Prefers where the run itself left the repository and falls back to the
-    repository's current ``HEAD`` for one the run recorded no commit for. Both
-    serve the check equally. The pin exists to give the comparison a tree no
-    other process writes to, and the auditor never reads that tree -- it works
-    from the evidence bundle under the run directory -- so the pin's isolation
-    is what the check depends on and the commit it holds only makes the checkout
-    reproducible for a reader.
-
-    Falling back is what keeps the check meaningful for the runs that most need
-    it. A run that recorded no commit at all -- a review, a run that paused, a
-    plan whose sessions all deferred -- used to be judged on the live workspace,
-    where a concurrent run or an operator's open editor is indistinguishable
-    from the auditor. Every mutation ever charged to an auditor was observed
-    that way and none on a pinned tree (ASI-13).
-
-    ``None`` when some registered repository offers neither, because a partial
-    pin would leave the rest of the comparison on the live tree -- the mixture
-    the pin exists to avoid.
-    """
-    recorded = run_commits(run_dir, repositories) or {}
-    root = Path(workspace_root)
-    resolved: dict[str, str] = {}
-    for relative in repositories:
-        commit = recorded.get(relative) or repository_evidence.resolve_head(
-            root / relative
-        )
-        if not commit:
-            return None
-        resolved[relative] = commit
-    return resolved
-
-
 def _pin_depth(relative: str) -> tuple[int, str]:
     """Order registered paths so an ancestor is checked out before a descendant."""
     return (0 if relative == "." else relative.count("/") + 1, relative)
@@ -692,9 +650,9 @@ def pinned_audit_workspace(
     on the live workspace that question has no honest answer: a concurrent run,
     or an operator with an editor open, changes the same tree for reasons this
     audit had nothing to do with, and the comparison reports it as the auditor's
-    doing. A detached checkout of a fixed commit -- see :func:`pin_commits` for
-    which one -- is a tree with no other writer, so a difference across the turn
-    is evidence again rather than a coincidence.
+    doing. A detached checkout of the commits the run itself recorded is a tree
+    with no other writer, so a difference across the turn is evidence again
+    rather than a coincidence.
 
     Pinning is all-or-nothing. A repository that cannot be checked out abandons
     the whole pin and yields the live root, because half a pinned comparison
@@ -8063,7 +8021,7 @@ def audit_terminal_run(
             with pinned_audit_workspace(
                 workspace_root,
                 repositories,
-                pin_commits(run_dir, workspace_root, repositories),
+                run_commits(run_dir, repositories),
             ) as pinned:
                 outcome = run_agent_audit(
                     role,

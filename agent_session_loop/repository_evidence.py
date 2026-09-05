@@ -1630,32 +1630,6 @@ def linked_worktrees(
     return tuple(dict.fromkeys(listed))
 
 
-def resolve_head(
-    repository: str | Path,
-    *,
-    _run_git_fn: GitRunner | None = None,
-) -> str | None:
-    """Return the commit ``HEAD`` names in ``repository``, or ``None``.
-
-    ``None`` covers every way there is no commit to name: a path that is not a
-    repository, an unborn HEAD before the first commit, and a Git probe that
-    could not be run at all. The caller wanted a commit and there is none, and
-    the three cases are indistinguishable to anything that only wants to check
-    one out.
-    """
-    root = Path(os.path.realpath(os.path.abspath(os.fspath(repository))))
-    token = _GIT_RUNNER.set(_run_git_fn)
-    try:
-        result = _run_git(root, ["rev-parse", "--verify", "HEAD"])
-    except Exception:
-        return None
-    finally:
-        _GIT_RUNNER.reset(token)
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
-
-
 def add_detached_worktree(
     repository: str | Path,
     destination: str | Path,
