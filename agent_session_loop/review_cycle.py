@@ -544,10 +544,7 @@ def _advance_review_cycle(
         hold_lock=False,
         allow_not_loop_ready=readiness_gate._allow_not_loop_ready(args),
     )
-    cycle_record["repair_session_ids"] = [
-        child.session_id.value for child in repair_result.children
-    ]
-    cycle_record["repair_groups"] = [
+    materialized_repair_groups = [
         {
             "repair_group": child.repair_group,
             "repair_session_id": child.session_id.value,
@@ -563,6 +560,24 @@ def _advance_review_cycle(
         }
         for child in repair_result.children
     ]
+    if not materialized_repair_groups:
+        # ASI-147: a cycle that planned repairs and materialized none is not a
+        # cycle that planned none. The pre-authoring gate refused the rendered
+        # children, or the executability gate withdrew them after authoring
+        # (ASI-136); either way the empty materialized list would overwrite the
+        # planned one recorded above and leave the pause detail as the only
+        # durable trace of repairs this cycle actually specified.
+        planned_repair_groups = cycle_record.get("repair_groups")
+        if planned_repair_groups:
+            cycle_record["withdrawn_repair_groups"] = planned_repair_groups
+            cycle_record["withdrawn_repair_session_ids"] = [
+                str(group["repair_session_id"]) for group in planned_repair_groups
+            ]
+            cycle_record["repair_children_rolled_back"] = repair_result.rolled_back
+    cycle_record["repair_session_ids"] = [
+        child.session_id.value for child in repair_result.children
+    ]
+    cycle_record["repair_groups"] = materialized_repair_groups
     # Materialization writes pending repair sessions into the durable plan
     # even on the paths that go on to pause, so every projection from here
     # down is built from the re-read rather than from the snapshot taken

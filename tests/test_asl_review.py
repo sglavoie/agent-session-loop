@@ -4843,6 +4843,49 @@ class ReviewRepairCycleTests(unittest.TestCase):
         self.assertIn("session-2.1.md", paused["details"]["repair_rollback"]["removed"])
         self.assertIn("withdrawn after authoring", paused["message"])
 
+    def test_a_withdrawn_cycle_records_the_repairs_it_planned(self) -> None:
+        """ASI-147: an empty child list must not erase the planned groups."""
+        _action, _after, payload, event_path = self._advance_blocked_review_cycle(
+            allow_not_loop_ready=False
+        )
+
+        cycle = payload["review_cycles"][-1]
+        # What the cycle materialized is still nothing, because the children
+        # were taken back off disk.
+        self.assertEqual([], cycle["repair_groups"])
+        self.assertEqual([], cycle["repair_session_ids"])
+        # What it planned survives beside that, so the durable lineage says four
+        # repairs were specified rather than that none ever existed.
+        self.assertEqual(
+            ["2.1"],
+            cycle["withdrawn_repair_session_ids"],
+        )
+        self.assertEqual(
+            ["2.1"],
+            [group["repair_session_id"] for group in cycle["withdrawn_repair_groups"]],
+        )
+        self.assertTrue(cycle["repair_children_rolled_back"])
+        recorded = [
+            record["payload"]
+            for record in read_jsonl(event_path)
+            if record["name"] == events.REVIEW_CYCLE_EVENT
+        ][-1]
+        self.assertEqual(
+            cycle["withdrawn_repair_groups"], recorded["withdrawn_repair_groups"]
+        )
+
+    def test_a_materialized_cycle_records_no_withdrawn_repairs(self) -> None:
+        """The withdrawal keys are absent when the children actually landed."""
+        _action, _after, payload, _event_path = self._advance_blocked_review_cycle(
+            allow_not_loop_ready=True
+        )
+
+        cycle = payload["review_cycles"][-1]
+        self.assertEqual(["2.1"], cycle["repair_session_ids"])
+        self.assertNotIn("withdrawn_repair_groups", cycle)
+        self.assertNotIn("withdrawn_repair_session_ids", cycle)
+        self.assertNotIn("repair_children_rolled_back", cycle)
+
     def test_allow_not_loop_ready_keeps_projecting_the_materialized_children(
         self,
     ) -> None:

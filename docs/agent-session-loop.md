@@ -2280,7 +2280,15 @@ moves. If the post-authoring executability gate blocks, the children are
 withdrawn: the window is restored, `ReviewRepairResult.children` is empty,
 `rolled_back` is true, and `rollback` carries the restored and removed paths.
 The `not-loop-ready` pause reports both as `repair_children_rolled_back` and
-`repair_rollback` in `pause_details`. `--allow-not-loop-ready` retains children
+`repair_rollback` in `pause_details`. The cycle record keeps what the cycle
+planned as well as what it kept: an empty materialized list leaves
+`repair_groups` and `repair_session_ids` empty and records the planned groups
+under `withdrawn_repair_groups`, `withdrawn_repair_session_ids`, and
+`repair_children_rolled_back`, so a cycle that specified repairs and kept none
+is distinguishable in the durable record from one that specified none. The
+withdrawn groups stay out of `repair_groups` on purpose, because
+`review_continuation.repair_group_attempts()` counts one attempt per entry and
+a group nobody ran must not spend a group's budget. `--allow-not-loop-ready` retains children
 blocked only by bypassable findings; non-bypassable blockers withdraw them
 regardless. A publication interrupted by a crash, a signal, or a failed atomic
 write leaves the window behind, and recovery is always a rollback rather than a
