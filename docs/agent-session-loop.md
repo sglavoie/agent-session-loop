@@ -1816,26 +1816,41 @@ workspace still publishes whatever the deterministic checks proved, under an
 `unavailable` verdict for the semantic half that went missing.
 
 "Mutating the workspace" is judged on a private checkout, not on the live tree.
-Before the first audit turn ASL reads the `head_after` each registered
-repository's `commit-*/result.json` recorded (the highest `commit_index` wins),
-checks each of those commits out with `git worktree add --detach` under a
-temporary root outside the run directory, and fingerprints *that* on both sides
-of every turn. The live workspace has other writers — a concurrent `asl run`, or
-an operator with an editor open — and a comparison over it reports their work as
-the auditor's, which is the false `audit-read-only-mutation` this replaces. A
-pinned checkout has no writer but the audit turn, so a difference across it is
-evidence again. Linked worktrees are not enumerated for a pinned root, because
-from inside one Git lists the very live trees the pin exists to stay out of. The
-checkouts and their registrations in the origin repositories are always removed
-afterwards. Pinning is all-or-nothing and fails open: if any registered
-repository has no recorded commit, or its commit cannot be checked out, the
-whole pin is abandoned and the check falls back to comparing the live workspace
-exactly as before. `supervisor-audit-mutation.json` records which tree the
-verdict was reached over under `comparison.workspace` (`pinned`, `root`,
-`commits`, and a `reason` of `not-requested`, `no-recorded-commit`, or
-`checkout-failed`). The evidence bundle is still collected against the live
-workspace root, and the auditor's read roots are unchanged: it never had read
-access to either tree.
+Before the first audit turn ASL picks one commit per registered repository —
+preferring the `head_after` its `commit-*/result.json` recorded (the highest
+`commit_index` wins) and falling back to the repository's current `HEAD` when
+the run recorded no commit for it — checks each of those commits out with
+`git worktree add --detach` under a temporary root outside the run directory,
+and fingerprints *that* on both sides of every turn. The live workspace has
+other writers — a concurrent `asl run`, or an operator with an editor open — and
+a comparison over it reports their work as the auditor's, which is the false
+`audit-read-only-mutation` this replaces. A pinned checkout has no writer but
+the audit turn, so a difference across it is evidence again. Which commit the
+pin holds does not affect the verdict, only its reproducibility for a reader:
+the auditor works from the evidence bundle and never reads the pinned tree, so
+what the check depends on is the tree's isolation. The fallback matters because
+the runs with nothing to pin from were the ones the false positive kept hitting
+— a review, a run that paused, a plan whose sessions all deferred. Linked
+worktrees are not enumerated for a pinned root, because from inside one Git
+lists the very live trees the pin exists to stay out of. The checkouts and their
+registrations in the origin repositories are always removed afterwards. Pinning
+is all-or-nothing and fails open: if any registered repository offers no commit
+at all, or its commit cannot be checked out, the whole pin is abandoned and the
+check falls back to comparing the live workspace exactly as before.
+`supervisor-audit-mutation.json` records which tree the verdict was reached over
+under `comparison.workspace` (`pinned`, `root`, `commits`, and a `reason` of
+`not-requested`, `no-recorded-commit`, or `checkout-failed`). The evidence
+bundle is still collected against the live workspace root, and the auditor's
+read roots are unchanged: it never had read access to either tree.
+
+One thing the pin cannot isolate is the ref store. A linked worktree gets its
+own `HEAD`, index, and working tree, but shares its origin repository's refs, so
+a remote-tracking ref moves under the auditor's feet whenever anything else
+fetches. A change confined to `refs/remotes/` is therefore dropped from the
+mutation reading, and a repository left with no other difference is dropped with
+it: the pin that makes every other difference attributable does not make that
+one attributable, and the move changes no file, no local branch, and no commit
+besides. `refs/heads` and `refs/tags` stay mutations.
 
 Registry identity in the audit is anchored to the same resolved objects the
 runner used. A registry row's `path` remains the workspace-relative declaration

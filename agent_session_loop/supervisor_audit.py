@@ -139,7 +139,10 @@ MUTATION_ARTIFACT_NAME = "supervisor-audit-mutation.json"
 PINNED_WORKSPACE_PREFIX = "asl-audit-pinned-"
 
 #: Why a boundary check was judged on the live workspace rather than on a
-#: checkout pinned to the audited run's own commits.
+#: checkout pinned to a fixed commit. ``no-recorded-commit`` keeps its name from
+#: when the run's own commits were the only pin source, and now covers a
+#: registered repository that offers no commit at all -- not one the run
+#: recorded, and no current ``HEAD`` either.
 PIN_REASON_NOT_REQUESTED = "not-requested"
 PIN_REASON_NO_RECORDED_COMMIT = "no-recorded-commit"
 PIN_REASON_CHECKOUT_FAILED = "checkout-failed"
@@ -423,20 +426,76 @@ class AuditAttemptResult:
     stderr_tail: str = ""
 
 
+#: Ref namespace holding a cache of some other repository's branches. It is
+#: written by ``git fetch`` and by nothing a working tree does.
+_REMOTE_TRACKING_REF_PREFIX = "refs/remotes/"
+
+#: What a repository's comparison entry names when something moved in it. A
+#: fingerprint difference outside these keys and ``head_changed`` cannot be
+#: named, and in practice cannot occur: the diff digests are the only other
+#: content in the fingerprint, and a diff whose text moves moves the per-path
+#: patch digest that feeds ``tracked`` with it.
+_MUTATION_CHANGE_KEYS = (
+    "tracked",
+    "untracked_added",
+    "untracked_removed",
+    "untracked_changed",
+    "worktree_ignore",
+    "ignore_config",
+    "refs_added",
+    "refs_removed",
+    "refs_changed",
+)
+
+
+def _without_remote_tracking_refs(changes: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop the ref moves a pinned checkout shares with every other one.
+
+    A linked worktree gets its own ``HEAD``, index, and working tree, but the
+    ref store stays the origin repository's. A remote-tracking ref therefore
+    moves under the auditor's feet whenever anything else fetches, and the pin
+    that makes every other difference attributable does not isolate it. Counting
+    it charged an auditor with a mutation it could not have made, and one that
+    changed no file, no local branch, and no commit besides (ASI-13).
+    """
+    filtered = dict(changes)
+    for key in ("refs_added", "refs_removed", "refs_changed"):
+        entries = _sequence(changes.get(key))
+        if not entries:
+            continue
+        filtered[key] = [
+            entry
+            for entry in entries
+            if not str(_mapping(entry).get("ref") or "").startswith(
+                _REMOTE_TRACKING_REF_PREFIX
+            )
+        ]
+    return filtered
+
+
 def _mutation_comparison(comparison: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return the comparison when it proves a change, else ``None``.
 
     Unavailable repository evidence is not a mutation: it is the absence of
     proof either way, and treating it as one would turn every transient git
-    failure into a fabricated integrity issue.
+    failure into a fabricated integrity issue. A repository whose only remaining
+    difference is a remote-tracking ref is dropped for the same reason -- see
+    :func:`_without_remote_tracking_refs` -- and a comparison left with nothing
+    else proves no mutation at all.
     """
-    changed = comparison.get("changed") or {}
+    changed = {
+        repository: filtered
+        for repository, raw in _mapping(comparison.get("changed")).items()
+        for filtered in (_without_remote_tracking_refs(_mapping(raw)),)
+        if filtered.get("head_changed") is True
+        or any(filtered.get(key) for key in _MUTATION_CHANGE_KEYS)
+    }
     added = comparison.get("added") or []
     removed = comparison.get("removed") or []
     if not (changed or added or removed):
         return None
     return {
-        "changed": dict(changed),
+        "changed": changed,
         "added": list(added),
         "removed": list(removed),
         "unavailable": dict(comparison.get("unavailable") or {}),
@@ -577,6 +636,45 @@ def run_commits(
     return {relative: latest[relative][1] for relative in repositories}
 
 
+def pin_commits(
+    run_dir: Path | str,
+    workspace_root: Path | str,
+    repositories: Sequence[str],
+) -> dict[str, str] | None:
+    """The commit each registered repository is pinned at for the boundary check.
+
+    Prefers where the run itself left the repository and falls back to the
+    repository's current ``HEAD`` for one the run recorded no commit for. Both
+    serve the check equally. The pin exists to give the comparison a tree no
+    other process writes to, and the auditor never reads that tree -- it works
+    from the evidence bundle under the run directory -- so the pin's isolation
+    is what the check depends on and the commit it holds only makes the checkout
+    reproducible for a reader.
+
+    Falling back is what keeps the check meaningful for the runs that most need
+    it. A run that recorded no commit at all -- a review, a run that paused, a
+    plan whose sessions all deferred -- used to be judged on the live workspace,
+    where a concurrent run or an operator's open editor is indistinguishable
+    from the auditor. Every mutation ever charged to an auditor was observed
+    that way and none on a pinned tree (ASI-13).
+
+    ``None`` when some registered repository offers neither, because a partial
+    pin would leave the rest of the comparison on the live tree -- the mixture
+    the pin exists to avoid.
+    """
+    recorded = run_commits(run_dir, repositories) or {}
+    root = Path(workspace_root)
+    resolved: dict[str, str] = {}
+    for relative in repositories:
+        commit = recorded.get(relative) or repository_evidence.resolve_head(
+            root / relative
+        )
+        if not commit:
+            return None
+        resolved[relative] = commit
+    return resolved
+
+
 def _pin_depth(relative: str) -> tuple[int, str]:
     """Order registered paths so an ancestor is checked out before a descendant."""
     return (0 if relative == "." else relative.count("/") + 1, relative)
@@ -588,15 +686,15 @@ def pinned_audit_workspace(
     repositories: Sequence[str],
     commits: Mapping[str, str] | None,
 ) -> Iterator[PinnedWorkspace]:
-    """Check the run's own commits out privately for the boundary check.
+    """Check the pinned commits out privately for the boundary check.
 
     The check asks whether the audit turn wrote to a registered repository, and
     on the live workspace that question has no honest answer: a concurrent run,
     or an operator with an editor open, changes the same tree for reasons this
     audit had nothing to do with, and the comparison reports it as the auditor's
-    doing. A detached checkout of the commits this run itself produced is a tree
-    with no other writer, so a difference across the turn is evidence again
-    rather than a coincidence.
+    doing. A detached checkout of a fixed commit -- see :func:`pin_commits` for
+    which one -- is a tree with no other writer, so a difference across the turn
+    is evidence again rather than a coincidence.
 
     Pinning is all-or-nothing. A repository that cannot be checked out abandons
     the whole pin and yields the live root, because half a pinned comparison
@@ -7963,7 +8061,9 @@ def audit_terminal_run(
             # the live workspace the run actually left behind, while grading it
             # is judged on a checkout no concurrent run can touch.
             with pinned_audit_workspace(
-                workspace_root, repositories, run_commits(run_dir, repositories)
+                workspace_root,
+                repositories,
+                pin_commits(run_dir, workspace_root, repositories),
             ) as pinned:
                 outcome = run_agent_audit(
                     role,

@@ -1444,7 +1444,18 @@ class PinnedAuditWorkspaceTests(unittest.TestCase):
 
     def _pin(self, workspace: Path, run_dir: Path, repositories: tuple[str, ...]):
         return supervisor_audit.pinned_audit_workspace(
-            workspace, repositories, supervisor_audit.run_commits(run_dir, repositories)
+            workspace,
+            repositories,
+            supervisor_audit.pin_commits(run_dir, workspace, repositories),
+        )
+
+    def _git(self, repository: Path, *argv: str) -> None:
+        subprocess.run(
+            ["git", *argv],
+            cwd=repository,
+            text=True,
+            capture_output=True,
+            check=True,
         )
 
     def test_the_checkout_holds_the_commit_the_run_recorded(self) -> None:
@@ -1581,23 +1592,79 @@ class PinnedAuditWorkspaceTests(unittest.TestCase):
             listed = git_stdout(workspace / "app", "worktree", "list", "--porcelain")
             self.assertEqual(1, listed.count("worktree "))
 
-    def test_a_run_that_recorded_no_commit_is_judged_on_the_live_workspace(
+    def test_a_pin_offered_no_commit_at_all_is_judged_on_the_live_workspace(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            workspace, _, _, run_dir = self._workspace(Path(tmp))
+            workspace, _, _, _ = self._workspace(Path(tmp))
 
-            with self._pin(workspace, run_dir, ("app",)) as pinned:
+            with supervisor_audit.pinned_audit_workspace(
+                workspace, ("app",), None
+            ) as pinned:
                 self.assertFalse(pinned.pinned)
                 self.assertEqual(
                     supervisor_audit.PIN_REASON_NO_RECORDED_COMMIT, pinned.reason
                 )
                 self.assertEqual(workspace, pinned.root)
 
-    def test_one_repository_without_a_commit_abandons_the_whole_pin(self) -> None:
+    def test_a_run_that_recorded_no_commit_still_pins_at_the_current_head(self) -> None:
+        # A run that committed nothing used to be judged on the live workspace,
+        # where every writer looks like the auditor. Any fixed commit isolates
+        # the tree, and the auditor never reads it.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, run_dir = self._workspace(Path(tmp))
+            head = self._head(workspace / "app")
+
+            self.assertEqual(
+                {"app": head},
+                supervisor_audit.pin_commits(run_dir, workspace, ("app",)),
+            )
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                self.assertTrue(pinned.pinned)
+                self.assertEqual(head, self._head(pinned.root / "app"))
+
+    def test_a_recorded_commit_outranks_the_repositorys_current_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, run_dir = self._workspace(Path(tmp))
+            recorded = self._head(workspace / "app")
+            (workspace / "app" / "later.txt").write_text("later\n", encoding="utf-8")
+            self._git(workspace / "app", "add", "later.txt")
+            self._git(workspace / "app", "commit", "-m", "later")
+            self._record_commit(
+                run_dir, index=1, repository_path="app", head_after=recorded
+            )
+
+            self.assertEqual(
+                {"app": recorded},
+                supervisor_audit.pin_commits(run_dir, workspace, ("app",)),
+            )
+
+    def test_one_repository_without_a_recorded_commit_is_filled_in_from_its_head(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, _, _, run_dir = self._workspace(Path(tmp))
             init_git_repo(workspace / "lib")
+            recorded = self._head(workspace / "app")
+            self._record_commit(
+                run_dir, index=1, repository_path="app", head_after=recorded
+            )
+
+            self.assertIsNone(supervisor_audit.run_commits(run_dir, ("app", "lib")))
+            self.assertEqual(
+                {"app": recorded, "lib": self._head(workspace / "lib")},
+                supervisor_audit.pin_commits(run_dir, workspace, ("app", "lib")),
+            )
+
+    def test_a_repository_offering_no_commit_anywhere_abandons_the_whole_pin(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, run_dir = self._workspace(Path(tmp))
+            # Initialized but never committed: HEAD names nothing to check out,
+            # and a partial pin would leave "lib" on the live tree.
+            (workspace / "lib").mkdir()
+            self._git(workspace / "lib", "init")
             self._record_commit(
                 run_dir,
                 index=1,
@@ -1605,7 +1672,93 @@ class PinnedAuditWorkspaceTests(unittest.TestCase):
                 head_after=self._head(workspace / "app"),
             )
 
-            self.assertIsNone(supervisor_audit.run_commits(run_dir, ("app", "lib")))
+            self.assertIsNone(
+                supervisor_audit.pin_commits(run_dir, workspace, ("app", "lib"))
+            )
+
+    def test_a_concurrent_write_during_an_uncommitted_run_is_not_the_auditors_doing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            fake = _RecordingHarness(writes=workspace / "app" / "concurrent.txt")
+
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                result = supervisor_audit.run_restricted_audit(
+                    self._role(),
+                    run_dir=run_dir,
+                    run_id=RUN_ID,
+                    workspace_root=workspace,
+                    plan_dir=plan_dir,
+                    prompt="Audit this run.",
+                    repositories=("app",),
+                    pinned=pinned,
+                    state_dir=state_dir,
+                    _run_harness_fn=fake,
+                )
+
+            self.assertEqual("ok", result.outcome)
+            self.assertIsNone(result.mutation)
+
+    def test_a_fetch_moving_a_remote_tracking_ref_is_not_a_mutation(self) -> None:
+        # A linked worktree gets its own HEAD, index, and tree, but shares the
+        # ref store, so the pin cannot isolate a remote-tracking ref.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            head = self._head(workspace / "app")
+            fake = _RecordingHarness(
+                action=lambda: self._git(
+                    workspace / "app",
+                    "update-ref",
+                    "refs/remotes/origin/main",
+                    head,
+                )
+            )
+
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                result = supervisor_audit.run_restricted_audit(
+                    self._role(),
+                    run_dir=run_dir,
+                    run_id=RUN_ID,
+                    workspace_root=workspace,
+                    plan_dir=plan_dir,
+                    prompt="Audit this run.",
+                    repositories=("app",),
+                    pinned=pinned,
+                    state_dir=state_dir,
+                    _run_harness_fn=fake,
+                )
+
+            self.assertEqual("ok", result.outcome)
+            self.assertIsNone(result.mutation)
+
+    def test_a_local_ref_that_moves_is_still_a_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            head = self._head(workspace / "app")
+            fake = _RecordingHarness(
+                action=lambda: self._git(
+                    workspace / "app", "update-ref", "refs/heads/sneaky", head
+                )
+            )
+
+            with self._pin(workspace, run_dir, ("app",)) as pinned:
+                result = supervisor_audit.run_restricted_audit(
+                    self._role(),
+                    run_dir=run_dir,
+                    run_id=RUN_ID,
+                    workspace_root=workspace,
+                    plan_dir=plan_dir,
+                    prompt="Audit this run.",
+                    repositories=("app",),
+                    pinned=pinned,
+                    state_dir=state_dir,
+                    _run_harness_fn=fake,
+                )
+
+            self.assertEqual("mutation-detected", result.outcome)
+            refs = (result.mutation or {})["changed"]["app"]["refs_added"]
+            self.assertEqual(["refs/heads/sneaky"], [entry["ref"] for entry in refs])
 
     def test_a_commit_that_cannot_be_checked_out_falls_back_to_the_live_workspace(
         self,
