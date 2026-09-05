@@ -18,8 +18,10 @@ Five guards in one fixed order, which is the whole of what this module owns:
   honoured a standing instruction an operator gave it mid-flight. A path can be
   perfectly in scope and still be one the operator said not to touch.
 * **The plan artifact guard** asks whether the turn changed a session artifact
-  it did not select, and it is gated on the turn having reached a terminating
-  result at all.
+  it did not select. On the turn's ordinary path it is gated on the turn having
+  reached a terminating result at all; on the path where an earlier guard
+  already ended the turn it runs in adjudicate-only mode, so the packets it
+  convicts are still named beside the pause that ended the turn.
 
 Durable records this boundary writes: exactly one of its own, the turn's result
 artifact rewritten with the per-repository review bases a passing workspace
@@ -43,11 +45,16 @@ Five invariants survive the move:
   a timeout, a transport failure -- relaunches the same session, so a guard that
   ran after the branch would let the relaunch adopt the turn's own mutation as
   its new baseline.
-* **A guard that pauses still reaches the protected-path step.** The two answer
-  different questions against the same comparison the write guard already
-  captured, so a turn that breached both has to report both. That is why the
-  pause is recorded in ``paused`` and the ``break`` moves to *after* the
-  protected-path step rather than being taken where the pause is decided.
+* **A guard that pauses still reaches the guards after it.** Each asks a
+  different question -- did the session stay in scope, did the run honour the
+  operator's standing instruction, did the turn rewrite a packet it was never
+  given -- and a turn can breach several of them at once, so a turn that
+  breached several has to report all of them. That is why the pause is recorded
+  in ``paused`` and the ``break`` moves to *after* the protected-path and plan
+  artifact steps rather than being taken where the pause is decided. Those two
+  run in adjudicate-only mode there: the verdict is recorded beside the pause
+  that already happened, and neither reverts a second time nor displaces the
+  reason an operator has to act on.
 * **A turn records its write verdict once.** Each of the three write-mode
   branches disarms the crash-path copy of the guard before enforcing the live
   one, so the exception handler above cannot re-enforce the same guard against
@@ -320,7 +327,7 @@ def enforce_post_turn_guards(
     # moved, and adopt that as the baseline. It is a distinct step because it
     # answers a distinct question — not "did the session stay in scope" but
     # "did the run honour the standing instruction an operator gave it".
-    if write_guards._enforce_protected_path_guard(
+    protected_path_paused = write_guards._enforce_protected_path_guard(
         event_path=ctx.event_path,
         payload=ctx.payload,
         persistence=ctx.persistence,
@@ -350,9 +357,33 @@ def enforce_post_turn_guards(
             else None
         ),
         adjudicate_only=finalization_paused,
-    ):
-        return _stopped()
-    if finalization_paused:
+    )
+    if protected_path_paused or finalization_paused:
+        # The turn is over, but the packet question is still unanswered, and it
+        # is a different question from the one that ended the turn: a session
+        # can breach its write scope and rewrite a packet it was never given in
+        # the same turn. Leaving this unrun let the changed packets stay in the
+        # plan with no verdict at all (ASI-119), so the guard adjudicates here
+        # and records beside the pause that already happened rather than
+        # displacing it.
+        handoff_guards._enforce_plan_artifact_guard(
+            event_path=ctx.event_path,
+            payload=ctx.payload,
+            persistence=ctx.persistence,
+            before=before,
+            after=after,
+            digests_before=plan_artifacts_before,
+            runner_written=plan_artifacts_written_by_runner,
+            session_id=session_id,
+            session_label=session_label,
+            session_details=session_details,
+            turn_payload=turn_payload,
+            paths=paths,
+            plan_cache=ctx.plan_cache,
+            append_handoff_note=handoff_correction._append_handoff_note,
+            reinspect=session_verification._reinspect_after_revert,
+            adjudicate_only=True,
+        )
         return _stopped()
 
     # Every branch below can end the turn — by pausing, by recording a clean

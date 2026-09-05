@@ -575,6 +575,7 @@ def _enforce_plan_artifact_guard(
     append_handoff_note: HandoffNoteAppender,
     reinspect: run_termination.SnapshotReinspector,
     result_disposition: str | None = None,
+    adjudicate_only: bool = False,
 ) -> bool:
     """Refuse a turn that changed a session artifact it did not select.
 
@@ -585,6 +586,17 @@ def _enforce_plan_artifact_guard(
     a retryable pause or a mid-turn ``continue`` would relaunch against the
     tampered packet and adopt it as the new baseline. Returns ``True`` when the
     run must pause (the caller must ``break``).
+
+    ``adjudicate_only`` is for a turn an earlier finalization guard already
+    ended, and it exists for the same reason the protected-path guard has one:
+    the two guards answer different questions -- "did the session stay inside
+    its declared write scope" and "did it rewrite a packet it was never given"
+    -- and a turn that breached both has to report both. Without it a write
+    guard that paused first left the changed packets with no verdict at all, so
+    they stayed in the plan unadjudicated (ASI-119). The verdict is reached and
+    recorded, but the outcome already decided is left standing: no second
+    revert, and no pause that would displace the reason an operator has to act
+    on.
     """
     digests_after = plans.session_artifact_digests(
         before.plan_dir, exclude_session_id=session_id
@@ -605,6 +617,7 @@ def _enforce_plan_artifact_guard(
     disposition = (
         {} if result_disposition is None else {"result_disposition": result_disposition}
     )
+    adjudication = {"adjudicated_only": True} if adjudicate_only else {}
     if not changed_artifacts:
         with persistence.lock:
             turn_payload["plan_artifact_guard"] = {
@@ -612,6 +625,7 @@ def _enforce_plan_artifact_guard(
                 "artifact_count": len(digests_after),
                 "runner_written": list(runner_written),
                 **disposition,
+                **adjudication,
             }
             durability.write_json_file(paths["result"], turn_payload)
         return False
@@ -624,6 +638,46 @@ def _enforce_plan_artifact_guard(
         "runner_written": list(runner_written),
         **disposition,
     }
+    if adjudicate_only:
+        # The turn is already ending, and whatever ended it first already
+        # withdrew the session if it needed withdrawing. Reverting again would
+        # append a second failure note for one turn.
+        adjudicated_record: dict[str, Any] = {
+            "passed": False,
+            "reason": reason,
+            "reverted_to_pending": False,
+            **evidence,
+            **adjudication,
+        }
+        primary_reason = payload.get("pause_reason")
+        if payload.get("paused") and isinstance(primary_reason, str):
+            adjudicated_record["deferred_to_pause_reason"] = primary_reason
+        with persistence.lock:
+            turn_payload["plan_artifact_guard"] = adjudicated_record
+            durability.write_json_file(paths["result"], turn_payload)
+            # The primary pause was published before this verdict existed, so
+            # its live details are amended in place -- ``payload["details"]`` is
+            # the same object -- rather than republished under a reason that
+            # would displace the one an operator has to act on.
+            pause_details = payload.get("pause_details")
+            if payload.get("paused") and isinstance(pause_details, dict):
+                pause_details["plan_artifact_guard"] = adjudicated_record
+        turn_execution.record_turn_rejected(
+            event_path=event_path,
+            payload=payload,
+            persistence=persistence,
+            turn_payload=turn_payload,
+            session_id=session_id,
+            guard="plan-artifact-guard",
+            reason=reason,
+            reopened=False,
+            detail={
+                "adjudicated_only": True,
+                "changed_artifacts": changed_artifacts,
+            },
+        )
+        return False
+
     # Leaving the session complete would make the tampered packet permanent
     # across a resume, so a failed guard always puts it back to pending.
     revert_target = after if after is not None else before

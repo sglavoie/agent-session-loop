@@ -5790,6 +5790,21 @@ Common pause reasons:
   `digests_before`, `digests_after`, and `runner_written`. The selected session
   is reverted to pending, so a resume cannot bank a completion earned against a
   plan the turn rewrote underneath itself.
+  A turn an earlier finalization guard already ended — the workspace write
+  guard, the legacy implementation write guard, the review mutation guard, or a
+  protected-path conviction — still reaches this guard, in adjudicate-only mode.
+  Staying inside a declared write scope and leaving the other packets alone are
+  different questions, and a turn can fail both at once; before that the earlier
+  pause ended the turn first and the changed packets stayed in the plan with no
+  verdict against them anywhere. The adjudicated block is marked
+  `adjudicated_only`, names the reason that did end the turn in
+  `deferred_to_pause_reason`, and is added to that pause's details rather than
+  published under a reason of its own, so the remediation an operator reads
+  stays the first guard's. It records `reverted_to_pending` as `false`: whatever
+  ended the turn first already withdrew the session if it needed withdrawing,
+  and a second revert would append a second failure note for one turn. The
+  `turn_rejected` event it appends carries `adjudicated_only` and
+  `changed_artifacts` in its `detail`.
 - `interrupted`: the run was interrupted by Ctrl+C.
 
 ## Autopilot Skill (`$asl`)

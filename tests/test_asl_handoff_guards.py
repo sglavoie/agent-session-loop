@@ -39,17 +39,20 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
 from agent_session_loop import (
+    events,
     handoff_correction,
     handoff_guards,
     harnesses,
     plans,
     repository_intent,
+    run_persistence,
     run_termination,
     runner,
     session_verification,
@@ -491,6 +494,148 @@ class RevertSessionStatusTests(_PlanCase):
             text.index(f"{plans.STATUS_PREFIX} complete"),
             text.index(f"{plans.STATUS_PREFIX} pending"),
         )
+
+
+class PlanArtifactAdjudicationTests(_PlanCase):
+    """What the artifact guard records for a turn something else already ended.
+
+    A turn can breach its write scope and rewrite a packet it was never given in
+    the same turn. The write guard pauses first, and before ASI-119 that ended
+    the turn before this guard ran at all, leaving the changed packets in the
+    plan with nothing anywhere saying they were changed. Adjudicating records
+    the verdict without taking the outcome away from the guard that reached it
+    first.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.event_path = self.tmp_dir / "events.jsonl"
+        self.result_path = self.tmp_dir / "result.json"
+        self.persistence = run_persistence._RunPersistence()
+        self.turn_payload: dict[str, Any] = {"turn_index": 1}
+        # The shape a paused write guard leaves behind: the run is already
+        # stopped, under a reason an operator is about to act on.
+        self.payload: dict[str, Any] = {
+            "run_id": "run-1",
+            "paused": True,
+            "pause_reason": events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            "pause_details": {"session_id": "1"},
+        }
+
+    def enforce(self, **overrides: Any) -> bool:
+        before = self.snapshot()
+        return handoff_guards._enforce_plan_artifact_guard(
+            event_path=self.event_path,
+            payload=self.payload,
+            persistence=self.persistence,
+            before=before,
+            after=before,
+            digests_before=overrides.pop(
+                "digests_before",
+                plans.session_artifact_digests(self.plan_dir, exclude_session_id="1"),
+            ),
+            runner_written=(),
+            session_id="1",
+            session_label="session 1",
+            session_details={"session_id": "1"},
+            turn_payload=self.turn_payload,
+            paths={"result": self.result_path},
+            plan_cache=plans.PlanSnapshotCache(),
+            append_handoff_note=self.appender,
+            reinspect=session_verification._reinspect_after_revert,
+            adjudicate_only=True,
+            **overrides,
+        )
+
+    def tamper(self) -> None:
+        path = self.session_path("2")
+        path.write_text(
+            path.read_text(encoding="utf-8") + "\n- **Note**: rewritten\n",
+            encoding="utf-8",
+        )
+
+    def test_an_unchanged_packet_set_still_records_that_it_was_checked(self) -> None:
+        self.assertFalse(self.enforce())
+        guard = self.turn_payload["plan_artifact_guard"]
+        self.assertTrue(guard["passed"])
+        self.assertTrue(guard["adjudicated_only"])
+
+    def test_a_tampered_packet_is_convicted_without_ending_the_turn_again(
+        self,
+    ) -> None:
+        digests_before = plans.session_artifact_digests(
+            self.plan_dir, exclude_session_id="1"
+        )
+        self.tamper()
+
+        self.assertFalse(self.enforce(digests_before=digests_before))
+
+        guard = self.turn_payload["plan_artifact_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertEqual(["session-2.md"], guard["changed_artifacts"])
+        self.assertTrue(guard["adjudicated_only"])
+
+    def test_the_conviction_defers_to_the_pause_that_ended_the_turn(self) -> None:
+        digests_before = plans.session_artifact_digests(
+            self.plan_dir, exclude_session_id="1"
+        )
+        self.tamper()
+
+        self.enforce(digests_before=digests_before)
+
+        guard = self.turn_payload["plan_artifact_guard"]
+        # The reason an operator has to act on is the one the first guard
+        # published; this verdict is recorded beside it, not over it.
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            self.payload["pause_reason"],
+        )
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            guard["deferred_to_pause_reason"],
+        )
+        self.assertEqual(guard, self.payload["pause_details"]["plan_artifact_guard"])
+
+    def test_a_deferred_conviction_does_not_revert_the_session_twice(self) -> None:
+        digests_before = plans.session_artifact_digests(
+            self.plan_dir, exclude_session_id="1"
+        )
+        self.tamper()
+
+        self.enforce(digests_before=digests_before)
+
+        # Whatever ended the turn first already withdrew the session if it
+        # needed withdrawing; a second revert would append a second failure
+        # note for one turn.
+        self.assertFalse(
+            self.turn_payload["plan_artifact_guard"]["reverted_to_pending"]
+        )
+        self.assertEqual([], self.appender.calls)
+        self.assertEqual(
+            "complete", plans.inspect_plan(self.plan_dir).status_by_id["1"]
+        )
+
+    def test_a_deferred_conviction_still_rejects_the_turn_in_the_event_log(
+        self,
+    ) -> None:
+        digests_before = plans.session_artifact_digests(
+            self.plan_dir, exclude_session_id="1"
+        )
+        self.tamper()
+
+        self.enforce(digests_before=digests_before)
+
+        rejections = [
+            json.loads(line)
+            for line in self.event_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(1, len(rejections))
+        self.assertEqual(events.TURN_REJECTED_EVENT, rejections[0]["name"])
+        rejection = rejections[0]["payload"]
+        self.assertEqual("plan-artifact-guard", rejection["guard"])
+        self.assertFalse(rejection["reopened"])
+        self.assertEqual(["session-2.md"], rejection["detail"]["changed_artifacts"])
 
 
 class TerminatingResultDispositionTests(unittest.TestCase):

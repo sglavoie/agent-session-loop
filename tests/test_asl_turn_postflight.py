@@ -546,7 +546,7 @@ class ExceptionGuardDisarmTests(PostflightTestCase):
 
 
 class FinalizationPauseTests(PostflightTestCase):
-    """A guard that pauses still has to reach the protected-path step."""
+    """A guard that pauses still has to reach the guards after it."""
 
     def test_a_paused_write_guard_still_adjudicates_the_protected_paths(self) -> None:
         self.recorder.verdicts[WORKSPACE_WRITE] = True
@@ -556,7 +556,19 @@ class FinalizationPauseTests(PostflightTestCase):
         self.assertTrue(outcome.stopped)
         self.assertIn(PROTECTED_PATH, self.recorder.order)
         self.assertTrue(self.recorder.calls[PROTECTED_PATH]["adjudicate_only"])
-        self.assertNotIn(PLAN_ARTIFACT, self.recorder.order)
+
+    def test_a_paused_write_guard_still_adjudicates_the_plan_artifacts(self) -> None:
+        # Staying in scope and leaving the other packets alone are separate
+        # questions, so a turn that failed the first still owes an answer to
+        # the second: the packets it changed would otherwise stay in the plan
+        # with no verdict against them at all.
+        self.recorder.verdicts[WORKSPACE_WRITE] = True
+
+        outcome = self.workspace_turn()
+
+        self.assertTrue(outcome.stopped)
+        self.assertIn(PLAN_ARTIFACT, self.recorder.order)
+        self.assertTrue(self.recorder.calls[PLAN_ARTIFACT]["adjudicate_only"])
 
     def test_a_paused_mutation_guard_still_adjudicates_the_protected_paths(
         self,
@@ -622,7 +634,15 @@ class ProtectedPathEvidenceTests(PostflightTestCase):
 
         self.assertTrue(outcome.stopped)
         self.assertIsNone(outcome.terminating_disposition)
-        self.assertNotIn(PLAN_ARTIFACT, self.recorder.order)
+
+    def test_a_convicted_protected_path_still_adjudicates_the_plan_artifacts(
+        self,
+    ) -> None:
+        self.recorder.verdicts[PROTECTED_PATH] = True
+
+        self.workspace_turn()
+
+        self.assertTrue(self.recorder.calls[PLAN_ARTIFACT]["adjudicate_only"])
 
 
 class TerminatingDispositionTests(PostflightTestCase):
