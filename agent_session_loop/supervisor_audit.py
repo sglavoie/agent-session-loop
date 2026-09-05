@@ -1997,6 +1997,46 @@ def _turn_directories(run_dir: Path) -> list[Path]:
     return sorted(entries, key=lambda entry: entry.name)
 
 
+#: How ``repository_evidence`` keys a linked worktree: the repository it
+#: belongs to, then the worktree's own root.
+_WORKTREE_KEY_SEPARATOR = "::worktree::"
+
+
+def _declared_repository_alias(guard: Mapping[str, Any], key: str) -> str:
+    """Name a guard's changed-repository key the way the plan declares it.
+
+    The change map is keyed by workspace-relative repository path, and by
+    ``<path>::worktree::<root>`` for a linked worktree, while session scopes --
+    and therefore every write-scope question asked of them -- are keyed by
+    registry alias. Comparing the two namespaces directly reads a commit to a
+    declared repository as a commit to an undeclared one, which is what made a
+    routine run report a scope breach it never committed (ASI-117).
+
+    A linked worktree resolves to the repository it belongs to because it
+    shares that repository's object store and refs: a commit made there lands
+    in the registered repository, so the registered repository is what the
+    declared scope has to answer for. A key that resolves to no registered
+    repository is returned verbatim, so an unknown repository stays unknown.
+    """
+    registered = [
+        _mapping(entry) for entry in _sequence(guard.get("registered_repositories"))
+    ]
+    aliases: set[str] = set()
+    by_path: dict[str, str] = {}
+    for entry in registered:
+        alias = entry.get("alias")
+        if not isinstance(alias, str) or not alias:
+            continue
+        aliases.add(alias)
+        path = entry.get("path")
+        if isinstance(path, str) and path:
+            by_path[path] = alias
+    root = key.split(_WORKTREE_KEY_SEPARATOR, 1)[0]
+    if root in aliases:
+        return root
+    return by_path.get(root, key)
+
+
 def _observed_repository_writes(
     turns: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -2015,7 +2055,7 @@ def _observed_repository_writes(
     for turn in turns:
         result = _mapping(turn.get("result"))
         guard = _mapping(result.get("workspace_write_guard"))
-        for alias, raw_changes in _mapping(guard.get("changed")).items():
+        for key, raw_changes in _mapping(guard.get("changed")).items():
             changes = _mapping(raw_changes)
             refs = [
                 str(_mapping(entry).get("ref"))
@@ -2029,7 +2069,8 @@ def _observed_repository_writes(
                 {
                     "turn": turn.get("name"),
                     "directory": turn.get("directory"),
-                    "repository": alias,
+                    "repository": _declared_repository_alias(guard, str(key)),
+                    "repository_key": str(key),
                     "session_id": result.get("session_id"),
                     "head_changed": head_changed,
                     "transition": _mapping(changes.get("head_transition")) or None,
@@ -2107,7 +2148,9 @@ def _reconcile_observed_commits(
             "origin": OBSERVED_COMMIT_ORIGIN,
             "turn": entry.get("turn"),
             "session_id": entry.get("session_id"),
-            "repository_key": alias,
+            # The key stays verbatim so the exact repository the guard named is
+            # never lost, while the alias is what a write-scope question reads.
+            "repository_key": entry.get("repository_key") or alias,
             "repository_alias": alias,
             "repo": alias,
             "head_before": entry.get("head_before") or transition.get("before"),

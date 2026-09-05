@@ -3314,6 +3314,93 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual("run/turn-0001-01", attempt["reference"])
             self.assertEqual(["app"], commits["commit_groups"][0]["ordered_aliases"])
 
+    def _worker_committed_under_key(
+        self, tmp: str, key: str, *, registered: bool = True
+    ) -> tuple[Path, Path, Path, Path]:
+        """A worker commit the guard filed under `key` rather than an alias."""
+        history = self._worker_committed(tmp)
+        _, _, _, run_dir = history
+        turn_dir = run_dir / "turn-0001-01"
+        result = json.loads(
+            (turn_dir / state.RESULT_FILE_NAME).read_text(encoding="utf-8")
+        )
+        guard = result["workspace_write_guard"]
+        guard["changed"] = {key: next(iter(guard["changed"].values()))}
+        if registered:
+            guard["registered_repositories"] = [
+                {"alias": "app", "path": "1_dev_projects/app"}
+            ]
+        self._write_result(turn_dir, result)
+        return history
+
+    def _mutation_guard_verdict(
+        self, history: tuple[Path, Path, Path, Path]
+    ) -> DeterministicResult:
+        results = {
+            result.check: result
+            for result in supervisor_audit.run_deterministic_checks(
+                self._bundle(history)
+            )
+        }
+        return results["mutation-commit-guards"]
+
+    def test_a_change_keyed_by_repository_path_is_named_by_its_alias(self) -> None:
+        # The change map is keyed by path; session scopes are keyed by alias.
+        # Comparing the two namespaces read a commit to a declared repository
+        # as a commit to an undeclared one.
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed_under_key(tmp, "1_dev_projects/app")
+
+            commits = self._bundle(history).payload["commits"]
+
+            projected = commits["commits"][0]
+            self.assertEqual("app", projected["repository_alias"])
+            self.assertEqual("1_dev_projects/app", projected["repository_key"])
+            self.assertEqual("pass", self._mutation_guard_verdict(history).status)
+
+    def test_a_commit_in_a_linked_worktree_is_named_by_its_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            key = "1_dev_projects/app::worktree::/elsewhere/feature-worktree"
+            history = self._worker_committed_under_key(tmp, key)
+
+            commits = self._bundle(history).payload["commits"]
+
+            # A linked worktree shares its repository's object store, so the
+            # commit landed in the registered repository the scope declares.
+            projected = commits["commits"][0]
+            self.assertEqual("app", projected["repository_alias"])
+            self.assertEqual(key, projected["repository_key"])
+            self.assertEqual("pass", self._mutation_guard_verdict(history).status)
+
+    def test_an_unregistered_repository_is_still_reported_verbatim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed_under_key(tmp, "1_dev_projects/other")
+
+            commits = self._bundle(history).payload["commits"]
+
+            self.assertEqual(
+                "1_dev_projects/other", commits["commits"][0]["repository_alias"]
+            )
+            verdict = self._mutation_guard_verdict(history)
+            self.assertEqual("fail", verdict.status)
+            self.assertIn(
+                "committed to 1_dev_projects/other, which no session declares "
+                "as writable",
+                verdict.detail,
+            )
+
+    def test_a_guard_naming_no_registry_leaves_its_key_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._worker_committed_under_key(
+                tmp, "1_dev_projects/app", registered=False
+            )
+
+            commits = self._bundle(history).payload["commits"]
+
+            self.assertEqual(
+                "1_dev_projects/app", commits["commits"][0]["repository_alias"]
+            )
+
     def test_a_projected_commit_is_not_a_commit_mode_contradiction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._worker_committed(tmp)
