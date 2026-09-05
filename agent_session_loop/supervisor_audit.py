@@ -2143,6 +2143,33 @@ def _reconcile_observed_commits(
     )
 
 
+def _reference_commit_streams(collector: _Collector, result: Mapping[str, Any]) -> None:
+    """Index the retained streams a failed commit attempt points at.
+
+    A failed attempt records the full ``git`` diagnostic in its own stdout and
+    stderr files and carries only a bounded preview inline, so the paths are
+    where the reason a commit was refused actually survives. Naming them in the
+    result while indexing only the parent directory left the auditor unable to
+    tell evidence it could read from a path it merely saw, and a path that is
+    not on disk is recorded as an omission rather than passed over, so a missing
+    stream is stated instead of being indistinguishable from one never written
+    (ASI-137).
+    """
+    if not _commit_shows_failure(result):
+        return
+    for key in ("stderr_path", "stdout_path"):
+        path = result.get(key)
+        if not isinstance(path, str) or not path:
+            continue
+        stream = key.removesuffix("_path")
+        if not Path(path).is_file():
+            collector.omissions.record("commits", REASON_MISSING, path)
+            continue
+        collector.reference(
+            path, kind="commit", detail=f"{_commit_record_label(result)} {stream}"
+        )
+
+
 def _commit_section(
     collector: _Collector,
     *,
@@ -2171,6 +2198,7 @@ def _commit_section(
         }
         if isinstance(result, Mapping):
             entry["result"] = collector.redact(result)
+            _reference_commit_streams(collector, result)
         else:
             collector.omissions.record(
                 "commits", reason or REASON_MALFORMED, str(directory)

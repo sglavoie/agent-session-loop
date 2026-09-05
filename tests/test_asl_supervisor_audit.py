@@ -3392,6 +3392,89 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual(1, len(observed))
             self.assertIsNone(observed[0]["transition"])
 
+    def _failed_commit_attempt(
+        self,
+        history: tuple[Path, Path, Path, Path],
+        *,
+        retain_streams: bool = True,
+        success: bool = False,
+    ) -> Path:
+        """One commit attempt whose result names retained stdout and stderr."""
+        commit_dir = history[3] / "commit-0001-session-01-app"
+        commit_dir.mkdir()
+        stdout_path = commit_dir / "stdout.log"
+        stderr_path = commit_dir / "stderr.log"
+        if retain_streams:
+            stdout_path.write_text("", encoding="utf-8")
+            stderr_path.write_text(
+                "error: pathspec 'docs/' did not match any file(s)\n", encoding="utf-8"
+            )
+        (commit_dir / state.RESULT_FILE_NAME).write_text(
+            json.dumps(
+                {
+                    "success": success,
+                    "returncode": 0 if success else 1,
+                    "repository_alias": "app",
+                    "session_id": "01",
+                    "status_result": "success" if success else "commit-failed",
+                    "stdout_path": str(stdout_path),
+                    "stderr_path": str(stderr_path),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return commit_dir
+
+    def test_a_failed_commits_retained_streams_are_indexed(self) -> None:
+        """ASI-137: a named artifact an auditor cannot locate is not evidence."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._failed_commit_attempt(history)
+
+            bundle = self._bundle(history)
+            locators = {entry["locator"] for entry in bundle.payload["evidence"]}
+
+            self.assertIn("run/commit-0001-session-01-app/stderr.log", locators)
+            self.assertIn("run/commit-0001-session-01-app/stdout.log", locators)
+
+    def test_an_unretained_commit_stream_is_recorded_as_an_omission(self) -> None:
+        """A path that is not on disk is stated, not passed over in silence."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._failed_commit_attempt(history, retain_streams=False)
+
+            bundle = self._bundle(history)
+            locators = {entry["locator"] for entry in bundle.payload["evidence"]}
+            omitted = [
+                entry
+                for entry in bundle.payload["omissions"]
+                if entry["section"] == "commits"
+            ]
+
+            self.assertNotIn("run/commit-0001-session-01-app/stderr.log", locators)
+            self.assertEqual(1, len(omitted))
+            self.assertEqual(supervisor_audit.REASON_MISSING, omitted[0]["reason"])
+            self.assertEqual(2, omitted[0]["count"])
+
+    def test_a_successful_commits_streams_are_left_unindexed(self) -> None:
+        """Only a refused commit has a diagnostic worth locating."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._failed_commit_attempt(history, success=True)
+
+            bundle = self._bundle(history)
+            locators = {entry["locator"] for entry in bundle.payload["evidence"]}
+
+            self.assertNotIn("run/commit-0001-session-01-app/stderr.log", locators)
+            self.assertEqual(
+                [],
+                [
+                    entry
+                    for entry in bundle.payload["omissions"]
+                    if entry["section"] == "commits"
+                ],
+            )
+
 
 class ReopenedReadinessProjectionTests(_RunHistoryFixture, unittest.TestCase):
     """The re-gate verdict that licenses a grown plan has to reach the audit."""
