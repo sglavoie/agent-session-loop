@@ -93,11 +93,63 @@ ENVIRONMENT_BLOCKED_PAUSE_REASONS: tuple[str, ...] = (
     events.PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE,
 )
 
-# Every pause an operator must inspect rather than answer, from either source:
-# a harness failure carrying no question context, or a blocked precondition.
+# Verdicts a post-turn guard reached, and turn outcomes nobody asked a question
+# about. These reached ``reply`` by falling through rather than by qualifying
+# for it, and nothing behind them ever opens a reply channel: the mailbox wait
+# is entered only from the runner-pause disposition, so a run that ends on one
+# of these advertises an answer it has no way to receive (ASI-114).
+#
+# Membership is justified per reason by that reason's own clearing path, never
+# by symmetry with a neighbour:
+#
+# - ``workspace-write-scope-violation``: the guard found writes outside the
+#   session's declared scope and reverted the session. The write is on disk and
+#   stays there; what has to change is the workspace or the scope the plan
+#   declares, neither of which an answer edits.
+# - ``workspace-write-guard-unavailable``: the guard could not capture the
+#   evidence it compares against. The repair is to the capture -- a readable
+#   worktree, a working git probe -- exactly as for
+#   ``guard-protected-path-unavailable``.
+# - ``review-guard-unavailable``: the same failure on the legacy review lane,
+#   with the same repair.
+# - ``review-mutated-worktree``: a review turn changed repository content it was
+#   supposed to leave alone. The content has to be restored or accepted by a
+#   human looking at the recorded diff.
+# - ``plan-artifact-tampered``: the turn rewrote a ``session-<id>.md`` its packet
+#   never gave it. The packets have to be restored on disk.
+# - ``unexpected-status-change`` / ``multiple-status-changes``: the turn moved a
+#   session status the packet did not select, or moved more than one. The plan
+#   file is what disagrees with the packet, so the plan is what gets edited.
+# - ``nonzero-exit``: the harness exited nonzero for a reason the classifier
+#   could not name. There is no question, only the turn's own output to read.
+# - ``malformed-plan``: the plan could not be inspected after the turn, so there
+#   is no snapshot to answer against; the plan file has to be repaired first.
+# - ``malformed-review-repair``: the repair materializer refused the finding set
+#   -- too many groups, or a child reaching an unregistered repository. The
+#   review has to be regrouped or the plan resplit.
+# - ``interrupted``: the operator stopped the run themselves. There is nobody
+#   left waiting for an answer.
+UNANSWERABLE_OUTCOME_PAUSE_REASONS: tuple[str, ...] = (
+    events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+    events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+    events.PAUSE_REASON_REVIEW_GUARD_UNAVAILABLE,
+    "review-mutated-worktree",
+    events.PAUSE_REASON_PLAN_ARTIFACT_TAMPERED,
+    "unexpected-status-change",
+    "multiple-status-changes",
+    events.PAUSE_REASON_NONZERO_EXIT,
+    "malformed-plan",
+    events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
+    events.PAUSE_REASON_INTERRUPTED,
+)
+
+# Every pause an operator must inspect rather than answer, from any source: a
+# harness failure carrying no question context, a blocked precondition, or a
+# guard verdict nothing can be said to.
 INSPECT_PAUSE_REASONS: tuple[str, ...] = (
     *USER_REQUIRED_HARNESS_FAILURE_REASONS,
     *ENVIRONMENT_BLOCKED_PAUSE_REASONS,
+    *UNANSWERABLE_OUTCOME_PAUSE_REASONS,
 )
 
 # What a human is supposed to do about a pause. Each pause carries exactly one:
@@ -114,8 +166,11 @@ USER_ACTION_INSPECT = "inspect"
 # every non-recoverable pause outside the harness-failure set as ``reply``; v3
 # reserves ``reply`` for pauses an answer can actually clear and routes
 # :data:`ENVIRONMENT_BLOCKED_PAUSE_REASONS` to ``inspect``, so the meaning of
-# ``user_action`` changed for reasons that already ship.
-POLICY_VERSION = 3
+# ``user_action`` changed for reasons that already ship; v4 applies that same
+# reservation to :data:`UNANSWERABLE_OUTCOME_PAUSE_REASONS`, the guard verdicts
+# and unclassifiable turn outcomes that were still reaching ``reply`` by
+# falling through.
+POLICY_VERSION = 4
 
 # How many times a supervisor relaunches the same session for a given
 # recoverable pause reason before giving up and surfacing the pause.
@@ -148,8 +203,9 @@ def classify_pause(reason: str | None) -> dict[str, Any]:
       operator answer can clear the pause, :data:`USER_ACTION_INSPECT` when none
       can and the environment has to change instead
       (:data:`INSPECT_PAUSE_REASONS`: the non-retryable harness failures that
-      carry no useful question context, plus the pauses blocked on a workspace
-      precondition), ``None`` when recoverable;
+      carry no useful question context, the pauses blocked on a workspace
+      precondition, and the guard verdicts and turn outcomes nothing can be said
+      to), ``None`` when recoverable;
     - ``max_retries``: the same-session retry budget (``DEFAULT_MAX_RETRIES``
       when recoverable, else ``0``);
     - ``backoff_seconds``: the per-retry backoff schedule — the

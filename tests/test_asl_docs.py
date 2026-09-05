@@ -3622,7 +3622,7 @@ class AuthoritativeDocsRegressionTests(unittest.TestCase):
         leaves an operator reading instructions the code no longer follows.
         """
         skill = (REPO_ROOT / "skills" / "asl" / "SKILL.md").read_text(encoding="utf-8")
-        marker = "Two kinds of pause are `inspect`"
+        marker = "Three kinds of pause are `inspect`"
         for name, surface in (
             ("docs/agent-session-loop.md", self.docs),
             ("skills/asl/SKILL.md", skill),

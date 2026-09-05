@@ -5976,21 +5976,31 @@ supposed to do about it — `reply` when an operator answer can clear the pause,
 `inspect` when no answer can and the environment has to change instead, and
 `null` for the recoverable pauses that need no human at all. The helper
 escalates `inspect` pauses immediately and routes `reply` pauses through the
-mailbox wait. Two kinds of pause are `inspect`: the non-retryable harness
+mailbox wait. Three kinds of pause are `inspect`: the non-retryable harness
 failures that carry no question context (`quota-exhausted`, `auth-failed`,
-`invalid-model`), and the pauses blocked on a workspace or environment
+`invalid-model`); the pauses blocked on a workspace or environment
 precondition (`commit-preflight`, `commit-failed`,
 `repository-registry-required`, `workspace-repository-contention`,
 `not-loop-ready`, `required-checks-incomplete`, `review-not-clear`,
-`guard-protected-path-changed`, `guard-protected-path-unavailable`). The
-dividing principle is whether a mailbox answer can make
-the run proceed: a dirty worktree stays dirty however the operator answers, so
-waiting for a reply would only burn the mailbox lease before escalating anyway.
-A reason joins the set on its own clearing path, never on symmetry with a
-neighbour. The block also carries `policy_version`, which lets a consumer
-diffing a persisted block against a fresh classification tell a schema change
-from a real contradiction; `policy_version: 3` is the revision that moved the
-blocked-precondition reasons off `reply`.
+`guard-protected-path-changed`, `guard-protected-path-unavailable`); and the
+verdicts a post-turn guard reached along with the turn outcomes nobody asked a
+question about (`workspace-write-scope-violation`,
+`workspace-write-guard-unavailable`, `review-guard-unavailable`,
+`review-mutated-worktree`, `plan-artifact-tampered`, `unexpected-status-change`,
+`multiple-status-changes`, `nonzero-exit`, `malformed-plan`,
+`malformed-review-repair`, `interrupted`). The dividing principle is whether a
+mailbox answer can make the run proceed: a dirty worktree stays dirty however
+the operator answers, so waiting for a reply would only burn the mailbox lease
+before escalating anyway. That third group is the same principle read from the
+other side — the mailbox wait is entered only from the runner-pause
+disposition, so a guard verdict advertising `reply` was advertising an answer it
+had no channel to receive. A reason joins the set on its own clearing path,
+never on symmetry with a neighbour. The block also carries `policy_version`,
+which lets a consumer diffing a persisted block against a fresh classification
+tell a schema change from a real contradiction; `policy_version: 3` is the
+revision that moved the blocked-precondition reasons off `reply`, and
+`policy_version: 4` the one that moved the guard verdicts and unclassifiable
+turn outcomes off it too.
 
 Every pause with `requires_user` also populates the state payload's
 `action_required` block (`source: pause`), echoing the pause reason, message,

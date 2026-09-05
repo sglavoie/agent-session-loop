@@ -171,7 +171,9 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
     def test_set_pause_pause_policy_names_the_reply_resolvable_state(self) -> None:
         # Neither machine-retryable nor a harness failure a reply cannot clear:
         # the pause needs a human, and what the human does is answer.
-        for reason in ("blocked", "malformed-plan", "runner-pause"):
+        # All three are the worker declaring its own stop through
+        # `RUNNER_PAUSE`, which is the one path that opens a mailbox wait.
+        for reason in ("blocked", "unsafe", "runner-pause"):
             with self.subTest(reason=reason):
                 payload: dict[str, object] = {}
                 run_termination.set_pause(payload, reason=reason, message="stopped")
@@ -205,10 +207,50 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
                     payload["action_required"]["user_action"],
                 )
 
+    def test_a_guard_verdict_is_inspect_not_reply(self) -> None:
+        """ASI-114: the reply channel these advertised was never opened.
+
+        A mailbox wait is entered from the runner-pause disposition alone, so a
+        run that ends on a guard verdict or an unclassifiable turn outcome
+        projected `user_action: reply` with nothing anywhere to reply to.
+        """
+        for reason in pause_policy.UNANSWERABLE_OUTCOME_PAUSE_REASONS:
+            with self.subTest(reason=reason):
+                self.assertIn(reason, events.PAUSE_REASONS)
+                payload: dict[str, object] = {}
+                run_termination.set_pause(payload, reason=reason, message="refused")
+                policy = payload["pause_policy"]
+                self.assertFalse(policy["recoverable"])
+                self.assertTrue(policy["requires_user"])
+                self.assertEqual(
+                    pause_policy.USER_ACTION_INSPECT, policy["user_action"]
+                )
+                self.assertEqual(
+                    pause_policy.USER_ACTION_INSPECT,
+                    payload["action_required"]["user_action"],
+                )
+
+    def test_a_guard_verdict_never_waits_for_a_mailbox_reply(self) -> None:
+        # A worker may declare any pause reason through `RUNNER_PAUSE`, so the
+        # classification is what keeps a self-declared guard verdict from
+        # holding the turn open for an answer that clears nothing.
+        result = harnesses.HarnessResult(
+            argv=["codex"], returncode=0, stdout="", stderr=""
+        )
+        for reason in pause_policy.UNANSWERABLE_OUTCOME_PAUSE_REASONS:
+            with self.subTest(reason=reason):
+                self.assertFalse(
+                    run_coordination.runner_pause_can_wait_for_mailbox_reply(
+                        mailbox_enabled=True,
+                        pause_reason=reason,
+                        result=result,
+                    )
+                )
+
     def test_policy_version_marks_the_changed_user_action_meaning(self) -> None:
         # `user_action` changed meaning for reasons that already ship, so a
-        # consumer diffing a persisted v2 block must not read it as agreement.
-        self.assertEqual(3, pause_policy.POLICY_VERSION)
+        # consumer diffing a persisted v3 block must not read it as agreement.
+        self.assertEqual(4, pause_policy.POLICY_VERSION)
         self.assertEqual(
             pause_policy.POLICY_VERSION,
             pause_policy.classify_pause("commit-preflight")["policy_version"],
