@@ -127,6 +127,7 @@ FAST_MODULES = (
     "tests.test_asl_startup_context",
     "tests.test_asl_commit_message",
     "tests.test_skill_sync",
+    "tests.test_asl_overseer_checkpoint",
     "tests.test_asl_overseer_context",
     "tests.test_asl_overseer_decisions",
     "tests.test_asl_overseer_discovery",
