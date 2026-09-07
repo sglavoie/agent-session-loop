@@ -58,6 +58,15 @@ already-dispatched actions are not automatically undone: an overseer that
 guessed "probably landed" or "probably did not" would be inventing the one fact
 it does not have.
 
+## Two watchers, one row
+
+Ownership between concurrent watcher instances is a lease per plan, taken and
+renewed through :meth:`Ledger.claim_watch` inside the same ``BEGIN IMMEDIATE``
+that reads it. A lease changes hands unwillingly only by running out of time,
+never by anyone deciding its holder has died: a watcher is a process that may be
+on another host, and a probe that fails says the same thing about a busy watcher
+as about a gone one.
+
 Durable records this boundary writes: **one SQLite database**, always through
 :meth:`Ledger.transaction`, so every multi-row write is all-or-nothing.
 """
@@ -95,6 +104,8 @@ __all__ = [
     "PolicyTransition",
     "ReceiptRecord",
     "Release",
+    "WatchClaim",
+    "WatchLease",
     "ledger_path",
     "open_ledger",
 ]
@@ -291,6 +302,30 @@ _BASE_SCHEMA: tuple[str, ...] = (
     "CREATE INDEX decision_by_plan ON decision (plan_dir, decision_id)",
 )
 
+#: Schema version 2: the row two watchers race for.
+#:
+#: ``expires_at`` is epoch seconds rather than an ISO string because it is the
+#: only column anything compares with an inequality, and the ISO strings this
+#: module writes elsewhere are not safely orderable as text: ``isoformat``
+#: drops the microsecond field when it is zero, so two stamps a microsecond
+#: apart can sort the wrong way round.
+_WATCH_SCHEMA: tuple[str, ...] = (
+    """
+    CREATE TABLE watch_lease (
+        plan_dir     TEXT    PRIMARY KEY,
+        watcher_id   TEXT    NOT NULL,
+        run_id       TEXT    NOT NULL,
+        host         TEXT    NOT NULL,
+        pid          INTEGER NOT NULL,
+        expires_at   REAL    NOT NULL,
+        claimed_at   TEXT    NOT NULL,
+        renewed_at   TEXT    NOT NULL,
+        released_at  TEXT
+    )
+    """,
+    "CREATE INDEX watch_lease_by_watcher ON watch_lease (watcher_id, plan_dir)",
+)
+
 
 def _create_base_schema(connection: sqlite3.Connection) -> None:
     """Schema version 1: the eight tables the overseer's memory is made of."""
@@ -298,16 +333,23 @@ def _create_base_schema(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _create_watch_schema(connection: sqlite3.Connection) -> None:
+    """Schema version 2: the watcher ownership table."""
+    for statement in _WATCH_SCHEMA:
+        connection.execute(statement)
+
+
 #: Every schema step, in order, each one taking the database from version
 #: ``index`` to version ``index + 1``. Migrations are appended and never edited:
 #: a database created by an older ASL replays exactly the steps it has not seen.
 #:
-#: There is one today, because the schema is new. The machinery is general
-#: anyway rather than inlined into :func:`open_ledger`, because the moment it
-#: matters is the moment it is too late to add: an installed overseer's ledger
-#: has to survive the second version, and a migration path first written when a
-#: second version exists is a migration path nothing has ever run.
-MIGRATIONS: tuple[Migration, ...] = (_create_base_schema,)
+#: The machinery is general rather than inlined into :func:`open_ledger`,
+#: because the moment it matters is the moment it is too late to add: an
+#: installed overseer's ledger has to survive the second version, and a
+#: migration path first written when a second version exists is a migration
+#: path nothing has ever run. Version 2 is that second version, and it replays
+#: onto a version 1 database without touching a single existing row.
+MIGRATIONS: tuple[Migration, ...] = (_create_base_schema, _create_watch_schema)
 
 #: The schema version this module writes and accepts. Derived from the migration
 #: list so the two can never disagree.
@@ -362,6 +404,65 @@ class EnrollmentRecord:
     last_failure: str | None
     first_seen_at: str
     observed_at: str
+
+
+@dataclass(frozen=True)
+class WatchLease:
+    """One watcher's claim on one plan, as the ledger holds it.
+
+    ``watcher_id`` is empty on a lease that was released: the row stays so the
+    run it last named survives, but it is owned by nobody and the next claim
+    takes it without waiting. ``expires_at`` is epoch seconds, and it is the
+    *only* thing that lets a claim be taken from a watcher that did not release
+    it -- see :meth:`Ledger.claim_watch`.
+    """
+
+    plan_dir: str
+    watcher_id: str
+    run_id: str
+    host: str
+    pid: int
+    expires_at: float
+    claimed_at: str
+    renewed_at: str
+    released_at: str | None
+
+    @property
+    def held(self) -> bool:
+        """Whether anybody owns this lease at all."""
+        return bool(self.watcher_id)
+
+    def expired(self, now: float) -> bool:
+        """Whether an unreleased claim has run out of time."""
+        return self.expires_at <= now
+
+
+@dataclass(frozen=True)
+class WatchClaim:
+    """What one attempt to own a plan did.
+
+    ``previous_run_id`` is what makes a superseded run visible: the lease
+    remembers which run the last watcher was watching, so a plan whose record
+    now names a different one is a new question rather than a continuation of
+    the old one.
+    """
+
+    plan_dir: str
+    watcher_id: str
+    run_id: str
+    granted: bool
+    took_over: bool
+    previous_watcher_id: str
+    previous_run_id: str
+    expires_at: float
+    holder: WatchLease | None
+
+    @property
+    def superseded_run(self) -> str:
+        """The run this claim replaced, or ``""`` when it continues one."""
+        if not self.granted or not self.previous_run_id:
+            return ""
+        return "" if self.previous_run_id == self.run_id else self.previous_run_id
 
 
 @dataclass(frozen=True)
@@ -869,6 +970,151 @@ class Ledger:
                 (plan_dir,),
             )
             return cursor.rowcount if cursor.rowcount > 0 else 0
+
+    # -- watcher ownership -------------------------------------------------
+
+    def claim_watch(
+        self,
+        *,
+        plan_dir: str,
+        watcher_id: str,
+        run_id: str,
+        host: str,
+        pid: int,
+        now: float,
+        lease_seconds: float,
+    ) -> WatchClaim:
+        """Take or renew this watcher's claim on one plan, atomically.
+
+        Four ways a claim is granted, and exactly one way it is refused. It is
+        granted when nobody has ever claimed the plan, when the last holder
+        released it, when the claimant already holds it (a renewal, which is
+        also how a restart under the same identity resumes), and when an
+        unreleased lease has run out of time. It is refused while another
+        watcher's lease is still inside its term.
+
+        That last case is the whole point, and the reason expiry is the only
+        way a lease changes hands unwillingly: a watcher is a process somewhere,
+        possibly on another host, and the observable evidence about it is the
+        same whether it is busy, quiet, or gone. Probing it and reading a failed
+        probe as death is the mistake
+        :func:`agent_session_loop.supervision_liveness.probe` exists to refuse
+        to make -- so this waits out a term the holder stopped renewing instead
+        of deciding the holder is dead. A watcher that crashed costs one lease
+        term of delay; a watcher that is alive and slow keeps its plans.
+
+        The read and the write are one ``BEGIN IMMEDIATE`` transaction, so two
+        watchers reaching the same plan at the same moment serialize rather than
+        both concluding the row was free.
+        """
+        if not plan_dir or not watcher_id:
+            raise LedgerError("a watch claim must name both a plan and a watcher")
+        moment = self._now()
+        expires_at = now + lease_seconds
+        with self.transaction() as connection:
+            existing = self.watch_lease(plan_dir)
+            held_by_another = (
+                existing is not None
+                and existing.held
+                and existing.watcher_id != watcher_id
+            )
+            if existing is not None and held_by_another and not existing.expired(now):
+                return WatchClaim(
+                    plan_dir=plan_dir,
+                    watcher_id=watcher_id,
+                    run_id=run_id,
+                    granted=False,
+                    took_over=False,
+                    previous_watcher_id=existing.watcher_id,
+                    previous_run_id=existing.run_id,
+                    expires_at=existing.expires_at,
+                    holder=existing,
+                )
+            took_over = held_by_another
+            claimed_at = (
+                existing.claimed_at
+                if existing is not None and existing.watcher_id == watcher_id
+                else moment
+            )
+            connection.execute(
+                """
+                INSERT INTO watch_lease (
+                    plan_dir, watcher_id, run_id, host, pid, expires_at,
+                    claimed_at, renewed_at, released_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT (plan_dir) DO UPDATE SET
+                    watcher_id = excluded.watcher_id,
+                    run_id = excluded.run_id,
+                    host = excluded.host,
+                    pid = excluded.pid,
+                    expires_at = excluded.expires_at,
+                    claimed_at = excluded.claimed_at,
+                    renewed_at = excluded.renewed_at,
+                    released_at = NULL
+                """,
+                (
+                    plan_dir,
+                    watcher_id,
+                    run_id,
+                    host,
+                    pid,
+                    expires_at,
+                    claimed_at,
+                    moment,
+                ),
+            )
+            return WatchClaim(
+                plan_dir=plan_dir,
+                watcher_id=watcher_id,
+                run_id=run_id,
+                granted=True,
+                took_over=took_over,
+                previous_watcher_id=(
+                    existing.watcher_id if existing is not None else ""
+                ),
+                previous_run_id=existing.run_id if existing is not None else "",
+                expires_at=expires_at,
+                holder=None,
+            )
+
+    def release_watch(self, *, plan_dir: str, watcher_id: str) -> bool:
+        """Give up this watcher's claim, keeping what the lease remembers.
+
+        The row is emptied of its owner rather than deleted, because the run it
+        names is the fact a later watcher needs to tell a continuation from a
+        run that has been replaced since anybody looked. Releasing a lease
+        somebody else holds does nothing and reports ``False``: a watcher can
+        only put down what it picked up.
+        """
+        moment = self._now()
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE watch_lease
+                SET watcher_id = '', expires_at = 0.0, released_at = ?
+                WHERE plan_dir = ? AND watcher_id = ?
+                """,
+                (moment, plan_dir, watcher_id),
+            )
+            return cursor.rowcount == 1
+
+    def watch_lease(self, plan_dir: str) -> WatchLease | None:
+        """The lease on one plan, held or released, if the row exists."""
+        row = self._connection.execute(
+            f"SELECT {_WATCH_LEASE_COLUMNS} FROM watch_lease WHERE plan_dir = ?",
+            (plan_dir,),
+        ).fetchone()
+        return None if row is None else _watch_lease(row)
+
+    def watch_leases(self, *, watcher_id: str | None = None) -> tuple[WatchLease, ...]:
+        """Every lease, or every lease one watcher holds, in plan order."""
+        where = " WHERE watcher_id = ?" if watcher_id is not None else ""
+        parameters = (watcher_id,) if watcher_id is not None else ()
+        rows = self._connection.execute(
+            f"SELECT {_WATCH_LEASE_COLUMNS} FROM watch_lease{where} ORDER BY plan_dir",
+            parameters,
+        ).fetchall()
+        return tuple(_watch_lease(row) for row in rows)
 
     # -- observation cursors ----------------------------------------------
 
@@ -1457,6 +1703,25 @@ _ACTION_COLUMNS = (
     "action_id, plan_dir, incident_id, operation, target, status, epoch, "
     "config_fingerprint, request_digest, attempted_at, settled_at"
 )
+
+_WATCH_LEASE_COLUMNS = (
+    "plan_dir, watcher_id, run_id, host, pid, expires_at, claimed_at, "
+    "renewed_at, released_at"
+)
+
+
+def _watch_lease(row: sqlite3.Row) -> WatchLease:
+    return WatchLease(
+        plan_dir=str(row["plan_dir"]),
+        watcher_id=str(row["watcher_id"]),
+        run_id=str(row["run_id"]),
+        host=str(row["host"]),
+        pid=int(row["pid"]),
+        expires_at=float(row["expires_at"]),
+        claimed_at=str(row["claimed_at"]),
+        renewed_at=str(row["renewed_at"]),
+        released_at=_optional_text(row["released_at"]),
+    )
 
 
 def _incident(row: sqlite3.Row) -> IncidentRecord:

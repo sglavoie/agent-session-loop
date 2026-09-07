@@ -131,6 +131,7 @@ FAST_MODULES = (
     "tests.test_asl_overseer_isolation",
     "tests.test_asl_overseer_store",
     "tests.test_asl_overseer_policy_client",
+    "tests.test_asl_overseer_watch",
     "tests.test_asl_literals",
 )
 
@@ -201,6 +202,7 @@ PORTABLE_MODULES = (
     "tests.test_asl_overseer_isolation",
     "tests.test_asl_overseer_store",
     "tests.test_asl_overseer_policy_client",
+    "tests.test_asl_overseer_watch",
     "tests.test_asl_literals",
 )
 
