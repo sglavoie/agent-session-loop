@@ -74,9 +74,10 @@ Durable records this boundary writes: **one SQLite database**, always through
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
 import sys
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -90,6 +91,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "WITHHOLDING_REASONS",
     "ActionRecord",
+    "CheckpointGroupRecord",
     "DecisionRecord",
     "EnrollmentRecord",
     "EvidenceInput",
@@ -353,6 +355,47 @@ _ACTION_PROGRESS_SCHEMA: tuple[str, ...] = (
 )
 
 
+#: Schema version 4: the multi-repository checkpoint a restart has to finish.
+#:
+#: A checkpoint that spans a plan's whole registry commits one repository at a
+#: time, and git offers nothing that makes several commits one transaction. The
+#: only honest way to be restart-safe is therefore to record what has already
+#: landed after every single commit, so a process that dies between the second
+#: and the third can be told which two are done. That is what this table is:
+#: ``record`` is the whole durable group --- per-repository snapshots, commit
+#: shas, and the aliases still outstanding --- and it is rewritten at each
+#: boundary rather than appended to, because the group's *current* obligation is
+#: the thing a retry needs and a log of obligations would have to be replayed to
+#: produce it.
+#:
+#: ``group_key`` is the primary key rather than a surrogate id, because the key
+#: is derived from the plan, the incident and the dispatch target: a retry
+#: computes the same key and finds the same row, which is what makes "reconcile
+#: before retrying" possible for a process that never saw the first attempt.
+_CHECKPOINT_GROUP_SCHEMA: tuple[str, ...] = (
+    """
+    CREATE TABLE checkpoint_group (
+        group_key           TEXT    PRIMARY KEY,
+        plan_dir            TEXT    NOT NULL,
+        incident_id         INTEGER,
+        target              TEXT    NOT NULL,
+        status              TEXT    NOT NULL,
+        phase               TEXT    NOT NULL,
+        epoch               INTEGER NOT NULL,
+        config_fingerprint  TEXT    NOT NULL,
+        request_digest      TEXT    NOT NULL,
+        record              TEXT    NOT NULL,
+        opened_at           TEXT    NOT NULL,
+        updated_at          TEXT    NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX checkpoint_group_by_plan
+    ON checkpoint_group (plan_dir, status, group_key)
+    """,
+)
+
+
 def _create_base_schema(connection: sqlite3.Connection) -> None:
     """Schema version 1: the eight tables the overseer's memory is made of."""
     for statement in _BASE_SCHEMA:
@@ -371,6 +414,12 @@ def _create_action_progress_schema(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _create_checkpoint_group_schema(connection: sqlite3.Connection) -> None:
+    """Schema version 4: the multi-repository checkpoint still owed."""
+    for statement in _CHECKPOINT_GROUP_SCHEMA:
+        connection.execute(statement)
+
+
 #: Every schema step, in order, each one taking the database from version
 #: ``index`` to version ``index + 1``. Migrations are appended and never edited:
 #: a database created by an older ASL replays exactly the steps it has not seen.
@@ -382,11 +431,13 @@ def _create_action_progress_schema(connection: sqlite3.Connection) -> None:
 #: path nothing has ever run. Version 2 is that second version, and it replays
 #: onto a version 1 database without touching a single existing row. Version 3
 #: adds a column to a table that already holds rows, which is the other shape a
-#: migration comes in, and it too rewrites nothing.
+#: migration comes in, and it too rewrites nothing. Version 4 adds a table, like
+#: version 2, and is likewise invisible to every row already stored.
 MIGRATIONS: tuple[Migration, ...] = (
     _create_base_schema,
     _create_watch_schema,
     _create_action_progress_schema,
+    _create_checkpoint_group_schema,
 )
 
 #: The schema version this module writes and accepts. Derived from the migration
@@ -657,6 +708,57 @@ class ActionRecord:
     def in_doubt(self) -> bool:
         """Whether the dispatch's outcome is genuinely unknown."""
         return self.status == "attempted"
+
+
+@dataclass(frozen=True)
+class CheckpointGroupRecord:
+    """A multi-repository checkpoint and how much of it is still owed.
+
+    ``record`` is opaque here on purpose. The ledger's stake in a group is that
+    it survives the process, is found again by the identity a retry can derive,
+    and reports which repositories are still outstanding; what a snapshot token
+    or a commit sha *means* belongs to the boundary that made them, and a table
+    that understood the shape would have to be migrated every time that boundary
+    learned something new.
+    """
+
+    group_key: str
+    plan_dir: str
+    incident_id: int | None
+    target: str
+    status: str
+    phase: str
+    epoch: int
+    config_fingerprint: str
+    request_digest: str
+    record: dict[str, Any]
+    opened_at: str
+    updated_at: str
+
+    @property
+    def settled(self) -> bool:
+        """Whether every repository in the group reached an outcome."""
+        return self.status == "complete"
+
+    @property
+    def outstanding(self) -> tuple[str, ...]:
+        """The repository keys this group still owes a commit, in order."""
+        remaining = self.record.get("remaining_aliases")
+        if not isinstance(remaining, list):
+            return ()
+        return tuple(str(alias) for alias in remaining)
+
+    @property
+    def committed(self) -> tuple[str, ...]:
+        """The repository keys this group has already committed, in order."""
+        rows = self.record.get("successful_repositories")
+        if not isinstance(rows, list):
+            return ()
+        return tuple(
+            str(row["key"])
+            for row in rows
+            if isinstance(row, Mapping) and isinstance(row.get("key"), str)
+        )
 
 
 def ledger_path(state_dir: str | Path | None = None) -> Path:
@@ -1693,6 +1795,163 @@ class Ledger:
         """
         return self.actions(plan_dir=plan_dir, status="attempted")
 
+    # -- checkpoint groups -------------------------------------------------
+
+    def open_checkpoint_group(
+        self,
+        *,
+        grant: overseer_policy_client.Grant | None,
+        plan_dir: str,
+        group_key: str,
+        target: str,
+        record: Mapping[str, Any],
+        incident_id: int | None = None,
+        phase: str = "prepared",
+    ) -> CheckpointGroupRecord:
+        """Open, or re-open, the multi-repository checkpoint owed under ``group_key``.
+
+        Grant-gated like :meth:`attempt_action`, and for the same reason: opening
+        a group is the step that decides several repositories are about to be
+        written to, so it is a question AgentMux must have answered under the
+        configuration currently in force.
+
+        Re-opening is deliberately *not* a reset. A retry after a partial failure
+        computes the same key, and this method keeps the row's ``opened_at``
+        while replacing the obligation with the one the caller just established
+        --- a caller that wanted to forget the commits already made would have to
+        omit them from ``record`` itself, which
+        :func:`agent_session_loop.overseer_checkpoint_groups.prepare_group` will
+        not do.
+        """
+        self._require_grant(
+            grant=grant,
+            plan_dir=plan_dir,
+            access=overseer_policy_client.ACCESS_ACTION,
+        )
+        if grant is None:
+            raise LedgerRefused(f"no action grant for {plan_dir}")
+        if not group_key:
+            raise LedgerError("a checkpoint group must be keyed")
+        moment = self._now()
+        epoch = self.current_epoch()
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO checkpoint_group (
+                    group_key, plan_dir, incident_id, target, status, phase,
+                    epoch, config_fingerprint, request_digest, record,
+                    opened_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (group_key) DO UPDATE SET
+                    status = excluded.status,
+                    phase = excluded.phase,
+                    epoch = excluded.epoch,
+                    config_fingerprint = excluded.config_fingerprint,
+                    request_digest = excluded.request_digest,
+                    record = excluded.record,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    group_key,
+                    plan_dir,
+                    incident_id,
+                    target,
+                    str(record.get("status", "pending")),
+                    phase,
+                    epoch.epoch,
+                    epoch.config_fingerprint,
+                    grant.request_digest,
+                    json.dumps(dict(record), sort_keys=True),
+                    moment,
+                    moment,
+                ),
+            )
+        stored = self.checkpoint_group(group_key)
+        if stored is None:
+            raise LedgerError(
+                f"checkpoint group {group_key} vanished immediately after it was opened"
+            )
+        return stored
+
+    def save_checkpoint_group(
+        self,
+        *,
+        group_key: str,
+        record: Mapping[str, Any],
+        phase: str,
+    ) -> CheckpointGroupRecord:
+        """Rewrite an open group at a transaction boundary.
+
+        Not grant-gated, and the asymmetry with :meth:`open_checkpoint_group` is
+        the same one :meth:`confirm_action` has with :meth:`attempt_action`: what
+        a caller needs permission for is *making* the commits, not recording that
+        they were made. Refusing this write when authorization moved mid-group
+        would delete the only durable evidence of the repositories that already
+        succeeded, which is precisely what a revocation between commits must not
+        cost.
+        """
+        moment = self._now()
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE checkpoint_group
+                SET status = ?, phase = ?, record = ?, updated_at = ?
+                WHERE group_key = ?
+                """,
+                (
+                    str(record.get("status", "pending")),
+                    phase,
+                    json.dumps(dict(record), sort_keys=True),
+                    moment,
+                    group_key,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LedgerError(
+                    f"no open checkpoint group {group_key} to save; a group is "
+                    "opened before it is coordinated"
+                )
+        stored = self.checkpoint_group(group_key)
+        if stored is None:
+            raise LedgerError(
+                f"checkpoint group {group_key} vanished while being saved"
+            )
+        return stored
+
+    def checkpoint_group(self, group_key: str) -> CheckpointGroupRecord | None:
+        """The group owed under one derived key, if the ledger holds one."""
+        row = self._connection.execute(
+            f"SELECT {_CHECKPOINT_GROUP_COLUMNS} FROM checkpoint_group "
+            "WHERE group_key = ?",
+            (group_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _checkpoint_group(row)
+
+    def checkpoint_groups(
+        self,
+        *,
+        plan_dir: str | None = None,
+        status: str | None = None,
+    ) -> tuple[CheckpointGroupRecord, ...]:
+        """Every stored group, narrowed to one plan or one status."""
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if plan_dir is not None:
+            clauses.append("plan_dir = ?")
+            parameters.append(plan_dir)
+        if status is not None:
+            clauses.append("status = ?")
+            parameters.append(status)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            f"SELECT {_CHECKPOINT_GROUP_COLUMNS} FROM checkpoint_group{where} "
+            "ORDER BY opened_at, group_key",
+            tuple(parameters),
+        ).fetchall()
+        return tuple(_checkpoint_group(row) for row in rows)
+
     def _receipt(self, action_id: int) -> ReceiptRecord | None:
         row = self._connection.execute(
             """
@@ -1822,6 +2081,44 @@ _WATCH_LEASE_COLUMNS = (
     "plan_dir, watcher_id, run_id, host, pid, expires_at, claimed_at, "
     "renewed_at, released_at"
 )
+
+_CHECKPOINT_GROUP_COLUMNS = (
+    "group_key, plan_dir, incident_id, target, status, phase, epoch, "
+    "config_fingerprint, request_digest, record, opened_at, updated_at"
+)
+
+
+def _checkpoint_group(row: sqlite3.Row) -> CheckpointGroupRecord:
+    """Read one stored group, refusing a payload that is not an object.
+
+    A ``record`` that no longer parses is raised rather than defaulted to an
+    empty group: an empty group reads as "nothing is owed", which is the one
+    answer a torn row must never be allowed to give.
+    """
+    try:
+        payload = json.loads(str(row["record"]))
+    except ValueError as error:
+        raise LedgerError(
+            f"checkpoint group {row['group_key']} holds an unreadable record: {error}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise LedgerError(
+            f"checkpoint group {row['group_key']} holds a record that is not an object"
+        )
+    return CheckpointGroupRecord(
+        group_key=str(row["group_key"]),
+        plan_dir=str(row["plan_dir"]),
+        incident_id=_optional_int(row["incident_id"]),
+        target=str(row["target"]),
+        status=str(row["status"]),
+        phase=str(row["phase"]),
+        epoch=int(row["epoch"]),
+        config_fingerprint=str(row["config_fingerprint"]),
+        request_digest=str(row["request_digest"]),
+        record=payload,
+        opened_at=str(row["opened_at"]),
+        updated_at=str(row["updated_at"]),
+    )
 
 
 def _watch_lease(row: sqlite3.Row) -> WatchLease:

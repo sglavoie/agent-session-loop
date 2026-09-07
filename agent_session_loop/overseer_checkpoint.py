@@ -132,9 +132,11 @@ __all__ = [
     "Verification",
     "adapters",
     "attribute",
+    "authority_refusal",
     "checkpoint_id",
     "checkpoint_message",
     "declared_repositories",
+    "dirty_paths",
     "find_checkpoint",
     "read_activity",
     "read_verification",
@@ -495,7 +497,7 @@ def attribute(
     repository = repositories[0]
     root = Path(repository.path)
     head = commit_message.head_sha(root)
-    dirty = _dirty_paths(root)
+    dirty = dirty_paths(root)
     if not head or dirty is None:
         return Attribution(
             alias=repository.alias,
@@ -555,6 +557,67 @@ def attribute(
     return accounted
 
 
+def authority_refusal(
+    ruling: overseer_decisions.Ruling | None,
+    *,
+    plan_dir: str,
+    run_id: str,
+    incident_id: int,
+) -> tuple[Refusal, str] | None:
+    """Return why this ruling does not authorize this checkpoint, or ``None``.
+
+    Scope is checked field by field against what the caller is about to do
+    rather than by :meth:`~agent_session_loop.overseer_decisions.Scope.covers`,
+    because covers answers "may this decision reach that target" and the
+    question here is the stricter one: was the ruling made about *this* plan,
+    run and incident. A ruling that named none of them is a ruling that would
+    equally authorize a commit in the next plan's repository.
+    """
+    if ruling is None:
+        return ("authority_absent", "no ruling was established")
+    if ruling.operation != "commit":
+        return (
+            "authority_silent",
+            f"the ruling is about {ruling.operation!r}, not 'commit'",
+        )
+    if ruling.refusal is not None:
+        return ("authority_refused", ruling.refusal)
+    if not ruling.authorized:
+        return ("authority_refused", ruling.summary or "not authorized")
+    if ruling.unresolved:
+        return ("authority_held", ", ".join(ruling.unresolved))
+    decision = ruling.decision
+    if decision is None:
+        return ("authority_absent", "the ruling names no governing decision")
+    if not decision.speaks_to("commit"):
+        return (
+            "authority_silent",
+            f"{decision.decision_id} says nothing about commits",
+        )
+    if decision.stance != "allow":
+        return ("authority_held", f"{decision.decision_id} is a {decision.stance}")
+    scope = ruling.scope
+    if not scope.project:
+        return ("authority_unscoped", "the ruling names no project")
+    named = (
+        ("plan", scope.plan_dir, plan_dir),
+        ("run", scope.run_id, run_id),
+        ("incident", scope.incident, str(incident_id)),
+    )
+    for named_field, ruled, wanted in named:
+        if not ruled or ruled != wanted:
+            return (
+                "authority_unscoped",
+                f"the ruling's {named_field} is {ruled!r}, not {wanted!r}",
+            )
+    if not decision.scope.covers(scope):
+        return (
+            "authority_unscoped",
+            f"{decision.decision_id} was not made about this scope",
+        )
+    return None
+
+
 Authority = Callable[[overseer_dispatch.Action], overseer_decisions.Ruling | None]
 Repositories = Callable[..., tuple[overseer_policy_client.Repository, ...]]
 
@@ -588,7 +651,7 @@ class CheckpointAdapter:
                 _phrase("payload_mismatch", "not a commit")
             )
         ruling = self.authority(action)
-        granted = _check_authority(
+        granted = authority_refusal(
             ruling,
             plan_dir=action.plan_dir,
             run_id=action.run_id,
@@ -655,7 +718,7 @@ class CheckpointAdapter:
                 _phrase("not_prepared", "no preparation established this checkpoint")
             )
         current = self.authority(action)
-        granted = _check_authority(
+        granted = authority_refusal(
             current,
             plan_dir=action.plan_dir,
             run_id=action.run_id,
@@ -829,7 +892,7 @@ def _git(root: Path, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr=str(error))
 
 
-def _dirty_paths(root: Path) -> tuple[str, ...] | None:
+def dirty_paths(root: Path) -> tuple[str, ...] | None:
     """Every path the worktree currently differs from HEAD on, or ``None``.
 
     ``None`` is a status that could not be taken, which is not the same fact as
@@ -1007,67 +1070,6 @@ def _key(plan_dir: str, incident_id: int, target: str) -> str:
 
 def _phrase(refusal: Refusal, detail: str) -> str:
     return f"{refusal}: {detail}" if detail else refusal
-
-
-def _check_authority(
-    ruling: overseer_decisions.Ruling | None,
-    *,
-    plan_dir: str,
-    run_id: str,
-    incident_id: int,
-) -> tuple[Refusal, str] | None:
-    """Return why this ruling does not authorize this checkpoint, or ``None``.
-
-    Scope is checked field by field against what the caller is about to do
-    rather than by :meth:`~agent_session_loop.overseer_decisions.Scope.covers`,
-    because covers answers "may this decision reach that target" and the
-    question here is the stricter one: was the ruling made about *this* plan,
-    run and incident. A ruling that named none of them is a ruling that would
-    equally authorize a commit in the next plan's repository.
-    """
-    if ruling is None:
-        return ("authority_absent", "no ruling was established")
-    if ruling.operation != "commit":
-        return (
-            "authority_silent",
-            f"the ruling is about {ruling.operation!r}, not 'commit'",
-        )
-    if ruling.refusal is not None:
-        return ("authority_refused", ruling.refusal)
-    if not ruling.authorized:
-        return ("authority_refused", ruling.summary or "not authorized")
-    if ruling.unresolved:
-        return ("authority_held", ", ".join(ruling.unresolved))
-    decision = ruling.decision
-    if decision is None:
-        return ("authority_absent", "the ruling names no governing decision")
-    if not decision.speaks_to("commit"):
-        return (
-            "authority_silent",
-            f"{decision.decision_id} says nothing about commits",
-        )
-    if decision.stance != "allow":
-        return ("authority_held", f"{decision.decision_id} is a {decision.stance}")
-    scope = ruling.scope
-    if not scope.project:
-        return ("authority_unscoped", "the ruling names no project")
-    named = (
-        ("plan", scope.plan_dir, plan_dir),
-        ("run", scope.run_id, run_id),
-        ("incident", scope.incident, str(incident_id)),
-    )
-    for named_field, ruled, wanted in named:
-        if not ruled or ruled != wanted:
-            return (
-                "authority_unscoped",
-                f"the ruling's {named_field} is {ruled!r}, not {wanted!r}",
-            )
-    if not decision.scope.covers(scope):
-        return (
-            "authority_unscoped",
-            f"{decision.decision_id} was not made about this scope",
-        )
-    return None
 
 
 def _decision_id(ruling: overseer_decisions.Ruling | None) -> str:

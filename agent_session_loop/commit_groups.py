@@ -39,10 +39,18 @@ GROUP_SCOPE_SESSION = "session"
 GROUP_SCOPE_SESSION_PAUSED = "session-paused"
 #: The end-of-run sweep, which belongs to no session.
 GROUP_SCOPE_END = "end"
+#: A checkpoint the overseer owes across a plan's repository registry. It names
+#: no session because an overseer checkpoint is made *at* a run rather than by
+#: one, and it is never written into a plan's state file: groups of this scope
+#: live in the overseer's own ledger, keyed there by the plan, incident and
+#: dispatch target, which is the identity ``group_id`` cannot carry (the hash
+#: covers ``{scope, session_id, ordered_aliases}``, so two checkpoints of the
+#: same repositories share it).
+GROUP_SCOPE_OVERSEER = "overseer"
 #: The scopes that name exactly one session. Membership here, not equality with
 #: a single scope, is what the scope/session-id invariant tests.
 SESSION_GROUP_SCOPES = (GROUP_SCOPE_SESSION, GROUP_SCOPE_SESSION_PAUSED)
-GROUP_SCOPES = (*SESSION_GROUP_SCOPES, GROUP_SCOPE_END)
+GROUP_SCOPES = (*SESSION_GROUP_SCOPES, GROUP_SCOPE_END, GROUP_SCOPE_OVERSEER)
 
 
 class CommitGroupError(RuntimeError):
