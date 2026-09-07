@@ -184,9 +184,9 @@ def _classify_mechanical_handoff_defect(
             code=HANDOFF_DEFECT_MISSING_FILES,
             detail="the completed handoff carries no Files modified entry",
             instruction=(
-                "list every file you changed on the Files modified line as "
+                "list every repository file you changed on the Files modified line as "
                 f"comma-separated Alias:path entries (aliases: {aliases}), or "
-                "write (none) if the session changed no files"
+                "write (none) if the session changed no repository files"
             ),
         )
     if inline == "(none yet)":
@@ -195,8 +195,8 @@ def _classify_mechanical_handoff_defect(
             detail="the completed handoff still reads (none yet)",
             instruction=(
                 "replace (none yet) on the Files modified line with the "
-                "Alias:path entries you actually changed "
-                f"(aliases: {aliases}), or with (none)"
+                "Alias:path entries for repository files you actually changed "
+                f"(aliases: {aliases}), or with (none) if no repository files changed"
             ),
         )
     if inline == "(none)":
@@ -209,8 +209,10 @@ def _classify_mechanical_handoff_defect(
                 code=HANDOFF_DEFECT_UNQUALIFIED_ENTRY,
                 detail=f"Files modified entry {entry!r} is invalid: {error}",
                 instruction=(
-                    f"rewrite the Files modified entry {entry!r} as "
-                    f"Alias:path using one of the declared aliases ({aliases})"
+                    f"if Files modified entry {entry!r} names a repository file, "
+                    "rewrite it as Alias:path using its declared repository alias "
+                    f"({aliases}); if it names a plan-local artifact, move its "
+                    "provenance to Notes instead"
                 ),
             )
     return None
@@ -286,8 +288,15 @@ def _handoff_correction_note(
     note = (
         f"handoff correction required: {defect.detail}. The plan could not be "
         f"inspected with this handoff in place. To fix it, {defect.instruction}. "
-        "Change nothing else: the session's work is already done and its status "
-        "was reverted to pending only so this line can be corrected."
+        "Files modified records repository changes only, using the session's "
+        "write aliases. Record plan-local artifact provenance (including "
+        "final-review.md and final-review.json) in Notes, without inventing a "
+        "repository alias. If only plan-local artifacts changed, use "
+        "Files modified: (none); if repository files also changed, retain every "
+        "such file as an Alias:path entry. Correct only the handoff's Files "
+        "modified and Notes fields, then mark its status complete: the session's "
+        "work is already done and its status was reverted to pending only for "
+        "this handoff correction."
     )
     if preserved_review is None:
         return note

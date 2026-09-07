@@ -161,9 +161,15 @@ def _workspace_prompt_lines(
             "",
             "- Read only repositories named by `Expected read aliases`.",
             "- Modify files only in repositories named by `Writable aliases`.",
-            "- In handoffs and cross-repository references use qualified paths "
+            "- For repository files in handoffs and cross-repository references "
+            "use qualified paths "
             "in canonical `Alias:path/to/file` form; never use an "
             "absolute path or an unqualified cross-repository path.",
+            "- `Files modified` records repository changes only, using the "
+            "session's write aliases. Record plan-local artifact provenance "
+            "(including `final-review.md` and `final-review.json`) in `Notes`. "
+            "Use `(none)` when no repository files changed, even if plan-local "
+            "artifacts were written; retain all repository entries for mixed changes.",
         ]
     )
     return lines

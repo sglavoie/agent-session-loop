@@ -433,6 +433,75 @@ class CorrectionTurnTests(unittest.TestCase):
             next(item.status for item in corrected.sessions if item.id == "1"),
         )
 
+    def test_plan_artifact_correction_preserves_repository_validation(self) -> None:
+        session_text = self.session_path.read_text(encoding="utf-8")
+        aliases = ", ".join(alias for alias, _path, _origin in DEFAULT_MULTI_REPO_SPECS)
+        for repository_entry in (None, "SVC:README.md", "OAK:README.md"):
+            with self.subTest(repository_entry=repository_entry):
+                writes = "SVC" if repository_entry else "(none)"
+                self.session_path.write_text(
+                    session_text.replace(
+                        f"**Writes repositories**: {aliases}",
+                        f"**Writes repositories**: {writes}",
+                    ),
+                    encoding="utf-8",
+                )
+                self.before = plans.inspect_plan(self.plan_dir)
+                # Authored review sessions do not have the generated-review
+                # marker that projects these artifact names away on read.
+                inline = "final-review.md, final-review.json"
+                if repository_entry:
+                    inline += f", {repository_entry}"
+                _set_handoff(
+                    self.session_path, status="complete", files_modified=inline
+                )
+                if self.event_path.exists():
+                    self.event_path.unlink()
+                before_digests = self.artifact_digests()
+                with self.assertRaises(plans.PlanError):
+                    plans.inspect_plan(self.plan_dir)
+
+                corrected, evidence = self.correct()
+
+                self.assertIsNotNone(corrected)
+                assert evidence is not None
+                self.assertFalse(evidence["exhausted"])
+                note = self.session_path.read_text(encoding="utf-8")
+                self.assertIn("move its provenance to Notes", note)
+                self.assertIn("Files modified: (none)", note)
+                self.assertIn("retain every such file as an Alias:path entry", note)
+
+                # Apply the documented representation: only the repository
+                # entry remains, with artifact provenance in the handoff notes.
+                _set_handoff(
+                    self.session_path,
+                    status="complete",
+                    files_modified=repository_entry or "(none)",
+                )
+                self.session_path.write_text(
+                    self.session_path.read_text(encoding="utf-8").replace(
+                        "- **Notes**:",
+                        "- **Notes**: Plan-local artifacts: "
+                        "final-review.md, final-review.json.",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                if repository_entry == "OAK:README.md":
+                    with self.assertRaisesRegex(
+                        plans.PlanError, "outside Writes repositories"
+                    ):
+                        plans.inspect_plan(self.plan_dir)
+                else:
+                    snapshot = plans.inspect_plan(self.plan_dir)
+                    handoff = plans.read_session_handoff(snapshot.sessions[0].session)
+                    self.assertEqual("complete", handoff.status)
+                    self.assertEqual(
+                        (repository_entry or "(none)",), handoff.files_modified
+                    )
+                    self.assertIn("Plan-local artifacts:", handoff.notes or "")
+                self.assertEqual(before_digests, self.artifact_digests())
+
     def test_a_second_correction_is_refused_but_still_reports(self) -> None:
         self.malform()
         self.persistence.append_event(
