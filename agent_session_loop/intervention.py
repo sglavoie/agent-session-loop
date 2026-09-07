@@ -25,7 +25,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +58,7 @@ REASON_INVALID_ACTION = "invalid-action"
 REASON_EMPTY_TEXT = "empty-text"
 REASON_BODY_TOO_LARGE = "question-body-too-large"
 REASON_MISSING_QUESTION_BODY = "missing-question-body"
+REASON_UNKNOWN_PROFILE_FIELD = "unknown-profile-field"
 
 # A body a client cannot render is worse than an explicit refusal that names the
 # surface which can: the Workbench already streams arbitrarily large artifacts.
@@ -715,3 +716,55 @@ def resume_paused_run(
         resume=True,
         **launch_kwargs,
     )
+
+
+def resume_recovered_run(
+    plan_dir: str | Path,
+    *,
+    profile_fields: Mapping[str, Any] | None = None,
+    state_dir: str | Path | None = None,
+    **launch_kwargs: Any,
+) -> Any:
+    """Spawn ``asl run --resume`` for a paused plan, carrying no reply at all.
+
+    The environmental-recovery counterpart to :func:`resume_paused_run`, added
+    beside it rather than in place of it. A run paused by a checkpoint, a
+    transport failure, or an unmet workspace precondition has nothing to answer,
+    so the reply-oriented path could only be reached by inventing text --- and
+    invented text becomes part of that run's own record. Here ``reply_text`` is
+    ``None``, which is what makes the omission structural: ``launch_plan`` adds
+    ``--reply-stdin`` and opens a pipe only when a reply is present, so there is
+    no channel for words nobody said to travel down.
+
+    ``profile_fields`` is a mapping rather than a ``LaunchProfile`` so a caller
+    restoring a launch out of persisted run metadata does not have to import the
+    launcher to reach one. An unknown key is refused rather than dropped: a
+    field this service quietly ignored would be a launch setting the caller
+    believes it restored and did not.
+
+    Launcher refusals are re-raised as :class:`InterventionError` under the
+    launcher's own reason, so a caller behind this seam handles one error type
+    and never needs the launcher in its own imports.
+    """
+    from . import workbench
+
+    values = dict(profile_fields or {})
+    known = {declared.name for declared in fields(workbench.LaunchProfile)}
+    unknown = sorted(set(values) - known)
+    if unknown:
+        raise InterventionError(
+            REASON_UNKNOWN_PROFILE_FIELD,
+            f"not launch profile fields: {', '.join(unknown)}",
+            details={"fields": unknown},
+        )
+    try:
+        return workbench.launch_plan(
+            plan_dir,
+            profile=workbench.LaunchProfile(**values),
+            reply_text=None,
+            state_dir=state_dir,
+            resume=True,
+            **launch_kwargs,
+        )
+    except workbench.LaunchError as error:
+        raise InterventionError(error.reason, error.message) from error

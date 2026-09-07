@@ -22,7 +22,9 @@ from agent_session_loop import (
     control_queue,
     events,
     harnesses,
+    intervention,
     mailbox,
+    overseer_resume,
     pause_policy,
     qna,
     run_coordination,
@@ -1425,6 +1427,77 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             )
             self.assertFalse(payload["control"]["abort_turn_requested"])
             self.assertIn("operator needs the machine", observed_guidance[0])
+
+
+class PauseRecoveryPathsTests(unittest.TestCase):
+    """Which pauses an operator answers, and which ones they repair instead.
+
+    ``pause_policy`` decides what a stopped run needs from a human, and
+    ``overseer_resume`` is the only caller that acts on the difference without
+    a human present. Reading both here keeps the two honest about each other:
+    a reason added to one of the inspect tuples must not quietly become a
+    resume that invents an answer, and a reply-shaped pause must not quietly
+    become one an overseer can restart around.
+    """
+
+    def _facts(
+        self, reason: str, *, unanswered: tuple[str, ...] = ()
+    ) -> intervention.RunFacts:
+        return intervention.build_run_facts(
+            Path("/plans/plan-a"),
+            runner_state={
+                "present": True,
+                "run_id": "run-1",
+                "paused": True,
+                "reason": reason,
+                "pause_policy": pause_policy.classify_pause(reason),
+            },
+            lock_active=False,
+            unanswered_ids=unanswered,
+        )
+
+    def test_every_inspect_pause_is_recoverable_without_an_answer(self) -> None:
+        # These are the pauses a human fixes the world for -- a quota, an auth
+        # failure, a dirty worktree. Once the world is fixed there is nothing
+        # for anybody to say, so a resume that carries no reply is the right
+        # instrument and refusing it would strand the run.
+        for reason in pause_policy.INSPECT_PAUSE_REASONS:
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    pause_policy.USER_ACTION_INSPECT,
+                    pause_policy.classify_pause(reason)["user_action"],
+                )
+                self.assertIsNone(
+                    overseer_resume.recovery_refusal(
+                        self._facts(reason, unanswered=("q-1",))
+                    )
+                )
+
+    def test_every_recoverable_pause_is_recoverable_without_an_answer(self) -> None:
+        for reason in pause_policy.RECOVERABLE_PAUSE_REASONS:
+            with self.subTest(reason=reason):
+                self.assertIsNone(overseer_resume.recovery_refusal(self._facts(reason)))
+
+    def test_a_reply_shaped_pause_with_an_open_question_stays_the_operators(
+        self,
+    ) -> None:
+        facts = self._facts("awaiting-reply", unanswered=("q-1",))
+
+        self.assertEqual(
+            pause_policy.USER_ACTION_REPLY,
+            pause_policy.classify_pause("awaiting-reply")["user_action"],
+        )
+        refusal = overseer_resume.recovery_refusal(facts)
+        assert refusal is not None
+        self.assertEqual("answer_required", refusal[0])
+
+    def test_a_reply_shaped_pause_whose_question_closed_is_recoverable(self) -> None:
+        # The question was answered or superseded while the run sat paused.
+        # Nothing is waiting on words now, so recovery does not have to make
+        # any up.
+        self.assertIsNone(
+            overseer_resume.recovery_refusal(self._facts("awaiting-reply"))
+        )
 
 
 if __name__ == "__main__":

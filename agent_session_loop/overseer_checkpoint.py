@@ -119,6 +119,7 @@ from . import (
 )
 
 __all__ = [
+    "AUTHORITY_REFUSALS",
     "CHECKPOINT_OPERATIONS",
     "CHECKPOINT_TRAILER",
     "LEGACY_REPOSITORY_KEY",
@@ -126,6 +127,7 @@ __all__ = [
     "VERIFICATION_STATES",
     "Activity",
     "Attribution",
+    "AuthorityRefusal",
     "CheckpointAdapter",
     "CheckpointUncertain",
     "Prepared",
@@ -169,6 +171,31 @@ VERIFICATION_STATES: tuple[VerificationState, ...] = (
     "unresolved",
     "passed",
     "failed",
+)
+
+AuthorityRefusal = Literal[
+    "authority_absent",
+    "authority_refused",
+    "authority_silent",
+    "authority_held",
+    "authority_unscoped",
+]
+
+#: Every answer :func:`authority_refusal` can give. Named separately from
+#: :data:`REFUSALS` because it is the part of this vocabulary that is not about
+#: checkpoints: an adapter for any operation asks the same question and gets one
+#: of these five back, so each adapter's own ``Refusal`` type contains them and
+#: none of them has to reimplement the check.
+#:
+#: ``authority_superseded`` is deliberately absent. It is not a verdict on one
+#: ruling but a comparison of two, which only an adapter that took a ruling
+#: before its side effect and another after it is in a position to make.
+AUTHORITY_REFUSALS: tuple[AuthorityRefusal, ...] = (
+    "authority_absent",
+    "authority_refused",
+    "authority_silent",
+    "authority_held",
+    "authority_unscoped",
 )
 
 Refusal = Literal[
@@ -563,8 +590,9 @@ def authority_refusal(
     plan_dir: str,
     run_id: str,
     incident_id: int,
-) -> tuple[Refusal, str] | None:
-    """Return why this ruling does not authorize this checkpoint, or ``None``.
+    operation: Operation = "commit",
+) -> tuple[AuthorityRefusal, str] | None:
+    """Return why this ruling does not authorize this action, or ``None``.
 
     Scope is checked field by field against what the caller is about to do
     rather than by :meth:`~agent_session_loop.overseer_decisions.Scope.covers`,
@@ -572,13 +600,20 @@ def authority_refusal(
     question here is the stricter one: was the ruling made about *this* plan,
     run and incident. A ruling that named none of them is a ruling that would
     equally authorize a commit in the next plan's repository.
+
+    ``operation`` defaults to ``commit`` because this module's own adapter is
+    the checkpoint. It is a parameter rather than a constant so a sibling
+    adapter asks this question through one implementation instead of a second
+    copy that could drift: the five refusals it can return are
+    :data:`AUTHORITY_REFUSALS`, which every adapter's own ``Refusal`` vocabulary
+    contains.
     """
     if ruling is None:
         return ("authority_absent", "no ruling was established")
-    if ruling.operation != "commit":
+    if ruling.operation != operation:
         return (
             "authority_silent",
-            f"the ruling is about {ruling.operation!r}, not 'commit'",
+            f"the ruling is about {ruling.operation!r}, not {operation!r}",
         )
     if ruling.refusal is not None:
         return ("authority_refused", ruling.refusal)
@@ -589,10 +624,10 @@ def authority_refusal(
     decision = ruling.decision
     if decision is None:
         return ("authority_absent", "the ruling names no governing decision")
-    if not decision.speaks_to("commit"):
+    if not decision.speaks_to(operation):
         return (
             "authority_silent",
-            f"{decision.decision_id} says nothing about commits",
+            f"{decision.decision_id} says nothing about {operation}",
         )
     if decision.stance != "allow":
         return ("authority_held", f"{decision.decision_id} is a {decision.stance}")
