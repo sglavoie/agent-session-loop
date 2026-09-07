@@ -157,6 +157,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.metrics",
         "agent_session_loop.model_availability",
         "agent_session_loop.overseer_context",
+        "agent_session_loop.overseer_decisions",
         "agent_session_loop.overseer_discovery",
         "agent_session_loop.overseer_history",
         "agent_session_loop.overseer_isolation",

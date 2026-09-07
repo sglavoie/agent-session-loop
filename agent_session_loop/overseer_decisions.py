@@ -1,0 +1,1027 @@
+"""Who decided what, over which scope, and which decision is still in force.
+
+The watcher finds a blocked run and :mod:`overseer_context` and
+:mod:`overseer_history` say what is known about it. Neither says whether the
+overseer may act, because that turns on a different question: did a human
+decide this, for this, recently enough that a later decision has not replaced
+it. This module is the deterministic half of that answer. The judgment is the
+host agent's -- it reads the evidence and states what it thinks a message
+decided -- and everything here is a check on that statement rather than a
+second reading of it.
+
+## Four voices, and only one of them authorizes
+
+A blocked run's record is full of imperative sentences and almost none of them
+are a human's. ASL composes task packets, guidance envelopes, reply and
+resolution context, and audit prompts, and every one of them reaches a harness
+transcript under the ``user`` role, indistinguishable by role alone from
+something an operator typed. So role alone is not the classifier:
+:data:`GENERATED_PROMPT_MARKERS` names the openings ASL itself publishes, and a
+``user``-role message carrying one is a :data:`generated_prompt
+<VOICES>` whatever it says. The other three are the ones an unqualified "the
+user said so" would blur: an assistant restating an instruction is an
+``assistant_interpretation``, a worker asking for something is a
+``worker_request``, and a mailbox guidance or reply is a
+``relayed_instruction`` -- ASL records no author for those, so a human's own
+words and a supervising agent's paraphrase are the same bytes and neither can
+be proven to be the former.
+
+Only ``user_instruction`` authorizes, and a claim resting on anything else is
+rejected rather than downgraded. That is deliberately strict: the relay is
+where an instruction *arrives*, and the transcript is the only record that says
+who *spoke*.
+
+## Scope is what stops an approval from travelling
+
+Every statement carries the scope it was made in -- a transcript message the
+project directory its conversation worked in, a mailbox record the plan and run
+it belongs to -- and a claim may narrow that scope but never widen it. An
+approval given in one project is therefore unrepresentable as permission in
+another, not because a rule forbids the transfer but because the claim that
+would perform it cannot be built: :data:`scope_widened <CLAIM_REJECTIONS>` is
+the rejection, and it is checked against the statement's own scope rather than
+against anything the claimant asserts.
+
+The same rule separates incidents. A decision narrowed to one incident does not
+cover the next one, and a decision that names no incident covers the plan it
+was made about and no other. What an out-of-scope decision *does* do is show up
+in a :class:`Ruling` as a precedent: history may suggest that a recovery is the
+right one, and the ruling says so, while ``authorized`` stays false and the
+refusal is :data:`unsupported_recovery <REFUSALS>`. A pattern is a reason to
+look, never a reason to act.
+
+## Later replaces earlier, within scope
+
+Applicable decisions on one topic are ordered by the moment their statement was
+made -- ties broken by statement identity, so the order is total and stable --
+and the last one governs. Every earlier one is reported as ``superseded``
+rather than dropped, because "the user changed their mind" and "the user never
+said" are different situations and an overseer that cannot tell them apart will
+eventually re-apply a decision that was revoked. A statement whose timestamp
+cannot be read is refused outright: without a moment there is no order, and
+without an order supersession is a guess.
+
+## What stays human
+
+:data:`HUMAN_TOPICS` -- acceptance, scope, design, safety -- are decisions this
+program never makes. They are representable here so that a human decision on
+one can be *recorded* and superseded like any other, and a :class:`Request` may
+name the topics its incident turns on; any that no in-scope decision settles
+makes the ruling :data:`human_decision <REFUSALS>` no matter what the
+operational decisions say. Withheld acceptance settles nothing either: a
+governing decision whose stance is ``hold`` leaves its topic unsettled and the
+decision is reported, so an operator sees a refusal rather than an absence.
+
+Durable records this boundary writes: **none**. A resolved decision is derived
+from evidence every time it is needed, exactly as :mod:`overseer_context`
+re-reads rather than recalls, because a stored ruling is the shape a cached
+permission takes when nobody is looking: it would outlive the statement it
+rested on, the scope it was made under, and the later instruction that replaced
+it. Nothing here opens a file, spawns a process, or holds state between calls.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal
+
+from . import clock, mailbox, overseer_history, overseer_policy_client
+
+__all__ = [
+    "AUDIT_PROMPT_MARKER",
+    "AUTHORIZING_VOICES",
+    "CLAIM_REJECTIONS",
+    "CONTEXT_ACCESS",
+    "DRAFT_PROMPT_MARKER",
+    "GENERATED_PROMPT_MARKERS",
+    "GUIDANCE_ENVELOPE_MARKER",
+    "HUMAN_TOPICS",
+    "MAILBOX_PROTOCOL_MARKER",
+    "MAX_STATEMENT_CHARS",
+    "OPERATIONS",
+    "REFUSALS",
+    "REPLY_CONTEXT_MARKER",
+    "REPLY_ENVELOPE_MARKER",
+    "RESOLUTION_CONTEXT_MARKER",
+    "RESOLUTION_ENVELOPE_MARKER",
+    "STANCES",
+    "STATE_SPACE",
+    "SUPERVISION_VOICES",
+    "TASK_PACKET_MARKER",
+    "TOPICS",
+    "TRANSCRIPT_SPACE",
+    "VOICES",
+    "Claim",
+    "Decision",
+    "Register",
+    "Rejection",
+    "Request",
+    "Ruling",
+    "Scope",
+    "Settlement",
+    "Statement",
+    "generated_marker",
+    "register",
+    "resolve",
+    "settle",
+    "statements_from_history",
+    "statements_from_supervision",
+]
+
+#: The access category evidence is gathered under. Reading a conversation or a
+#: plan's supervision traffic is ``context``; nothing here asks for more, and a
+#: grant of another category yields no statements at all.
+CONTEXT_ACCESS = overseer_policy_client.ACCESS_CONTEXT
+
+#: Where a statement was read. ``asl-state`` is the same reserved pseudo-alias
+#: :mod:`overseer_context` labels the runner's own records with -- restated
+#: rather than imported, so this module does not depend on the packet builder to
+#: name a mailbox; a test pins the two spellings together.
+TRANSCRIPT_SPACE = "transcript"
+STATE_SPACE = "asl-state"
+
+#: How much of one statement is carried. The evidence boundaries already bound
+#: what they hand over; this is a second cap so a hand-built statement cannot
+#: put an unbounded string into a decision record.
+MAX_STATEMENT_CHARS = 4000
+
+Voice = Literal[
+    "user_instruction",
+    "assistant_interpretation",
+    "worker_request",
+    "generated_prompt",
+    "relayed_instruction",
+    "machine_record",
+    "unattributed",
+]
+
+#: Who is speaking in one record. Treat as a consumer contract: a claim is
+#: accepted or rejected on this value alone.
+#:
+#: * ``user_instruction`` -- a human's own words, in a record that attests the
+#:   authorship: a transcript message under the ``user`` role carrying no
+#:   machine marker.
+#: * ``assistant_interpretation`` -- an assistant restating, summarizing or
+#:   proposing. It may be right; it is not the instruction.
+#: * ``worker_request`` -- the run's own worker asking for something.
+#: * ``generated_prompt`` -- text ASL composed and delivered under a party's
+#:   role: a task packet, a guidance envelope, reply or resolution context, an
+#:   audit or draft prompt.
+#: * ``relayed_instruction`` -- a mailbox guidance, reply or resolution. An
+#:   instruction that reached the run through the supervision channel, whose
+#:   author the record does not name.
+#: * ``machine_record`` -- ASL's own bookkeeping: acks, deliveries, receipts,
+#:   wait markers, supervision closures.
+#: * ``unattributed`` -- a role or kind this build cannot attribute. Fail
+#:   closed: it is never read as any of the others.
+VOICES: tuple[Voice, ...] = (
+    "user_instruction",
+    "assistant_interpretation",
+    "worker_request",
+    "generated_prompt",
+    "relayed_instruction",
+    "machine_record",
+    "unattributed",
+)
+
+#: The only voice a decision may rest on. A tuple rather than a constant so the
+#: check reads as membership and so widening it is a visible edit to a published
+#: name rather than a changed comparison buried in a validator.
+AUTHORIZING_VOICES: tuple[Voice, ...] = ("user_instruction",)
+
+Operation = Literal["reply", "guidance", "verify", "commit", "resume"]
+
+#: The operational scope an overseer can be authorized for: answering a
+#: question, sending guidance, running verification, committing a checkpoint,
+#: and resuming a run. Repairing the application a run is working on is not
+#: here, and no decision can put it here.
+OPERATIONS: tuple[Operation, ...] = (
+    "reply",
+    "guidance",
+    "verify",
+    "commit",
+    "resume",
+)
+
+Topic = Literal["operations", "acceptance", "scope", "design", "safety"]
+
+#: What a decision is about. ``operations`` decisions name operations; the other
+#: four name none and cannot be made to.
+TOPICS: tuple[Topic, ...] = (
+    "operations",
+    "acceptance",
+    "scope",
+    "design",
+    "safety",
+)
+
+#: The questions that stay with a human. A decision on one is recordable, so
+#: that an operator's answer can supersede their earlier answer; what is not
+#: available is for the overseer to answer one itself.
+HUMAN_TOPICS: tuple[Topic, ...] = ("acceptance", "scope", "design", "safety")
+
+Stance = Literal["allow", "hold"]
+
+#: What a decision does with its topic. A ``hold`` naming no operation holds
+#: every one of them, which is what "stop, do not touch this run" has to mean if
+#: preserving a hold is to be structural rather than a matter of listing.
+STANCES: tuple[Stance, ...] = ("allow", "hold")
+
+RejectionReason = Literal[
+    "unknown_statement",
+    "not_user_authored",
+    "undated",
+    "scope_unnamed",
+    "scope_widened",
+    "unknown_topic",
+    "unknown_operation",
+    "operations_unnamed",
+    "operations_named",
+    "duplicate_claim",
+]
+
+#: Why a claim did not become a decision.
+#:
+#: * ``unknown_statement`` -- it cites a statement not in the evidence.
+#: * ``not_user_authored`` -- its statement is not a direct user instruction.
+#: * ``undated`` -- its statement carries no readable moment, so nothing can be
+#:   ordered against it.
+#: * ``scope_unnamed`` -- it names no project, so it covers nothing.
+#: * ``scope_widened`` -- it claims reach its statement does not have.
+#: * ``unknown_topic`` / ``unknown_operation`` -- outside the closed vocabulary.
+#: * ``operations_unnamed`` -- an operational allowance that allows nothing.
+#: * ``operations_named`` -- an acceptance, scope, design or safety decision
+#:   carrying operations, which is how a human topic would be laundered into an
+#:   operational permission.
+#: * ``duplicate_claim`` -- a second reading of one statement on one topic.
+CLAIM_REJECTIONS: tuple[RejectionReason, ...] = (
+    "unknown_statement",
+    "not_user_authored",
+    "undated",
+    "scope_unnamed",
+    "scope_widened",
+    "unknown_topic",
+    "unknown_operation",
+    "operations_unnamed",
+    "operations_named",
+    "duplicate_claim",
+)
+
+Refusal = Literal[
+    "target_unscoped",
+    "operation_unsupported",
+    "held",
+    "human_decision",
+    "unsupported_recovery",
+    "no_decision",
+]
+
+#: Why an operation is not authorized, strongest first.
+#:
+#: * ``target_unscoped`` -- the request names no project, so no decision can
+#:   apply to it.
+#: * ``operation_unsupported`` -- outside :data:`OPERATIONS` entirely.
+#: * ``held`` -- the governing decision holds this run.
+#: * ``human_decision`` -- the incident turns on an acceptance, scope, design or
+#:   safety question that no in-scope decision settles.
+#: * ``unsupported_recovery`` -- decisions elsewhere suggest this recovery and
+#:   none of them was made about this.
+#: * ``no_decision`` -- nothing in the evidence speaks to it at all.
+REFUSALS: tuple[Refusal, ...] = (
+    "target_unscoped",
+    "operation_unsupported",
+    "held",
+    "human_decision",
+    "unsupported_recovery",
+    "no_decision",
+)
+
+#: The openings of text ASL composes and sends to a harness. Restated here
+#: rather than imported: ``task_packet``, ``run_prompts``, ``supervisor_audit``
+#: and ``assurance_draft`` are prompt-building modules that pull argparse,
+#: workspaces and verification behind them, and this boundary needs eight
+#: strings from them. ``tests/test_asl_overseer_decisions.py`` compares every
+#: one against the module that publishes it, so a reworded prompt fails there
+#: rather than silently reclassifying a machine prompt as an instruction.
+TASK_PACKET_MARKER = "# ASL session task packet"
+MAILBOX_PROTOCOL_MARKER = "## Live mailbox protocol"
+GUIDANCE_ENVELOPE_MARKER = "BEGIN ASL PENDING GUIDANCE JSONL"
+REPLY_CONTEXT_MARKER = "## ASL reply context"
+REPLY_ENVELOPE_MARKER = "BEGIN ASL OPERATOR REPLY JSONL"
+RESOLUTION_CONTEXT_MARKER = "## ASL resolution context"
+RESOLUTION_ENVELOPE_MARKER = "BEGIN ASL SUPERVISOR RESOLUTION JSONL"
+AUDIT_PROMPT_MARKER = (
+    "You are auditing the control plane of one finished agent-session-loop (ASL) run."
+)
+DRAFT_PROMPT_MARKER = (
+    "You are drafting an improvement proposal for one issue in the agent-session-loop"
+)
+
+#: Matched as substrings rather than prefixes, because ASL appends its context
+#: blocks to a base prompt and a harness stores the whole thing as one message.
+GENERATED_PROMPT_MARKERS: tuple[str, ...] = (
+    TASK_PACKET_MARKER,
+    MAILBOX_PROTOCOL_MARKER,
+    GUIDANCE_ENVELOPE_MARKER,
+    REPLY_CONTEXT_MARKER,
+    REPLY_ENVELOPE_MARKER,
+    RESOLUTION_CONTEXT_MARKER,
+    RESOLUTION_ENVELOPE_MARKER,
+    AUDIT_PROMPT_MARKER,
+    DRAFT_PROMPT_MARKER,
+)
+
+#: What each mailbox record is, as a voice. Guidance, replies and resolutions
+#: are relayed rather than attributed because ``MailboxMessage`` has no author
+#: field: an operator typing into ``asl inbox guidance`` and a supervising agent
+#: relaying them write the same record. A test pins this table to
+#: ``mailbox.MESSAGE_KINDS`` so a new kind cannot arrive unclassified.
+SUPERVISION_VOICES: dict[str, Voice] = {
+    mailbox.KIND_GUIDANCE: "relayed_instruction",
+    mailbox.KIND_REPLY: "relayed_instruction",
+    mailbox.KIND_RESOLUTION: "relayed_instruction",
+    mailbox.KIND_QUESTION: "worker_request",
+    mailbox.KIND_NOTICE: "worker_request",
+    mailbox.KIND_ACK: "machine_record",
+    mailbox.KIND_WAIT_START: "machine_record",
+    mailbox.KIND_WAIT_END: "machine_record",
+    mailbox.KIND_RECEIPT: "machine_record",
+    mailbox.KIND_SUPERVISION_END: "machine_record",
+    mailbox.KIND_GUIDANCE_DELIVERY: "machine_record",
+}
+
+
+@dataclass(frozen=True)
+class Scope:
+    """What a decision is about, and therefore what it cannot reach.
+
+    An empty field is *not narrowed* rather than *any*: on the deciding side it
+    means the decision was not made about one plan, run or incident in
+    particular, and on the target side it means the caller did not say -- which
+    refuses, since a decision narrowed to something the target does not name
+    cannot be shown to apply to it.
+    """
+
+    project: str
+    plan_dir: str = ""
+    run_id: str = ""
+    incident: str = ""
+
+    def covers(self, target: Scope) -> bool:
+        """Whether a decision made in this scope applies to ``target``."""
+        if not self.project or not target.project:
+            return False
+        if self.project != target.project:
+            return False
+        narrowings = (
+            (self.plan_dir, target.plan_dir),
+            (self.run_id, target.run_id),
+            (self.incident, target.incident),
+        )
+        return not any(narrowed and narrowed != named for narrowed, named in narrowings)
+
+    def within(self, other: Scope) -> bool:
+        """Whether this scope is ``other`` or a narrowing of it."""
+        return other.covers(self)
+
+
+@dataclass(frozen=True)
+class Statement:
+    """One thing somebody said, with the provenance that makes it usable.
+
+    ``moment`` is the parsed form of ``at`` and is ``None`` when the record
+    carried no readable timestamp. It is kept next to the raw string rather than
+    replacing it, because the string is what the source said and the moment is
+    what this module can order.
+    """
+
+    statement_id: str
+    voice: Voice
+    space: str
+    locator: str
+    scope: Scope
+    at: str
+    text: str
+    truncated: bool = False
+    marker: str = ""
+    moment: datetime | None = None
+
+    @property
+    def authorizing(self) -> bool:
+        """Whether a decision may rest on this statement's authorship."""
+        return self.voice in AUTHORIZING_VOICES
+
+    @property
+    def order(self) -> tuple[datetime, str]:
+        """The total order supersession uses. Undated statements have none."""
+        if self.moment is None:
+            raise ValueError(f"{self.statement_id} carries no readable moment")
+        return (self.moment, self.statement_id)
+
+
+@dataclass(frozen=True)
+class Claim:
+    """What the host agent reads one statement as deciding.
+
+    ``reading`` is the agent's own words and is carried through to the decision
+    as an interpretation, kept apart from the statement's text so a record never
+    presents a paraphrase as the instruction.
+    """
+
+    statement_id: str
+    topic: Topic
+    stance: Stance
+    scope: Scope
+    operations: tuple[Operation, ...] = ()
+    corroborating: tuple[str, ...] = ()
+    reading: str = ""
+
+
+@dataclass(frozen=True)
+class Decision:
+    """One accepted claim: a user decision, its scope, and what it rests on."""
+
+    decision_id: str
+    statement_id: str
+    topic: Topic
+    stance: Stance
+    scope: Scope
+    operations: tuple[Operation, ...]
+    at: str
+    moment: datetime
+    sources: tuple[str, ...]
+    text: str
+    reading: str = ""
+
+    @property
+    def order(self) -> tuple[datetime, str]:
+        return (self.moment, self.statement_id)
+
+    def speaks_to(self, operation: str) -> bool:
+        """Whether this decision says anything about one operation.
+
+        A hold naming no operation speaks to all of them; an allowance has to
+        name what it allows, which :data:`operations_unnamed <CLAIM_REJECTIONS>`
+        enforces at registration.
+        """
+        if self.topic != "operations":
+            return False
+        if operation in self.operations:
+            return True
+        return self.stance == "hold" and not self.operations
+
+
+@dataclass(frozen=True)
+class Rejection:
+    """One claim that did not become a decision, and why."""
+
+    claim: Claim
+    reason: RejectionReason
+    detail: str
+
+
+@dataclass(frozen=True)
+class Register:
+    """The decisions one body of evidence supports, and the claims it refused."""
+
+    statements: tuple[Statement, ...]
+    decisions: tuple[Decision, ...]
+    rejections: tuple[Rejection, ...]
+
+    def statement(self, statement_id: str) -> Statement | None:
+        for item in self.statements:
+            if item.statement_id == statement_id:
+                return item
+        return None
+
+    def decision(self, decision_id: str) -> Decision | None:
+        for item in self.decisions:
+            if item.decision_id == decision_id:
+                return item
+        return None
+
+    def rejected(self, statement_id: str) -> tuple[Rejection, ...]:
+        return tuple(
+            item for item in self.rejections if item.claim.statement_id == statement_id
+        )
+
+
+@dataclass(frozen=True)
+class Settlement:
+    """Which decision on one topic is in force for one scope, and which are not.
+
+    ``settled`` is deliberately narrower than "a decision exists": a governing
+    decision whose stance is ``hold`` is acceptance withheld, scope not agreed,
+    a design or safety question answered *no*. Reporting that as settled would
+    turn a refusal into permission.
+    """
+
+    topic: Topic
+    scope: Scope
+    decision: Decision | None
+    superseded: tuple[Decision, ...] = ()
+    precedents: tuple[Decision, ...] = ()
+
+    @property
+    def settled(self) -> bool:
+        return self.decision is not None and self.decision.stance == "allow"
+
+    @property
+    def withheld(self) -> bool:
+        return self.decision is not None and self.decision.stance == "hold"
+
+
+@dataclass(frozen=True)
+class Request:
+    """One operation an overseer is considering, and what it turns on.
+
+    ``raises`` names the human topics this incident depends on -- the acceptance
+    of a verification result, the scope of a repair, a design or safety call.
+    Naming one that nobody has settled is what makes the ruling
+    ``human_decision`` even when the operation itself was authorized.
+    """
+
+    operation: str
+    scope: Scope
+    raises: tuple[Topic, ...] = ()
+
+
+@dataclass(frozen=True)
+class Ruling:
+    """Whether one operation is authorized, on whose decision, and against what.
+
+    ``precedents`` is the answer to "we have done this before": decisions that
+    speak to the operation and were made about something else. They are
+    reported because a pattern is worth showing an operator and never acted on,
+    which is why ``authorized`` is false whenever they are all there is.
+    """
+
+    operation: str
+    scope: Scope
+    authorized: bool
+    refusal: Refusal | None
+    decision: Decision | None = None
+    superseded: tuple[Decision, ...] = ()
+    precedents: tuple[Decision, ...] = ()
+    settlements: tuple[Settlement, ...] = ()
+    summary: str = ""
+
+    @property
+    def unresolved(self) -> tuple[Topic, ...]:
+        """Every raised human topic no in-scope decision settles."""
+        return tuple(item.topic for item in self.settlements if not item.settled)
+
+    @property
+    def sources(self) -> tuple[str, ...]:
+        """Every statement the governing decision rests on."""
+        return () if self.decision is None else self.decision.sources
+
+
+def generated_marker(text: str) -> str:
+    """The machine-prompt marker a text carries, or ``""`` if it carries none."""
+    for marker in GENERATED_PROMPT_MARKERS:
+        if marker in text:
+            return marker
+    return ""
+
+
+def statements_from_history(
+    history: overseer_history.History,
+    *,
+    generated_classes: Sequence[str] = (),
+) -> tuple[Statement, ...]:
+    """Read transcript evidence as statements, scoped to the project it names.
+
+    Evidence that was not permitted yields nothing: without a grant there is no
+    answer to read, and reading one anyway would be exactly the substitution
+    :mod:`overseer_history` refuses to make on its own side.
+
+    A conversation's scope is the working directory AgentMux authorized it
+    under, and no more -- a transcript names no plan, so a claim that wants one
+    has to narrow the scope itself and be checked for it.
+
+    ``generated_classes`` names conversation classes whose ``user``-role
+    messages are written by another agent rather than a person. It defaults to
+    empty because this module cannot verify AgentMux's classification
+    vocabulary from here; a caller that knows which class means "driven by an
+    orchestrating agent" passes it and those conversations contribute
+    ``generated_prompt`` statements instead of instructions.
+    """
+    if history.grant() is None:
+        return ()
+    machine_classes = {value for value in generated_classes if value}
+    statements: list[Statement] = []
+    for conversation in history.conversations:
+        machine = conversation.session_class in machine_classes
+        locator = f"{conversation.harness}:{conversation.session_id}"
+        for excerpt in conversation.excerpts:
+            marker = generated_marker(excerpt.text)
+            voice = _transcript_voice(role=excerpt.role, marker=marker, machine=machine)
+            statements.append(
+                _statement(
+                    statement_id=f"{TRANSCRIPT_SPACE}:{locator}#{excerpt.index}",
+                    voice=voice,
+                    space=TRANSCRIPT_SPACE,
+                    locator=locator,
+                    scope=Scope(project=conversation.directory),
+                    at=excerpt.timestamp,
+                    text=excerpt.text,
+                    marker=marker if voice == "generated_prompt" else "",
+                )
+            )
+    return tuple(statements)
+
+
+def statements_from_supervision(
+    messages: Iterable[mailbox.MailboxMessage],
+    *,
+    grant: overseer_policy_client.Grant | None,
+    scope: Scope,
+) -> tuple[Statement, ...]:
+    """Read a plan's mailbox traffic as statements, scoped to that plan.
+
+    The grant is checked against the scope before anything is classified, on the
+    same terms :mod:`overseer_context` checks it: the same plan, the ``context``
+    category, and both identities present. A mismatch yields no statements
+    rather than unscoped ones, because a statement with a scope nobody
+    authorized is a statement that could be claimed against any plan.
+
+    Nothing here becomes a ``user_instruction``. The mailbox records no author,
+    so its instruction-shaped records are relayed: they show that an instruction
+    arrived, never that a human composed it.
+    """
+    if (
+        grant is None
+        or not scope.plan_dir
+        or grant.plan_dir != scope.plan_dir
+        or grant.access != CONTEXT_ACCESS
+        or not grant.request_digest
+        or not grant.config_fingerprint
+    ):
+        return ()
+    statements: list[Statement] = []
+    for message in messages:
+        text = message.text or ""
+        voice = SUPERVISION_VOICES.get(message.kind, "unattributed")
+        marker = generated_marker(text)
+        if marker and voice == "relayed_instruction":
+            voice = "generated_prompt"
+        statements.append(
+            _statement(
+                statement_id=f"{STATE_SPACE}:{message.seq}:{message.id}",
+                voice=voice,
+                space=STATE_SPACE,
+                locator=f"{mailbox.MAILBOX_FILE_NAME}#{message.seq}",
+                scope=scope,
+                at=message.created_at,
+                text=text,
+                marker=marker if voice == "generated_prompt" else "",
+            )
+        )
+    return tuple(statements)
+
+
+def register(
+    *,
+    statements: Sequence[Statement],
+    claims: Sequence[Claim],
+) -> Register:
+    """Turn the host agent's readings into decisions, refusing what cannot hold.
+
+    Every claim produces exactly one outcome -- a decision or a named rejection
+    -- so a caller can account for each reading it submitted. Rejections carry
+    the claim itself rather than an identifier, since a claim citing a statement
+    that does not exist has no identity to look up.
+    """
+    known = {item.statement_id: item for item in statements}
+    decisions: list[Decision] = []
+    rejections: list[Rejection] = []
+    seen: set[str] = set()
+    for claim in claims:
+        statement = known.get(claim.statement_id)
+        outcome = _validate(claim, statement, seen)
+        if isinstance(outcome, Rejection):
+            rejections.append(outcome)
+            continue
+        seen.add(outcome.decision_id)
+        decisions.append(outcome)
+    decisions.sort(key=lambda item: item.order)
+    return Register(
+        statements=tuple(statements),
+        decisions=tuple(decisions),
+        rejections=tuple(rejections),
+    )
+
+
+def settle(*, register: Register, topic: Topic, scope: Scope) -> Settlement:
+    """Which decision on one topic is in force for one scope.
+
+    Applicable decisions are ordered and the last one governs; the rest are
+    superseded, and decisions on the topic that were made about something else
+    are precedents. It is the same partition :func:`resolve` performs for an
+    operation, so a topic and an operation are answered by one rule rather than
+    two that could drift apart.
+    """
+    applicable, precedents = _partition(
+        (item for item in register.decisions if item.topic == topic), scope
+    )
+    governing = applicable[-1] if applicable else None
+    return Settlement(
+        topic=topic,
+        scope=scope,
+        decision=governing,
+        superseded=tuple(applicable[:-1]),
+        precedents=precedents,
+    )
+
+
+def resolve(*, register: Register, request: Request) -> Ruling:
+    """Whether one operation is authorized for one target, and on what.
+
+    Refusals are ordered by how fundamental they are rather than by how they
+    were discovered: an unscoped request and an unsupported operation are
+    questions that cannot be asked, a hold is a decision to respect, an
+    unsettled human question outranks any operational allowance, and only then
+    is the absence of a decision -- or the presence of one made about something
+    else -- reported.
+    """
+    settlements = tuple(
+        settle(register=register, topic=topic, scope=request.scope)
+        for topic in request.raises
+    )
+    if not request.scope.project:
+        return _refused(
+            request,
+            "target_unscoped",
+            "the request names no project, so no decision can be applicable",
+            settlements=settlements,
+        )
+    if request.operation not in OPERATIONS:
+        return _refused(
+            request,
+            "operation_unsupported",
+            f"{request.operation!r} is not an operation an overseer performs",
+            settlements=settlements,
+        )
+
+    applicable, precedents = _partition(
+        (item for item in register.decisions if item.speaks_to(request.operation)),
+        request.scope,
+    )
+    governing = applicable[-1] if applicable else None
+    superseded = tuple(applicable[:-1])
+
+    if governing is None:
+        refusal: Refusal = "unsupported_recovery" if precedents else "no_decision"
+        detail = (
+            f"{len(precedents)} decision(s) elsewhere allow {request.operation} "
+            "and none of them was made about this run"
+            if precedents
+            else f"no user decision speaks to {request.operation} here"
+        )
+        return _refused(
+            request,
+            refusal,
+            detail,
+            superseded=superseded,
+            precedents=precedents,
+            settlements=settlements,
+        )
+
+    if governing.stance == "hold":
+        return _refused(
+            request,
+            "held",
+            f"{governing.decision_id} holds this run",
+            decision=governing,
+            superseded=superseded,
+            precedents=precedents,
+            settlements=settlements,
+        )
+
+    unsettled = tuple(item.topic for item in settlements if not item.settled)
+    if unsettled:
+        return _refused(
+            request,
+            "human_decision",
+            f"unsettled human {'question' if len(unsettled) == 1 else 'questions'}: "
+            f"{', '.join(unsettled)}",
+            decision=governing,
+            superseded=superseded,
+            precedents=precedents,
+            settlements=settlements,
+        )
+
+    return Ruling(
+        operation=request.operation,
+        scope=request.scope,
+        authorized=True,
+        refusal=None,
+        decision=governing,
+        superseded=superseded,
+        precedents=precedents,
+        settlements=settlements,
+        summary=(
+            f"{request.operation} authorized by {governing.decision_id} "
+            f"({governing.at})"
+        ),
+    )
+
+
+# -- validation ------------------------------------------------------------
+
+
+def _validate(
+    claim: Claim, statement: Statement | None, seen: set[str]
+) -> Decision | Rejection:
+    """One claim against the statement it cites, in refusal order."""
+    if statement is None:
+        return Rejection(
+            claim=claim,
+            reason="unknown_statement",
+            detail=f"{claim.statement_id} is not in the evidence",
+        )
+    if not statement.authorizing:
+        return Rejection(
+            claim=claim,
+            reason="not_user_authored",
+            detail=(
+                f"{statement.statement_id} is a {statement.voice}, "
+                "which cannot carry a decision"
+            ),
+        )
+    if statement.moment is None:
+        return Rejection(
+            claim=claim,
+            reason="undated",
+            detail=(
+                f"{statement.statement_id} carries no readable moment, so no "
+                "later decision could be shown to replace it"
+            ),
+        )
+    if not claim.scope.project:
+        return Rejection(
+            claim=claim,
+            reason="scope_unnamed",
+            detail="a decision that names no project covers nothing",
+        )
+    if not claim.scope.within(statement.scope):
+        return Rejection(
+            claim=claim,
+            reason="scope_widened",
+            detail=(
+                f"{statement.statement_id} was made about "
+                f"{_scope_text(statement.scope)}, which does not reach "
+                f"{_scope_text(claim.scope)}"
+            ),
+        )
+    if claim.topic not in TOPICS:
+        return Rejection(
+            claim=claim,
+            reason="unknown_topic",
+            detail=f"{claim.topic!r} is not a topic a decision can be about",
+        )
+    unknown = tuple(item for item in claim.operations if item not in OPERATIONS)
+    if unknown:
+        return Rejection(
+            claim=claim,
+            reason="unknown_operation",
+            detail=f"{', '.join(unknown)} is outside the operational scope",
+        )
+    if claim.topic == "operations":
+        if claim.stance == "allow" and not claim.operations:
+            return Rejection(
+                claim=claim,
+                reason="operations_unnamed",
+                detail="an operational allowance has to name what it allows",
+            )
+    elif claim.operations:
+        return Rejection(
+            claim=claim,
+            reason="operations_named",
+            detail=(
+                f"a {claim.topic} decision names no operation; naming one would "
+                "turn a human judgement into an operational permission"
+            ),
+        )
+    decision_id = f"{claim.statement_id}:{claim.topic}"
+    if decision_id in seen:
+        return Rejection(
+            claim=claim,
+            reason="duplicate_claim",
+            detail=f"{claim.statement_id} was already read as a {claim.topic} decision",
+        )
+    sources = (claim.statement_id, *claim.corroborating)
+    return Decision(
+        decision_id=decision_id,
+        statement_id=claim.statement_id,
+        topic=claim.topic,
+        stance=claim.stance,
+        scope=claim.scope,
+        operations=tuple(claim.operations),
+        at=statement.at,
+        moment=statement.moment,
+        sources=sources,
+        text=statement.text,
+        reading=claim.reading,
+    )
+
+
+# -- helpers ---------------------------------------------------------------
+
+
+def _partition(
+    decisions: Iterable[Decision], scope: Scope
+) -> tuple[tuple[Decision, ...], tuple[Decision, ...]]:
+    """Split decisions into the ones that reach ``scope`` and the ones that do not.
+
+    Both halves come back ordered, because the applicable half is read as a
+    supersession chain and the precedents are shown to an operator, and an
+    unordered list of either would be a set of claims with no history.
+    """
+    applicable: list[Decision] = []
+    precedents: list[Decision] = []
+    for decision in decisions:
+        target = applicable if decision.scope.covers(scope) else precedents
+        target.append(decision)
+    applicable.sort(key=lambda item: item.order)
+    precedents.sort(key=lambda item: item.order)
+    return tuple(applicable), tuple(precedents)
+
+
+def _refused(
+    request: Request,
+    refusal: Refusal,
+    detail: str,
+    *,
+    decision: Decision | None = None,
+    superseded: tuple[Decision, ...] = (),
+    precedents: tuple[Decision, ...] = (),
+    settlements: tuple[Settlement, ...] = (),
+) -> Ruling:
+    """A ruling that authorizes nothing, and says which refusal it is."""
+    return Ruling(
+        operation=request.operation,
+        scope=request.scope,
+        authorized=False,
+        refusal=refusal,
+        decision=decision,
+        superseded=superseded,
+        precedents=precedents,
+        settlements=settlements,
+        summary=f"{request.operation} refused ({refusal}): {detail}",
+    )
+
+
+def _transcript_voice(*, role: str, marker: str, machine: bool) -> Voice:
+    """Attribute one transcript message from its role and its own text."""
+    normalized = role.strip().lower()
+    if normalized == "assistant":
+        return "assistant_interpretation"
+    if normalized != "user":
+        return "unattributed"
+    if machine or marker:
+        return "generated_prompt"
+    return "user_instruction"
+
+
+def _statement(
+    *,
+    statement_id: str,
+    voice: Voice,
+    space: str,
+    locator: str,
+    scope: Scope,
+    at: str,
+    text: str,
+    marker: str = "",
+) -> Statement:
+    """One statement, clipped and dated, however the source spelled its moment."""
+    clipped = text[:MAX_STATEMENT_CHARS]
+    return Statement(
+        statement_id=statement_id,
+        voice=voice,
+        space=space,
+        locator=locator,
+        scope=scope,
+        at=at,
+        text=clipped,
+        truncated=len(clipped) < len(text),
+        marker=marker,
+        moment=clock.parse_datetime(at),
+    )
+
+
+def _scope_text(scope: Scope) -> str:
+    """One scope, rendered for a refusal an operator has to act on."""
+    parts = [f"project {scope.project or '-'}"]
+    for label, value in (
+        ("plan", scope.plan_dir),
+        ("run", scope.run_id),
+        ("incident", scope.incident),
+    ):
+        if value:
+            parts.append(f"{label} {value}")
+    return ", ".join(parts)
