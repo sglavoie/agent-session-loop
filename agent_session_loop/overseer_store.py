@@ -326,6 +326,32 @@ _WATCH_SCHEMA: tuple[str, ...] = (
     "CREATE INDEX watch_lease_by_watcher ON watch_lease (watcher_id, plan_dir)",
 )
 
+#: Schema version 3: the column that makes "no meaningful progress" durable.
+#:
+#: A dispatcher that may retry a failed action only twice before escalating
+#: needs the count to survive the process, or restarting is how a caller buys
+#: two more attempts. It also needs the count to reset when -- and only when --
+#: the run's situation actually moved, which is why the discriminator is a
+#: token supplied by the caller rather than a counter the ledger increments: a
+#: counter has to be told when to reset, and whoever tells it is whoever
+#: evades it. ``progress_token`` is instead a fingerprint of the run's
+#: situation, and the count is simply how many rows carry the one in force.
+#: What it excludes is the point -- see
+#: :func:`agent_session_loop.overseer_dispatch.progress_token`.
+#:
+#: ``ALTER TABLE ... ADD COLUMN`` with a non-null default rewrites no rows and
+#: runs inside the migration's transaction like any other statement, so a
+#: version 1 or version 2 database reaches version 3 without its existing
+#: actions being touched. They read as having been attempted under the empty
+#: token, which is the honest record: nothing observed their situation.
+_ACTION_PROGRESS_SCHEMA: tuple[str, ...] = (
+    "ALTER TABLE action ADD COLUMN progress_token TEXT NOT NULL DEFAULT ''",
+    """
+    CREATE INDEX action_by_progress
+    ON action (plan_dir, progress_token, status)
+    """,
+)
+
 
 def _create_base_schema(connection: sqlite3.Connection) -> None:
     """Schema version 1: the eight tables the overseer's memory is made of."""
@@ -339,6 +365,12 @@ def _create_watch_schema(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _create_action_progress_schema(connection: sqlite3.Connection) -> None:
+    """Schema version 3: the situation an action was attempted under."""
+    for statement in _ACTION_PROGRESS_SCHEMA:
+        connection.execute(statement)
+
+
 #: Every schema step, in order, each one taking the database from version
 #: ``index`` to version ``index + 1``. Migrations are appended and never edited:
 #: a database created by an older ASL replays exactly the steps it has not seen.
@@ -348,8 +380,14 @@ def _create_watch_schema(connection: sqlite3.Connection) -> None:
 #: installed overseer's ledger has to survive the second version, and a
 #: migration path first written when a second version exists is a migration
 #: path nothing has ever run. Version 2 is that second version, and it replays
-#: onto a version 1 database without touching a single existing row.
-MIGRATIONS: tuple[Migration, ...] = (_create_base_schema, _create_watch_schema)
+#: onto a version 1 database without touching a single existing row. Version 3
+#: adds a column to a table that already holds rows, which is the other shape a
+#: migration comes in, and it too rewrites nothing.
+MIGRATIONS: tuple[Migration, ...] = (
+    _create_base_schema,
+    _create_watch_schema,
+    _create_action_progress_schema,
+)
 
 #: The schema version this module writes and accepts. Derived from the migration
 #: list so the two can never disagree.
@@ -601,6 +639,7 @@ class ActionRecord:
     epoch: int
     config_fingerprint: str
     request_digest: str
+    progress_token: str
     attempted_at: str
     settled_at: str | None
     receipt: ReceiptRecord | None
@@ -1436,6 +1475,7 @@ class Ledger:
         operation: str,
         target: str,
         incident_id: int | None = None,
+        progress_token: str = "",
     ) -> ActionRecord:
         """Record a dispatch *before* it happens, and return it as ``attempted``.
 
@@ -1449,6 +1489,12 @@ class Ledger:
         change is refused rather than honored: the recheck the requirements ask
         for before dispatch is meaningless if a decision made under a
         superseded configuration still opens the door.
+
+        ``progress_token`` is stored, never interpreted. The ledger's only
+        stake in it is that two attempts made in the same situation carry the
+        same value and two made in different ones do not, which is what
+        :meth:`recovery_attempts` counts by; deciding what "the same situation"
+        means is the dispatcher's job, not this table's.
         """
         self._require_grant(
             grant=grant,
@@ -1464,8 +1510,9 @@ class Ledger:
                 """
                 INSERT INTO action (
                     plan_dir, incident_id, operation, target, status, epoch,
-                    config_fingerprint, request_digest, attempted_at, settled_at
-                ) VALUES (?, ?, ?, ?, 'attempted', ?, ?, ?, ?, NULL)
+                    config_fingerprint, request_digest, progress_token,
+                    attempted_at, settled_at
+                ) VALUES (?, ?, ?, ?, 'attempted', ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     plan_dir,
@@ -1475,6 +1522,7 @@ class Ledger:
                     epoch.epoch,
                     epoch.config_fingerprint,
                     grant.request_digest,
+                    progress_token,
                     moment,
                 ),
             )
@@ -1566,6 +1614,72 @@ class Ledger:
             tuple(parameters),
         ).fetchall()
         return tuple(_action(row, self._receipt(int(row["action_id"]))) for row in rows)
+
+    def recovery_attempts(
+        self, *, plan_dir: str, progress_token: str
+    ) -> tuple[ActionRecord, ...]:
+        """Dispatches on one plan that ended badly in one situation.
+
+        Keyed by the situation and *not* by the incident. Keying it by incident
+        would make opening a second incident for the same trouble a way to buy
+        two more attempts, and opening incidents is something the overseer does
+        for itself -- so the evasion would need no bad actor, just a blocker
+        observed twice.
+
+        ``failed`` and ``abandoned`` both count. An abandoned attempt is one
+        the overseer stopped waiting on, which cost the same recovery a failed
+        one did; excluding it would let a caller buy attempts by abandoning
+        them. ``attempted`` does not count, because an unsettled dispatch may
+        yet turn out to have worked -- the dispatcher refuses to retry over one
+        of those anyway, so it is never the row standing between a caller and
+        an escalation.
+
+        This is a read, not a policy: how many is too many belongs to
+        :data:`agent_session_loop.overseer_dispatch.RECOVERY_LIMIT`.
+        """
+        rows = self._connection.execute(
+            f"""
+            SELECT {_ACTION_COLUMNS} FROM action
+            WHERE plan_dir = ? AND progress_token = ?
+              AND status IN ('failed', 'abandoned')
+            ORDER BY action_id
+            """,
+            (plan_dir, progress_token),
+        ).fetchall()
+        return tuple(_action(row, self._receipt(int(row["action_id"]))) for row in rows)
+
+    def executed_action(
+        self,
+        *,
+        plan_dir: str,
+        operation: str,
+        target: str,
+        progress_token: str,
+    ) -> ActionRecord | None:
+        """The dispatch that already did this exact thing in this situation.
+
+        The situation is part of the identity on purpose. Without it, a second
+        resumption of a run that paused again would read as a duplicate of the
+        first, and the overseer would refuse to do the one thing the second
+        pause is asking for; with it, "again, in the same circumstances,
+        against the same target" is the only shape that counts as a repeat.
+
+        The incident is *not* part of it, for the reason
+        :meth:`recovery_attempts` gives: a repeat filed under a new incident is
+        still a repeat.
+        """
+        row = self._connection.execute(
+            f"""
+            SELECT {_ACTION_COLUMNS} FROM action
+            WHERE plan_dir = ? AND operation = ? AND target = ?
+              AND progress_token = ? AND status = 'executed'
+            ORDER BY action_id LIMIT 1
+            """,
+            (plan_dir, operation, target, progress_token),
+        ).fetchone()
+        if row is None:
+            return None
+        return _action(row, self._receipt(int(row["action_id"])))
 
     def in_doubt_actions(
         self, *, plan_dir: str | None = None
@@ -1701,7 +1815,7 @@ _DECISION_COLUMNS = (
 
 _ACTION_COLUMNS = (
     "action_id, plan_dir, incident_id, operation, target, status, epoch, "
-    "config_fingerprint, request_digest, attempted_at, settled_at"
+    "config_fingerprint, request_digest, progress_token, attempted_at, settled_at"
 )
 
 _WATCH_LEASE_COLUMNS = (
@@ -1782,6 +1896,7 @@ def _action(row: sqlite3.Row, receipt: ReceiptRecord | None) -> ActionRecord:
         epoch=int(row["epoch"]),
         config_fingerprint=str(row["config_fingerprint"]),
         request_digest=str(row["request_digest"]),
+        progress_token=str(row["progress_token"]),
         attempted_at=str(row["attempted_at"]),
         settled_at=_optional_text(row["settled_at"]),
         receipt=receipt,
