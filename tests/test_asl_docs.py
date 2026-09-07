@@ -34,6 +34,7 @@ from agent_session_loop import (
     mailbox_cli,
     mailbox_rendering,
     metrics,
+    overseer_decisions,
     pause_policy,
     plans,
     preflight,
@@ -91,6 +92,81 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("For a registered plan", repair_skill)
         self.assertIn("every check needs a valid `repo`", repair_skill)
         self.assertIn("PREFLIGHT_ITERATE_PAUSE: plan-recreate", repair_skill)
+
+    def test_asl_overseer_skill_specifies_the_whole_host_loop(self) -> None:
+        """The skill is the host's only instruction; a missing step is a gap."""
+        text = (REPO_ROOT / "skills/asl-overseer/SKILL.md").read_text(encoding="utf-8")
+
+        for leaf in ("scan", "watch", "inspect", "decide", "act", "reconcile"):
+            self.assertIn(f"asl overseer {leaf}", text)
+        for step in (
+            "### 1. Observe",
+            "### 2. Authorize",
+            "### 3. Collect context",
+            "### 4. Reason",
+            "### 5. Dispatch",
+            "### 6. Reconcile",
+            "### 7. Report",
+        ):
+            self.assertIn(step, text)
+        # The operational scope, stated as a closed list rather than examples.
+        self.assertIn(
+            "`reply`, `guidance`, `verify`, `commit`, `resume`. These five are "
+            "the operational scope",
+            text,
+        )
+        self.assertIn("asl_overseer = true", text)
+        self.assertIn("last 24 hours", text)
+        self.assertIn("Exclusions always win over selectors", text)
+        self.assertIn("`deferred`", text)
+        self.assertIn("Authorization can be revoked mid-invocation", text)
+        self.assertIn("Actions already dispatched are not undone", text)
+        self.assertIn("`recovery_exhausted`", text)
+        self.assertIn("--release", text)
+
+    def test_asl_overseer_skill_forbids_a_timed_default(self) -> None:
+        """A timed default turns an escalation into a rubber stamp."""
+        text = (REPO_ROOT / "skills/asl-overseer/SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("There is no timed default", text)
+        self.assertIn("Silence is not consent", text)
+        self.assertIn("proceeding since no objection was raised", text)
+        # Dependent work stops; independent authorized work does not.
+        self.assertIn("**Dependent work stays blocked.**", text)
+        self.assertIn("**Independent authorized work continues**", text)
+
+    def test_asl_overseer_skill_names_the_evidence_asymmetry(self) -> None:
+        """A mailbox record shows an instruction arrived, never who wrote it."""
+        text = (REPO_ROOT / "skills/asl-overseer/SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("on their own they authorize nothing", text)
+        self.assertIn("`not_user_authored`", text)
+        self.assertIn("--no-history", text)
+        self.assertIn("--generated-class", text)
+        self.assertIn("`scope_widened`", text)
+        self.assertNotIn(
+            "user_instruction",
+            set(overseer_decisions.SUPERVISION_VOICES.values()),
+            "the skill's claim about the mailbox has to still be true of the code",
+        )
+
+    def test_asl_overseer_skill_routes_everything_through_the_guarded_leaf(
+        self,
+    ) -> None:
+        """No fallback path: reaching for a shell is the escalation case."""
+        text = (REPO_ROOT / "skills/asl-overseer/SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Every state-changing thing you do goes through `asl overseer act`", text
+        )
+        self.assertIn("There is no fallback path", text)
+        self.assertIn("`verify` currently has no adapter", text)
+        self.assertIn("operation_unsupported", text)
+        self.assertEqual(
+            ("reply", "guidance", "verify", "commit", "resume"),
+            overseer_decisions.OPERATIONS,
+            "the skill states the operational scope as a closed list of five",
+        )
 
     def test_session_expand_auto_marks_loop_ready_before_session_run(self) -> None:
         text = (REPO_ROOT / "skills/session-expand/SKILL.md").read_text(

@@ -1709,6 +1709,445 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="diagnostics_export:export_from_args"
     )
 
+    overseer_parser = subparsers.add_parser(
+        "overseer",
+        help="Watch authorized runs on behalf of an invoked overseer host agent.",
+        epilog=_group_epilogue("overseer", "asl overseer scan --help"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    overseer_sub = overseer_parser.add_subparsers(
+        dest="overseer_command", required=True
+    )
+
+    overseer_scan_parser = overseer_sub.add_parser(
+        "scan",
+        help="List every run discovery can see and why each is or is not in play.",
+        description=(
+            "Report the fleet as ASL's own discovery sees it: every plan under "
+            "the state root, its run, its lifecycle, whether it is eligible and "
+            "the reasons it is not. Discovery only -- no run's content is read, "
+            "so AgentMux is not consulted and a plan listed as eligible here may "
+            "still be refused the moment `asl overseer watch` asks about it. "
+            "Exits nonzero when the view is partial, so a caller cannot read "
+            "'nothing to do' out of 'could not look'."
+        ),
+    )
+    overseer_scan_parser.add_argument(
+        "--plan",
+        dest="plans",
+        action="append",
+        metavar="PLAN_DIR",
+        help="Limit the listing to this plan (repeatable)",
+    )
+    overseer_scan_parser.add_argument(
+        "--project",
+        dest="projects",
+        action="append",
+        metavar="DIR",
+        help="Limit the listing to runs inside this project directory (repeatable)",
+    )
+    overseer_scan_parser.add_argument(
+        "--pause-window-hours",
+        type=float,
+        help="How far back a pause still counts as recent (default 24)",
+    )
+    overseer_scan_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    overseer_scan_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    overseer_scan_parser.set_defaults(handler_ref="overseer_cli:scan_from_args")
+
+    overseer_watch_parser = overseer_sub.add_parser(
+        "watch",
+        help="Enrol the runs AgentMux authorizes and hold a watch lease on each.",
+        description=(
+            "Sweep the fleet, ask AgentMux about each plan in scope, and take a "
+            "lease on the ones it authorizes. One sweep by default; "
+            "`--for-seconds` keeps sweeping until the deadline, which is how "
+            "runs that start mid-invocation and pauses that become eligible "
+            "mid-invocation get picked up without re-invoking anything. "
+            "`--release` hands every lease this watcher holds back, which is "
+            "what ending an invocation means: an abandoned lease does expire, "
+            "but not before it has kept another watcher out for its whole term. "
+            "Exits nonzero when a sweep did not reach every plan it wanted to."
+        ),
+    )
+    overseer_watch_parser.add_argument(
+        "--watcher-id",
+        required=True,
+        help="Stable identity for this invocation; leases are held under it",
+    )
+    overseer_watch_parser.add_argument(
+        "--plan",
+        dest="plans",
+        action="append",
+        metavar="PLAN_DIR",
+        help="Watch only this plan (repeatable); naming a plan relaxes the age window",
+    )
+    overseer_watch_parser.add_argument(
+        "--project",
+        dest="projects",
+        action="append",
+        metavar="DIR",
+        help="Watch only runs inside this project directory (repeatable)",
+    )
+    overseer_watch_parser.add_argument(
+        "--for-seconds",
+        type=float,
+        help="Keep sweeping for this long instead of running a single sweep",
+    )
+    overseer_watch_parser.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=15.0,
+        help="Wait this long between sweeps under --for-seconds (default 15)",
+    )
+    overseer_watch_parser.add_argument(
+        "--sweep-seconds",
+        type=float,
+        default=60.0,
+        help="Budget for one sweep; plans not reached are reported deferred",
+    )
+    overseer_watch_parser.add_argument(
+        "--lease-seconds",
+        type=float,
+        default=300.0,
+        help="How long each watch lease is held before it expires (default 300)",
+    )
+    overseer_watch_parser.add_argument(
+        "--pause-window-hours",
+        type=float,
+        help="How far back a pause still counts as recent (default 24)",
+    )
+    overseer_watch_parser.add_argument(
+        "--release",
+        action="store_true",
+        help="Release every lease this watcher holds and exit",
+    )
+    overseer_watch_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for each AgentMux authorization (default 10)",
+    )
+    overseer_watch_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    overseer_watch_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    overseer_watch_parser.set_defaults(handler_ref="overseer_cli:watch_from_args")
+
+    overseer_inspect_parser = overseer_sub.add_parser(
+        "inspect",
+        help="Open an incident and capture a bounded packet of a run's context.",
+        description=(
+            "Ask AgentMux for context access, then capture what the host needs "
+            "to reason about one run: the pending questions, the run's own "
+            "summary of itself, and what could not be read. The packet is a "
+            "summary, not a transcript. `--expand` widens exactly one named "
+            "source at a time under a published character and record ceiling, "
+            "so context grows because the host asked for something and not "
+            "because a run happened to be verbose. The printed `scope` and "
+            "`token` are what `asl overseer act` must be given later; they are "
+            "captured here so a run that moves in between produces a stale "
+            "action refusal instead of an action aimed at a state that is gone."
+        ),
+    )
+    overseer_inspect_parser.add_argument("plan_dir", help="Plan directory to inspect")
+    overseer_inspect_parser.add_argument(
+        "--kind",
+        default="question_pending",
+        help="Why this incident is being opened (default question_pending)",
+    )
+    overseer_inspect_parser.add_argument(
+        "--summary",
+        default="",
+        help="One line recording what the host is looking into",
+    )
+    overseer_inspect_parser.add_argument(
+        "--incident-id",
+        type=int,
+        help="Reload this existing incident instead of opening a new one",
+    )
+    overseer_inspect_parser.add_argument(
+        "--expand",
+        action="append",
+        # The closed vocabulary is overseer_context.SOURCE_KINDS; it is repeated
+        # here rather than imported so `asl --help` stays off the heavy modules.
+        choices=(
+            "status",
+            "questions",
+            "run_config",
+            "verification",
+            "worker_changes",
+            "supervision",
+        ),
+        help="Widen one recorded source of the packet (repeatable)",
+    )
+    overseer_inspect_parser.add_argument(
+        "--limit",
+        type=int,
+        default=4000,
+        help="Character ceiling for each expansion (default 4000)",
+    )
+    overseer_inspect_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for the AgentMux authorization (default 10)",
+    )
+    overseer_inspect_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    overseer_inspect_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    overseer_inspect_parser.set_defaults(handler_ref="overseer_cli:inspect_from_args")
+
+    overseer_decide_parser = overseer_sub.add_parser(
+        "decide",
+        help="Resolve one operation against the decisions humans already made.",
+        description=(
+            "Reuse what a person already settled on this plan instead of "
+            "settling it again. `--list-statements` prints the supervision "
+            "record with the stable statement IDs a claim must cite; the host "
+            "reads what those statements mean and passes claims back through "
+            "`--claims-file` or `--claims-stdin`. Everything after that is "
+            "mechanical: the register rejects claims that cite nothing, widen "
+            "their scope or name an unknown topic, and the ruling follows from "
+            "what survives. A refusal is an escalation, printed with the "
+            "question to put to a human, the work that stays blocked, and the "
+            "other plans this invocation may keep working on meanwhile. There "
+            "is no timeout and no default answer: silence is not consent."
+        ),
+    )
+    overseer_decide_parser.add_argument("plan_dir", help="Plan directory in question")
+    overseer_decide_parser.add_argument(
+        "--operation",
+        default="reply",
+        choices=("reply", "guidance", "verify", "commit", "resume"),
+        help="The operation to resolve (default reply)",
+    )
+    overseer_decide_parser.add_argument(
+        "--incident-id",
+        type=int,
+        help="Narrow the scope to one open incident",
+    )
+    overseer_decide_parser.add_argument(
+        "--list-statements",
+        action="store_true",
+        help="Print the statements in scope with their IDs, then stop",
+    )
+    overseer_decide_parser.add_argument(
+        "--claims-file",
+        metavar="PATH",
+        help="Read the host's claims about those statements from PATH",
+    )
+    overseer_decide_parser.add_argument(
+        "--claims-stdin",
+        action="store_true",
+        help="Read the host's claims from standard input",
+    )
+    overseer_decide_parser.add_argument(
+        "--no-history",
+        dest="history",
+        action="store_false",
+        default=True,
+        help=(
+            "Rule on the mailbox alone. Nothing can authorize under this: a "
+            "mailbox record shows an instruction arrived, never who wrote it"
+        ),
+    )
+    overseer_decide_parser.add_argument(
+        "--generated-class",
+        dest="generated_classes",
+        action="append",
+        metavar="CLASS",
+        help=(
+            "A conversation class whose `user` turns are written by another "
+            "agent; repeat per class. Those turns become generated prompts"
+        ),
+    )
+    overseer_decide_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for the AgentMux authorization (default 10)",
+    )
+    overseer_decide_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    overseer_decide_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    overseer_decide_parser.set_defaults(handler_ref="overseer_cli:decide_from_args")
+
+    overseer_act_parser = overseer_sub.add_parser(
+        "act",
+        help="Hand one authorized action to the guarded dispatcher.",
+        description=(
+            "The only leaf that changes anything, and it changes it only "
+            "through the guarded dispatcher: the operation is refused unless "
+            "the plan is still observed, the run is the one that was read, the "
+            "scope has not widened, this watcher still holds the lease, the "
+            "action token still matches and a ruling still authorizes it. "
+            "`--token` and `--scope` come from the earlier `asl overseer "
+            "inspect` and are never recomputed here, because a token recomputed "
+            "now would agree with itself. The operational scope is reply, "
+            "guidance, verify, commit and resume; anything else, and anything "
+            "no adapter implements, is refused and escalated rather than "
+            "improvised. Application-code repairs belong to a worker, not here."
+        ),
+    )
+    overseer_act_parser.add_argument("plan_dir", help="Plan directory to act on")
+    overseer_act_parser.add_argument(
+        "--watcher-id",
+        required=True,
+        help="The watcher holding the lease on this run",
+    )
+    overseer_act_parser.add_argument(
+        "--operation",
+        required=True,
+        choices=("reply", "guidance", "verify", "commit", "resume"),
+        help="The operation to dispatch",
+    )
+    overseer_act_parser.add_argument(
+        "--run-id",
+        required=True,
+        help="The run ID `asl overseer inspect` reported",
+    )
+    overseer_act_parser.add_argument(
+        "--incident-id",
+        type=int,
+        required=True,
+        help="The incident this action answers",
+    )
+    overseer_act_parser.add_argument(
+        "--token",
+        required=True,
+        help="The action token `asl overseer inspect` reported",
+    )
+    overseer_act_parser.add_argument(
+        "--scope",
+        required=True,
+        help="The scope digest `asl overseer inspect` reported",
+    )
+    overseer_act_parser.add_argument(
+        "--question-id",
+        help="For reply: the question being answered",
+    )
+    overseer_act_parser.add_argument(
+        "--text",
+        help="For reply and guidance: the message body",
+    )
+    overseer_act_parser.add_argument(
+        "--check",
+        help="For verify: the named check to run",
+    )
+    overseer_act_parser.add_argument(
+        "--message",
+        help="For commit: the checkpoint message",
+    )
+    overseer_act_parser.add_argument(
+        "--session-id",
+        help="For resume: the session to resume (default the run's own next)",
+    )
+    overseer_act_parser.add_argument(
+        "--claims-file",
+        metavar="PATH",
+        help="Read the host's claims from PATH; authority is rechecked from them",
+    )
+    overseer_act_parser.add_argument(
+        "--claims-stdin",
+        action="store_true",
+        help="Read the host's claims from standard input",
+    )
+    overseer_act_parser.add_argument(
+        "--no-history",
+        dest="history",
+        action="store_false",
+        default=True,
+        help=(
+            "Recheck authority against the mailbox alone, which authorizes "
+            "nothing; use it to prove an action does not need the transcript"
+        ),
+    )
+    overseer_act_parser.add_argument(
+        "--generated-class",
+        dest="generated_classes",
+        action="append",
+        metavar="CLASS",
+        help=(
+            "A conversation class whose `user` turns are written by another "
+            "agent; repeat per class. Those turns become generated prompts"
+        ),
+    )
+    overseer_act_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for each AgentMux authorization (default 10)",
+    )
+    overseer_act_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    overseer_act_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    overseer_act_parser.set_defaults(handler_ref="overseer_cli:act_from_args")
+
+    overseer_reconcile_parser = overseer_sub.add_parser(
+        "reconcile",
+        help="Settle actions a previous dispatch left in doubt.",
+        description=(
+            "A dispatch that dies between performing an action and recording "
+            "its receipt leaves a row saying 'maybe'. Only the adapter that "
+            "would have performed it can answer, and it answers from the ledger "
+            "row alone because the process that held the action is gone. Run "
+            "this before acting again: it is what keeps a retry from becoming a "
+            "duplicate. Exits nonzero while any row is still in doubt."
+        ),
+    )
+    overseer_reconcile_parser.add_argument(
+        "plan_dir", help="Plan directory to reconcile"
+    )
+    overseer_reconcile_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for each AgentMux authorization (default 10)",
+    )
+    overseer_reconcile_parser.add_argument(
+        "--state-dir",
+        help="Override operational state directory",
+    )
+    overseer_reconcile_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON output",
+    )
+    overseer_reconcile_parser.set_defaults(
+        handler_ref="overseer_cli:reconcile_from_args"
+    )
+
     workbench_parser = subparsers.add_parser(
         "workbench",
         help="Run the local Workbench HTTP control plane.",

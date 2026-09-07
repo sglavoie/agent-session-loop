@@ -570,7 +570,95 @@ asl commit [PATH] [--yes] [--verify|--no-verify] [--staged] [--dry-run] [--guida
 asl bridge serve [--stdio] [--protocol VERSION] [--state-dir DIR] [--plan-root DIR]
 asl agent-mux pairing [--state-dir DIR] [--migrate] [--json]
 asl diagnostics export --agent-mux [--state-dir DIR] [--run-id ID] [--plan-dir DIR] [--output PATH] [--json]
+asl overseer scan [--plan PLAN_DIR ...] [--project DIR ...] [--pause-window-hours H] [--state-dir DIR] [--json]
+asl overseer watch --watcher-id ID [--plan PLAN_DIR ...] [--project DIR ...] [--for-seconds SEC] [--interval-seconds SEC] [--sweep-seconds SEC] [--lease-seconds SEC] [--pause-window-hours H] [--release] [--timeout SEC] [--state-dir DIR] [--json]
+asl overseer inspect PLAN_DIR [--kind KIND] [--summary TEXT] [--incident-id ID] [--expand status|questions|run_config|verification|worker_changes|supervision ...] [--limit CHARS] [--timeout SEC] [--state-dir DIR] [--json]
+asl overseer decide PLAN_DIR [--operation reply|guidance|verify|commit|resume] [--incident-id ID] [--list-statements] [--claims-file PATH|--claims-stdin] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
+asl overseer act PLAN_DIR --watcher-id ID --operation reply|guidance|verify|commit|resume --run-id ID --incident-id ID --token TOKEN --scope DIGEST [--question-id ID] [--text TEXT] [--check NAME] [--message TEXT] [--session-id ID] [--claims-file PATH|--claims-stdin] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
+asl overseer reconcile PLAN_DIR [--timeout SEC] [--state-dir DIR] [--json]
 ```
+
+### Overseer
+
+`asl overseer` is the operator surface the `asl-overseer` skill drives. It is
+the only supported way for a host agent to watch ASL runs it did not start: the
+guards live in Python, the judgement lives in the host, and the two meet at
+these six leaves.
+
+The loop is observe, authorize, collect context, reason, dispatch, reconcile,
+report. `scan` lists what discovery can see and asks AgentMux nothing, so its
+`eligible` flag is ASL's own opinion and not permission. `watch` is what asks:
+it sweeps the fleet, authorizes each plan in scope, and takes a lease on the
+ones AgentMux allows, re-sweeping until `--for-seconds` elapses so runs that
+start mid-invocation join without re-invoking anything. `--release` hands the
+leases back; an abandoned lease expires on its own, but not before it has kept
+another watcher out for its whole term. Selectors (`--plan`, `--project`) only
+narrow, and exclusions take precedence over them — except that naming a plan
+exactly relaxes the 24-hour pause window for that plan alone.
+
+`inspect` opens an incident and captures a bounded packet: pending questions,
+the run's own summary, and the `gaps` naming what could not be read. `--expand`
+widens exactly one named source under a 4000-character, 50-record ceiling and
+re-checks the grant each time, so context grows because the host asked for
+something rather than because a run was verbose. The `scope` digest and action
+`token` it prints are what `asl overseer act` must be given later; they are
+captured at read time on purpose, so a run that moves in between produces a
+`stale_action` refusal instead of an action aimed at a state that is gone.
+
+`decide` resolves one operation against decisions humans already recorded.
+`--list-statements` prints every statement in scope with the stable ID a claim
+must cite; the host reads what those statements mean and passes claims back
+through `--claims-file` or `--claims-stdin`. The register rejects claims that
+cite nothing, widen their scope, or name an unknown topic, and reports each
+rejection rather than failing the command. A refusal is an escalation: the
+payload carries the question to put to a human, the work that stays blocked, and
+the other eligible plans the invocation may keep working on meanwhile. It
+carries no default, no timeout, and no deadline — there is nowhere to express
+"proceed if nobody answers".
+
+Statements come from two boundaries that are not interchangeable. A plan's
+mailbox records that an instruction *arrived* and records no author, so every
+statement it yields is relayed: citable as corroboration, never an authorization
+on its own, and rejected `not_user_authored` when a claim rests on one alone.
+Only the harness transcript carries a turn a person typed, and a transcript
+statement is scoped to the working directory AgentMux authorized it under — it
+names no plan, so a claim that wants one must narrow the scope itself or be
+rejected `scope_widened`. `decide` and `act` read both boundaries by default;
+`--no-history` reads the mailbox alone, which authorizes nothing by
+construction, and `--generated-class CLASS` (repeatable) marks conversation
+classes whose `user` turns are written by another agent so they contribute
+generated prompts instead of instructions. A transcript that could not be read
+comes back as a `history` object carrying its own `failure` and contributing no
+statements, which keeps "no authorization was found" distinct from "the evidence
+could not be reached".
+
+`act` is the only leaf that changes anything, and it changes it only through the
+guarded dispatcher, which refuses unless the plan is still observed, the run is
+the one that was read, the scope has not widened, the watcher still holds the
+lease, the token still matches, and a ruling still authorizes it. Authority is
+re-derived from live supervision twice — before the adapter prepares and again
+immediately before it performs — so a revocation landing in between stops the
+action. Revocation stops later context reads and queued actions but never undoes
+a dispatch that already happened. `commit` writes a checkpoint across every
+declared repository as one durable group, so a crash partway through leaves a
+group `reconcile` can finish. A recoverable refusal is retried at most twice
+before it becomes `recovery_exhausted`.
+
+The operational scope is `reply`, `guidance`, `verify`, `commit` and `resume`,
+and the registry is closed: an operation no adapter implements is refused
+`operation_unsupported` before the ledger is touched. `verify` has no adapter
+today, so dispatching it escalates rather than improvising a command.
+Application-code repairs stay with the worker session.
+
+`reconcile` settles rows a dispatch left in doubt after dying between performing
+an action and recording its receipt. Only the adapter can answer, and it answers
+from the ledger row alone because the process that held the action is gone.
+Running it before acting again is what keeps a retry from becoming a duplicate.
+
+Every leaf exits `0` when the answer was yes, `1` on a refusal or a partial view
+(an incomplete sweep, a withheld packet, an unsettled row), and `2` on a
+malformed invocation, so a `&&` chain stops at the first refusal instead of
+reading "could not look" as "nothing to do".
 
 `asl commit` writes Conventional Commits messages for the worktree containing
 `PATH` (default: the current directory), and is the same command the auto-commit
