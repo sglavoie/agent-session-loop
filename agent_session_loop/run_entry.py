@@ -358,6 +358,7 @@ def run_from_args(
     *,
     run_argv: list[str] | None = None,
     run_locked: LockedRun,
+    reclaim_stale_locks: bool = True,
 ) -> int:
     """Run one or more pending sessions from CLI arguments.
 
@@ -372,6 +373,14 @@ def run_from_args(
     ``run_locked`` is the :class:`LockedRun` seam and is required rather than
     defaulted: it is called only once the plan's lock is held, and a default
     would let a caller start a run this module cannot finish.
+
+    ``reclaim_stale_locks`` defaults to true, which is the contention check ASL
+    has always performed: the scan reclaims every lock in the state root whose
+    owner this host has proven dead. A launcher whose authorization covers only
+    *this* plan passes false, because that hygiene reaches plans it was never
+    granted — see ``overseer_isolation.launch``. It narrows the writing, never
+    the checking: the overlap question, the refusal and its payload are
+    identical either way.
     """
     if run_argv is None:
         run_argv = getattr(args, "_run_argv", None)
@@ -571,6 +580,7 @@ def run_from_args(
                         plan_dir=initial_snapshot.plan_dir,
                         repository_roots=claimed_repository_roots,
                         state_dir=args.state_dir,
+                        reclaim=reclaim_stale_locks,
                     )
                     if conflicts:
                         payload = run_outcome._error_payload(

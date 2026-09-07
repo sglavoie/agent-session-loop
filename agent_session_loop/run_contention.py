@@ -25,6 +25,9 @@ __all__ = [
     "LIVENESS_RUNNING",
     "LIVENESS_FOREIGN_HOST",
     "RepositoryConflict",
+    "canonical_roots",
+    "conflict_sort_key",
+    "claimed_roots",
     "detect_conflicts",
     "conflict_message",
     "conflict_details",
@@ -48,7 +51,14 @@ class RepositoryConflict:
     repositories: tuple[str, ...]
 
 
-def _canonical_roots(roots: Iterable[Any]) -> frozenset[str]:
+def canonical_roots(roots: Iterable[Any]) -> frozenset[str]:
+    """Canonicalize a claim into the only form two runs can be compared in.
+
+    Public because the observation-only reader in ``overseer_isolation`` has to
+    canonicalize the same way this refusal does. Two implementations of "is
+    this the same repository" is two answers, and the one that disagrees is the
+    one that lets two agents into one working tree.
+    """
     canonical: set[str] = set()
     for root in roots:
         if not isinstance(root, (str, Path)):
@@ -63,7 +73,7 @@ def _canonical_roots(roots: Iterable[Any]) -> frozenset[str]:
     return frozenset(canonical)
 
 
-def _row_roots(row: session_overview.RunningRow) -> frozenset[str]:
+def claimed_roots(row: session_overview.RunningRow) -> frozenset[str]:
     """Roots a running row claims, preferring the lock's own declaration.
 
     The lock is written before the run's first ``state.json``, so its claim is
@@ -72,8 +82,8 @@ def _row_roots(row: session_overview.RunningRow) -> frozenset[str]:
     two workspace roots produce the same relative path.
     """
     if row.repository_roots:
-        return _canonical_roots(row.repository_roots)
-    return _canonical_roots(
+        return canonical_roots(row.repository_roots)
+    return canonical_roots(
         entry.get("resolved_root")
         for entry in row.repositories
         if isinstance(entry, dict)
@@ -91,7 +101,7 @@ def _warn_undeclared_foreign_lock(stale: session_overview.StaleLock) -> None:
     )
 
 
-def _conflict_sort_key(conflict: RepositoryConflict) -> tuple[str, int, str, str]:
+def conflict_sort_key(conflict: RepositoryConflict) -> tuple[str, int, str, str]:
     return (
         str(conflict.plan_dir),
         conflict.pid if conflict.pid is not None else -1,
@@ -105,6 +115,7 @@ def detect_conflicts(
     plan_dir: str | Path,
     repository_roots: Iterable[str],
     state_dir: str | Path | None = None,
+    reclaim: bool = True,
 ) -> tuple[RepositoryConflict, ...]:
     """Return the live claims that overlap ``repository_roots``.
 
@@ -120,22 +131,30 @@ def detect_conflicts(
     checked, so the overlap is warned about on stderr rather than refused: one
     legacy lock would otherwise brick every run in the state root.
 
-    The scan reclaims locks this host has proven dead. That is deliberate: this
-    caller is about to write anyway, and reclaiming keeps ``asl sessions`` in
-    agreement with the refusal.
+    The scan reclaims locks this host has proven dead. That is deliberate for
+    an ordinary start: this caller is about to write anyway, and reclaiming
+    keeps ``asl sessions`` in agreement with the refusal.
+
+    ``reclaim=False`` asks the same question and writes nothing. The reclaim is
+    hygiene over the *whole* state root, so a caller that is only allowed to
+    touch one plan cannot afford it: checking a plan it may act on would delete
+    lock files belonging to plans it may not, which is a mutation of an
+    excluded plan caused by a read of an allowed one. The observation-only
+    reader in ``overseer_isolation`` is that caller, and it is what an overseer
+    launch passes down through ``run_entry.run_from_args``.
     """
-    claimed = _canonical_roots(repository_roots)
+    claimed = canonical_roots(repository_roots)
     if not claimed:
         return ()
     canonical_plan_dir = plans.canonicalize_path(plan_dir)
     rows, stale_locks, _skipped = session_overview.scan_running_rows(
-        state_dir, reclaim=True
+        state_dir, reclaim=reclaim
     )
     conflicts: list[RepositoryConflict] = []
     for row in rows:
         if row.plan_dir == canonical_plan_dir and row.pid == os.getpid():
             continue
-        shared = claimed & _row_roots(row)
+        shared = claimed & claimed_roots(row)
         if not shared:
             continue
         conflicts.append(
@@ -152,7 +171,7 @@ def detect_conflicts(
     for stale in stale_locks:
         if not stale.foreign_host:
             continue
-        declared = _canonical_roots(stale.repository_roots)
+        declared = canonical_roots(stale.repository_roots)
         if not declared:
             _warn_undeclared_foreign_lock(stale)
             continue
@@ -170,7 +189,7 @@ def detect_conflicts(
                 repositories=tuple(sorted(shared)),
             )
         )
-    conflicts.sort(key=_conflict_sort_key)
+    conflicts.sort(key=conflict_sort_key)
     return tuple(conflicts)
 
 

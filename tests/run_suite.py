@@ -128,6 +128,7 @@ FAST_MODULES = (
     "tests.test_asl_commit_message",
     "tests.test_skill_sync",
     "tests.test_asl_overseer_discovery",
+    "tests.test_asl_overseer_isolation",
     "tests.test_asl_literals",
 )
 
@@ -195,6 +196,7 @@ PORTABLE_MODULES = (
     "tests.test_asl_harness_compatibility",
     "tests.test_asl_startup_context",
     "tests.test_asl_overseer_discovery",
+    "tests.test_asl_overseer_isolation",
     "tests.test_asl_literals",
 )
 
