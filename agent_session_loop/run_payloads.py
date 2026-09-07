@@ -101,6 +101,7 @@ from . import (
     agent_mux_projection,
     clock,
     events,
+    overseer_discovery,
     plans,
     qna,
     readiness_gate,
@@ -222,6 +223,19 @@ def _initial_payload(
         run_id=run_id,
         run_started_at=clock.isoformat(clock.utc_now()),
         run_finished_at=None,
+        # When the pause happened, stamped by `run_termination.set_pause`. The
+        # overseer's fleet inventory dates a pause from this rather than from
+        # the event log, which it may not open before authorization, so a run
+        # that never publishes the slot cannot be placed in the window at all.
+        **{overseer_discovery.PAUSED_AT_KEY: None},
+        # Which discovery vocabulary this record speaks. Absence is what makes a
+        # record legacy rather than merely truncated, so it is seeded here at
+        # birth and never written conditionally.
+        **{
+            overseer_discovery.DISCOVERY_VERSION_KEY: (
+                overseer_discovery.DISCOVERY_CONTRACT_VERSION
+            )
+        },
         agent_mux_sequence=0,
         # The lifecycle sequence counts notifications; the projection
         # generation counts durable transitions. Seeded separately and side by

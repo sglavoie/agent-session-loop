@@ -70,10 +70,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import (
+    clock,
     commit_settlement,
     events,
     harnesses,
     live_verification,
+    overseer_discovery,
     pause_policy,
     plans,
     preflight,
@@ -549,6 +551,12 @@ def set_pause(
     payload["paused"] = True
     payload["reason"] = reason
     payload["pause_reason"] = reason
+    # When, not just why. The overseer's fleet inventory decides whether a pause
+    # is inside the window it was invoked for, and it may not open the event log
+    # to find out, so the single pause writer is also the single stamp site. A
+    # later pause overwrites an earlier one because the record describes the
+    # pause the run is *in*, not the first one it ever took.
+    payload[overseer_discovery.PAUSED_AT_KEY] = clock.isoformat(clock.utc_now())
     payload["pause_message"] = message
     payload["pause_details"] = {} if details is None else details
     payload["details"] = payload["pause_details"]
