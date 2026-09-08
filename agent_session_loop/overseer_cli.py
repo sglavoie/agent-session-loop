@@ -225,9 +225,12 @@ def _failure(command: str, error: OverseerCliError, *, as_json: bool) -> int:
     return EXIT_USAGE
 
 
-def _scope_payload(scope: overseer_decisions.Scope) -> dict[str, str]:
+def _scope_payload(scope: overseer_decisions.Scope) -> dict[str, Any]:
+    # `project` is the single-project spelling and is empty for a plan spanning
+    # several, so `projects` is the field a caller reads to see them all.
     return {
         "project": scope.project,
+        "projects": list(scope.named_projects),
         "plan_dir": scope.plan_dir,
         "run_id": scope.run_id,
         "incident": scope.incident,
@@ -508,15 +511,68 @@ def _grant_for(
     return decision, decision.grant()
 
 
+def project_identities(
+    candidate: overseer_discovery.Candidate,
+) -> tuple[str, ...]:
+    """Every project a plan participates in, in the registry's own spelling.
+
+    A project is a repository root, because that is the identity AgentMux
+    authorizes a conversation under. The workspace directory those repositories
+    sit under is not one of them: no conversation is ever admitted under it, so
+    a request naming it could be matched by no evidence at all and a repository
+    approval would be rejected ``scope_widened`` for naming somewhere else.
+
+    The roots are passed through exactly as discovery resolved them, since the
+    packet digests, the policy question and the dispatcher all compare that same
+    spelling; a second normalization here would be a second answer to what one
+    repository is.
+    """
+    return tuple(
+        dict.fromkeys(
+            declaration.resolved_root
+            for declaration in candidate.repositories
+            if declaration.resolved_root
+        )
+    )
+
+
 def _scope_for(
     candidate: overseer_discovery.Candidate, *, incident_id: int | None
 ) -> overseer_decisions.Scope:
+    """The scope one request is about: this plan, in its own repositories.
+
+    A plan that declares no repository names no project, which refuses
+    ``target_unscoped`` rather than falling back to the workspace -- an
+    unmatched identity would read as a permission problem, and an unscoped
+    request reads as what it is.
+    """
     return overseer_decisions.Scope(
-        project=candidate.workspace_root or "",
+        projects=project_identities(candidate),
         plan_dir=plan_dir_of(candidate),
         run_id=candidate.run_id or "",
         incident="" if incident_id is None else str(incident_id),
     )
+
+
+def _claim_projects(
+    named: dict[str, Any], position: int, *, scope: overseer_decisions.Scope
+) -> tuple[str, ...]:
+    """The projects one claim's scope names, defaulting to the request's.
+
+    A claim scope that mentions neither ``project`` nor ``projects`` inherits
+    every project the request is about, which is the narrowest reading for a
+    plan in one repository and the only honest one for a plan in several. A
+    claim that names either of them is taken at its word and checked against
+    the evidence, which is where naming a project nobody spoke in is refused.
+    """
+    if "projects" not in named:
+        return () if "project" in named else scope.named_projects
+    listed = named["projects"]
+    if not isinstance(listed, list):
+        raise OverseerCliError(
+            "claims_invalid", f"claim {position} has a non-list scope.projects"
+        )
+    return tuple(str(item) for item in listed)
 
 
 def parse_claims(
@@ -567,7 +623,8 @@ def parse_claims(
             claim_scope = scope
         elif isinstance(named, dict):
             claim_scope = overseer_decisions.Scope(
-                project=str(named.get("project", scope.project)),
+                project=str(named.get("project", "")),
+                projects=_claim_projects(named, position, scope=scope),
                 plan_dir=str(named.get("plan_dir", scope.plan_dir)),
                 run_id=str(named.get("run_id", scope.run_id)),
                 incident=str(named.get("incident", scope.incident)),
@@ -667,7 +724,9 @@ def gather(
         )
         statements.extend(
             overseer_decisions.statements_from_history(
-                transcript, generated_classes=tuple(generated_classes)
+                transcript,
+                generated_classes=tuple(generated_classes),
+                repositories=project_identities(candidate),
             )
         )
     return Evidence(scope=scope, statements=tuple(statements), history=transcript)

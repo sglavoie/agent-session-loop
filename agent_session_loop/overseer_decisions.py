@@ -53,13 +53,23 @@ value it can carry that turns a class into a human one.
 ## Scope is what stops an approval from travelling
 
 Every statement carries the scope it was made in -- a transcript message the
-project directory its conversation worked in, a mailbox record the plan and run
-it belongs to -- and a claim may narrow that scope but never widen it. An
+project its conversation was authorized under, a mailbox record the plan and
+run it belongs to -- and a claim may narrow that scope but never widen it. An
 approval given in one project is therefore unrepresentable as permission in
 another, not because a rule forbids the transfer but because the claim that
 would perform it cannot be built: :data:`scope_widened <CLAIM_REJECTIONS>` is
 the rejection, and it is checked against the statement's own scope rather than
 against anything the claimant asserts.
+
+A project is a repository, never the workspace directory a plan's repositories
+sit under. AgentMux admits a conversation under the project governing its
+working directory, so a workspace path is an identity no evidence can carry: a
+request naming one would be matched by nothing and every repository approval
+would read as an approval of somewhere else. A plan participating in several
+repositories names all of them, and a decision reaches it only by naming all of
+them too -- which one statement cannot do, so such a claim has to rest on a
+human statement in each project and cite them together. That is what keeps one
+project's authority from becoming another's.
 
 The same rule separates incidents. A decision narrowed to one incident does not
 cover the next one, and a decision that names no incident covers the plan it
@@ -461,6 +471,22 @@ SUPERVISION_VOICES: dict[str, Voice] = {
 class Scope:
     """What a decision is about, and therefore what it cannot reach.
 
+    A project is a *repository*: the root AgentMux authorized a conversation
+    under, and the root a plan declares in its registry. It is never the
+    workspace directory several repositories sit under. AgentMux admits a
+    conversation only when the project governing its working directory permits
+    it, so a workspace path is an identity no evidence can carry and a request
+    naming one could be matched by nothing -- a repository approval would read
+    as an approval of somewhere else.
+
+    ``project`` names one and ``projects`` names the several a plan spans when
+    it participates in more than one repository. They are two spellings of one
+    thing rather than two fields: a scope naming exactly one project always
+    carries it in ``project``, a scope naming several always carries them
+    sorted in ``projects`` with ``project`` empty, and both are normalized on
+    construction so one project set has one representation and two scopes about
+    the same thing compare equal.
+
     An empty field is *not narrowed* rather than *any*: on the deciding side it
     means the decision was not made about one plan, run or incident in
     particular, and on the target side it means the caller did not say -- which
@@ -468,17 +494,66 @@ class Scope:
     cannot be shown to apply to it.
     """
 
-    project: str
+    project: str = ""
     plan_dir: str = ""
     run_id: str = ""
     incident: str = ""
+    projects: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        named = tuple(
+            dict.fromkeys(item for item in (self.project, *self.projects) if item)
+        )
+        single = named[0] if len(named) == 1 else ""
+        object.__setattr__(self, "project", single)
+        object.__setattr__(self, "projects", () if single else tuple(sorted(named)))
+
+    @property
+    def named_projects(self) -> tuple[str, ...]:
+        """Every project this scope names, which may be one or several."""
+        return (self.project,) if self.project else self.projects
 
     def covers(self, target: Scope) -> bool:
-        """Whether a decision made in this scope applies to ``target``."""
-        if not self.project or not target.project:
+        """Whether a decision made in this scope applies to ``target``.
+
+        Every project the target names has to be one this scope names. A
+        decision made in one repository therefore does not reach a plan that
+        also participates in another: authority is held per project, and a plan
+        spanning two of them needs human evidence covering both.
+        """
+        mine = set(self.named_projects)
+        theirs = set(target.named_projects)
+        if not mine or not theirs:
             return False
-        if self.project != target.project:
+        if not theirs <= mine:
             return False
+        return self.narrows(target)
+
+    def bears_on(self, target: Scope) -> bool:
+        """Whether a statement made in this scope is evidence about ``target``.
+
+        Weaker than :meth:`covers` on the project alone: sharing one project is
+        enough. A hold typed in one of a plan's repositories is evidence about
+        that plan even though it cannot by itself authorize work spanning the
+        others, and evidence that could not be seen is evidence that cannot
+        make a reading stale.
+        """
+        mine = set(self.named_projects)
+        theirs = set(target.named_projects)
+        if not mine or not theirs:
+            return False
+        if mine.isdisjoint(theirs):
+            return False
+        return self.narrows(target)
+
+    def narrows(self, target: Scope) -> bool:
+        """Whether this scope's plan, run and incident reach ``target``'s.
+
+        The project half of :meth:`covers`, separated because a claim may rest
+        on more than one statement and each of them has to reach the plan, run
+        and incident being decided even when only one of them names the project
+        that is short.
+        """
         narrowings = (
             (self.plan_dir, target.plan_dir),
             (self.run_id, target.run_id),
@@ -725,6 +800,7 @@ def statements_from_history(
     history: overseer_history.History,
     *,
     generated_classes: Sequence[str] = (),
+    repositories: Sequence[str] = (),
 ) -> tuple[Statement, ...]:
     """Read transcript evidence as statements, scoped to the project it names.
 
@@ -732,9 +808,18 @@ def statements_from_history(
     answer to read, and reading one anyway would be exactly the substitution
     :mod:`overseer_history` refuses to make on its own side.
 
-    A conversation's scope is the working directory AgentMux authorized it
-    under, and no more -- a transcript names no plan, so a claim that wants one
-    has to narrow the scope itself and be checked for it.
+    A conversation's scope is the project AgentMux authorized it under, and no
+    more -- a transcript names no plan, so a claim that wants one has to narrow
+    the scope itself and be checked for it.
+
+    ``repositories`` names the roots a plan declares. A conversation's working
+    directory is resolved back to the one containing it, because the project is
+    what AgentMux authorized and the directory is merely where the harness was
+    started: a conversation opened in a repository subdirectory is evidence
+    about that repository, and scoping it to the subdirectory would name a
+    project no request ever carries. A directory under none of them keeps its
+    own spelling, which authorizes nothing, and passing no repositories at all
+    reads every directory literally.
 
     Authorship comes from the conversation's own class before anything about
     the turn is read, on the fail-closed reading in
@@ -750,12 +835,14 @@ def statements_from_history(
     """
     if history.grant() is None:
         return ()
+    roots = _declared_roots(repositories)
     statements: list[Statement] = []
     for conversation in history.conversations:
         authorship = transcript_authorship(
             conversation.session_class, generated_classes=generated_classes
         )
         locator = f"{conversation.harness}:{conversation.session_id}"
+        project = _project_of(conversation.directory, roots)
         for excerpt in conversation.excerpts:
             marker = generated_marker(excerpt.text)
             voice = _transcript_voice(
@@ -767,7 +854,7 @@ def statements_from_history(
                     voice=voice,
                     space=TRANSCRIPT_SPACE,
                     locator=locator,
-                    scope=Scope(project=conversation.directory),
+                    scope=Scope(project=project),
                     at=excerpt.timestamp,
                     text=excerpt.text,
                     marker=marker if voice == "generated_prompt" else "",
@@ -828,12 +915,17 @@ def statements_from_supervision(
 def evidence_digest(statements: Sequence[Statement], *, scope: Scope) -> str:
     """Summarize the human evidence in scope, so a reading can name what it read.
 
-    Only :data:`REVIEWED_VOICES` statements whose own scope covers ``scope``
+    Only :data:`REVIEWED_VOICES` statements whose own scope bears on ``scope``
     take part. Both narrowings matter: a machine record cannot move the digest,
     since ASL writes one for every message it delivers and a digest that
     answered to those would report a change on every action; and a statement
     about another plan cannot move it either, for the same reason a decision
     about another plan cannot authorize this one.
+
+    Bearing on a scope is deliberately weaker than authorizing it: a statement
+    in one of a multi-repository plan's projects counts, even though on its own
+    it could authorize nothing there. Freshness asks what the host could have
+    read, and a hold it would have read is a hold that has to move the digest.
 
     The identity is order-independent -- statements are sorted by their own ID
     -- so a boundary returning the same records in a different order is the same
@@ -845,7 +937,7 @@ def evidence_digest(statements: Sequence[Statement], *, scope: Scope) -> str:
         (
             item
             for item in statements
-            if item.voice in REVIEWED_VOICES and item.scope.covers(scope)
+            if item.voice in REVIEWED_VOICES and item.scope.bears_on(scope)
         ),
         key=lambda item: item.statement_id,
     )
@@ -858,7 +950,7 @@ def evidence_digest(statements: Sequence[Statement], *, scope: Scope) -> str:
                 item.voice,
                 item.at,
                 item.text,
-                item.scope.project,
+                "\x1f".join(item.scope.named_projects),
                 item.scope.plan_dir,
                 item.scope.run_id,
                 item.scope.incident,
@@ -889,7 +981,7 @@ def register(
     seen: set[str] = set()
     for claim in claims:
         statement = known.get(claim.statement_id)
-        outcome = _validate(claim, statement, seen)
+        outcome = _validate(claim, statement, known, seen)
         if isinstance(outcome, Rejection):
             rejections.append(outcome)
             continue
@@ -945,7 +1037,7 @@ def resolve(*, register: Register, request: Request) -> Ruling:
         settle(register=register, topic=topic, scope=request.scope)
         for topic in request.raises
     )
-    if not request.scope.project:
+    if not request.scope.named_projects:
         return _refused(
             request,
             "target_unscoped",
@@ -1038,7 +1130,10 @@ def resolve(*, register: Register, request: Request) -> Ruling:
 
 
 def _validate(
-    claim: Claim, statement: Statement | None, seen: set[str]
+    claim: Claim,
+    statement: Statement | None,
+    known: dict[str, Statement],
+    seen: set[str],
 ) -> Decision | Rejection:
     """One claim against the statement it cites, in refusal order."""
     if statement is None:
@@ -1065,13 +1160,13 @@ def _validate(
                 "later decision could be shown to replace it"
             ),
         )
-    if not claim.scope.project:
+    if not claim.scope.named_projects:
         return Rejection(
             claim=claim,
             reason="scope_unnamed",
             detail="a decision that names no project covers nothing",
         )
-    if not claim.scope.within(statement.scope):
+    if not statement.scope.narrows(claim.scope):
         return Rejection(
             claim=claim,
             reason="scope_widened",
@@ -1079,6 +1174,26 @@ def _validate(
                 f"{statement.statement_id} was made about "
                 f"{_scope_text(statement.scope)}, which does not reach "
                 f"{_scope_text(claim.scope)}"
+            ),
+        )
+    supporting = _supporting(claim, statement, known)
+    covered = {project for item in supporting for project in item.scope.named_projects}
+    uncovered = tuple(
+        project for project in claim.scope.named_projects if project not in covered
+    )
+    if uncovered:
+        return Rejection(
+            claim=claim,
+            reason="scope_widened",
+            detail=(
+                f"{statement.statement_id} was made about "
+                f"{_scope_text(statement.scope)}, which does not reach "
+                f"{_scope_text(claim.scope)}"
+            )
+            if len(supporting) == 1
+            else (
+                "no statement this claim rests on was made about "
+                f"{', '.join(uncovered)}"
             ),
         )
     if claim.topic not in TOPICS:
@@ -1134,6 +1249,64 @@ def _validate(
 
 
 # -- helpers ---------------------------------------------------------------
+
+
+def _supporting(
+    claim: Claim, statement: Statement, known: dict[str, Statement]
+) -> tuple[Statement, ...]:
+    """The statements whose authorship can carry the projects a claim names.
+
+    The cited statement, plus every corroborating one that is itself a dated
+    user instruction reaching the same plan, run and incident. This is the only
+    way one decision covers more than one project: a plan participating in two
+    repositories needs a human statement in each, cited together, and no
+    reading of the one can supply the other's authority.
+
+    A corroborating statement that is not a dated user instruction lends
+    nothing rather than rejecting the claim. Corroboration is also how a
+    mailbox record showing that an instruction *arrived* is cited beside the
+    transcript turn that shows who spoke, and that record has always been
+    reportable without being authorizing.
+    """
+    supporting = [statement]
+    for statement_id in claim.corroborating:
+        item = known.get(statement_id)
+        if item is None or not item.authorizing or item.moment is None:
+            continue
+        if item.scope.narrows(claim.scope):
+            supporting.append(item)
+    return tuple(supporting)
+
+
+def _declared_roots(repositories: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    """Each declared root as (comparable, declared), longest comparable first.
+
+    Repositories nest -- a checkout inside a checkout is a different project --
+    so the most specific root has to be tried first or the enclosing one would
+    claim a directory the nested one owns. The declared spelling is carried
+    beside the comparable form because it is the identity a request names, and
+    a statement scoped to a normalized variant of it would match nothing.
+    """
+    pairs = []
+    for item in repositories:
+        comparable = item.rstrip("/")
+        if comparable:
+            pairs.append((comparable, item))
+    return tuple(sorted(pairs, key=lambda pair: len(pair[0]), reverse=True))
+
+
+def _project_of(directory: str, roots: Sequence[tuple[str, str]]) -> str:
+    """The declared repository a working directory belongs to, or the directory.
+
+    Containment is measured on path boundaries, the same way AgentMux decides
+    whether a conversation is in scope, so ``/srv/api-internal`` is not inside
+    ``/srv/api``.
+    """
+    trimmed = directory.rstrip("/") or directory
+    for comparable, declared in roots:
+        if trimmed == comparable or trimmed.startswith(f"{comparable}/"):
+            return declared
+    return directory
 
 
 def _partition(
@@ -1227,7 +1400,9 @@ def _statement(
 
 def _scope_text(scope: Scope) -> str:
     """One scope, rendered for a refusal an operator has to act on."""
-    parts = [f"project {scope.project or '-'}"]
+    named = scope.named_projects
+    label = "projects" if len(named) > 1 else "project"
+    parts = [f"{label} {', '.join(named) or '-'}"]
     for label, value in (
         ("plan", scope.plan_dir),
         ("run", scope.run_id),

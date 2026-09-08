@@ -903,7 +903,7 @@ def _check_authority(
     if decision.stance != "allow":
         return ("authority_held", f"{decision.decision_id} is a {decision.stance}")
     scope = ruling.scope
-    if not scope.project:
+    if not scope.named_projects:
         return ("authority_unscoped", "the ruling names no project")
     named = (
         ("plan", scope.plan_dir, plan_dir),

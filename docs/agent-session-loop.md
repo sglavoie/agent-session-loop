@@ -621,9 +621,16 @@ mailbox records that an instruction *arrived* and records no author, so every
 statement it yields is relayed: citable as corroboration, never an authorization
 on its own, and rejected `not_user_authored` when a claim rests on one alone.
 Only the harness transcript carries a turn a person typed, and a transcript
-statement is scoped to the working directory AgentMux authorized it under — it
-names no plan, so a claim that wants one must narrow the scope itself or be
-rejected `scope_widened`. `decide` and `act` read both boundaries by default;
+statement is scoped to the project AgentMux authorized it under: the
+conversation's working directory, resolved to whichever repository the run
+declares that holds it, so a conversation started inside a checkout speaks for
+that checkout. A project is a repository and never the directory above one — a
+run's workspace may hold several checkouts nobody spoke about, so the scope a
+request carries names the declared repository roots instead. A statement names
+no plan, so a claim that wants one must narrow the scope itself or be rejected
+`scope_widened`; and a plan declared over several repositories names all of
+them, so a claim covering it has to cite a human statement in each, listed in
+`corroborating`. One project's instruction never supplies another's authority. `decide` and `act` read both boundaries by default;
 `--no-history` reads the mailbox alone, which authorizes nothing by
 construction. Authorship comes from AgentMux's own classification of the whole
 conversation, before the turn is read and with no flag to set: only a `main`

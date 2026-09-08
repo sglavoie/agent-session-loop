@@ -255,8 +255,8 @@ class _World:
         # `plans.canonicalize_path` resolves the macOS `/var` symlink. Every
         # path in this fixture is canonical from the start, because the scope a
         # transcript statement carries is the directory AgentMux reports and the
-        # scope a claim carries is the run's `workspace_root`: the two are
-        # compared for equality, so one uncanonicalized string rejects every
+        # scope a claim carries is the run's declared repository roots: the two
+        # are compared for equality, so one uncanonicalized string rejects every
         # claim in the module with `scope_widened`.
         self.root = plans.canonicalize_path(workdir.name)
         self.state_root = self.root / "state"
@@ -813,16 +813,28 @@ class _WorldCase(unittest.TestCase):
         self.watch()
         return self.inspect(plan)
 
-    def allowing(self, *operations: str, index: int = 0) -> list[dict[str, Any]]:
-        return [
-            {
-                "statement_id": self.world.statement_id(self.session, index),
-                "topic": "operations",
-                "stance": "allow",
-                "operations": list(operations),
-                "reading": "the user authorized routine work on their runs",
-            }
-        ]
+    def allowing(
+        self,
+        *operations: str,
+        index: int = 0,
+        corroborating: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
+        """The claim a host writes, optionally resting on more than one turn.
+
+        ``corroborating`` is what carries a run declared over two repositories:
+        each project needs a person to have spoken in it, and citing the second
+        conversation is how the claim says so.
+        """
+        claim: dict[str, Any] = {
+            "statement_id": self.world.statement_id(self.session, index),
+            "topic": "operations",
+            "stance": "allow",
+            "operations": list(operations),
+            "reading": "the user authorized routine work on their runs",
+        }
+        if corroborating:
+            claim["corroborating"] = list(corroborating)
+        return [claim]
 
     def decide(
         self, packet: dict[str, Any], operation: str, claims: list[dict[str, Any]]
@@ -954,7 +966,7 @@ class _WorldCase(unittest.TestCase):
     def _ruling(self, action: overseer_dispatch.Action) -> overseer_decisions.Ruling:
         """The ruling the leaf would have reached, reached the same way."""
         scope = overseer_decisions.Scope(
-            project=self.world.workspace_root,
+            projects=tuple(item.path for item in action.repositories),
             plan_dir=action.plan_dir,
             run_id=action.run_id,
             incident=str(action.incident_id),
@@ -1031,7 +1043,14 @@ class PairedBoundaryTests(_WorldCase):
         self.assertIn("user_instruction", {item.voice for item in statements})
 
     def test_the_scope_a_statement_carries_is_the_scope_a_claim_needs(self) -> None:
-        """The one alignment the whole module rests on, asserted directly."""
+        """The one alignment the whole module rests on, asserted directly.
+
+        Both sides have to be the same identity for the same project, and that
+        identity is the repository AgentMux authorized: the directory it scopes
+        a conversation to, and the resolved root the run declares. Anything
+        else -- a workspace holding several checkouts, most of all -- names
+        something nobody was ever asked about.
+        """
         history = self.world.read_history(
             plan_dir=str(self.plan),
             repositories=(
@@ -1047,7 +1066,13 @@ class PairedBoundaryTests(_WorldCase):
             item for item in inventory.candidates if item.plan_dir == str(self.plan)
         )
 
-        self.assertEqual(candidate.workspace_root, statement.scope.project)
+        self.assertEqual(
+            [item.resolved_root for item in candidate.repositories],
+            [statement.scope.project],
+        )
+        self.assertEqual(
+            (statement.scope.project,), overseer_cli.project_identities(candidate)
+        )
 
 
 # -- historical replay --------------------------------------------------------
@@ -1404,7 +1429,7 @@ class FaultQualificationTests(_WorldCase):
         two. Nothing is committed and nothing is discarded: the work is still in
         both worktrees, staged where it got that far.
         """
-        self._two_repository_run()
+        in_second = self._two_repository_run()
         (self.world.repos[SECOND] / ".git" / "index.lock").write_text(
             "", encoding="utf-8"
         )
@@ -1413,7 +1438,7 @@ class FaultQualificationTests(_WorldCase):
         status, payload = self.act(
             packet,
             "commit",
-            self.allowing("commit"),
+            self.allowing("commit", corroborating=(in_second,)),
             "--message",
             "checkpoint work in progress",
         )
@@ -1436,14 +1461,14 @@ class FaultQualificationTests(_WorldCase):
         a checkpoint back to make the group look tidy would be the one thing
         the requirements forbid.
         """
-        self._two_repository_run()
+        in_second = self._two_repository_run()
         self._seal_refs(SECOND)
         packet = self.observed()
 
         status, payload = self.act(
             packet,
             "commit",
-            self.allowing("commit"),
+            self.allowing("commit", corroborating=(in_second,)),
             "--message",
             "checkpoint work in progress",
         )
@@ -1535,12 +1560,20 @@ class FaultQualificationTests(_WorldCase):
 
     # -- helpers -----------------------------------------------------------
 
-    def _two_repository_run(self) -> None:
-        """Redeclare the run over both writable repositories, both dirty."""
+    def _two_repository_run(self) -> str:
+        """Redeclare the run over both writable repositories, both dirty.
+
+        Authority follows the repositories rather than the directory above
+        them, so a run over two projects needs a person to have spoken in each.
+        The second repository gets its own conversation and the id of that turn
+        is returned, to be cited beside the first.
+        """
         self.world.write_run("plan-tt", aliases=(AUTHORIZED, SECOND))
+        second = self.world.write_transcript(SECOND, [("user", STANDING_INSTRUCTION)])
         for alias in (AUTHORIZED, SECOND):
             self.world.change(alias)
         self.world.publish_turn(self.plan, (AUTHORIZED, SECOND))
+        return self.world.statement_id(second, 0)
 
     def _seal_refs(self, alias: str) -> None:
         """Let a repository stage and stop it committing.

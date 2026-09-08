@@ -177,10 +177,14 @@ class _Policy:
 class _Transcript:
     """A stand-in for ``overseer_history.read_history``.
 
-    Hands back one conversation in the workspace AgentMux authorized, so a
+    Hands back one conversation in the repository AgentMux authorized, so a
     ``user`` turn in it is the only thing in the whole fixture that can carry an
-    authorization. ``fail`` switches it to an answer that could not be obtained,
-    which has to stay distinguishable from an answer that said nothing.
+    authorization. The directory has to be the repository the run declares and
+    not the workspace above it: a workspace is not a project, and a decision
+    typed one level up reaches none of the projects beneath it.
+
+    ``fail`` switches it to an answer that could not be obtained, which has to
+    stay distinguishable from an answer that said nothing.
 
     ``on_read`` runs once an answer has been assembled, which is how a test puts
     a turn into the transcript *between* two readings of it. A person typing
@@ -198,11 +202,46 @@ class _Transcript:
         self.turns: list[tuple[str, str]] = [
             ("user", "answer routine tooling questions on my runs without asking me")
         ]
+        self.elsewhere: list[tuple[str, str, list[tuple[str, str]]]] = []
 
     def __call__(self, **kwargs: Any) -> overseer_history.History:
         self.calls.append(kwargs)
         if self.failure is not None:
             return self._unavailable()
+        answer = self._history(
+            allowed=True,
+            available=True,
+            reason="opted_in",
+            conversations=(
+                self._conversation(SESSION, self.project, self.turns),
+                *(
+                    self._conversation(session, project, turns)
+                    for session, project, turns in self.elsewhere
+                ),
+            ),
+        )
+        if self.on_read is not None:
+            self.on_read(len(self.calls))
+        return answer
+
+    def also_in(self, project: str, text: str) -> str:
+        """Add a conversation in another project, and name the turn it holds.
+
+        A plan that spans two repositories can only be spoken for by someone
+        speaking in each of them, and those are two different conversations in
+        two different directories. Returns the statement id of the turn, which
+        is what a claim cites.
+        """
+        session = f"{SESSION}-{len(self.elsewhere) + 2}"
+        self.elsewhere.append((session, project, [("user", text)]))
+        return f"{overseer_decisions.TRANSCRIPT_SPACE}:{HARNESS}:{session}#0"
+
+    def statement_id(self, index: int = 0) -> str:
+        return f"{overseer_decisions.TRANSCRIPT_SPACE}:{HARNESS}:{SESSION}#{index}"
+
+    def _conversation(
+        self, session: str, project: str, turns: list[tuple[str, str]]
+    ) -> overseer_history.Conversation:
         excerpts = tuple(
             overseer_history.Excerpt(
                 index=index,
@@ -211,15 +250,15 @@ class _Transcript:
                 text=text,
                 truncated=False,
             )
-            for index, (role, text) in enumerate(self.turns)
+            for index, (role, text) in enumerate(turns)
         )
-        conversation = overseer_history.Conversation(
+        return overseer_history.Conversation(
             harness=HARNESS,
-            session_id=SESSION,
+            session_id=session,
             profiles=(),
-            directory=self.project,
-            projects=(self.project,),
-            path=f"{self.project}/.transcripts/{SESSION}.jsonl",
+            directory=project,
+            projects=(project,),
+            path=f"{project}/.transcripts/{session}.jsonl",
             started_at=clock.isoformat(EPOCH - timedelta(days=1)),
             last_at=clock.isoformat(EPOCH - timedelta(hours=1)),
             session_class=self.session_class,
@@ -227,18 +266,6 @@ class _Transcript:
             truncated=False,
             excerpts=excerpts,
         )
-        answer = self._history(
-            allowed=True,
-            available=True,
-            reason="opted_in",
-            conversations=(conversation,),
-        )
-        if self.on_read is not None:
-            self.on_read(len(self.calls))
-        return answer
-
-    def statement_id(self, index: int = 0) -> str:
-        return f"{overseer_decisions.TRANSCRIPT_SPACE}:{HARNESS}:{SESSION}#{index}"
 
     def _unavailable(self) -> overseer_history.History:
         return self._history(
@@ -303,7 +330,8 @@ class _Fleet:
         self.state_root = self.root / "state"
         self.clock = _Clock()
         self.policy = _Policy()
-        self.transcript = _Transcript(str(self.root))
+        self.repository_root = self.root / "scripts"
+        self.transcript = _Transcript(str(self.repository_root))
         self.facts: dict[str, intervention.RunFacts] = {}
         self.reads: list[str] = []
         self.parser = cli.build_parser(prog="asl")
@@ -333,7 +361,7 @@ class _Fleet:
                     "alias": "scripts",
                     "path": "scripts",
                     "origin": "workspace",
-                    "resolved_root": str(self.root / "scripts"),
+                    "resolved_root": str(self.repository_root),
                 }
             ],
             overseer_discovery.PAUSED_AT_KEY: clock.isoformat(
@@ -1092,6 +1120,149 @@ class EvidenceBoundaryTests(_OverseerCase):
             "--claims-file",
             self.fleet.claims_file(self, claims),
             *extra,
+        )
+
+
+class ProjectScopeTests(unittest.TestCase):
+    """Which project a decision is about, when a plan sits under a workspace.
+
+    A run names a workspace root and the repositories checked out beneath it,
+    and those are not interchangeable. AgentMux authorizes repositories and
+    scopes a transcript to the directory its conversation was started in, so
+    the project a statement speaks about is a repository. A scope built from
+    the workspace above them would be a project nobody ever spoke about: every
+    repository decision would read as widening, and the reverse -- a scope that
+    matched the workspace loosely -- would let a decision typed in one checkout
+    reach a sibling checkout the person never mentioned. The fixture keeps the
+    workspace, the two repositories and the plan directory all distinct so
+    neither confusion can pass unnoticed.
+    """
+
+    def setUp(self) -> None:
+        self.fleet = _Fleet(self)
+        self.workspace = self.fleet.root
+        self.scripts_root = self.fleet.repository_root
+        self.api_root = self.fleet.root / "api"
+        self.plan = self.fleet.write_run("plan-alpha")
+        self.fleet.ask_question(self.plan)
+        self.shared = self.fleet.write_run(
+            "plan-both",
+            repositories=[
+                self._declaration("scripts", self.scripts_root),
+                self._declaration("api", self.api_root),
+            ],
+        )
+        self.fleet.ask_question(self.shared)
+
+    def test_a_repository_decision_reaches_a_plan_below_the_workspace(self) -> None:
+        """One repository, and the decision made in it is about it."""
+        packet = self._observe(self.plan)
+
+        status, payload = self._decide(
+            self.plan, packet, self._allowing(self.fleet.transcript.statement_id())
+        )
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["authorized"])
+        self.assertEqual([], payload["rejected_claims"])
+        scope = payload["ruling"]["scope"]
+        self.assertEqual([str(self.scripts_root)], scope["projects"])
+        self.assertNotEqual(str(self.workspace), scope["project"])
+
+    def test_a_workspace_conversation_authorizes_nothing_beneath_it(self) -> None:
+        """The workspace is a directory, not a project anyone was asked about."""
+        self.fleet.transcript.project = str(self.workspace)
+        packet = self._observe(self.plan)
+
+        status, payload = self._decide(
+            self.plan, packet, self._allowing(self.fleet.transcript.statement_id())
+        )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertFalse(payload["authorized"])
+        self.assertEqual(
+            ["scope_widened"], [item["reason"] for item in payload["rejected_claims"]]
+        )
+
+    def test_multi_repository_authority_does_not_cross_projects(self) -> None:
+        """A plan in two repositories needs a person to have spoken in each."""
+        packet = self._observe(self.shared)
+        in_scripts = self.fleet.transcript.statement_id()
+
+        status, payload = self._decide(self.shared, packet, self._allowing(in_scripts))
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertFalse(payload["authorized"])
+        self.assertEqual(
+            ["scope_widened"], [item["reason"] for item in payload["rejected_claims"]]
+        )
+        self.assertIn(
+            str(self.api_root),
+            payload["rejected_claims"][0]["detail"],
+            "the refusal has to name the project nobody spoke about",
+        )
+
+        in_api = self.fleet.transcript.also_in(
+            str(self.api_root),
+            "same for the api checkout: handle routine tooling without asking me",
+        )
+        status, payload = self._decide(
+            self.shared,
+            packet,
+            self._allowing(in_scripts, corroborating=[in_api]),
+        )
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["authorized"], payload["rejected_claims"])
+        self.assertEqual(
+            sorted([str(self.scripts_root), str(self.api_root)]),
+            payload["ruling"]["scope"]["projects"],
+        )
+
+    # -- helpers -----------------------------------------------------------
+
+    def _declaration(self, alias: str, root: Path) -> dict[str, Any]:
+        return {
+            "alias": alias,
+            "path": alias,
+            "origin": "workspace",
+            "resolved_root": str(root),
+        }
+
+    def _observe(self, plan: Path) -> dict[str, Any]:
+        status, payload = self.fleet.invoke("watch", "--watcher-id", WATCHER)
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        status, payload = self.fleet.invoke(
+            "inspect",
+            str(plan),
+            "--kind",
+            "question_pending",
+            "--summary",
+            "a run is waiting on a tooling question",
+        )
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        return payload
+
+    def _allowing(
+        self, statement_id: str, *, corroborating: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        claim = self.fleet.allowing(statement_id, "guidance")
+        if corroborating is not None:
+            claim[0]["corroborating"] = corroborating
+        return claim
+
+    def _decide(
+        self, plan: Path, packet: dict[str, Any], claims: list[dict[str, Any]]
+    ) -> tuple[int, dict[str, Any]]:
+        return self.fleet.invoke(
+            "decide",
+            str(plan),
+            "--operation",
+            "guidance",
+            "--incident-id",
+            str(packet["packet"]["incident_id"]),
+            "--claims-file",
+            self.fleet.claims_file(self, claims),
         )
 
 

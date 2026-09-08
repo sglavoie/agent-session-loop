@@ -86,7 +86,9 @@ That prints every statement in scope with a stable ID, from both evidence bounda
 
 A transcript that cannot be read is not the same as a transcript that said nothing. The `history` object reports `available`, `failure` and `withheld`; when it names a failure, you are looking at a partial evidence base and "no authorization found" is not a conclusion you have earned. Say so and escalate.
 
-A transcript statement is scoped to the working directory AgentMux authorized it under — it names no plan. A claim that wants to apply it to a plan has to narrow the scope itself, and `scope_widened` is what you get when it did not.
+A transcript statement is scoped to the project AgentMux authorized it under — the conversation's working directory, read as whichever repository the run declares that contains it — and it names no plan. A claim that wants to apply it to a plan has to narrow the scope itself, and `scope_widened` is what you get when it did not.
+
+**A project is a repository, not the workspace above one.** A run declaring two repositories is scoped to both, and a decision reaches it only by covering both: cite a statement made in each, listing the second in the claim's `corroborating` array. A statement made in one checkout is not authority over the checkout beside it, and neither is a conversation started in the directory that holds them. If nobody spoke in one of the projects, that is a question for a human rather than a scope to widen.
 
 Read the statements. Decide what each one means for the operation you have in mind, and write claims:
 

@@ -1518,6 +1518,195 @@ class ScopeTests(unittest.TestCase):
 
         self.assertFalse(overseer_decisions.Scope(project=PROJECT).covers(nested))
 
+    def test_a_scope_names_each_project_once_however_it_was_given(self) -> None:
+        """One project named twice is one project, and order is not identity."""
+        one = overseer_decisions.Scope(project=PROJECT, projects=(PROJECT,))
+        both = overseer_decisions.Scope(projects=(OTHER_PROJECT, PROJECT, PROJECT))
+
+        self.assertEqual(PROJECT, one.project)
+        self.assertEqual((PROJECT,), one.named_projects)
+        self.assertEqual((OTHER_PROJECT, PROJECT), tuple(sorted(both.named_projects)))
+        self.assertEqual(
+            overseer_decisions.Scope(projects=(PROJECT, OTHER_PROJECT)), both
+        )
+
+    def test_covering_several_projects_means_covering_every_one(self) -> None:
+        """A plan in two repositories is not reached by one of them."""
+        both = overseer_decisions.Scope(
+            projects=(PROJECT, OTHER_PROJECT), plan_dir=PLAN, run_id=RUN
+        )
+
+        self.assertFalse(overseer_decisions.Scope(project=PROJECT).covers(both))
+        self.assertFalse(overseer_decisions.Scope(project=OTHER_PROJECT).covers(both))
+        self.assertTrue(
+            overseer_decisions.Scope(projects=(PROJECT, OTHER_PROJECT)).covers(both)
+        )
+
+    def test_a_decision_about_two_projects_reaches_one_of_them(self) -> None:
+        """Coverage is a subset test: naming more than the target is not wider."""
+        both = overseer_decisions.Scope(projects=(PROJECT, OTHER_PROJECT))
+
+        self.assertTrue(both.covers(PLAN_SCOPE))
+        self.assertFalse(both.covers(overseer_decisions.Scope(project="/home/dev/web")))
+
+
+class RepositoryIdentityTests(unittest.TestCase):
+    """Which project a conversation was in, once the run says what exists.
+
+    AgentMux scopes a conversation to the directory it was started in, and
+    people start them wherever they happen to be standing -- usually inside a
+    repository rather than at its root. The run declares its repositories, so
+    a directory below one of them is that project speaking. A directory below
+    none of them is only itself, which is what keeps a conversation in the
+    workspace above two checkouts from speaking for either.
+    """
+
+    def test_a_conversation_below_a_repository_speaks_for_it(self) -> None:
+        statements = overseer_decisions.statements_from_history(
+            _history(
+                _conversation(
+                    directory=f"{PROJECT}/agent_session_loop", excerpts=(_excerpt(),)
+                )
+            ),
+            repositories=(PROJECT,),
+        )
+
+        self.assertEqual(PROJECT, statements[0].scope.project)
+
+    def test_the_declared_root_is_the_identity_a_statement_carries(self) -> None:
+        """The spelling the run declares, so both sides name the same string."""
+        statements = overseer_decisions.statements_from_history(
+            _history(_conversation(directory=PROJECT, excerpts=(_excerpt(),))),
+            repositories=(f"{PROJECT}/",),
+        )
+
+        self.assertEqual(f"{PROJECT}/", statements[0].scope.project)
+
+    def test_a_directory_no_repository_holds_is_only_itself(self) -> None:
+        """The finding, at its source: a workspace is not one of its projects."""
+        statements = overseer_decisions.statements_from_history(
+            _history(_conversation(directory="/home/dev", excerpts=(_excerpt(),))),
+            repositories=(PROJECT, OTHER_PROJECT),
+        )
+
+        self.assertEqual("/home/dev", statements[0].scope.project)
+
+    def test_a_checkout_inside_a_checkout_is_the_nested_one(self) -> None:
+        nested = f"{PROJECT}/vendor/tool"
+        statements = overseer_decisions.statements_from_history(
+            _history(_conversation(directory=nested, excerpts=(_excerpt(),))),
+            repositories=(PROJECT, nested),
+        )
+
+        self.assertEqual(nested, statements[0].scope.project)
+
+    def test_a_sibling_sharing_a_prefix_is_a_different_project(self) -> None:
+        """Containment is by path boundary, not by string prefix."""
+        statements = overseer_decisions.statements_from_history(
+            _history(
+                _conversation(directory=f"{PROJECT}-fork", excerpts=(_excerpt(),))
+            ),
+            repositories=(PROJECT,),
+        )
+
+        self.assertEqual(f"{PROJECT}-fork", statements[0].scope.project)
+
+
+class MultiProjectAuthorityTests(unittest.TestCase):
+    """A plan declared over two repositories, and what speaks for both.
+
+    Authority is held per project. A claim covering two of them rests on a
+    person having spoken in each, cited together; no reading of one project's
+    instruction supplies the other's, and no third project lends what neither
+    of them said.
+    """
+
+    def setUp(self) -> None:
+        self.scope = overseer_decisions.Scope(
+            projects=(PROJECT, OTHER_PROJECT), plan_dir=PLAN, run_id=RUN
+        )
+        self.in_scripts = _direct_statement(
+            statement_id="transcript:claude:sess-1#0",
+            scope=overseer_decisions.Scope(project=PROJECT),
+        )
+        self.in_api = _direct_statement(
+            statement_id="transcript:claude:sess-2#0",
+            scope=overseer_decisions.Scope(project=OTHER_PROJECT),
+        )
+
+    def test_one_projects_instruction_does_not_speak_for_the_other(self) -> None:
+        register = overseer_decisions.register(
+            statements=(self.in_scripts, self.in_api),
+            claims=(_claim(self.in_scripts.statement_id, scope=self.scope),),
+        )
+
+        self.assertEqual((), register.decisions)
+        self.assertEqual("scope_widened", register.rejections[0].reason)
+        self.assertIn(OTHER_PROJECT, register.rejections[0].detail)
+
+    def test_a_statement_in_each_project_carries_the_claim(self) -> None:
+        register = overseer_decisions.register(
+            statements=(self.in_scripts, self.in_api),
+            claims=(
+                _claim(
+                    self.in_scripts.statement_id,
+                    scope=self.scope,
+                    corroborating=(self.in_api.statement_id,),
+                ),
+            ),
+        )
+
+        ruling = overseer_decisions.resolve(
+            register=register,
+            request=overseer_decisions.Request(operation="resume", scope=self.scope),
+        )
+
+        self.assertEqual((), register.rejections)
+        self.assertTrue(ruling.authorized, ruling.summary)
+
+    def test_corroboration_from_a_third_project_covers_nothing(self) -> None:
+        elsewhere = _direct_statement(
+            statement_id="transcript:claude:sess-3#0",
+            scope=overseer_decisions.Scope(project="/home/dev/web"),
+        )
+
+        register = overseer_decisions.register(
+            statements=(self.in_scripts, elsewhere),
+            claims=(
+                _claim(
+                    self.in_scripts.statement_id,
+                    scope=self.scope,
+                    corroborating=(elsewhere.statement_id,),
+                ),
+            ),
+        )
+
+        self.assertEqual((), register.decisions)
+        self.assertEqual("scope_widened", register.rejections[0].reason)
+        self.assertIn(OTHER_PROJECT, register.rejections[0].detail)
+
+    def test_an_interpretation_cannot_stand_in_for_the_missing_project(self) -> None:
+        """Corroboration carries a project only from an authorizing voice."""
+        reading = _direct_statement(
+            statement_id="transcript:claude:sess-2#1",
+            voice="assistant_interpretation",
+            scope=overseer_decisions.Scope(project=OTHER_PROJECT),
+        )
+
+        register = overseer_decisions.register(
+            statements=(self.in_scripts, reading),
+            claims=(
+                _claim(
+                    self.in_scripts.statement_id,
+                    scope=self.scope,
+                    corroborating=(reading.statement_id,),
+                ),
+            ),
+        )
+
+        self.assertEqual((), register.decisions)
+        self.assertEqual("scope_widened", register.rejections[0].reason)
+
 
 class VocabularyTests(unittest.TestCase):
     """Each closed vocabulary is published twice and must agree with itself."""
