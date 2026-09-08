@@ -696,8 +696,13 @@ CLI writing the host's reading for it, and would absorb every hold that landed
 beforehand into the record the host is then said to have reviewed. A refused
 `decide` publishes no digest for the same reason read from the other end: the
 new record's name in the host's hand would match at `act`, and the stale claims
-would go through as though the hold had been reviewed. `evidence_changed` is not
-a retry: the reading was about a record that has changed, and the answer is
+would go through as though the hold had been reviewed. That is a rule about the
+whole answer rather than about one field — no refusal at either leaf names the
+record it observed, in its payload, its ruling summary, its escalation or the
+lines it prints without `--json`, and `act`'s `evidence.observed` reports the
+binding its checks confirmed or nothing at all. A record acquires a name by
+being read, and `decide --list-statements` is the reading. `evidence_changed` is
+not a retry: the reading was about a record that has changed, and the answer is
 another reading. `commit` writes a checkpoint across every
 declared repository as one durable group, so a crash partway through leaves a
 group `reconcile` can finish. A recoverable refusal is retried at most twice

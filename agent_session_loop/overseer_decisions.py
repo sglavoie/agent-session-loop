@@ -119,9 +119,12 @@ digest in ``reviewed``, and :func:`resolve` refuses
 :data:`evidence_changed <REFUSALS>` when the evidence in hand no longer hashes
 to it. The refusal is not a verdict on the new statement: it says the reading
 is about a record that has moved, and the answer is another reading rather than
-a retry. ``reviewed`` empty means the caller is not making the binding, which
-is what keeps this a check a caller offers rather than a second place a
-decision could be made.
+a retry. It therefore names the record the caller read and never the record it
+moved to, because the second name is precisely what these claims would need to
+pass and an answer that supplied it would be refusing and authorizing at once.
+``reviewed`` empty means the caller is not making the binding, which is what
+keeps this a check a caller offers rather than a second place a decision could
+be made.
 
 Who is *owed* a binding is a different question, and it is not answerable here.
 This module is handed claims and never sees where they came from, so it cannot
@@ -1118,6 +1121,13 @@ def resolve(*, register: Register, request: Request) -> Ruling:
     last word among them while the record they were read from has gained a hold
     nobody claimed, which is precisely the case re-resolving the same claims
     cannot see.
+
+    That refusal names the record the caller says it read and never the one it
+    found instead. The digest of the record as it stands is what these very
+    claims would need in order to pass, so printing it beside "your reading is
+    out of date" would issue the replacement binding in the same breath as the
+    refusal. The new record has a name only for somebody who has read it, and
+    reading it is :func:`evidence_digest` over a listing, not this refusal.
     """
     settlements = tuple(
         settle(register=register, topic=topic, scope=request.scope)
@@ -1137,16 +1147,21 @@ def resolve(*, register: Register, request: Request) -> Ruling:
             f"{request.operation!r} is not an operation an overseer performs",
             settlements=settlements,
         )
-    if request.reviewed:
-        observed = evidence_digest(register.statements, scope=request.scope)
-        if observed != request.reviewed:
-            return _refused(
-                request,
-                "evidence_changed",
-                "the claims were read from evidence "
-                f"{request.reviewed} and the evidence in hand is {observed}",
-                settlements=settlements,
-            )
+    # Computed, compared, and dropped. The digest of the record as it stands is
+    # the name of a record nobody has read, and a refusal that printed it would
+    # be handing the caller the very binding its stale claims need. Only the
+    # comparison survives these lines.
+    if request.reviewed and request.reviewed != evidence_digest(
+        register.statements, scope=request.scope
+    ):
+        return _refused(
+            request,
+            "evidence_changed",
+            f"the claims were read from evidence {request.reviewed}, which is "
+            "no longer the record in scope; the record in scope now is named "
+            "only by reading it",
+            settlements=settlements,
+        )
 
     applicable, precedents = _partition(
         (item for item in register.decisions if item.speaks_to(request.operation)),

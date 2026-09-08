@@ -123,6 +123,8 @@ This is the only place your judgement enters, and it enters as data the register
 
 **A refused evaluation issues no digest.** If the record moved between the listing and your claims, this comes back `evidence_changed` and `evidence_digest` is null — there is nothing to carry forward, because a digest for the *new* record would let the claims you wrote about the old one travel to step 5 as though the hold had been reviewed. Go back to `--list-statements`, read what is there now, and write claims about it.
 
+**That holds for the whole answer, not just that field.** No refusal from `decide` or `act` names the record it observed anywhere — not in the ruling summary, not in the escalation question, not in the lines it prints without `--json`. The new record has a name only for somebody who has read it, and `--list-statements` is the only reading. If you find yourself lifting a digest out of a refusal, you are reconstructing the binding the refusal exists to withhold.
+
 An authorized `decide` echoes the same `$DIGEST` back. Carry it to step 5.
 
 ### 5. Dispatch
@@ -145,6 +147,8 @@ The dispatcher re-checks authority twice — once before the adapter prepares an
 Omitting it is refused `evidence_unbound` rather than treated as a weaker check. The leaf could read the record itself and pin what it saw, and that is exactly the wrong answer: it would be writing your reading for you, and every hold that arrived before you invoked it would be silently absorbed into the record you are then said to have reviewed.
 
 `evidence_changed` is not a stale token and not a retry. The record you reasoned about has moved, so go back to step 4, read what is there now, and write claims about it.
+
+A refused `act` reports the same way `decide` does. `evidence.changed` says the record moved and `evidence.observed` is empty: it publishes the binding the checks confirmed — the one you brought — or nothing at all. There is no digest to pick out of the refusal and retry with, by design.
 
 **Checkpoint semantics.** `commit` writes a checkpoint across every repository the run declares, as one durable group. If the process dies between the first repository and the second, the group survives and step 6 finishes it. A checkpoint records work in progress; it is not a merge, not a push, and not a substitute for a worker's own commit discipline.
 

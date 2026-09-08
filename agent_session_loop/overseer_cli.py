@@ -795,7 +795,11 @@ def _rule(
 #: in it turned out to say. A leaf that answers with one of these publishes no
 #: ``evidence_digest``: a digest printed beside "your reading is unusable" is a
 #: fresh record's name handed to a caller holding an old record's claims, which
-#: is the manufactured binding this boundary exists to refuse.
+#: is the manufactured binding this boundary exists to refuse. The field is only
+#: the obvious route, so the rule is the whole answer rather than one key of it:
+#: no refusal from either leaf names the record it observed, in its payload, its
+#: summary, its escalation or its printed lines. The name of a record is what
+#: reading it produces, and a refusal is not a reading.
 UNUSABLE_READING: frozenset[str] = frozenset({"evidence_unbound", "evidence_changed"})
 
 
@@ -1157,7 +1161,10 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
     it. A refused reading publishes no digest either: the whole point of the
     window between the listing and the claims is that a hold can land in it, so
     handing back the *new* record's name would let the old claims travel on to
-    ``act`` as though that record had been reviewed.
+    ``act`` as though that record had been reviewed. That holds for the whole
+    answer and not only for the ``evidence_digest`` field: the ruling summary
+    and the escalation this prints are read by the same host and carried by the
+    same hands, so neither names the record the refusal observed either.
 
     A refusal is not a failure to try harder. ``held`` and ``human_decision``
     both mean a person already settled this, or has not, and the honest next
@@ -1322,6 +1329,13 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
     landed before the invocation into the record the host is then said to have
     reviewed.
 
+    Nothing this leaf prints names the record it observed. ``evidence.observed``
+    reports the binding the checks confirmed -- the caller's own digest, or
+    nothing when the record moved -- because publishing the digest of a record
+    the host never read would hand these same claims the replacement binding
+    that makes them pass on the next invocation, which is the refusal undone by
+    its own diagnostics.
+
     ``--raises`` is read once and handed to both rechecks, so the human
     questions this action depends on cannot be answered by the first reading and
     forgotten by the second. What the register itself raises is re-derived each
@@ -1343,11 +1357,12 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
         return _failure("overseer-act", error, as_json=as_json)
     timeout = float(args.timeout)
     raises = _raises(args)
-    binding = {
-        "reviewed": str(getattr(args, "reviewed_evidence", "") or ""),
-        "observed": "",
-    }
-    bound = bool(binding["reviewed"]) or not claims
+    reviewed = str(getattr(args, "reviewed_evidence", "") or "")
+    # What each authority check found, and never what it found it to be. The
+    # digest of the record as it stands is the binding these claims are missing,
+    # so the only thing that outlives the comparison is whether it held.
+    freshness = {"checked": False, "holds": False}
+    bound = bool(reviewed) or not claims
 
     def authority(
         action: overseer_dispatch.Action,
@@ -1378,15 +1393,16 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
             generated_classes=tuple(args.generated_classes or ()),
             timeout=timeout,
         )
-        binding["observed"] = overseer_decisions.evidence_digest(
+        freshness["holds"] = reviewed == overseer_decisions.evidence_digest(
             evidence.statements, scope=evidence.scope
         )
+        freshness["checked"] = True
         ruling, _register = _rule(
             evidence=evidence,
             claims=claims,
             operation=action.payload.operation,
             raises=raises,
-            reviewed=binding["reviewed"],
+            reviewed=reviewed,
         )
         return ruling
 
@@ -1427,17 +1443,17 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
             blocked=(f"{candidate.plan_dir}::{args.operation}",),
             independent=_independent_plans(inventory, excluding=plan_dir_of(candidate)),
         )
-    changed = (
-        bool(binding["observed"])
-        and bool(binding["reviewed"])
-        and binding["observed"] != binding["reviewed"]
-    )
+    changed = freshness["checked"] and bool(reviewed) and not freshness["holds"]
     payload = responses.success_payload(
         "overseer-act",
         dispatch=_dispatch_payload(dispatch),
         evidence={
-            "reviewed": binding["reviewed"],
-            "observed": binding["observed"],
+            "reviewed": reviewed,
+            # The binding this invocation confirmed, which is the caller's own
+            # digest or nothing at all. A record that moved is reported as
+            # having moved and is never named: naming it here would publish the
+            # replacement binding these same claims are refused for lacking.
+            "observed": reviewed if freshness["holds"] else "",
             "changed": changed,
             "bound": bound,
         },
@@ -1457,10 +1473,13 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
         )
     if changed:
         lines.append(
-            f"  evidence moved: reviewed {binding['reviewed']}, "
-            f"observed {binding['observed']}"
+            f"  evidence moved: the record is no longer {reviewed}, and the "
+            "record it is now is named by reading it"
         )
-        lines.append("  re-run decide and read the record again before acting")
+        lines.append(
+            "  re-run `asl overseer decide --list-statements` and read the "
+            "record again before acting"
+        )
     if dispatch.recoveries:
         lines.append(
             f"  recoveries: {dispatch.recoveries}/{overseer_dispatch.RECOVERY_LIMIT}"

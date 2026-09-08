@@ -64,6 +64,7 @@ import contextlib
 import inspect as inspect_module
 import io
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -528,16 +529,20 @@ class _Fleet:
 
     # -- driving -----------------------------------------------------------
 
-    def parse(self, *argv: str) -> argparse.Namespace:
+    def parse(self, *argv: str, as_json: bool = True) -> argparse.Namespace:
         """Parse through the real parser, so the flags under test are the ones
         an operator types rather than a namespace the test invented."""
         return self.parser.parse_args(
-            ["overseer", *argv, "--state-dir", str(self.state_root), "--json"]
+            [
+                "overseer",
+                *argv,
+                "--state-dir",
+                str(self.state_root),
+                *(("--json",) if as_json else ()),
+            ]
         )
 
-    def invoke(self, *argv: str) -> tuple[int, dict[str, Any]]:
-        """Run one leaf the way ``asl`` would, and read its JSON envelope."""
-        args = self.parse(*argv)
+    def _run(self, args: argparse.Namespace) -> tuple[int, str]:
         # `resolve_handler` is typed for the shape every leaf shares. The
         # overseer leaves additionally take the keyword-only `seams` this
         # fixture injects, so the widening lives here rather than in the
@@ -546,7 +551,21 @@ class _Fleet:
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
             status = handler(args, seams=self.seams())
-        return status, json.loads(stream.getvalue())
+        return status, stream.getvalue()
+
+    def invoke(self, *argv: str) -> tuple[int, dict[str, Any]]:
+        """Run one leaf the way ``asl`` would, and read its JSON envelope."""
+        status, written = self._run(self.parse(*argv))
+        return status, json.loads(written)
+
+    def render(self, *argv: str) -> tuple[int, str]:
+        """The same leaf without ``--json``, read the way an operator reads it.
+
+        A structured payload is not the whole of what a leaf hands back: the
+        printed lines reach the same host, and a value withheld from one and
+        spelled out in the other is not withheld.
+        """
+        return self._run(self.parse(*argv, as_json=False))
 
     def claims_file(self, case: unittest.TestCase, claims: list[dict[str, Any]]) -> str:
         path = self.root / f"claims-{len(list(self.root.glob('claims-*.json')))}.json"
@@ -1543,6 +1562,12 @@ class EvidenceFreshnessTests(_OverseerCase):
     and inside a single dispatch --- the refusal that closes them when nothing
     was bound at all, and the case that must keep working, which is evidence
     that did not move.
+
+    They also read the refusals themselves, in both renderings and in full. A
+    refusal that names the record it observed hands the claims it just refused
+    the one thing they were missing, so the answer would undo itself on the next
+    invocation: the binding a host holds has to have come from reading a record,
+    and a refusal is not a reading.
     """
 
     def test_decide_publishes_the_digest_of_the_record_it_read(self) -> None:
@@ -1751,6 +1776,98 @@ class EvidenceFreshnessTests(_OverseerCase):
         self.assertEqual("evidence_unbound", payload["ruling"]["refusal"])
         self.assertIsNone(payload["evidence_digest"])
 
+    def test_a_refused_decide_furnishes_no_replacement_binding(self) -> None:
+        """The refusal must not issue the binding it is refusing for lacking.
+
+        Withholding ``evidence_digest`` is only the obvious half. The summary
+        says why the reading is unusable, the escalation asks a human about it,
+        and the printed lines say both again --- and a digest spelled out in any
+        of them is the new record's name in the hand of a host holding the old
+        record's claims, which is the whole of what the binding is for. So the
+        entire answer is read, in both renderings, and anything in it that looks
+        like a binding is tried against ``act`` before being asserted absent.
+        """
+        packet = self.observed()
+        listed = self._reviewed(packet)
+        claims = self.fleet.allowing(self.fleet.transcript.statement_id(), "guidance")
+        self.fleet.transcript.turns.append(
+            ("user", "hold this run. do not resume or send guidance.")
+        )
+
+        status, refused = self._decide(packet, reviewed=listed, claims=claims)
+        printed_status, printed = self.fleet.render(
+            "decide",
+            str(self.plan),
+            "--operation",
+            "guidance",
+            "--incident-id",
+            str(packet["packet"]["incident_id"]),
+            "--reviewed-evidence",
+            listed,
+            "--claims-file",
+            self.fleet.claims_file(self, claims),
+        )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, refused)
+        self.assertEqual("evidence_changed", refused["ruling"]["refusal"])
+        self.assertEqual(overseer_cli.EXIT_REFUSED, printed_status, printed)
+        self.assertIn("evidence_changed", printed)
+        self._assert_no_reusable_binding(packet, listed, refused, printed)
+
+    def test_a_refused_act_furnishes_no_replacement_binding(self) -> None:
+        """The same rule at the mutating leaf, whose answer says more.
+
+        ``act`` reports what its authority checks found, so it is the leaf with
+        an actual field for the record it read. What it publishes there is the
+        binding the caller brought and the checks confirmed, or nothing: a
+        record the host never read is reported as a record that moved and is
+        never named, in the payload or in the line printed beside it.
+        """
+        packet = self.observed()
+        reviewed = self._reviewed(packet)
+        self.fleet.transcript.turns.append(
+            ("user", "hold this run. do not resume or send guidance.")
+        )
+
+        status, refused = self._act(packet, reviewed)
+        printed_status, printed = self.fleet.render(
+            "act",
+            str(self.plan),
+            "--watcher-id",
+            WATCHER,
+            "--operation",
+            "guidance",
+            "--run-id",
+            packet["run_id"],
+            "--incident-id",
+            str(packet["packet"]["incident_id"]),
+            "--token",
+            packet["token"],
+            "--scope",
+            packet["scope"],
+            "--text",
+            "carry on",
+            "--reviewed-evidence",
+            reviewed,
+            "--claims-file",
+            self.fleet.claims_file(
+                self,
+                self.fleet.allowing(self.fleet.transcript.statement_id(), "guidance"),
+            ),
+        )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, refused)
+        self.assertFalse(refused["dispatch"]["performed"])
+        self.assertTrue(refused["evidence"]["changed"])
+        self.assertEqual(
+            "",
+            refused["evidence"]["observed"],
+            "a refused act must not name the record its claims were not read from",
+        )
+        self.assertEqual(overseer_cli.EXIT_REFUSED, printed_status, printed)
+        self.assertIn("evidence moved", printed)
+        self._assert_no_reusable_binding(packet, reviewed, refused, printed)
+
     def test_an_operation_without_claims_needs_no_binding(self) -> None:
         """Nothing was read, so there is no reading to bind.
 
@@ -1766,6 +1883,51 @@ class EvidenceFreshnessTests(_OverseerCase):
         self.assertEqual("no_decision", payload["ruling"]["refusal"])
 
     # -- helpers -----------------------------------------------------------
+
+    #: What an evidence binding looks like from outside, which is how a host
+    #: reading an answer would recognize one.
+    BINDING = re.compile(r"ev1-[0-9a-f]{32}")
+
+    def _bindings(self, answer: dict[str, Any] | str, reviewed: str) -> set[str]:
+        """Every binding an answer names that its caller did not already hold."""
+        rendered = answer if isinstance(answer, str) else json.dumps(answer)
+        return set(self.BINDING.findall(rendered)) - {reviewed}
+
+    def _assert_no_reusable_binding(
+        self,
+        packet: dict[str, Any],
+        reviewed: str,
+        *answers: dict[str, Any] | str,
+    ) -> None:
+        """No answer hands back a binding, and none it could hand back works.
+
+        Both halves are asserted rather than one: the reuse attempt is the
+        property that matters --- a value that authorizes nothing is not a
+        binding --- and the emptiness is what keeps the property from resting
+        on every future consumer of the refusal being careful with it.
+        """
+        offered = set().union(*(self._bindings(answer, reviewed) for answer in answers))
+        for replacement in sorted(offered):
+            _status, retried = self._act(packet, replacement)
+            self.assertFalse(
+                retried["dispatch"]["performed"],
+                f"a refusal furnished a usable replacement binding: {replacement}",
+            )
+        self.assertEqual(
+            set(),
+            offered,
+            "a refusal named a record the host never read; the stale claims "
+            "could carry that name to `act` as though it had been reviewed",
+        )
+        self.assertEqual(
+            (),
+            tuple(
+                message
+                for message in self.fleet.messages(self.plan)
+                if message.kind == mailbox.KIND_GUIDANCE
+            ),
+            "guidance crossed a hold on a binding no listing ever issued",
+        )
 
     def _reviewed(self, packet: dict[str, Any]) -> str:
         return self.fleet.reviewed(
