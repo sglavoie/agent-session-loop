@@ -6625,11 +6625,23 @@ after a restart.
 - Every `python -m agent_session_loop run` child the Workbench spawns —
   including the intervention and `--resume` launches — carries
   `ASL_INVOCATION_ORIGIN=workbench`, so `asl metrics` attributes those
-  runs to the Workbench rather than to a supervisor at a terminal. The
-  marker is the only entry `launch_plan` sets; a caller-supplied `env`
+  runs to the Workbench rather than to a supervisor at a terminal. That
+  marker and — on an `isolate_locks=True` launch — `ASL_LOCK_ISOLATION=1`
+  are the only entries `launch_plan` sets; a caller-supplied `env`
   mapping is otherwise passed through unchanged, and a launch with no
   `env` materializes the inherited environment so the child is still
   attributed. See [CLI invocation trace](#cli-invocation-trace).
+- `ASL_LOCK_ISOLATION` narrows a spawned child's lock authorization to
+  the plan it was launched for: the child still takes that plan's lock
+  and still refuses an overlapping claim, but it reclaims no other
+  plan's proven-dead lock. It is set only by launchers authorized one
+  plan at a time — today, the overseer's environmental-recovery resume
+  through `intervention.resume_recovered_run`. An operator-driven
+  launch, including `asl run` and the Workbench's own reply resume, sets
+  nothing and keeps the ordinary corpus-wide hygiene. The variable is
+  internal, presence-checked rather than value-checked, and never
+  documented as an operator knob: setting it by hand only turns off
+  stale-lock cleanup for that one run.
 - The Recovery Center is a read-only diagnosis layer. It may display
   copyable repair commands, but the Workbench never executes those
   commands. Action cards only route to existing affordances and

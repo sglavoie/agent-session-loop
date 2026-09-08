@@ -42,6 +42,7 @@ from . import (
     qna,
     responses,
     review_continuation,
+    run_contention,
     run_inputs,
     state,
 )
@@ -5653,12 +5654,20 @@ def launch_plan(
     stderr: Any = subprocess.DEVNULL,
     popen_factory: Any = subprocess.Popen,
     resume: bool = False,
+    isolate_locks: bool = False,
 ) -> LaunchResult:
     """Spawn a background ``python -m agent_session_loop run`` process.
 
     ``reply_text`` is streamed to the child's stdin when set so the operator
     answer never appears in argv, environment variables, or persisted state.
     The child still emits its normal ASL state, events, and artifacts.
+
+    ``isolate_locks`` narrows the child's lock authorization to the plan being
+    launched: it still takes that plan's lock and still refuses on an overlap,
+    but it reclaims no other plan's stale lock. It defaults to false because an
+    operator-driven launch is an ordinary start and wants the ordinary hygiene;
+    a launcher authorized one plan at a time passes true, and the marker
+    travels in the environment because the argv belongs to the resumed run.
 
     Validation errors raise :class:`LaunchError` before any subprocess is
     spawned, so callers can map them to immediate API errors.
@@ -5698,6 +5707,8 @@ def launch_plan(
     popen_env = cli_trace.child_env(
         os.environ if env is None else env, cli_trace.ORIGIN_WORKBENCH
     )
+    if isolate_locks:
+        popen_env = run_contention.isolated_child_env(popen_env)
 
     stdin_pipe = subprocess.PIPE if reply_via_stdin else subprocess.DEVNULL
     try:

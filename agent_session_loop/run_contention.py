@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,11 +24,14 @@ from . import plans, session_overview
 __all__ = [
     "LIVENESS_RUNNING",
     "LIVENESS_FOREIGN_HOST",
+    "LOCK_ISOLATION_ENV_VAR",
     "RepositoryConflict",
     "canonical_roots",
     "conflict_sort_key",
     "claimed_roots",
     "detect_conflicts",
+    "isolated_child_env",
+    "lock_isolation_requested",
     "conflict_message",
     "conflict_details",
 ]
@@ -36,6 +39,29 @@ __all__ = [
 
 LIVENESS_RUNNING = "running"
 LIVENESS_FOREIGN_HOST = "foreign-host"
+
+LOCK_ISOLATION_ENV_VAR = "ASL_LOCK_ISOLATION"
+
+
+def lock_isolation_requested(env: Mapping[str, str] | None = None) -> bool:
+    """Whether this process was launched under a narrowed lock authorization.
+
+    A launcher authorized for one plan cannot express that narrowing in the
+    child's argv: the argv belongs to the resumed run, and a flag there would
+    be a flag an operator could pass to an ordinary ``asl run``. The marker is
+    an environment variable the launcher sets instead, and the reading is
+    presence-based rather than value-based so an unexpected value isolates —
+    the failure direction where the child writes nothing it may not write.
+    """
+    source = os.environ if env is None else env
+    return bool((source.get(LOCK_ISOLATION_ENV_VAR) or "").strip())
+
+
+def isolated_child_env(base: Mapping[str, str]) -> dict[str, str]:
+    """Return ``base`` marked so the child reclaims no lock but its own plan's."""
+    env = dict(base)
+    env[LOCK_ISOLATION_ENV_VAR] = "1"
+    return env
 
 
 @dataclass(frozen=True)
@@ -141,7 +167,10 @@ def detect_conflicts(
     lock files belonging to plans it may not, which is a mutation of an
     excluded plan caused by a read of an allowed one. The observation-only
     reader in ``overseer_isolation`` is that caller, and it is what an overseer
-    launch passes down through ``run_entry.run_from_args``.
+    launch passes down through ``run_entry.run_from_args``. A launch that
+    spawns the run as a child process rather than calling it in this one hands
+    the same narrowing over in :data:`LOCK_ISOLATION_ENV_VAR`, which the child
+    reads back through :func:`lock_isolation_requested`.
     """
     claimed = canonical_roots(repository_roots)
     if not claimed:

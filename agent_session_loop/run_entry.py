@@ -380,8 +380,14 @@ def run_from_args(
     *this* plan passes false, because that hygiene reaches plans it was never
     granted — see ``overseer_isolation.launch``. It narrows the writing, never
     the checking: the overlap question, the refusal and its payload are
-    identical either way.
+    identical either way. A launcher that spawns the run as a child process
+    cannot pass that argument at all, so it sets
+    ``run_contention.LOCK_ISOLATION_ENV_VAR`` on the child's environment
+    instead; the parameter is narrowed from that marker below, which makes an
+    in-process isolated call and a spawned isolated child the same run.
     """
+    if run_contention.lock_isolation_requested():
+        reclaim_stale_locks = False
     if run_argv is None:
         run_argv = getattr(args, "_run_argv", None)
     if getattr(args, "resume", False):

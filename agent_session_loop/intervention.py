@@ -742,6 +742,17 @@ def resume_recovered_run(
     field this service quietly ignored would be a launch setting the caller
     believes it restored and did not.
 
+    ``isolate_locks=True`` is passed here rather than left to callers, for the
+    same structural reason. This path exists for a recovery an overseer drives,
+    and an overseer is authorized one plan at a time while the plans it was
+    refused sit in the same state root; corpus-wide stale-lock reclamation in
+    the spawned child would delete their lock files. A keyword every caller has
+    to remember is a keyword one caller forgets, and the forgetting is silent —
+    so the narrowing belongs to the route, not to its callers. The resumed
+    plan's own lock and the overlap refusal are untouched by it, and
+    :func:`resume_paused_run` keeps the ordinary hygiene an operator-driven
+    launch should have.
+
     Launcher refusals are re-raised as :class:`InterventionError` under the
     launcher's own reason, so a caller behind this seam handles one error type
     and never needs the launcher in its own imports.
@@ -764,6 +775,7 @@ def resume_recovered_run(
             reply_text=None,
             state_dir=state_dir,
             resume=True,
+            isolate_locks=True,
             **launch_kwargs,
         )
     except workbench.LaunchError as error:
