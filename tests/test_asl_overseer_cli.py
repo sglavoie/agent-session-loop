@@ -2566,9 +2566,9 @@ class VerificationOperationTests(_OverseerCase):
     The last two remove the manifest instead of growing it, which is the edit
     that makes the plan *legacy* rather than differently registered. A legacy
     reading binds no registry at all, so these are the cases where the binding
-    above would simply stop applying; they carry their own control, because a
-    run whose record never observed a registry has to keep verifying against
-    exactly the plan the other half refuses.
+    above would simply stop applying. The ordinary `asl verify` CLI remains
+    the control for supported legacy verification; overseer discovery excludes
+    real legacy runs because they declare no authorized repository set.
     """
 
     def setUp(self) -> None:
@@ -2582,10 +2582,17 @@ class VerificationOperationTests(_OverseerCase):
         #: The record of a run discovery observed with no registry, kept before
         #: `_register` overwrites it so a test can put a genuinely legacy
         #: observation back and read the same plan the other way.
-        self.legacy_record = self._record().read_text(encoding="utf-8")
+        legacy_record = json.loads(self._record().read_text(encoding="utf-8"))
+        # Real legacy runs publish none of these workspace fields. An arbitrary
+        # registry digest with malformed declarations is not legacy provenance.
+        for key in ("workspace_root", "registry_digest", "repositories"):
+            legacy_record.pop(key, None)
+        self.legacy_record = json.dumps(legacy_record)
         #: Every directory Git was asked about, so a test can show that an
         #: unpermitted repository was refused rather than merely not verified in.
         self.inspected: list[str] = []
+        self._register("scripts")
+        self.enterContext(self._answering_git())
 
     def test_authorized_verify_runs_declared_check(self) -> None:
         self.marker.write_text("present\n", encoding="utf-8")
@@ -2783,11 +2790,9 @@ class VerificationOperationTests(_OverseerCase):
         AgentMux permitted. Only the mode moved, from a registry this action was
         bound to towards none at all.
 
-        The second half is the control the first needs. Same plan, same missing
-        manifest, same legacy contract, and the only difference is a record that
-        never observed a registry: that verifies, so the refusal above is the
-        registered observation being honoured rather than legacy mode being
-        broken.
+        The second half restores a real legacy observation, whose workspace
+        fields are absent. Overseer discovery excludes it, while the ordinary
+        public verify command still verifies the same plan and legacy contract.
         """
         self.marker.write_text("present\n", encoding="utf-8")
         self._register("scripts")
@@ -2816,27 +2821,85 @@ class VerificationOperationTests(_OverseerCase):
         self._assert_the_check_never_ran(dispatch["detail"])
 
         self._forget_the_registry_observation()
-        legacy = self.observed()
-
-        with self._answering_git():
-            status, payload = self.act(
-                legacy,
-                "--check",
-                "marker",
-                "--reviewed-evidence",
-                self._reviewed(legacy),
-                "--claims-file",
-                self._claims(),
-                operation="verify",
-            )
-
-        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
-        self.assertTrue(
-            payload["dispatch"]["performed"],
-            f"a run observed with no registry stopped verifying: "
-            f"{payload['dispatch']['detail']}",
+        inventory = overseer_discovery.build_inventory(state_dir=self.fleet.state_root)
+        legacy = next(c for c in inventory.candidates if c.plan_dir == str(self.plan))
+        self.assertFalse(legacy.eligible)
+        self.assertIsNone(overseer_verify._observed_registry(legacy))
+        # The ordinary public verify command is the supported legacy workflow;
+        # overseer discovery has always excluded runs without declared roots.
+        output = io.StringIO()
+        args = self.fleet.parser.parse_args(
+            [
+                "verify",
+                str(self.plan),
+                "--session",
+                PLAN_SESSION,
+                "--cwd",
+                str(self.fleet.repository_root),
+                "--json",
+            ]
         )
-        self.assertIn("marker", payload["dispatch"]["detail"])
+        with contextlib.redirect_stdout(output):
+            status = cli.resolve_handler(args)(args)
+        self.assertEqual(0, status, output.getvalue())
+        self.assertIn("marker", output.getvalue())
+
+    def test_inconsistent_registry_cannot_authorize_legacy_downgrade(self) -> None:
+        for timing in ("after-inspect", "during-preparation"):
+            for field, value in (
+                ("path", "other"),
+                ("origin", "github.com/example/other"),
+                ("path", ""),
+            ):
+                with self.subTest(timing=timing, field=field, value=value):
+                    case = VerificationOperationTests()
+                    case.setUp()
+                    try:
+                        case._assert_registry_corruption_refused(timing, field, value)
+                    finally:
+                        case.doCleanups()
+
+    def _assert_registry_corruption_refused(
+        self, timing: str, field: str, value: str
+    ) -> None:
+        self.marker.write_text("present\n", encoding="utf-8")
+        packet = self.observed()
+        reviewed, claims = self._reviewed(packet), self._claims()
+
+        def corrupt() -> None:
+            self._drop_the_registry()
+            record = json.loads(self._record().read_text(encoding="utf-8"))
+            record["repositories"][0][field] = value
+            self._record().write_text(json.dumps(record), encoding="utf-8")
+
+        if timing == "after-inspect":
+            corrupt()
+        else:
+            asks: list[str] = []
+
+            def on_ask(access: str) -> None:
+                asks.append(access)
+                if access == ACTION and asks.count(ACTION) == 2:
+                    corrupt()
+
+            self.fleet.policy.on_ask = on_ask
+        status, payload = self.act(
+            packet,
+            "--check",
+            "marker",
+            "--reviewed-evidence",
+            reviewed,
+            "--claims-file",
+            claims,
+            operation="verify",
+        )
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        dispatch = payload["dispatch"]
+        self.assertFalse(dispatch["performed"])
+        self.assertIn("registry_moved", dispatch["detail"])
+        self.assertIn("inconsistent registry evidence", dispatch["detail"])
+        self.assertNotIn("contract_moved", dispatch["detail"])
+        self._assert_the_check_never_ran(dispatch["detail"])
 
     def test_registry_removal_during_preparation_refuses_verify(self) -> None:
         """The same removal, made while the action was already in flight.

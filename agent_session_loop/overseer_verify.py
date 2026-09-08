@@ -83,9 +83,11 @@ the registry it ran under: ``registry_digest`` and the repositories it was
 computed from are written together, from one registry, so the record attests to
 its own registry and can be checked against itself. Rebuild the registry from
 the declarations and its digest is the digest recorded beside them. A record
-whose declarations are not a registry at all, or do not hash to what it
-carries, observed no registry --- that run is legacy, and a plan with no
-manifest is what it has always been.
+whose declarations are malformed or do not reproduce the recorded digest has
+invalid registry evidence, not legacy provenance. It is refused before either
+mode is selected. Only an observation with no workspace root, digest, or
+repository declarations represents a legacy run; ordinary legacy verification
+remains supported, while overseer discovery excludes those undeclared runs.
 
 A run the record attests as registered, whose plan now declares no registry, is
 therefore ``registry_moved`` like any other registry drift, and for the same
@@ -695,6 +697,16 @@ def _context(
             "read back",
         )
 
+    try:
+        _observed_registry(observed)
+    except workspaces.WorkspaceError as error:
+        return (
+            "registry_moved",
+            f"{observed.plan_dir} has inconsistent registry evidence: {error}; "
+            "this needs fresh discovery and a fresh reading of the record "
+            "rather than another attempt",
+        )
+
     if registry is None:
         # A plan with no manifest is legacy *now*. Whether it was legacy when
         # this action was authorized is the different question the record
@@ -799,29 +811,29 @@ def _observed_registry(
     A registered run's record carries the digest and the repositories it was
     computed from, written together out of one registry, so the record attests
     to its own registry and that attestation is checkable without the plan:
-    rebuild the registry from the declarations and it names the digest recorded
-    beside them. Declarations that are not a registry at all, or that do not
-    hash to what the record carries, are not an observation of one --- and a
-    run observed with no registry is legacy, which is the only reading under
-    which a plan with no manifest is unchanged.
+    rebuild the registry from the declarations and require the recorded digest.
+    Failed reconstruction or attestation raises rather than returning the
+    absence that represents legacy mode. Partial registry metadata is invalid
+    too; a legacy run's published workspace fields are all absent.
     """
     digest = (observed.registry_digest or "").strip()
-    if not digest or not observed.repositories:
+    if not observed.workspace_root and not digest and not observed.repositories:
         return None
-    try:
-        registry = workspaces.RepositoryRegistry(
-            tuple(
-                workspaces.Repository(
-                    alias=declaration.alias,
-                    path=declaration.path,
-                    origin=declaration.origin,
-                )
-                for declaration in observed.repositories
+    if not observed.workspace_root or not digest or not observed.repositories:
+        raise workspaces.WorkspaceError("incomplete registered observation")
+    registry = workspaces.RepositoryRegistry(
+        tuple(
+            workspaces.Repository(
+                alias=declaration.alias,
+                path=declaration.path,
+                origin=declaration.origin,
             )
+            for declaration in observed.repositories
         )
-    except workspaces.WorkspaceError:
-        return None
-    return registry if registry.digest == digest else None
+    )
+    if registry.digest != digest:
+        raise workspaces.WorkspaceError("declarations do not match the recorded digest")
+    return registry
 
 
 def _registry_bound(
