@@ -672,8 +672,12 @@ before it becomes `recovery_exhausted`.
 
 The operational scope is `reply`, `guidance`, `verify`, `commit` and `resume`,
 and the registry is closed: an operation no adapter implements is refused
-`operation_unsupported` before the ledger is touched. `verify` has no adapter
-today, so dispatching it escalates rather than improvising a command.
+`operation_unsupported` before the ledger is touched. `verify` runs one check
+the plan already declared — `--check` names a check in the completion contract
+of the session the run is on, and the argv comes from that contract rather than
+from the action, so a different command means a different plan file. A name the
+contract does not declare is refused `check_undeclared`, and a check that ran
+and failed reports that failure rather than a refusal.
 Application-code repairs stay with the worker session.
 
 `reconcile` settles rows a dispatch left in doubt after dying between performing

@@ -67,6 +67,7 @@ from . import (
     overseer_policy_client,
     overseer_resume,
     overseer_store,
+    overseer_verify,
     overseer_watch,
     responses,
 )
@@ -775,11 +776,11 @@ def _adapters(
     repository as the degenerate case, so there is no reason to register the
     ungrouped one and every reason not to.
 
-    ``verify`` is absent on purpose. No adapter implements it, so
-    :func:`overseer_dispatch.dispatch` refuses it ``operation_unsupported``
-    before it touches the ledger. That refusal is the escalation path working:
-    an operation outside the helper's reach becomes a question for a human, not
-    an improvised command.
+    ``verify`` comes from :mod:`overseer_verify`, which takes the check *name*
+    the action carries and looks it up in the completion contract of the session
+    the run is on. Nothing here composes a command, and no seam could pass one:
+    a caller who wants a different argv has to change a plan file, in a
+    repository, under the write rules that govern repositories.
     """
     root = None if state_dir is None else Path(state_dir)
     sources = (
@@ -792,6 +793,12 @@ def _adapters(
             timeout=timeout,
         ),
         overseer_resume.adapters(
+            authority=authority,
+            state_dir=root,
+            build_inventory=seams.build_inventory,
+            inspect_run=seams.inspect_run,
+        ),
+        overseer_verify.adapters(
             authority=authority,
             state_dir=root,
             build_inventory=seams.build_inventory,

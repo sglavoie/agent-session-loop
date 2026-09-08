@@ -1680,7 +1680,7 @@ class ExclusionInvariantTests(_WorldCase):
         self._assert_untouched()
 
     def test_no_operation_reaches_the_excluded_project(self) -> None:
-        """Every operation with an adapter, plus the one deliberately without."""
+        """Every operation in the scope, none of them touching the exclusion."""
         question = self.world.ask_question(self.plan, "which lint profile?")
         self.world.change(AUTHORIZED)
         self.world.publish_turn(self.plan, (AUTHORIZED,))
@@ -1693,6 +1693,7 @@ class ExclusionInvariantTests(_WorldCase):
         )
 
         refusals = {}
+        details = {}
         for operation, extra in attempts:
             # Re-observed each time: every operation that lands moves the run,
             # and an action carrying the previous picture is stale by design.
@@ -1700,11 +1701,17 @@ class ExclusionInvariantTests(_WorldCase):
                 self.observed(), operation, self.allowing(operation), *extra
             )
             refusals[operation] = payload["dispatch"]["refusal"]
+            details[operation] = payload["dispatch"]["detail"]
 
         self.assertIsNone(refusals["reply"])
         self.assertIsNone(refusals["guidance"])
         self.assertIsNone(refusals["commit"])
-        self.assertEqual("operation_unsupported", refusals["verify"])
+        # This world's sessions carry no completion contract, so there is no
+        # check to name and `verify` stops at the plan. That is the whole
+        # point of the operation: the argv comes from a declaration or the
+        # action is refused, and no `--check` string here becomes a command.
+        self.assertEqual("preparation_declined", refusals["verify"])
+        self.assertIn("contract_absent", details["verify"])
         # The plan's own worker is alive throughout, so `resume` is refused by
         # the census. Nothing here may reach the leaf's launcher: it has no
         # `launch` seam, and an authorized resume would start a real runner.

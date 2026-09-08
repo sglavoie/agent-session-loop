@@ -2015,7 +2015,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
             "The operational scope is reply, "
             "guidance, verify, commit and resume; anything else, and anything "
             "no adapter implements, is refused and escalated rather than "
-            "improvised. Application-code repairs belong to a worker, not here."
+            "improvised. `--check` names a check the session's completion "
+            "contract already declares and the argv comes from that contract, "
+            "so an undeclared name is refused rather than run. "
+            "Application-code repairs belong to a worker, not here."
         ),
     )
     overseer_act_parser.add_argument("plan_dir", help="Plan directory to act on")

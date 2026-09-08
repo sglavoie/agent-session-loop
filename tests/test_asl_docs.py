@@ -160,7 +160,8 @@ class SkillInstructionTests(unittest.TestCase):
             "Every state-changing thing you do goes through `asl overseer act`", text
         )
         self.assertIn("There is no fallback path", text)
-        self.assertIn("`verify` currently has no adapter", text)
+        self.assertIn("`verify` runs a check the plan already declared", text)
+        self.assertIn("`check_undeclared`", text)
         self.assertIn("operation_unsupported", text)
         self.assertEqual(
             ("reply", "guidance", "verify", "commit", "resume"),

@@ -19,11 +19,17 @@ only a harness transcript can carry a person's turn. The tests assert both
 halves, because either one alone reads as an accident.
 
 *Escalation without a way out.* ``EscalationTests`` covers the refusals that
-must stay refusals: an operation no adapter implements, a claim resting on a
-relay, an unreadable transcript. The structural test is the important one --
+must stay refusals: a check no plan declares, a claim resting on a relay, an
+unreadable transcript. The structural test is the important one --
 :class:`overseer_cli.Escalation` is inspected for a ``default``, ``timeout`` or
 ``deadline`` field, because "silence is not consent" enforced by instruction is
 enforced by nothing.
+
+*A name, not a command.* ``VerificationOperationTests`` drives ``verify``
+against a real completion contract in a real session file: a declared check
+runs and reports its real result, and an undeclared name is refused with the
+declared names in the refusal. Only both halves together say the operation is
+neither a stub that always refuses nor a shell that always obliges.
 
 *Permission before content.* ``ReconciliationPermissionTests`` covers the leaf
 whose whole job is reading what a previous process touched, and which is
@@ -85,6 +91,7 @@ from agent_session_loop import (
     overseer_policy_client,
     overseer_resume,
     overseer_store,
+    overseer_verify,
     overseer_watch,
     plans,
     state,
@@ -102,6 +109,10 @@ FINGERPRINT = "fp-1"
 DIGEST = "rd-1"
 HARNESS = "claude"
 SESSION = "session-7"
+#: The ASL session the fixture's run is on. Deliberately not `SESSION`: a
+#: harness conversation id and a plan session id are different vocabularies, and
+#: `verify` reads the second one to find the contract it may run a check from.
+PLAN_SESSION = "7"
 #: The access category a mutation and its reconciliation are both asked under.
 ACTION = overseer_policy_client.ACCESS_ACTION
 
@@ -380,6 +391,50 @@ class _Fleet:
         self.facts[str(plan_dir)] = self._run_facts(plan_dir, run_id)
         return plan_dir
 
+    def declare_checks(
+        self, plan_dir: Path, *checks: dict[str, Any]
+    ) -> tuple[str, ...]:
+        """Write the session file whose completion contract declares ``checks``.
+
+        A real session file parsed by the real contract reader, because the
+        whole claim `verify` rests on is that the argv comes from a plan rather
+        than from an action -- a stubbed contract would prove the adapter reads
+        *something*, which is the uninteresting half.
+        """
+        recipe = json.dumps({"session": PLAN_SESSION, "checks": list(checks)}, indent=2)
+        (plan_dir / plans.session_id_to_filename(PLAN_SESSION)).write_text(
+            "\n".join(
+                (
+                    f"# Session {PLAN_SESSION}: Fixture",
+                    "",
+                    "Instructions.",
+                    "",
+                    "## Completion Contract",
+                    "",
+                    "### Done when",
+                    "",
+                    "- the declared check passes",
+                    "",
+                    "### Verify",
+                    "",
+                    "```json",
+                    recipe,
+                    "```",
+                    "",
+                    "## Handoff",
+                    "",
+                    "- **Status**: pending",
+                    "- **Files modified**: (none yet)",
+                    "- **Key decisions**: (none yet)",
+                    "- **Blockers for next session**: (none yet)",
+                    "- **Notes**:",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        return tuple(str(check["name"]) for check in checks)
+
     def ask_question(self, plan_dir: Path, text: str = "which lint profile?") -> str:
         """Put a question in a run's mailbox and return its id."""
         message = mailbox.append_question(
@@ -413,7 +468,7 @@ class _Fleet:
                 "run_started_at": clock.isoformat(EPOCH - timedelta(hours=2)),
                 "run_finished_at": None,
                 "active_turn": {
-                    "session_id": SESSION,
+                    "session_id": PLAN_SESSION,
                     "turn_index": 3,
                     "last_activity_at": clock.isoformat(EPOCH - timedelta(minutes=1)),
                 },
@@ -1444,8 +1499,17 @@ class EscalationTests(_OverseerCase):
         for forbidden in ("default", "timeout", "deadline", "expires_at"):
             self.assertNotIn(forbidden, payload)
 
-    def test_an_operation_no_adapter_implements_is_refused_and_escalated(self) -> None:
-        """`verify` is the meaningful escalation: refused before the ledger."""
+    def test_a_check_no_plan_declares_is_refused_and_escalated(self) -> None:
+        """A fully authorized verify still cannot invent the check it runs.
+
+        The meaningful escalation for `verify`: authority is not the missing
+        piece, the plan is. A human said to handle routine tooling, and the
+        name still resolves to nothing, so the answer is a question rather than
+        a command assembled to satisfy the request.
+        """
+        self.fleet.declare_checks(
+            self.plan, {"type": "file_exists", "name": "marker", "path": "marker.txt"}
+        )
         packet = self.observed()
 
         status, payload = self.act(
@@ -1462,8 +1526,9 @@ class EscalationTests(_OverseerCase):
 
         self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
         self.assertFalse(payload["dispatch"]["performed"])
-        self.assertEqual("operation_unsupported", payload["dispatch"]["refusal"])
-        self.assertEqual("operation_unsupported", payload["escalation"]["reason"])
+        self.assertEqual("preparation_declined", payload["dispatch"]["refusal"])
+        self.assertIn("check_undeclared", payload["dispatch"]["detail"])
+        self.assertEqual("preparation_declined", payload["escalation"]["reason"])
 
     def test_an_escalation_names_the_blocked_work_and_what_may_continue(self) -> None:
         """Dependent work stops; independent authorized work does not."""
@@ -1543,9 +1608,29 @@ class GuardedOperationTests(_OverseerCase):
             set(overseer_decisions.OPERATIONS), set(overseer_cli.OPERATIONS)
         )
 
-    def test_verify_is_absent_rather_than_stubbed(self) -> None:
-        """A stub that refuses is indistinguishable from an adapter that failed."""
-        self.assertIsNone(self._registry().adapter("verify"))
+    def test_verify_comes_from_the_contract_reading_adapter(self) -> None:
+        """The check name is looked up in a plan, so a plan is what it takes."""
+        adapter = self._registry().adapter("verify")
+
+        self.assertIsNotNone(adapter)
+        self.assertEqual(overseer_verify.__name__, type(adapter).__module__)
+
+    def test_no_seam_can_hand_the_verify_adapter_a_command(self) -> None:
+        """`Verify` names a check; nothing on the payload or the seams is argv.
+
+        The property this module has to keep is not "the adapter reads a
+        contract" but "there is no other place the argv could come from". Both
+        halves are structural: the payload has one field and it is a name, and
+        the record this module substitutes its world through has no way to
+        express a command either.
+        """
+        self.assertEqual(
+            ["check"],
+            [field.name for field in fields(overseer_dispatch.Verify)],
+        )
+        seams = {field.name for field in fields(overseer_cli.Seams)}
+        for forbidden in ("run_check", "argv", "command", "shell", "read_contract"):
+            self.assertNotIn(forbidden, seams)
 
     def test_commit_comes_from_the_durable_group_checkpointer(self) -> None:
         """A crash between two repositories is the case the group exists for."""
@@ -1607,6 +1692,110 @@ class GuardedOperationTests(_OverseerCase):
             state_dir=str(self.fleet.state_root),
             seams=self.fleet.seams(),
             timeout=1.0,
+        )
+
+
+class VerificationOperationTests(_OverseerCase):
+    """That `verify` runs a plan's own check, and refuses anything else.
+
+    The two tests are one claim read from both sides. A declared check runs and
+    its real result is reported, so the operation is not a stub that always
+    refuses; an undeclared name is refused, so it is not a shell that always
+    obliges. Either half alone is satisfiable by a mistake.
+
+    The contract is a real session file and the check is run by the real
+    :func:`agent_session_loop.verification.run_check`, which is what makes the
+    pass/fail a fact about the filesystem rather than about a fake. A
+    ``file_exists`` check keeps that true without spawning anything, so this
+    class stays inside `test_the_loop_spawns_no_process`'s promise.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fleet.repository_root.mkdir(parents=True, exist_ok=True)
+        self.declared = self.fleet.declare_checks(
+            self.plan,
+            {"type": "file_exists", "name": "marker", "path": "marker.txt"},
+        )
+        self.marker = self.fleet.repository_root / "marker.txt"
+
+    def test_authorized_verify_runs_declared_check(self) -> None:
+        self.marker.write_text("present\n", encoding="utf-8")
+        packet = self.observed()
+
+        status, payload = self.act(
+            packet,
+            "--check",
+            "marker",
+            "--claims-file",
+            self._claims(),
+            operation="verify",
+        )
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["dispatch"]["performed"], payload["dispatch"]["detail"])
+        self.assertIsNone(payload["dispatch"]["refusal"])
+        self.assertIn("marker", payload["dispatch"]["detail"])
+        self.assertIsNone(payload["escalation"])
+
+    def test_a_declared_check_that_fails_reports_the_failure_not_a_refusal(
+        self,
+    ) -> None:
+        """`performed` false with no refusal: the check ran and the answer is no."""
+        packet = self.observed()
+
+        status, payload = self.act(
+            packet,
+            "--check",
+            "marker",
+            "--claims-file",
+            self._claims(),
+            operation="verify",
+        )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertFalse(payload["dispatch"]["performed"])
+        self.assertIsNone(payload["dispatch"]["refusal"])
+        self.assertIn("check_failed", payload["dispatch"]["detail"])
+
+    def test_undeclared_verify_is_refused(self) -> None:
+        self.marker.write_text("present\n", encoding="utf-8")
+        packet = self.observed()
+
+        status, payload = self.act(
+            packet,
+            "--check",
+            "rm -rf /",
+            "--claims-file",
+            self._claims(),
+            operation="verify",
+        )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertFalse(payload["dispatch"]["performed"])
+        self.assertEqual("preparation_declined", payload["dispatch"]["refusal"])
+        detail = payload["dispatch"]["detail"]
+        self.assertIn("check_undeclared", detail)
+        # The refusal names what the plan does declare, so an operator reads a
+        # menu rather than being invited to guess again.
+        for name in self.declared:
+            self.assertIn(name, detail)
+
+    def test_an_unauthorized_verify_never_reaches_the_check(self) -> None:
+        """No claims, so the check is not run and nothing is reported about it."""
+        packet = self.observed()
+
+        status, payload = self.act(packet, "--check", "marker", operation="verify")
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertEqual("preparation_declined", payload["dispatch"]["refusal"])
+        self.assertIn("authority_refused: no_decision", payload["dispatch"]["detail"])
+        self.assertNotIn("check_failed", payload["dispatch"]["detail"])
+
+    def _claims(self) -> str:
+        return self.fleet.claims_file(
+            self,
+            self.fleet.allowing(self.fleet.transcript.statement_id(), "verify"),
         )
 
 
