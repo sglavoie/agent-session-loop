@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import ast
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from typing import get_args
 
@@ -1252,6 +1253,244 @@ class PrecedentTests(unittest.TestCase):
         self.assertEqual(ruling.refusal, "operation_unsupported")
 
 
+class EvidenceFreshnessTests(unittest.TestCase):
+    """A reading is about a record, and a record that moved is a different one.
+
+    Supersession orders the statements a host *claimed*, so it cannot see the
+    one nobody claimed because nobody had seen it. That is exactly the shape of
+    a hold typed while an action was in flight: every claim still stands, the
+    allowance is still the last word among them, and the run is nonetheless
+    supposed to stop. These tests are about the check that closes that gap and
+    about the things that must *not* trip it, since a freshness check that fires
+    on ASL's own bookkeeping would be a check an operator learns to ignore.
+    """
+
+    def _reviewed(self) -> tuple[overseer_decisions.Statement, ...]:
+        """The record a host reads: one instruction, one relayed corroboration."""
+        return (
+            _direct_statement(text="commit the checkpoint and resume"),
+            *overseer_decisions.statements_from_supervision(
+                [_message()], grant=GRANT, scope=PLAN_SCOPE
+            ),
+        )
+
+    def _allowed(
+        self,
+        statements: Sequence[overseer_decisions.Statement],
+    ) -> overseer_decisions.Register:
+        return overseer_decisions.register(
+            statements=statements,
+            claims=[_claim("transcript:claude:sess-1#0")],
+        )
+
+    def test_a_digest_answers_to_the_statements_a_host_would_have_read(self) -> None:
+        statements = self._reviewed()
+
+        digest = overseer_decisions.evidence_digest(statements, scope=PLAN_SCOPE)
+
+        self.assertTrue(digest.startswith("ev1-"))
+        self.assertNotEqual(
+            digest, overseer_decisions.evidence_digest((), scope=PLAN_SCOPE)
+        )
+
+    def test_the_digest_does_not_depend_on_the_order_evidence_arrived_in(self) -> None:
+        """A boundary that reorders its answer has not changed the record."""
+        statements = self._reviewed()
+
+        self.assertEqual(
+            overseer_decisions.evidence_digest(statements, scope=PLAN_SCOPE),
+            overseer_decisions.evidence_digest(
+                tuple(reversed(statements)), scope=PLAN_SCOPE
+            ),
+        )
+
+    def test_asl_s_own_bookkeeping_does_not_move_the_digest(self) -> None:
+        """The ack of the message being sent is not a change in what a human said.
+
+        ASL writes a machine record for traffic it handles, including the very
+        action under way. A digest answering to those would report a change on
+        every action, and a check that always fires stops being read.
+        """
+        statements = self._reviewed()
+        noisy = statements + overseer_decisions.statements_from_supervision(
+            [
+                _message(
+                    seq=2,
+                    kind=mailbox.KIND_ACK,
+                    text="delivered",
+                    created_at=LATE,
+                ),
+                _message(
+                    seq=3,
+                    kind=mailbox.KIND_QUESTION,
+                    text="which branch?",
+                    created_at=LATE,
+                ),
+            ],
+            grant=GRANT,
+            scope=PLAN_SCOPE,
+        )
+
+        self.assertEqual(
+            overseer_decisions.evidence_digest(statements, scope=PLAN_SCOPE),
+            overseer_decisions.evidence_digest(noisy, scope=PLAN_SCOPE),
+        )
+
+    def test_a_statement_about_another_project_does_not_move_the_digest(self) -> None:
+        """The anti-transfer rule again: elsewhere is not this run's record."""
+        statements = self._reviewed()
+        elsewhere = statements + (
+            _direct_statement(
+                statement_id="transcript:claude:sess-9#0",
+                scope=overseer_decisions.Scope(project="/home/dev/other"),
+                at=LATE,
+                text="hold everything",
+            ),
+        )
+
+        self.assertEqual(
+            overseer_decisions.evidence_digest(statements, scope=PLAN_SCOPE),
+            overseer_decisions.evidence_digest(elsewhere, scope=PLAN_SCOPE),
+        )
+
+    def test_a_fresh_human_hold_moves_the_digest(self) -> None:
+        statements = self._reviewed()
+        held = statements + (
+            _direct_statement(
+                statement_id="transcript:claude:sess-1#1",
+                at=LATE,
+                text="hold this run, do not resume",
+            ),
+        )
+
+        self.assertNotEqual(
+            overseer_decisions.evidence_digest(statements, scope=PLAN_SCOPE),
+            overseer_decisions.evidence_digest(held, scope=PLAN_SCOPE),
+        )
+
+    def test_a_relayed_instruction_moves_the_digest(self) -> None:
+        """A relay authorizes nothing and is still a change in the record.
+
+        It cannot carry a decision, so it can never appear as a claim; what it
+        can do is tell a host that the plan's supervision channel now says
+        something it did not say when the host read it.
+        """
+        statements = self._reviewed()
+        relayed = statements + overseer_decisions.statements_from_supervision(
+            [_message(seq=2, text="stop before committing", created_at=LATE)],
+            grant=GRANT,
+            scope=PLAN_SCOPE,
+        )
+
+        self.assertNotEqual(
+            overseer_decisions.evidence_digest(statements, scope=PLAN_SCOPE),
+            overseer_decisions.evidence_digest(relayed, scope=PLAN_SCOPE),
+        )
+
+    def test_a_request_naming_no_evidence_is_answered_as_before(self) -> None:
+        """The binding is opt-in, so every existing request keeps its meaning."""
+        statements = self._reviewed()
+
+        ruling = overseer_decisions.resolve(
+            register=self._allowed(statements),
+            request=overseer_decisions.Request(operation="commit", scope=PLAN_SCOPE),
+        )
+
+        self.assertTrue(ruling.authorized)
+
+    def test_unchanged_reviewed_evidence_remains_usable(self) -> None:
+        statements = self._reviewed()
+
+        ruling = overseer_decisions.resolve(
+            register=self._allowed(statements),
+            request=overseer_decisions.Request(
+                operation="commit",
+                scope=PLAN_SCOPE,
+                reviewed=overseer_decisions.evidence_digest(
+                    statements, scope=PLAN_SCOPE
+                ),
+            ),
+        )
+
+        self.assertTrue(ruling.authorized)
+        self.assertIsNone(ruling.refusal)
+
+    def test_a_hold_nobody_claimed_refuses_the_reading_that_predates_it(self) -> None:
+        """The finding itself: the claims stand and the action stops anyway.
+
+        Every claim in this register is valid, in force, and unsuperseded --
+        re-resolving them answers `authorized` no matter how many times it is
+        asked. What changed is the record, and naming the record is what lets a
+        re-check say so.
+        """
+        reviewed = self._reviewed()
+        digest = overseer_decisions.evidence_digest(reviewed, scope=PLAN_SCOPE)
+        held = reviewed + (
+            _direct_statement(
+                statement_id="transcript:claude:sess-1#1",
+                at=LATE,
+                text="hold this run, do not resume",
+            ),
+        )
+        register = self._allowed(held)
+
+        stale = overseer_decisions.resolve(
+            register=register,
+            request=overseer_decisions.Request(
+                operation="commit", scope=PLAN_SCOPE, reviewed=digest
+            ),
+        )
+        unbound = overseer_decisions.resolve(
+            register=register,
+            request=overseer_decisions.Request(operation="commit", scope=PLAN_SCOPE),
+        )
+
+        self.assertFalse(stale.authorized)
+        self.assertEqual(stale.refusal, "evidence_changed")
+        self.assertIn(digest, stale.summary)
+        self.assertTrue(
+            unbound.authorized, "the claims themselves never stopped holding"
+        )
+
+    def test_changed_evidence_outranks_a_governing_allowance(self) -> None:
+        """Ordering: the reading is answered before what the reading said."""
+        self.assertLess(
+            overseer_decisions.REFUSALS.index("evidence_changed"),
+            overseer_decisions.REFUSALS.index("held"),
+        )
+
+    def test_a_question_that_cannot_be_asked_outranks_changed_evidence(self) -> None:
+        """An unsupported operation is refused before its evidence is weighed."""
+        ruling = overseer_decisions.resolve(
+            register=self._allowed(self._reviewed()),
+            request=overseer_decisions.Request(
+                operation="repair_the_application",
+                scope=PLAN_SCOPE,
+                reviewed="ev1-something-else",
+            ),
+        )
+
+        self.assertEqual(ruling.refusal, "operation_unsupported")
+
+    def test_nothing_about_a_digest_is_a_permission(self) -> None:
+        """It summarizes evidence and cannot be turned into an authorization."""
+        ruling = overseer_decisions.resolve(
+            register=overseer_decisions.register(
+                statements=self._reviewed(), claims=[]
+            ),
+            request=overseer_decisions.Request(
+                operation="commit",
+                scope=PLAN_SCOPE,
+                reviewed=overseer_decisions.evidence_digest(
+                    self._reviewed(), scope=PLAN_SCOPE
+                ),
+            ),
+        )
+
+        self.assertFalse(ruling.authorized)
+        self.assertEqual(ruling.refusal, "no_decision")
+
+
 class ScopeTests(unittest.TestCase):
     """Coverage is one rule, and an empty field is never a wildcard on a target."""
 
@@ -1335,6 +1574,11 @@ class IsolationTests(unittest.TestCase):
         was handed. A module that could open a plan's state, run a subprocess or
         write a ledger row could also decide something the caller never showed
         it, so the absence of those imports is the property worth pinning.
+
+        ``hashlib`` is permitted because summarizing evidence is still a pure
+        function of the evidence handed over: it reads nothing and reaches
+        nowhere, which is the property this test is about rather than the
+        length of the list.
         """
         source = Path(overseer_decisions.__file__ or "").read_text(encoding="utf-8")
         permitted = {
@@ -1342,6 +1586,7 @@ class IsolationTests(unittest.TestCase):
             "collections.abc",
             "dataclasses",
             "datetime",
+            "hashlib",
             "typing",
             "clock",
             "mailbox",

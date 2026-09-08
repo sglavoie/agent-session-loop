@@ -2009,7 +2009,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
             "action token still matches and a ruling still authorizes it. "
             "`--token` and `--scope` come from the earlier `asl overseer "
             "inspect` and are never recomputed here, because a token recomputed "
-            "now would agree with itself. The operational scope is reply, "
+            "now would agree with itself. `--reviewed-evidence` binds the "
+            "claims to the record they were read from, so a hold that arrived "
+            "since is refused `evidence_changed` rather than resolved past. "
+            "The operational scope is reply, "
             "guidance, verify, commit and resume; anything else, and anything "
             "no adapter implements, is refused and escalated rather than "
             "improvised. Application-code repairs belong to a worker, not here."
@@ -2077,6 +2080,15 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "--claims-stdin",
         action="store_true",
         help="Read the host's claims from standard input",
+    )
+    overseer_act_parser.add_argument(
+        "--reviewed-evidence",
+        metavar="DIGEST",
+        help=(
+            "The `evidence_digest` the `asl overseer decide` that produced "
+            "these claims reported; the action is refused `evidence_changed` "
+            "if human evidence in scope moved since it was read"
+        ),
     )
     overseer_act_parser.add_argument(
         "--no-history",

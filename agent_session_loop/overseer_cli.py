@@ -678,14 +678,23 @@ def _rule(
     evidence: Evidence,
     claims: Sequence[overseer_decisions.Claim],
     operation: str,
+    reviewed: str = "",
 ) -> tuple[overseer_decisions.Ruling, overseer_decisions.Register]:
-    """Recompute a ruling from live statements. Never from a cached one."""
+    """Recompute a ruling from live statements. Never from a cached one.
+
+    ``reviewed`` is the evidence digest the claims were read from, when the
+    caller is binding them to one. Re-deriving the ruling proves the claims are
+    still in force; the digest is what makes the re-derivation notice a
+    statement nobody claimed because nobody had seen it yet.
+    """
     register = overseer_decisions.register(
         statements=evidence.statements, claims=claims
     )
     ruling = overseer_decisions.resolve(
         register=register,
-        request=overseer_decisions.Request(operation=operation, scope=evidence.scope),
+        request=overseer_decisions.Request(
+            operation=operation, scope=evidence.scope, reviewed=reviewed
+        ),
     )
     return ruling, register
 
@@ -996,6 +1005,12 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
     lives, and the ids being derived rather than invented is what keeps a claim
     from citing a statement nobody made.
 
+    ``evidence_digest`` names the record those claims were read from. It is
+    printed rather than stored, because storing it would be the cached
+    permission this boundary refuses to keep; the host carries it to
+    ``asl overseer act --reviewed-evidence`` and the action is refused
+    ``evidence_changed`` if human evidence in scope moved in the meantime.
+
     A refusal is not a failure to try harder. ``held`` and ``human_decision``
     both mean a person already settled this, or has not, and the honest next
     move is the escalation this prints rather than an action.
@@ -1026,11 +1041,13 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
         generated_classes=tuple(args.generated_classes or ()),
         timeout=float(args.timeout),
     )
+    reviewed = overseer_decisions.evidence_digest(evidence.statements, scope=scope)
     if args.list_statements:
         payload = responses.success_payload(
             "overseer-decide",
             listed=True,
             scope=_scope_payload(scope),
+            evidence_digest=reviewed,
             history=_history_payload(evidence.history),
             statements=[_statement_payload(item) for item in evidence.statements],
         )
@@ -1039,6 +1056,7 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
             f"  {item.statement_id} [{item.voice}] {item.text[:72]}"
             for item in evidence.statements
         )
+        lines.append(f"  evidence digest: {reviewed}")
         _emit(payload, lines, as_json=as_json)
         return EXIT_OK
     ruling, register = _rule(evidence=evidence, claims=claims, operation=args.operation)
@@ -1062,6 +1080,7 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
         listed=False,
         authorized=ruling.authorized,
         ruling=_ruling_payload(ruling),
+        evidence_digest=reviewed,
         history=_history_payload(evidence.history),
         human_settlements=[
             {
@@ -1087,6 +1106,7 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
         f"{args.operation} on {candidate.plan_dir}: "
         f"{'authorized' if ruling.authorized else f'refused ({ruling.refusal})'}",
         f"  {ruling.summary}",
+        f"  evidence digest: {reviewed}",
     ]
     for rejection in register.rejections:
         lines.append(f"  rejected {rejection.claim.statement_id}: {rejection.reason}")
@@ -1111,8 +1131,19 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
 
     The authority callback re-derives the ruling from live supervision each time
     the dispatcher asks, which it does twice: once before the adapter prepares
-    and once immediately before it performs. A revocation or a fresh human hold
-    landing between those two checks stops the action.
+    and once immediately before it performs. Re-deriving catches a revocation,
+    because a revoked grant is a missing grant. It does not on its own catch a
+    *new* statement: the claims cite what the host read, and a hold nobody
+    claimed never becomes a decision, so the second reading of the same claims
+    agrees with the first however the record moved.
+
+    ``--reviewed-evidence`` is what closes that. It carries the digest
+    ``asl overseer decide`` printed for the evidence the host actually read, and
+    a mismatch is refused ``evidence_changed`` before any decision is weighed.
+    When it is absent the first authority check pins the digest it observes, so
+    a hold arriving *during* preparation is still caught -- what is not caught
+    without the flag is a hold that arrived between ``decide`` and ``act``,
+    which is the window the host closes by passing what it reviewed.
     """
     as_json = bool(getattr(args, "json", False))
     state_dir = _state_dir(args)
@@ -1128,6 +1159,10 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
     except OverseerCliError as error:
         return _failure("overseer-act", error, as_json=as_json)
     timeout = float(args.timeout)
+    binding = {
+        "reviewed": str(getattr(args, "reviewed_evidence", "") or ""),
+        "observed": "",
+    }
 
     def authority(
         action: overseer_dispatch.Action,
@@ -1150,10 +1185,16 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
             generated_classes=tuple(args.generated_classes or ()),
             timeout=timeout,
         )
+        binding["observed"] = overseer_decisions.evidence_digest(
+            evidence.statements, scope=evidence.scope
+        )
+        if not binding["reviewed"]:
+            binding["reviewed"] = binding["observed"]
         ruling, _register = _rule(
             evidence=evidence,
             claims=claims,
             operation=action.payload.operation,
+            reviewed=binding["reviewed"],
         )
         return ruling
 
@@ -1194,9 +1235,15 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
             blocked=(f"{candidate.plan_dir}::{args.operation}",),
             independent=_independent_plans(inventory, excluding=plan_dir_of(candidate)),
         )
+    changed = bool(binding["observed"]) and binding["observed"] != binding["reviewed"]
     payload = responses.success_payload(
         "overseer-act",
         dispatch=_dispatch_payload(dispatch),
+        evidence={
+            "reviewed": binding["reviewed"],
+            "observed": binding["observed"],
+            "changed": changed,
+        },
         escalation=None if escalation is None else escalation.payload(),
     )
     lines = [
@@ -1205,6 +1252,12 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
     ]
     if dispatch.detail:
         lines.append(f"  {dispatch.detail}")
+    if changed:
+        lines.append(
+            f"  evidence moved: reviewed {binding['reviewed']}, "
+            f"observed {binding['observed']}"
+        )
+        lines.append("  re-run decide and read the record again before acting")
     if dispatch.recoveries:
         lines.append(
             f"  recoveries: {dispatch.recoveries}/{overseer_dispatch.RECOVERY_LIMIT}"

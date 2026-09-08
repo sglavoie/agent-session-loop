@@ -113,17 +113,24 @@ This is the only place your judgement enters, and it enters as data the register
 
 **Reusing decisions is the point.** A human who already settled something settled it. Cite the statement and proceed. What you must not do is manufacture a settlement out of a statement that does not carry one.
 
+**Record the `evidence_digest`.** Both `decide` outputs carry one: it names the record your claims were read from. Your claims cite statements, and a statement nobody has seen yet cannot be cited — so a hold typed while you were writing claims is invisible to a re-check that only re-resolves those claims. The digest is what makes it visible. Carry it to step 5.
+
 ### 5. Dispatch
 
 ```bash
 asl overseer act "$PLAN" --watcher-id "$WATCHER" --operation reply \
   --run-id "$RUN" --incident-id "$INCIDENT" --token "$TOKEN" --scope "$SCOPE" \
-  --question-id "$QUESTION" --text "..." --claims-file claims.json --json
+  --question-id "$QUESTION" --text "..." --claims-file claims.json \
+  --reviewed-evidence "$DIGEST" --json
 ```
 
 `--token` and `--scope` come from step 3 and are never recomputed. That is what makes a `stale_action` refusal possible: if the run moved between reading and acting, the token no longer matches and the action is refused rather than aimed at a state that is gone.
 
-The dispatcher re-checks authority twice — once before the adapter prepares and once immediately before it performs — so a revocation or a fresh human hold landing in between stops the action.
+The dispatcher re-checks authority twice — once before the adapter prepares and once immediately before it performs. That catches a revocation, because a withdrawn grant is a missing grant. It does not on its own catch a *new statement*: your claims cite what you read, an unclaimed hold never becomes a decision, and so the second reading of the same claims agrees with the first however the record moved.
+
+**`--reviewed-evidence` is what closes that**, and it is the digest step 4 printed. Pass it on every `act`. A new hold, a changed statement, or a superseding decision arriving since you read the record is refused `evidence_changed` before any decision is weighed. Without the flag the first authority check pins whatever it sees, so a hold arriving *during* the dispatch is still caught — what goes uncaught is one that arrived between your `decide` and your `act`, which is precisely the window you close by saying what you reviewed.
+
+`evidence_changed` is not a stale token and not a retry. The record you reasoned about has moved, so go back to step 4, read what is there now, and write claims about it.
 
 **Checkpoint semantics.** `commit` writes a checkpoint across every repository the run declares, as one durable group. If the process dies between the first repository and the second, the group survives and step 6 finishes it. A checkpoint records work in progress; it is not a merge, not a push, and not a substitute for a worker's own commit discipline.
 

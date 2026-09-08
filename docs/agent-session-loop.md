@@ -574,7 +574,7 @@ asl overseer scan [--plan PLAN_DIR ...] [--project DIR ...] [--pause-window-hour
 asl overseer watch --watcher-id ID [--plan PLAN_DIR ...] [--project DIR ...] [--for-seconds SEC] [--interval-seconds SEC] [--sweep-seconds SEC] [--lease-seconds SEC] [--pause-window-hours H] [--release] [--timeout SEC] [--state-dir DIR] [--json]
 asl overseer inspect PLAN_DIR [--kind KIND] [--summary TEXT] [--incident-id ID] [--expand status|questions|run_config|verification|worker_changes|supervision ...] [--limit CHARS] [--timeout SEC] [--state-dir DIR] [--json]
 asl overseer decide PLAN_DIR [--operation reply|guidance|verify|commit|resume] [--incident-id ID] [--list-statements] [--claims-file PATH|--claims-stdin] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
-asl overseer act PLAN_DIR --watcher-id ID --operation reply|guidance|verify|commit|resume --run-id ID --incident-id ID --token TOKEN --scope DIGEST [--question-id ID] [--text TEXT] [--check NAME] [--message TEXT] [--session-id ID] [--claims-file PATH|--claims-stdin] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
+asl overseer act PLAN_DIR --watcher-id ID --operation reply|guidance|verify|commit|resume --run-id ID --incident-id ID --token TOKEN --scope DIGEST [--question-id ID] [--text TEXT] [--check NAME] [--message TEXT] [--session-id ID] [--claims-file PATH|--claims-stdin] [--reviewed-evidence DIGEST] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
 asl overseer reconcile PLAN_DIR [--timeout SEC] [--state-dir DIR] [--json]
 ```
 
@@ -644,7 +644,21 @@ lease, the token still matches, and a ruling still authorizes it. Authority is
 re-derived from live supervision twice — before the adapter prepares and again
 immediately before it performs — so a revocation landing in between stops the
 action. Revocation stops later context reads and queued actions but never undoes
-a dispatch that already happened. `commit` writes a checkpoint across every
+a dispatch that already happened.
+
+Re-deriving catches a withdrawn grant and does not on its own catch a *new*
+statement: claims cite what the host read, a hold nobody claimed never becomes a
+decision, and the second reading of the same claims agrees with the first
+however the record moved. `--reviewed-evidence DIGEST` closes that. `decide`
+prints an `evidence_digest` summarizing every human statement in scope — the
+instructions and relays a host would have read, and deliberately not ASL's own
+acks and receipts, which would otherwise report a change on every action — and
+naming it here refuses `evidence_changed` when the record has moved since. It is
+opt-in, so an invocation that omits it keeps its meaning; what the first
+authority check then pins is whatever it observed, which still catches a hold
+arriving during the dispatch and not one that arrived between `decide` and
+`act`. `evidence_changed` is not a retry: the reading was about a record that
+has changed, and the answer is another reading. `commit` writes a checkpoint across every
 declared repository as one durable group, so a crash partway through leaves a
 group `reconcile` can finish. A recoverable refusal is retried at most twice
 before it becomes `recovery_exhausted`.

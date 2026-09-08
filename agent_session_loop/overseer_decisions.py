@@ -80,6 +80,29 @@ eventually re-apply a decision that was revoked. A statement whose timestamp
 cannot be read is refused outright: without a moment there is no order, and
 without an order supersession is a guess.
 
+## A reading is bound to the evidence it was read from
+
+Supersession orders the statements a caller *claimed*, and a claim can only
+cite a statement the caller has seen. That leaves one gap the ordering cannot
+close: a statement nobody claimed, because it did not exist when the host read
+the evidence. A hold typed while an action was being prepared is exactly that
+shape -- the claims still cite the statements they always cited, every one of
+them is still in force, and the allowance they carry is still the last word
+among them, so a re-check that only re-resolves the same claims agrees with
+itself no matter what arrived in between.
+
+:func:`evidence_digest` closes it by summarizing the human evidence in scope --
+every :data:`REVIEWED_VOICES` statement covering the target, ordered and hashed
+with its identity, moment, text and scope -- so that a reading can carry the
+state of the record it was made against. A :class:`Request` may name that
+digest in ``reviewed``, and :func:`resolve` refuses
+:data:`evidence_changed <REFUSALS>` when the evidence in hand no longer hashes
+to it. The refusal is not a verdict on the new statement: it says the reading
+is about a record that has moved, and the answer is another reading rather than
+a retry. ``reviewed`` empty means the caller is not making the binding, which
+is what keeps this a check a caller opts into rather than a second place a
+decision could be made.
+
 ## What stays human
 
 :data:`HUMAN_TOPICS` -- acceptance, scope, design, safety -- are decisions this
@@ -101,6 +124,7 @@ it. Nothing here opens a file, spawns a process, or holds state between calls.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -115,6 +139,7 @@ __all__ = [
     "CLAIM_REJECTIONS",
     "CONTEXT_ACCESS",
     "DRAFT_PROMPT_MARKER",
+    "EVIDENCE_DIGEST_PREFIX",
     "GENERATED_PROMPT_MARKERS",
     "GUIDANCE_ENVELOPE_MARKER",
     "HUMAN_SESSION_CLASSES",
@@ -127,6 +152,7 @@ __all__ = [
     "REPLY_ENVELOPE_MARKER",
     "RESOLUTION_CONTEXT_MARKER",
     "RESOLUTION_ENVELOPE_MARKER",
+    "REVIEWED_VOICES",
     "SESSION_CLASSES",
     "SESSION_CLASS_AUTOMATED",
     "SESSION_CLASS_MAIN",
@@ -147,6 +173,7 @@ __all__ = [
     "Scope",
     "Settlement",
     "Statement",
+    "evidence_digest",
     "generated_marker",
     "register",
     "resolve",
@@ -216,6 +243,21 @@ VOICES: tuple[Voice, ...] = (
 #: check reads as membership and so widening it is a visible edit to a published
 #: name rather than a changed comparison buried in a validator.
 AUTHORIZING_VOICES: tuple[Voice, ...] = ("user_instruction",)
+
+#: The voices a human's words can reach evidence through, and therefore the
+#: statements :func:`evidence_digest` summarizes. Wider than
+#: :data:`AUTHORIZING_VOICES` on purpose: a relayed instruction cannot carry a
+#: decision, but a hold arriving through the mailbox is still a change in what a
+#: host would have read. Every other voice is excluded so that ASL's own
+#: bookkeeping -- the ack of the very message being sent, a receipt, a worker's
+#: new question -- cannot change the digest and make an unchanged record look
+#: like a moved one.
+REVIEWED_VOICES: tuple[Voice, ...] = ("user_instruction", "relayed_instruction")
+
+#: Domain separator for :func:`evidence_digest`. Named and prefixed onto the
+#: value so a digest is recognizable in a payload and so a later hashing of a
+#: different thing cannot be mistaken for this one.
+EVIDENCE_DIGEST_PREFIX = "asl-overseer-evidence-v1"
 
 #: AgentMux's classification of a whole conversation, restated here for the same
 #: reason the prompt markers are: this module's import surface is four ASL
@@ -329,6 +371,7 @@ CLAIM_REJECTIONS: tuple[RejectionReason, ...] = (
 Refusal = Literal[
     "target_unscoped",
     "operation_unsupported",
+    "evidence_changed",
     "held",
     "human_decision",
     "unsupported_recovery",
@@ -340,6 +383,9 @@ Refusal = Literal[
 #: * ``target_unscoped`` -- the request names no project, so no decision can
 #:   apply to it.
 #: * ``operation_unsupported`` -- outside :data:`OPERATIONS` entirely.
+#: * ``evidence_changed`` -- the request names the evidence its claims were read
+#:   from and the evidence in hand is no longer that evidence. The claims may
+#:   all still stand; what cannot stand is a reading of a record that has moved.
 #: * ``held`` -- the governing decision holds this run.
 #: * ``human_decision`` -- the incident turns on an acceptance, scope, design or
 #:   safety question that no in-scope decision settles.
@@ -349,6 +395,7 @@ Refusal = Literal[
 REFUSALS: tuple[Refusal, ...] = (
     "target_unscoped",
     "operation_unsupported",
+    "evidence_changed",
     "held",
     "human_decision",
     "unsupported_recovery",
@@ -598,11 +645,18 @@ class Request:
     of a verification result, the scope of a repair, a design or safety call.
     Naming one that nobody has settled is what makes the ruling
     ``human_decision`` even when the operation itself was authorized.
+
+    ``reviewed`` is the :func:`evidence_digest` of the record the claims were
+    read from. Empty means the caller is not binding its reading to a record,
+    which is the default so that every existing request keeps its meaning;
+    naming one asks for :data:`evidence_changed <REFUSALS>` if human evidence in
+    scope has moved since.
     """
 
     operation: str
     scope: Scope
     raises: tuple[Topic, ...] = ()
+    reviewed: str = ""
 
 
 @dataclass(frozen=True)
@@ -771,6 +825,52 @@ def statements_from_supervision(
     return tuple(statements)
 
 
+def evidence_digest(statements: Sequence[Statement], *, scope: Scope) -> str:
+    """Summarize the human evidence in scope, so a reading can name what it read.
+
+    Only :data:`REVIEWED_VOICES` statements whose own scope covers ``scope``
+    take part. Both narrowings matter: a machine record cannot move the digest,
+    since ASL writes one for every message it delivers and a digest that
+    answered to those would report a change on every action; and a statement
+    about another plan cannot move it either, for the same reason a decision
+    about another plan cannot authorize this one.
+
+    The identity is order-independent -- statements are sorted by their own ID
+    -- so a boundary returning the same records in a different order is the same
+    record. Everything a reading could turn on is hashed: the statement's
+    identity and voice, its moment, its text, and the scope it was made in, each
+    length-prefixed so no two different records can pack into one string.
+    """
+    relevant = sorted(
+        (
+            item
+            for item in statements
+            if item.voice in REVIEWED_VOICES and item.scope.covers(scope)
+        ),
+        key=lambda item: item.statement_id,
+    )
+    digest = hashlib.sha256()
+    parts = [EVIDENCE_DIGEST_PREFIX]
+    for item in relevant:
+        parts.extend(
+            (
+                item.statement_id,
+                item.voice,
+                item.at,
+                item.text,
+                item.scope.project,
+                item.scope.plan_dir,
+                item.scope.run_id,
+                item.scope.incident,
+            )
+        )
+    for part in parts:
+        encoded = part.encode("utf-8")
+        digest.update(f"{len(encoded)}:".encode("ascii"))
+        digest.update(encoded)
+    return f"ev1-{digest.hexdigest()[:32]}"
+
+
 def register(
     *,
     statements: Sequence[Statement],
@@ -830,10 +930,16 @@ def resolve(*, register: Register, request: Request) -> Ruling:
 
     Refusals are ordered by how fundamental they are rather than by how they
     were discovered: an unscoped request and an unsupported operation are
-    questions that cannot be asked, a hold is a decision to respect, an
-    unsettled human question outranks any operational allowance, and only then
-    is the absence of a decision -- or the presence of one made about something
-    else -- reported.
+    questions that cannot be asked, a reading of evidence that has moved is a
+    reading nobody made, a hold is a decision to respect, an unsettled human
+    question outranks any operational allowance, and only then is the absence of
+    a decision -- or the presence of one made about something else -- reported.
+
+    ``evidence_changed`` sits above the decision checks because it is not a
+    verdict on them: the claims can all be in force and the allowance can be the
+    last word among them while the record they were read from has gained a hold
+    nobody claimed, which is precisely the case re-resolving the same claims
+    cannot see.
     """
     settlements = tuple(
         settle(register=register, topic=topic, scope=request.scope)
@@ -853,6 +959,16 @@ def resolve(*, register: Register, request: Request) -> Ruling:
             f"{request.operation!r} is not an operation an overseer performs",
             settlements=settlements,
         )
+    if request.reviewed:
+        observed = evidence_digest(register.statements, scope=request.scope)
+        if observed != request.reviewed:
+            return _refused(
+                request,
+                "evidence_changed",
+                "the claims were read from evidence "
+                f"{request.reviewed} and the evidence in hand is {observed}",
+                settlements=settlements,
+            )
 
     applicable, precedents = _partition(
         (item for item in register.decisions if item.speaks_to(request.operation)),

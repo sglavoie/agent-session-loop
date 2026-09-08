@@ -181,6 +181,12 @@ class _Transcript:
     ``user`` turn in it is the only thing in the whole fixture that can carry an
     authorization. ``fail`` switches it to an answer that could not be obtained,
     which has to stay distinguishable from an answer that said nothing.
+
+    ``on_read`` runs once an answer has been assembled, which is how a test puts
+    a turn into the transcript *between* two readings of it. A person typing
+    while an action is in flight is a real sequence, and reproducing it means
+    changing the record at the moment the code under test is between its two
+    looks at it.
     """
 
     def __init__(self, project: str) -> None:
@@ -188,6 +194,7 @@ class _Transcript:
         self.calls: list[dict[str, Any]] = []
         self.failure: overseer_history.Failure | None = None
         self.session_class = overseer_decisions.SESSION_CLASS_MAIN
+        self.on_read: Callable[[int], None] | None = None
         self.turns: list[tuple[str, str]] = [
             ("user", "answer routine tooling questions on my runs without asking me")
         ]
@@ -220,12 +227,15 @@ class _Transcript:
             truncated=False,
             excerpts=excerpts,
         )
-        return self._history(
+        answer = self._history(
             allowed=True,
             available=True,
             reason="opted_in",
             conversations=(conversation,),
         )
+        if self.on_read is not None:
+            self.on_read(len(self.calls))
+        return answer
 
     def statement_id(self, index: int = 0) -> str:
         return f"{overseer_decisions.TRANSCRIPT_SPACE}:{HARNESS}:{SESSION}#{index}"
@@ -1082,6 +1092,172 @@ class EvidenceBoundaryTests(_OverseerCase):
             "--claims-file",
             self.fleet.claims_file(self, claims),
             *extra,
+        )
+
+
+class EvidenceFreshnessTests(_OverseerCase):
+    """A hold typed while an action is in flight has to stop the action.
+
+    Re-deriving the ruling at dispatch time is what catches a revoked grant, and
+    on its own it does not catch a *new* statement: the claims cite what the
+    host read, an unclaimed hold never becomes a decision, and the second
+    reading of the same claims therefore agrees with the first however the
+    record moved. These tests drive the two windows that matters in --- between
+    ``decide`` and ``act``, and inside a single dispatch --- and the case that
+    must keep working, which is evidence that did not move.
+    """
+
+    def test_decide_publishes_the_digest_of_the_record_it_read(self) -> None:
+        """The token a host carries to `act` comes from the leaf that read."""
+        packet = self.observed()
+
+        _status, listing = self.fleet.invoke(
+            "decide",
+            str(self.plan),
+            "--incident-id",
+            str(packet["packet"]["incident_id"]),
+            "--list-statements",
+        )
+        _ruled, payload = self._decide(
+            packet,
+            claims=self.fleet.allowing(
+                self.fleet.transcript.statement_id(), "guidance"
+            ),
+        )
+
+        self.assertTrue(listing["evidence_digest"].startswith("ev1-"))
+        self.assertEqual(listing["evidence_digest"], payload["evidence_digest"])
+
+    def test_unchanged_reviewed_evidence_remains_usable(self) -> None:
+        """The ordinary path: the host reviewed it, nothing moved, it acts."""
+        packet = self.observed()
+        _status, decided = self._decide(
+            packet,
+            claims=self.fleet.allowing(
+                self.fleet.transcript.statement_id(), "guidance"
+            ),
+        )
+
+        status, payload = self._act(packet, decided["evidence_digest"])
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["dispatch"]["performed"])
+        self.assertFalse(payload["evidence"]["changed"])
+        self.assertEqual(decided["evidence_digest"], payload["evidence"]["observed"])
+
+    def test_a_hold_arriving_between_decide_and_act_stops_the_action(self) -> None:
+        """The finding: a fresh hold nobody claimed, and the old claim standing.
+
+        The claim still cites the statement it always cited, that statement is
+        still in force, and every guard that re-resolves the same claims answers
+        the same way. What changed is the record the reading was made against.
+        """
+        packet = self.observed()
+        _status, decided = self._decide(
+            packet,
+            claims=self.fleet.allowing(
+                self.fleet.transcript.statement_id(), "guidance"
+            ),
+        )
+        self.fleet.transcript.turns.append(
+            ("user", "hold this run. do not resume or send guidance.")
+        )
+
+        status, payload = self._act(packet, decided["evidence_digest"])
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertFalse(payload["dispatch"]["performed"])
+        self.assertEqual("preparation_declined", payload["dispatch"]["refusal"])
+        self.assertIn("evidence_changed", payload["dispatch"]["detail"])
+        self.assertTrue(payload["evidence"]["changed"])
+        self.assertEqual(
+            (),
+            tuple(
+                message
+                for message in self.fleet.messages(self.plan)
+                if message.kind == mailbox.KIND_GUIDANCE
+            ),
+        )
+
+    def test_a_hold_arriving_during_preparation_stops_the_action(self) -> None:
+        """The other window, and the one a host cannot close by being careful.
+
+        No flag is passed here: the first authority check pins what it saw, so
+        the hold that lands while the adapter is preparing is caught by the
+        second check even though the invocation named no digest.
+        """
+        packet = self.observed()
+        claims = self.fleet.claims_file(
+            self,
+            self.fleet.allowing(self.fleet.transcript.statement_id(), "guidance"),
+        )
+        baseline = len(self.fleet.transcript.calls)
+
+        def hold_lands(read: int) -> None:
+            if read == baseline + 1:
+                self.fleet.transcript.turns.append(
+                    ("user", "hold this run. do not resume or send guidance.")
+                )
+
+        self.fleet.transcript.on_read = hold_lands
+
+        status, payload = self.act(
+            packet, "--text", "carry on", "--claims-file", claims
+        )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertFalse(payload["dispatch"]["performed"])
+        self.assertIn("evidence_changed", payload["dispatch"]["detail"])
+        self.assertTrue(payload["evidence"]["changed"])
+
+    def test_an_invocation_naming_no_digest_reports_what_it_pinned(self) -> None:
+        """The binding is opt-in, so the unbound invocation still acts and says so."""
+        packet = self.observed()
+        claims = self.fleet.claims_file(
+            self,
+            self.fleet.allowing(self.fleet.transcript.statement_id(), "guidance"),
+        )
+
+        status, payload = self.act(
+            packet, "--text", "carry on", "--claims-file", claims
+        )
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["dispatch"]["performed"])
+        self.assertFalse(payload["evidence"]["changed"])
+        self.assertTrue(payload["evidence"]["reviewed"].startswith("ev1-"))
+
+    # -- helpers -----------------------------------------------------------
+
+    def _act(self, packet: dict[str, Any], digest: str) -> tuple[int, dict[str, Any]]:
+        return self.act(
+            packet,
+            "--text",
+            "carry on",
+            "--reviewed-evidence",
+            digest,
+            "--claims-file",
+            self.fleet.claims_file(
+                self,
+                self.fleet.allowing(self.fleet.transcript.statement_id(), "guidance"),
+            ),
+        )
+
+    def _decide(
+        self,
+        packet: dict[str, Any],
+        *,
+        claims: list[dict[str, Any]],
+    ) -> tuple[int, dict[str, Any]]:
+        return self.fleet.invoke(
+            "decide",
+            str(self.plan),
+            "--operation",
+            "guidance",
+            "--incident-id",
+            str(packet["packet"]["incident_id"]),
+            "--claims-file",
+            self.fleet.claims_file(self, claims),
         )
 
 
