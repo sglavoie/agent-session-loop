@@ -660,6 +660,19 @@ Every leaf exits `0` when the answer was yes, `1` on a refusal or a partial view
 malformed invocation, so a `&&` chain stops at the first refusal instead of
 reading "could not look" as "nothing to do".
 
+The overseer's contracts are shared with a program released on its own schedule,
+so the version that matters is the one the two *installed* programs agree on.
+`just overseer-integration asl_root=/path/to/scripts`, in the Agent Mux
+checkout, is the gate for that: it drives these leaves against the `amx` in
+`~/.local/bin` and the `asl` on `PATH`, in a throwaway world the suite builds
+and deletes — its own repositories, state root, `config.toml`, profile home and
+fake harness processes — and checks compatibility both ways, that the installed
+binary answers the contracts this client speaks and that a component which does
+not is refused rather than read past. It reads no operator configuration and
+touches no real plan. The suite is `tests/test_asl_overseer_paired_smoke.py`; it
+skips when nothing is installed and `AMX_ASL_OVERSEER_SMOKE` turns that skip
+into a failure, which is what the recipe sets.
+
 `asl commit` writes Conventional Commits messages for the worktree containing
 `PATH` (default: the current directory), and is the same command the auto-commit
 groups above invoke. It is usable standalone, outside any loop or plan. Staging

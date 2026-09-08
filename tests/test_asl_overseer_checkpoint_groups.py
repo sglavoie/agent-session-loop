@@ -48,7 +48,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from agent_session_loop import (
     commit_groups,
@@ -406,7 +406,7 @@ class ClosedVocabulary(_GroupCase):
     def test_refusals_tuple_matches_the_literal_type(self) -> None:
         self.assertEqual(
             set(overseer_checkpoint_groups.REFUSALS),
-            set(overseer_checkpoint_groups.Refusal.__args__),
+            set(get_args(overseer_checkpoint_groups.Refusal)),
         )
         self.assertEqual(
             len(overseer_checkpoint_groups.REFUSALS),

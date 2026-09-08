@@ -54,10 +54,11 @@ import json
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Callable
 from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
 from agent_session_loop import (
@@ -416,7 +417,11 @@ class _Fleet:
     def invoke(self, *argv: str) -> tuple[int, dict[str, Any]]:
         """Run one leaf the way ``asl`` would, and read its JSON envelope."""
         args = self.parse(*argv)
-        handler = cli.resolve_handler(args)
+        # `resolve_handler` is typed for the shape every leaf shares. The
+        # overseer leaves additionally take the keyword-only `seams` this
+        # fixture injects, so the widening lives here rather than in the
+        # production signature, where it would stop describing the leaves.
+        handler = cast("Callable[..., int]", cli.resolve_handler(args))
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
             status = handler(args, seams=self.seams())

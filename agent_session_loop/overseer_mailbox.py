@@ -225,7 +225,7 @@ class Posting:
 
     operation: Operation
     plan_dir: str
-    incident_id: int
+    incident_id: int | None
     target: str
     message_id: str
     state: State
@@ -298,7 +298,7 @@ class FleetPoll:
 def message_id(
     *,
     plan_dir: str,
-    incident_id: int,
+    incident_id: int | None,
     operation: str,
     target: str,
 ) -> str:
@@ -308,6 +308,13 @@ def message_id(
     row both carry, so appending twice is refused by the mailbox instead of
     producing two messages and so a crashed process's record is findable by a
     process that never saw it.
+
+    ``incident_id`` is optional because the ledger's is:
+    :class:`~agent_session_loop.overseer_store.ActionRecord` carries a nullable
+    incident, and the derivation has to accept whatever a row actually holds or
+    a reconciliation could not look up the row it is reconciling. An absent
+    incident derives its own stable id, which is what keeps such a row findable
+    by the same rule as any other rather than unaddressable.
     """
     name = "\x00".join((plan_dir, str(incident_id), operation, target))
     return str(uuid.uuid5(_ID_NAMESPACE, name))
@@ -317,7 +324,7 @@ def inspect_posting(
     view: mailbox.MailboxView,
     *,
     plan_dir: str,
-    incident_id: int,
+    incident_id: int | None,
     operation: str,
     target: str,
 ) -> Posting | None:

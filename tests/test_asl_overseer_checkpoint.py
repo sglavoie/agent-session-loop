@@ -48,7 +48,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from agent_session_loop import (
     commit_message,
@@ -344,7 +344,7 @@ class ClosedVocabulary(_CheckpointCase):
     def test_refusals_tuple_matches_the_literal_type(self) -> None:
         self.assertEqual(
             set(overseer_checkpoint.REFUSALS),
-            set(overseer_checkpoint.Refusal.__args__),
+            set(get_args(overseer_checkpoint.Refusal)),
         )
         self.assertEqual(
             len(overseer_checkpoint.REFUSALS),
@@ -354,7 +354,7 @@ class ClosedVocabulary(_CheckpointCase):
     def test_verification_states_tuple_matches_the_literal_type(self) -> None:
         self.assertEqual(
             set(overseer_checkpoint.VERIFICATION_STATES),
-            set(overseer_checkpoint.VerificationState.__args__),
+            set(get_args(overseer_checkpoint.VerificationState)),
         )
 
     def test_the_registry_holds_the_commit_operation_only(self) -> None:

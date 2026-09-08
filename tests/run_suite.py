@@ -240,6 +240,7 @@ INTEGRATION_MODULES = (
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
     "tests.test_asl_overseer_e2e",
+    "tests.test_asl_overseer_paired_smoke",
     "tests.test_brainnotes_vault_guard",
 )
 

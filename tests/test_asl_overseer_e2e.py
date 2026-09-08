@@ -82,7 +82,7 @@ import unittest
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agent_session_loop import (
     bridge,
@@ -148,9 +148,7 @@ STANDING_INSTRUCTION = (
 )
 
 #: The later word that supersedes the earlier one on the same topic.
-LATER_HOLD = (
-    "actually hold off on committing anything in tt until I have looked at it"
-)
+LATER_HOLD = "actually hold off on committing anything in tt until I have looked at it"
 
 _BUILD: dict[str, Any] = {}
 
@@ -242,9 +240,15 @@ class _World:
     production. The two seams that remain are the binary's location and the
     child environment, and both are here rather than in the module under test
     precisely so nothing under test has to know it is being tested.
+
+    ``binary`` names the ``amx`` under test. It defaults to the one this module
+    built from source, which is what a development checkout should be judged
+    against. The paired smoke gate in ``tests.test_asl_overseer_paired_smoke``
+    passes the *installed* one instead: same world, same assertions, a different
+    claim about which pair they are a statement about.
     """
 
-    def __init__(self, case: unittest.TestCase) -> None:
+    def __init__(self, case: unittest.TestCase, *, binary: Path | None = None) -> None:
         workdir = tempfile.TemporaryDirectory(prefix="asl-overseer-e2e-")
         case.addCleanup(workdir.cleanup)
         self.case = case
@@ -260,7 +264,7 @@ class _World:
         self.plans_root.mkdir(parents=True, exist_ok=True)
         self.home = self.root / "harness-home"
         self.config_path = self.root / "config.toml"
-        self.binary = Path(_BUILD["binary"])
+        self.binary = Path(binary) if binary is not None else Path(_BUILD["binary"])
         self.calls: list[dict[str, str]] = []
         self.on_call: Callable[[list[str]], None] | None = None
         self.repos: dict[str, Path] = {}
@@ -324,9 +328,7 @@ class _World:
 
     def corrupt_config(self) -> None:
         """Leave configuration AgentMux cannot parse where it will look."""
-        self.config_path.write_text(
-            '[[profiles]\nname = "broken\n', encoding="utf-8"
-        )
+        self.config_path.write_text('[[profiles]\nname = "broken\n', encoding="utf-8")
 
     # -- transcripts -------------------------------------------------------
 
@@ -407,6 +409,33 @@ class _World:
         command is there, it runs, it answers, and the answer is to a question
         under a contract this side does not implement.
         """
+        self._install_contract_shim(
+            "contract = data.get('contract')",
+            "if isinstance(contract, dict):",
+            "    contract['version'] = "
+            f"{overseer_policy_client.POLICY_CONTRACT_VERSION + 1}",
+        )
+
+    def install_predating_binary(self) -> None:
+        """Point the client at a component from before the contract existed.
+
+        The other direction of the same skew, and the one an operator actually
+        meets: an AgentMux older than the ASL beside it answers the commands and
+        publishes no contract block at all, because it predates the block. There
+        is no version 0 to report -- version 1 is the first -- so an older
+        component is exactly a payload with nothing to check the version of, and
+        the client has to read that as unavailable rather than as permission.
+        """
+        self._install_contract_shim("data.pop('contract', None)")
+
+    def _install_contract_shim(self, *mutation: str) -> None:
+        """Wrap the current binary in a shim that rewrites what it published.
+
+        The shim runs the real binary and edits only the envelope's ``contract``
+        block, so everything the payload says about the request it answered
+        stays the real answer to the real question. That is the point: the skew
+        under test is a disagreement about the contract, not a fabricated reply.
+        """
         shim = self.root / "amx-shim"
         shim.write_text(
             "\n".join(
@@ -424,10 +453,7 @@ class _World:
                     "    sys.stdout.write(done.stdout)",
                     "    raise SystemExit(done.returncode)",
                     "data = parsed.get('data') or {}",
-                    "contract = data.get('contract')",
-                    "if isinstance(contract, dict):",
-                    "    contract['version'] = "
-                    f"{overseer_policy_client.POLICY_CONTRACT_VERSION + 1}",
+                    *mutation,
                     "sys.stdout.write(json.dumps(parsed))",
                     "raise SystemExit(done.returncode)",
                     "",
@@ -674,7 +700,11 @@ class _World:
 
     def invoke(self, *argv: str) -> tuple[int, dict[str, Any]]:
         args = self.parse(*argv)
-        handler = cli.resolve_handler(args)
+        # `resolve_handler` is typed for the shape every leaf shares. The
+        # overseer leaves additionally take the keyword-only `seams` this
+        # fixture injects, so the widening lives here rather than in the
+        # production signature, where it would stop describing the leaves.
+        handler = cast("Callable[..., int]", cli.resolve_handler(args))
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
             status = handler(args, seams=self.seams())
@@ -707,8 +737,13 @@ class _World:
 class _WorldCase(unittest.TestCase):
     """One authorized plan, one excluded project, one person's instruction."""
 
+    #: The ``amx`` the world is built around. ``None`` means the binary this
+    #: module built from source. The paired smoke gate subclasses these fixtures
+    #: with the installed one, so the world stays defined in one place.
+    binary: Path | None = None
+
     def setUp(self) -> None:
-        self.world = _World(self)
+        self.world = _World(self, binary=self.binary)
         self.session = self.world.write_transcript(
             AUTHORIZED,
             [
@@ -813,9 +848,7 @@ class _WorldCase(unittest.TestCase):
     def _candidate(self, plan: Path | None = None) -> overseer_discovery.Candidate:
         inventory = overseer_discovery.build_inventory(state_dir=self.world.state_root)
         wanted = str(plan or self.plan)
-        return next(
-            item for item in inventory.candidates if item.plan_dir == wanted
-        )
+        return next(item for item in inventory.candidates if item.plan_dir == wanted)
 
     def _porcelain(self, alias: str) -> list[str]:
         return [
@@ -838,6 +871,95 @@ class _WorldCase(unittest.TestCase):
             ).splitlines()
             if line
         ]
+
+    # -- driving a resume --------------------------------------------------
+
+    def _dispatch_resume(self, packet: dict[str, Any]) -> overseer_dispatch.Dispatch:
+        """The resume path, one level below the leaf and otherwise unchanged.
+
+        :func:`overseer_cli._adapters` builds the resume adapter without a
+        ``launch`` seam, so an authorized resume through the leaf would spawn a
+        real ``asl run`` against the fixture's plan. Everything else -- the
+        ledger, the lease, the policy client, the binary, the state corpus --
+        is the leaf's own.
+        """
+        self.launched: list[str] = []
+        plan_dir = str(self.plan)
+        ledger = self.world.open_ledger(state_dir=self.world.state_root)
+        candidate = self._candidate()
+        repositories = overseer_policy_client.repositories_for(candidate.repositories)
+        action = overseer_dispatch.Action(
+            plan_dir=plan_dir,
+            run_id=packet["run_id"],
+            incident_id=packet["packet"]["incident_id"],
+            scope=packet["scope"],
+            token=packet["token"],
+            repositories=repositories,
+            payload=overseer_dispatch.Resume(session_id=""),
+        )
+
+        def launch(context: overseer_resume.LaunchContext) -> overseer_resume.Launched:
+            """Start a fake harness and move the run, as a resumed runner does."""
+            child = self.world.start_fake_harness()
+            self.launched.append(context.plan_dir)
+            record = self.world.read_state(self.plan)
+            record["paused"] = False
+            record["pause_reason"] = None
+            record["active_turn"] = {
+                "session_id": "1",
+                "turn_index": 4,
+                "last_activity_at": clock.utc_iso_now(),
+            }
+            self.world.write_state(self.plan, record)
+            return overseer_resume.Launched(pid=child.pid, argv=("fake", "resume"))
+
+        registry = overseer_resume.adapters(
+            authority=self._ruling,
+            state_dir=self.world.state_root,
+            launch=launch,
+        )
+        return overseer_dispatch.dispatch(
+            action=action,
+            watcher_id=WATCHER,
+            ledger=ledger,
+            adapters=registry,
+            authorize=self.world.authorize,
+            state_dir=self.world.state_root,
+        )
+
+    def _ruling(self, action: overseer_dispatch.Action) -> overseer_decisions.Ruling:
+        """The ruling the leaf would have reached, reached the same way."""
+        scope = overseer_decisions.Scope(
+            project=self.world.workspace_root,
+            plan_dir=action.plan_dir,
+            run_id=action.run_id,
+            incident=str(action.incident_id),
+        )
+        history = self.world.read_history(
+            plan_dir=action.plan_dir,
+            repositories=action.repositories,
+            timeout=30.0,
+        )
+        statements = overseer_decisions.statements_from_history(history)
+        register = overseer_decisions.register(
+            statements=statements,
+            claims=(
+                overseer_decisions.Claim(
+                    statement_id=self.world.statement_id(self.session, 0),
+                    topic="operations",
+                    stance="allow",
+                    scope=scope,
+                    operations=("resume",),
+                    reading="the user authorized routine work on their runs",
+                ),
+            ),
+        )
+        return overseer_decisions.resolve(
+            register=register,
+            request=overseer_decisions.Request(
+                operation=action.payload.operation, scope=scope
+            ),
+        )
 
 
 # -- the paired boundary ------------------------------------------------------
@@ -882,9 +1004,7 @@ class PairedBoundaryTests(_WorldCase):
         directories = {item.directory for item in history.conversations}
         self.assertEqual({self.world.workspace_root}, directories)
         statements = overseer_decisions.statements_from_history(history)
-        self.assertIn(
-            "user_instruction", {item.voice for item in statements}
-        )
+        self.assertIn("user_instruction", {item.voice for item in statements})
 
     def test_the_scope_a_statement_carries_is_the_scope_a_claim_needs(self) -> None:
         """The one alignment the whole module rests on, asserted directly."""
@@ -1085,89 +1205,6 @@ class HistoricalReplayTests(_WorldCase):
             [item["statement_id"] for item in payload["ruling"]["superseded"]],
         )
         self.assertEqual([], self._porcelain_committed(AUTHORIZED))
-
-    # -- helpers -----------------------------------------------------------
-
-    def _dispatch_resume(self, packet: dict[str, Any]) -> overseer_dispatch.Dispatch:
-        self.launched: list[str] = []
-        plan_dir = str(self.plan)
-        ledger = self.world.open_ledger(state_dir=self.world.state_root)
-        candidate = self._candidate()
-        repositories = overseer_policy_client.repositories_for(candidate.repositories)
-        action = overseer_dispatch.Action(
-            plan_dir=plan_dir,
-            run_id=packet["run_id"],
-            incident_id=packet["packet"]["incident_id"],
-            scope=packet["scope"],
-            token=packet["token"],
-            repositories=repositories,
-            payload=overseer_dispatch.Resume(session_id=""),
-        )
-
-        def launch(context: overseer_resume.LaunchContext) -> overseer_resume.Launched:
-            """Start a fake harness and move the run, as a resumed runner does."""
-            child = self.world.start_fake_harness()
-            self.launched.append(context.plan_dir)
-            record = self.world.read_state(self.plan)
-            record["paused"] = False
-            record["pause_reason"] = None
-            record["active_turn"] = {
-                "session_id": "1",
-                "turn_index": 4,
-                "last_activity_at": clock.utc_iso_now(),
-            }
-            self.world.write_state(self.plan, record)
-            return overseer_resume.Launched(pid=child.pid, argv=("fake", "resume"))
-
-        registry = overseer_resume.adapters(
-            authority=self._ruling,
-            state_dir=self.world.state_root,
-            launch=launch,
-        )
-        return overseer_dispatch.dispatch(
-            action=action,
-            watcher_id=WATCHER,
-            ledger=ledger,
-            adapters=registry,
-            authorize=self.world.authorize,
-            state_dir=self.world.state_root,
-        )
-
-    def _ruling(
-        self, action: overseer_dispatch.Action
-    ) -> overseer_decisions.Ruling:
-        """The ruling the leaf would have reached, reached the same way."""
-        scope = overseer_decisions.Scope(
-            project=self.world.workspace_root,
-            plan_dir=action.plan_dir,
-            run_id=action.run_id,
-            incident=str(action.incident_id),
-        )
-        history = self.world.read_history(
-            plan_dir=action.plan_dir,
-            repositories=action.repositories,
-            timeout=30.0,
-        )
-        statements = overseer_decisions.statements_from_history(history)
-        register = overseer_decisions.register(
-            statements=statements,
-            claims=(
-                overseer_decisions.Claim(
-                    statement_id=self.world.statement_id(self.session, 0),
-                    topic="operations",
-                    stance="allow",
-                    scope=scope,
-                    operations=("resume",),
-                    reading="the user authorized routine work on their runs",
-                ),
-            ),
-        )
-        return overseer_decisions.resolve(
-            register=register,
-            request=overseer_decisions.Request(
-                operation=action.payload.operation, scope=scope
-            ),
-        )
 
 
 # -- fault qualification ------------------------------------------------------

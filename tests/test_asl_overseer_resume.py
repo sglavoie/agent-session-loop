@@ -57,7 +57,7 @@ import unittest
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 from unittest import mock
 
 from agent_session_loop import (
@@ -515,7 +515,7 @@ class ClosedVocabulary(_ResumeCase):
     def test_refusals_tuple_matches_the_literal_type(self) -> None:
         self.assertEqual(
             set(overseer_resume.REFUSALS),
-            set(overseer_resume.Refusal.__args__),
+            set(get_args(overseer_resume.Refusal)),
         )
         self.assertEqual(
             len(overseer_resume.REFUSALS), len(set(overseer_resume.REFUSALS))
