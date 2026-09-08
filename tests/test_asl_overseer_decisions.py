@@ -1118,6 +1118,107 @@ class ChangedAcceptanceTests(unittest.TestCase):
                     self.assertFalse(decision.speaks_to(operation))
 
 
+class DependencyTests(unittest.TestCase):
+    """Which human questions a request depends on when nobody named them.
+
+    ``raises`` is the one part of a request a caller has to compose, and a
+    caller composing it from nothing can only name questions it already knew
+    were open. The register knows something the caller does not: which human
+    topics somebody actually spoke to about this run.
+    """
+
+    def _register(
+        self,
+        *,
+        topic: str = "safety",
+        stance: str = "hold",
+        scope: overseer_decisions.Scope | None = None,
+    ) -> overseer_decisions.Register:
+        operational = _direct_statement(
+            statement_id="operational", at=EARLY, text="resume routine pauses"
+        )
+        human = _direct_statement(
+            statement_id="human", at=LATE, text="I have not settled that question"
+        )
+        return overseer_decisions.register(
+            statements=(operational, human),
+            claims=[
+                _claim("operational", operations=("commit", "resume")),
+                _claim("human", topic=topic, stance=stance, operations=(), scope=scope),
+            ],
+        )
+
+    def test_a_claimed_human_decision_raises_its_own_topic(self) -> None:
+        """The finding: the caller named nothing and the hold still counts."""
+        for topic in overseer_decisions.HUMAN_TOPICS:
+            for stance in overseer_decisions.STANCES:
+                with self.subTest(topic=topic, stance=stance):
+                    raised = overseer_decisions.dependencies(
+                        register=self._register(topic=topic, stance=stance),
+                        scope=PLAN_SCOPE,
+                    )
+
+                    self.assertEqual(raised, (topic,))
+
+    def test_an_operational_decision_raises_nothing(self) -> None:
+        """Operations are answered by the ruling, not raised as a question."""
+        register = overseer_decisions.register(
+            statements=(_direct_statement(statement_id="operational"),),
+            claims=[_claim("operational")],
+        )
+
+        self.assertEqual(
+            overseer_decisions.dependencies(register=register, scope=PLAN_SCOPE), ()
+        )
+
+    def test_named_topics_come_first_and_are_never_repeated(self) -> None:
+        """A caller that names the topic the register found gets it once."""
+        raised = overseer_decisions.dependencies(
+            register=self._register(topic="safety"),
+            scope=PLAN_SCOPE,
+            raises=("design", "safety"),
+        )
+
+        self.assertEqual(raised, ("design", "safety"))
+
+    def test_a_decision_about_another_run_raises_nothing_here(self) -> None:
+        """Anti-transfer reads both ways: a neighbour's hold is not our question.
+
+        The decision is real and stays in the register as a precedent; what it
+        cannot do is make this run answerable to a question asked about a
+        different one.
+        """
+        register = self._register(
+            scope=overseer_decisions.Scope(
+                project=PROJECT, plan_dir=PLAN, run_id=RUN, incident="incident-1"
+            )
+        )
+
+        self.assertEqual(
+            overseer_decisions.dependencies(register=register, scope=PLAN_SCOPE), ()
+        )
+        self.assertEqual(len(register.decisions), 2)
+
+    def test_a_raised_topic_the_register_found_is_not_thereby_settled(self) -> None:
+        """Raising and settling are different questions with the same input."""
+        register = self._register(topic="safety", stance="hold")
+
+        ruling = overseer_decisions.resolve(
+            register=register,
+            request=overseer_decisions.Request(
+                operation="resume",
+                scope=PLAN_SCOPE,
+                raises=overseer_decisions.dependencies(
+                    register=register, scope=PLAN_SCOPE
+                ),
+            ),
+        )
+
+        self.assertFalse(ruling.authorized)
+        self.assertEqual(ruling.refusal, "human_decision")
+        self.assertEqual(ruling.unresolved, ("safety",))
+
+
 class PrecedentTests(unittest.TestCase):
     """The session's fourth fixture: an approval that was about something else."""
 

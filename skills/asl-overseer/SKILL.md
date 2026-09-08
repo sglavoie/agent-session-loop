@@ -111,6 +111,8 @@ asl overseer decide "$PLAN" --operation reply --incident-id "$INCIDENT" \
   --claims-file claims.json --json
 ```
 
+**Name the human questions this operation depends on.** `acceptance`, `scope`, `design` and `safety` are the topics that stay human, and a decision on one of them never authorizes an operation by itself — it settles a question the operation waits on. Pass `--raises TOPIC` (repeat it) for every such question you know is open, and a topic no in-scope decision settles refuses `human_decision` no matter what the operational allowance said. You do not have to name a topic you already wrote a claim about: any human topic a surviving claim spoke to about this run is raised for you, so a safety hold you read honestly and claimed honestly stops the operation even if you forgot the flag. The ruling's `unresolved` list is what is still outstanding, and it does not distinguish a hold from silence — neither one is an answer.
+
 This is the only place your judgement enters, and it enters as data the register can reject. `rejected_claims` in the output tells you which claims did not survive and why — `unknown_statement` means you cited something nobody said, `not_user_authored` means you leaned on a relay as if a person had written it, `scope_widened` means you applied a statement past what it covered. A rejection is information about your reading, not an obstacle to route around.
 
 **Reusing decisions is the point.** A human who already settled something settled it. Cite the statement and proceed. What you must not do is manufacture a settlement out of a statement that does not carry one.
@@ -125,6 +127,8 @@ asl overseer act "$PLAN" --watcher-id "$WATCHER" --operation reply \
   --question-id "$QUESTION" --text "..." --claims-file claims.json \
   --reviewed-evidence "$DIGEST" --json
 ```
+
+Pass the same `--raises` topics you passed to `decide`. They are read once and carried into both authority re-checks, and what your claims raise is re-derived at each one, so an action cannot be refused by the first check and authorized by the second.
 
 `--token` and `--scope` come from step 3 and are never recomputed. That is what makes a `stale_action` refusal possible: if the run moved between reading and acting, the token no longer matches and the action is refused rather than aimed at a state that is gone.
 

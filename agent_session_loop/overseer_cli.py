@@ -414,6 +414,7 @@ def _ruling_payload(ruling: overseer_decisions.Ruling) -> dict[str, Any]:
             }
             for settlement in ruling.settlements
         ],
+        "unresolved": list(ruling.unresolved),
     }
 
 
@@ -671,6 +672,20 @@ def _claims_text(args: argparse.Namespace) -> str:
         ) from error
 
 
+def _raises(args: argparse.Namespace) -> tuple[overseer_decisions.Topic, ...]:
+    """The human questions the invocation says this operation depends on.
+
+    ``--raises`` is additive to what the claims already show: a topic named here
+    is raised whether or not any decision was claimed on it, which is how a host
+    agent says "this needs acceptance and nobody has given it" rather than only
+    "someone answered acceptance". The parser restricts the values to
+    :data:`overseer_decisions.HUMAN_TOPICS`, so the cast records a vocabulary the
+    argument list already enforced.
+    """
+    named = tuple(getattr(args, "raises", None) or ())
+    return tuple(cast(overseer_decisions.Topic, str(item)) for item in named)
+
+
 @dataclass(frozen=True)
 class Evidence:
     """Everything a ruling was derived from, and how much of it was readable."""
@@ -738,6 +753,7 @@ def _rule(
     evidence: Evidence,
     claims: Sequence[overseer_decisions.Claim],
     operation: str,
+    raises: Sequence[overseer_decisions.Topic] = (),
     reviewed: str = "",
 ) -> tuple[overseer_decisions.Ruling, overseer_decisions.Register]:
     """Recompute a ruling from live statements. Never from a cached one.
@@ -746,6 +762,13 @@ def _rule(
     caller is binding them to one. Re-deriving the ruling proves the claims are
     still in force; the digest is what makes the re-derivation notice a
     statement nobody claimed because nobody had seen it yet.
+
+    ``raises`` is the human questions the caller knows are open. It is a floor
+    rather than the whole answer: the register is asked which human topics were
+    actually claimed in scope, so a safety hold the host agent read out of the
+    conversation stops the operation whether or not the invocation named safety.
+    Deriving it here rather than at each leaf is what keeps every authority
+    recheck asking the same question as the first one.
     """
     register = overseer_decisions.register(
         statements=evidence.statements, claims=claims
@@ -753,7 +776,12 @@ def _rule(
     ruling = overseer_decisions.resolve(
         register=register,
         request=overseer_decisions.Request(
-            operation=operation, scope=evidence.scope, reviewed=reviewed
+            operation=operation,
+            scope=evidence.scope,
+            raises=overseer_decisions.dependencies(
+                register=register, scope=evidence.scope, raises=raises
+            ),
+            reviewed=reviewed,
         ),
     )
     return ruling, register
@@ -1125,7 +1153,12 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
         lines.append(f"  evidence digest: {reviewed}")
         _emit(payload, lines, as_json=as_json)
         return EXIT_OK
-    ruling, register = _rule(evidence=evidence, claims=claims, operation=args.operation)
+    ruling, register = _rule(
+        evidence=evidence,
+        claims=claims,
+        operation=args.operation,
+        raises=_raises(args),
+    )
     settlements = [
         overseer_decisions.settle(register=register, topic=topic, scope=scope)
         for topic in overseer_decisions.HUMAN_TOPICS
@@ -1210,6 +1243,12 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
     a hold arriving *during* preparation is still caught -- what is not caught
     without the flag is a hold that arrived between ``decide`` and ``act``,
     which is the window the host closes by passing what it reviewed.
+
+    ``--raises`` is read once and handed to both rechecks, so the human
+    questions this action depends on cannot be answered by the first reading and
+    forgotten by the second. What the register itself raises is re-derived each
+    time, because a hold claimed against live evidence is a dependency the
+    invocation never had to know about.
     """
     as_json = bool(getattr(args, "json", False))
     state_dir = _state_dir(args)
@@ -1225,6 +1264,7 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
     except OverseerCliError as error:
         return _failure("overseer-act", error, as_json=as_json)
     timeout = float(args.timeout)
+    raises = _raises(args)
     binding = {
         "reviewed": str(getattr(args, "reviewed_evidence", "") or ""),
         "observed": "",
@@ -1260,6 +1300,7 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
             evidence=evidence,
             claims=claims,
             operation=action.payload.operation,
+            raises=raises,
             reviewed=binding["reviewed"],
         )
         return ruling

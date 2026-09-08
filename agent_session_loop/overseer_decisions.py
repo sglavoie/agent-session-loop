@@ -183,6 +183,7 @@ __all__ = [
     "Scope",
     "Settlement",
     "Statement",
+    "dependencies",
     "evidence_digest",
     "generated_marker",
     "register",
@@ -1015,6 +1016,41 @@ def settle(*, register: Register, topic: Topic, scope: Scope) -> Settlement:
         superseded=tuple(applicable[:-1]),
         precedents=precedents,
     )
+
+
+def dependencies(
+    *, register: Register, scope: Scope, raises: Sequence[Topic] = ()
+) -> tuple[Topic, ...]:
+    """Which human questions one request depends on.
+
+    A human topic never :meth:`Decision.speaks_to` an operation, so an accepted
+    decision about acceptance, scope, design or safety is invisible to
+    :func:`resolve` unless the request names its topic. That is the right shape
+    for a caller who knows a question is open and the wrong one for a caller who
+    was handed the answer: a user who typed a safety hold about this run said the
+    safety question governs it, and a caller that had to name the topic to be
+    stopped by it could be stopped only by holds it already knew about.
+
+    So the topics a caller names are unioned with the human topics some in-scope
+    decision was claimed on, in that order and without repeats. Scope is the
+    same ``covers`` relation the rest of the module uses: a human decision made
+    about another project, plan, run or incident stays a precedent rather than
+    becoming a question about this one, because the anti-transfer rule reads in
+    both directions -- a neighbour's hold no more raises this run's questions
+    than a neighbour's allowance settles them.
+
+    Raising a topic is not settling it. A topic reaches :attr:`Request.raises`
+    whether the claimed decision allows or holds, and :func:`resolve` refuses
+    ``human_decision`` for a hold and for a withheld or absent settlement alike,
+    which is what keeps an operational allowance from standing in for an answer
+    nobody gave.
+    """
+    claimed = tuple(
+        decision.topic
+        for decision in register.decisions
+        if decision.topic in HUMAN_TOPICS and decision.scope.covers(scope)
+    )
+    return tuple(dict.fromkeys((*raises, *claimed)))
 
 
 def resolve(*, register: Register, request: Request) -> Ruling:

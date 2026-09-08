@@ -1946,6 +1946,20 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         help="Narrow the scope to one open incident",
     )
     overseer_decide_parser.add_argument(
+        "--raises",
+        action="append",
+        metavar="TOPIC",
+        # overseer_decisions.HUMAN_TOPICS, restated: this parser imports no
+        # overseer module.
+        choices=("acceptance", "scope", "design", "safety"),
+        help=(
+            "A human question this operation depends on; repeat per topic. A "
+            "topic no in-scope decision settles refuses `human_decision` "
+            "however the operation itself was allowed. Topics some claimed "
+            "in-scope decision already names are raised anyway"
+        ),
+    )
+    overseer_decide_parser.add_argument(
         "--list-statements",
         action="store_true",
         help="Print the statements in scope with their IDs, then stop",
@@ -2053,6 +2067,19 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "--scope",
         required=True,
         help="The scope digest `asl overseer inspect` reported",
+    )
+    overseer_act_parser.add_argument(
+        "--raises",
+        action="append",
+        metavar="TOPIC",
+        # overseer_decisions.HUMAN_TOPICS, restated: this parser imports no
+        # overseer module.
+        choices=("acceptance", "scope", "design", "safety"),
+        help=(
+            "A human question this action depends on; repeat per topic. It is "
+            "carried into every authority recheck, and a claimed in-scope hold "
+            "on any human topic is carried whether or not it is named here"
+        ),
     )
     overseer_act_parser.add_argument(
         "--question-id",

@@ -573,8 +573,8 @@ asl diagnostics export --agent-mux [--state-dir DIR] [--run-id ID] [--plan-dir D
 asl overseer scan [--plan PLAN_DIR ...] [--project DIR ...] [--pause-window-hours H] [--state-dir DIR] [--json]
 asl overseer watch --watcher-id ID [--plan PLAN_DIR ...] [--project DIR ...] [--for-seconds SEC] [--interval-seconds SEC] [--sweep-seconds SEC] [--lease-seconds SEC] [--pause-window-hours H] [--release] [--timeout SEC] [--state-dir DIR] [--json]
 asl overseer inspect PLAN_DIR [--kind KIND] [--summary TEXT] [--incident-id ID] [--expand status|questions|run_config|verification|worker_changes|supervision ...] [--limit CHARS] [--timeout SEC] [--state-dir DIR] [--json]
-asl overseer decide PLAN_DIR [--operation reply|guidance|verify|commit|resume] [--incident-id ID] [--list-statements] [--claims-file PATH|--claims-stdin] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
-asl overseer act PLAN_DIR --watcher-id ID --operation reply|guidance|verify|commit|resume --run-id ID --incident-id ID --token TOKEN --scope DIGEST [--question-id ID] [--text TEXT] [--check NAME] [--message TEXT] [--session-id ID] [--claims-file PATH|--claims-stdin] [--reviewed-evidence DIGEST] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
+asl overseer decide PLAN_DIR [--operation reply|guidance|verify|commit|resume] [--incident-id ID] [--raises TOPIC ...] [--list-statements] [--claims-file PATH|--claims-stdin] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
+asl overseer act PLAN_DIR --watcher-id ID --operation reply|guidance|verify|commit|resume --run-id ID --incident-id ID --token TOKEN --scope DIGEST [--raises TOPIC ...] [--question-id ID] [--text TEXT] [--check NAME] [--message TEXT] [--session-id ID] [--claims-file PATH|--claims-stdin] [--reviewed-evidence DIGEST] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
 asl overseer reconcile PLAN_DIR [--timeout SEC] [--state-dir DIR] [--json]
 ```
 
@@ -616,6 +616,24 @@ the other eligible plans the invocation may keep working on meanwhile. It
 carries no default, no timeout, and no deadline — there is nowhere to express
 "proceed if nobody answers".
 
+Acceptance, scope, design and safety are the questions that stay human, and a
+decision on one of them never speaks to an operation: it is a settlement a
+request has to *raise* before the ruling can weigh it. Both leaves raise two
+things. `--raises TOPIC` (repeatable on `decide` and on `act`) is what a host
+names when it knows a question is open, and a topic no in-scope decision settles
+is refused `human_decision` however the operation itself was allowed — an
+operational allowance is not an answer to a question nobody asked the person.
+The register raises the rest: any human topic a surviving claim spoke to about
+this run is carried whether or not the invocation named it, so a safety hold the
+host read out of the conversation and claimed honestly cannot be stepped past by
+an invocation that forgot to mention safety. Scope reads the same way in both
+directions — a human decision made about another project, plan, run or incident
+stays a precedent and raises nothing here, because a neighbour's hold no more
+poses this run's questions than a neighbour's allowance settles them. Raising is
+not settling: a topic is raised whether the claimed decision allows or holds, and
+a hold, a withheld settlement and an absent one all read out the same way in the
+ruling's `unresolved` list.
+
 Statements come from two boundaries that are not interchangeable. A plan's
 mailbox records that an instruction *arrived* and records no author, so every
 statement it yields is relayed: citable as corroboration, never an authorization
@@ -651,7 +669,9 @@ lease, the token still matches, and a ruling still authorizes it. Authority is
 re-derived from live supervision twice — before the adapter prepares and again
 immediately before it performs — so a revocation landing in between stops the
 action. Revocation stops later context reads and queued actions but never undoes
-a dispatch that already happened.
+a dispatch that already happened. `--raises` is read once and handed to both
+rechecks, and what the register itself raises is re-derived at each one, so
+neither pass can authorize a human question the other refused.
 
 Re-deriving catches a withdrawn grant and does not on its own catch a *new*
 statement: claims cite what the host read, a hold nobody claimed never becomes a

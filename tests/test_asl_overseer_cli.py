@@ -1487,6 +1487,212 @@ class EvidenceFreshnessTests(_OverseerCase):
         )
 
 
+class HumanDependencyTests(_OverseerCase):
+    """That a human question reaches the CLI at all.
+
+    A human topic never speaks to an operation, so an accepted decision about
+    acceptance, scope, design or safety is invisible to the ruling unless the
+    request raises it. The CLI used to raise nothing, which made the whole
+    ``HUMAN_TOPICS`` half of the decision layer unreachable from an invocation:
+    a safety hold the host read out of the conversation, submitted as a claim
+    and accepted into the register, still authorized the operation. These tests
+    drive both halves of the repair --- the topic the register itself raises
+    because a decision was claimed on it, and the topic ``--raises`` names
+    because the host knows nobody has answered it --- across all four topics,
+    through ``decide`` and through every recheck ``act`` performs.
+    """
+
+    STATEMENTS = {
+        "acceptance": "the shard-timeout fix is what I asked for. it is accepted.",
+        "scope": "this run may widen to the packaging repository. that is in scope.",
+        "design": "the contract-reading adapter is the design I want here.",
+        "safety": "the migration this run is paused on is safe to perform.",
+    }
+
+    def test_a_settled_topic_leaves_authorized_work_authorized(self) -> None:
+        """The dependency is a question to answer, not a second veto.
+
+        A topic somebody settled is raised and then satisfied, so the operation
+        the same person allowed still goes through --- otherwise every claim a
+        host submitted about a human question would cost it the operation.
+        """
+        packet = self.observed()
+
+        for topic in overseer_decisions.HUMAN_TOPICS:
+            with self.subTest(topic=topic):
+                status, payload = self._decide(packet, topic=topic, stance="allow")
+
+                self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+                self.assertTrue(payload["authorized"])
+                self.assertEqual([], payload["ruling"]["unresolved"])
+                self.assertEqual(
+                    [topic],
+                    [item["topic"] for item in payload["ruling"]["settlements"]],
+                )
+
+    def test_a_claimed_hold_outranks_a_general_operational_allowance(self) -> None:
+        """The finding, per topic: the hold is in the register and it now bites.
+
+        The operational allowance is still the governing decision --- nothing
+        about the hold changes which decision speaks to the operation --- and
+        the request is refused anyway, which is the ordering the decision layer
+        always had and the CLI could never reach.
+        """
+        packet = self.observed()
+
+        for topic in overseer_decisions.HUMAN_TOPICS:
+            with self.subTest(topic=topic):
+                status, payload = self._decide(packet, topic=topic, stance="hold")
+
+                self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+                self.assertFalse(payload["authorized"])
+                self.assertEqual("human_decision", payload["ruling"]["refusal"])
+                self.assertEqual([topic], payload["ruling"]["unresolved"])
+                self.assertEqual("operations", payload["ruling"]["decision"]["topic"])
+                self.assertEqual("allow", payload["ruling"]["decision"]["stance"])
+
+    def test_a_raised_topic_nobody_settled_blocks_the_operation(self) -> None:
+        """The other direction: no decision on the topic at all.
+
+        Deriving dependencies from the register alone would raise only questions
+        somebody already answered, which is the useless half. `--raises` is how
+        a host says the question is open, and an open question is not an
+        allowance.
+        """
+        packet = self.observed()
+
+        for topic in overseer_decisions.HUMAN_TOPICS:
+            with self.subTest(topic=topic):
+                status, payload = self._decide(packet, raises=topic)
+
+                self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+                self.assertEqual("human_decision", payload["ruling"]["refusal"])
+                self.assertEqual([topic], payload["ruling"]["unresolved"])
+                self.assertIn(topic, payload["ruling"]["summary"])
+
+    def test_a_claimed_hold_stops_the_action_and_writes_nothing(self) -> None:
+        """Through `act`, where the ruling is re-derived rather than carried."""
+        packet = self.observed()
+        claims = self.fleet.claims_file(
+            self, self._claims(topic="safety", stance="hold")
+        )
+
+        status, payload = self.act(
+            packet, "--text", "carry on", "--claims-file", claims
+        )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertFalse(payload["dispatch"]["performed"])
+        self.assertEqual("preparation_declined", payload["dispatch"]["refusal"])
+        self.assertIn("human_decision", payload["dispatch"]["detail"])
+        self.assertEqual((), self._guidance())
+
+    def test_a_raised_topic_stops_the_action_before_it_prepares(self) -> None:
+        """`--raises` reaches the ruling the dispatcher asks for, not just `decide`.
+
+        The dispatcher checks authority twice, and the flag is read once and
+        handed to both, so neither pass can re-derive an authorization the other
+        refused. Only the first pass runs here --- an action refused before its
+        adapter prepares never reaches the second --- so what this pins is that
+        the transcript was read exactly once and nothing was appended.
+        """
+        packet = self.observed()
+        claims = self.fleet.claims_file(
+            self, self.fleet.allowing(self.fleet.transcript.statement_id(), "guidance")
+        )
+        baseline = len(self.fleet.transcript.calls)
+
+        status, payload = self.act(
+            packet,
+            "--text",
+            "carry on",
+            "--raises",
+            "acceptance",
+            "--claims-file",
+            claims,
+        )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertFalse(payload["dispatch"]["performed"])
+        self.assertIn("human_decision", payload["dispatch"]["detail"])
+        self.assertEqual(baseline + 1, len(self.fleet.transcript.calls))
+        self.assertEqual((), self._guidance())
+
+    def test_a_settled_topic_the_invocation_raised_still_acts(self) -> None:
+        """The whole point: naming the question is how a host clears it."""
+        packet = self.observed()
+        claims = self.fleet.claims_file(
+            self, self._claims(topic="acceptance", stance="allow")
+        )
+
+        status, payload = self.act(
+            packet,
+            "--text",
+            "carry on",
+            "--raises",
+            "acceptance",
+            "--claims-file",
+            claims,
+        )
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["dispatch"]["performed"])
+        self.assertEqual(1, len(self._guidance()))
+
+    # -- helpers -----------------------------------------------------------
+
+    def _claims(self, *, topic: str, stance: str) -> list[dict[str, Any]]:
+        """The operational allowance, plus one reading of one human question.
+
+        The human statement is appended rather than replacing the record, so the
+        allowance that would otherwise authorize the operation is still there to
+        be outranked.
+        """
+        self.fleet.transcript.turns[1:] = [("user", self.STATEMENTS[topic])]
+        return [
+            *self.fleet.allowing(self.fleet.transcript.statement_id(), "guidance"),
+            {
+                "statement_id": self.fleet.transcript.statement_id(1),
+                "topic": topic,
+                "stance": stance,
+                "operations": [],
+                "reading": f"the user spoke to the {topic} question for this run",
+            },
+        ]
+
+    def _guidance(self) -> tuple[Any, ...]:
+        return tuple(
+            message
+            for message in self.fleet.messages(self.plan)
+            if message.kind == mailbox.KIND_GUIDANCE
+        )
+
+    def _decide(
+        self,
+        packet: dict[str, Any],
+        *,
+        topic: str = "",
+        stance: str = "allow",
+        raises: str = "",
+    ) -> tuple[int, dict[str, Any]]:
+        claims = (
+            self._claims(topic=topic, stance=stance)
+            if topic
+            else self.fleet.allowing(self.fleet.transcript.statement_id(), "guidance")
+        )
+        return self.fleet.invoke(
+            "decide",
+            str(self.plan),
+            "--operation",
+            "guidance",
+            "--incident-id",
+            str(packet["packet"]["incident_id"]),
+            *(("--raises", raises) if raises else ()),
+            "--claims-file",
+            self.fleet.claims_file(self, claims),
+        )
+
+
 class EscalationTests(_OverseerCase):
     """What a refusal produces, and what it deliberately cannot produce."""
 
