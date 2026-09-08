@@ -1325,6 +1325,111 @@ class ProjectScopeTests(unittest.TestCase):
             payload["ruling"]["scope"]["projects"],
         )
 
+    def test_participating_repository_holds_block_multi_repository_actions(
+        self,
+    ) -> None:
+        """A hold in one checkout still stops work that also spans another.
+
+        Authority is held per repository, so an allowance covering only one of
+        them cannot authorize a plan spanning two. A hold is the other shape: it
+        constrains the repository it names, and a target that still includes
+        that repository is still work it was about. Reading both through the
+        same subset rule let a plan walk out from under a hold by adding a
+        second repository to the action, which is what this drives --- through
+        the operational topic and all four human ones, with the two directions
+        that must keep working beside them.
+
+        The transcript fixture dates turn *n* at ``EPOCH - (n + 1) hours``, so
+        the record is laid out newest first: the release supersedes the hold and
+        the hold supersedes the allowance it interrupts.
+        """
+        self.fleet.transcript.turns = [
+            ("user", "the review is done; resume routine guidance on both checkouts"),
+            ("user", "hold every run in the scripts checkout until I have reviewed it"),
+            ("user", "answer routine tooling questions on my runs without asking me"),
+        ]
+        release, hold, allow = (self.fleet.transcript.statement_id(i) for i in range(3))
+        in_api = self.fleet.transcript.also_in(
+            str(self.api_root),
+            "same for the api checkout: handle routine tooling without asking me",
+        )
+        held_api = self.fleet.transcript.also_in(
+            str(self.api_root), "hold every run in the api checkout for now"
+        )
+        allowance = self._allowing(allow, corroborating=[in_api])
+        topics = ("operations", *overseer_decisions.HUMAN_TOPICS)
+        packet = self._observe(self.shared)
+
+        for topic in topics:
+            with self.subTest(topic=topic, case="held"):
+                status, payload = self._decide(
+                    self.shared,
+                    packet,
+                    [*allowance, self._holding(hold, topic, self.scripts_root)],
+                )
+
+                self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+                self.assertEqual([], payload["rejected_claims"])
+                self.assertFalse(payload["authorized"])
+                self.assertEqual(
+                    "held" if topic == "operations" else "human_decision",
+                    payload["ruling"]["refusal"],
+                )
+                self.assertEqual(
+                    [] if topic == "operations" else [topic],
+                    payload["ruling"]["unresolved"],
+                )
+
+        with self.subTest(case="the other repository cannot release this one"):
+            status, payload = self._decide(
+                self.shared,
+                packet,
+                [
+                    *allowance,
+                    self._holding(hold, "operations", self.scripts_root),
+                    self._releasing(in_api, "operations", project=self.api_root),
+                ],
+            )
+
+            self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+            self.assertEqual([], payload["rejected_claims"])
+            self.assertEqual("held", payload["ruling"]["refusal"])
+            self.assertEqual(hold, payload["ruling"]["decision"]["statement_id"])
+
+        for topic in topics:
+            with self.subTest(topic=topic, case="released"):
+                status, payload = self._decide(
+                    self.shared,
+                    packet,
+                    [
+                        *allowance,
+                        self._holding(hold, topic, self.scripts_root),
+                        self._releasing(release, topic, corroborating=[in_api]),
+                    ],
+                )
+
+                self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+                self.assertEqual([], payload["rejected_claims"])
+                self.assertTrue(payload["authorized"])
+                self.assertEqual([], payload["ruling"]["unresolved"])
+
+        with self.subTest(case="a hold elsewhere leaves independent work alone"):
+            alone = self._observe(self.plan)
+
+            status, payload = self._decide(
+                self.plan,
+                alone,
+                [
+                    *self._allowing(allow),
+                    self._holding(held_api, "operations", self.api_root),
+                ],
+            )
+
+            self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+            self.assertEqual([], payload["rejected_claims"])
+            self.assertTrue(payload["authorized"])
+            self.assertEqual(allow, payload["ruling"]["decision"]["statement_id"])
+
     # -- helpers -----------------------------------------------------------
 
     def _declaration(self, alias: str, root: Path) -> dict[str, Any]:
@@ -1355,6 +1460,44 @@ class ProjectScopeTests(unittest.TestCase):
         claim = self.fleet.allowing(statement_id, "guidance")
         if corroborating is not None:
             claim[0]["corroborating"] = corroborating
+        return claim
+
+    def _holding(self, statement_id: str, topic: str, project: Path) -> dict[str, Any]:
+        """A hold read out of one repository, scoped to that repository alone.
+
+        Naming the project is the whole point: a claim that omits it inherits
+        every project the request is about, which would make the hold cover the
+        target by construction and prove nothing.
+        """
+        return {
+            "statement_id": statement_id,
+            "topic": topic,
+            "stance": "hold",
+            "scope": {"project": str(project)},
+            "reading": "the user stopped work in this checkout",
+        }
+
+    def _releasing(
+        self,
+        statement_id: str,
+        topic: str,
+        *,
+        project: Path | None = None,
+        corroborating: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """A later allowance, either covering the whole target or one project."""
+        claim: dict[str, Any] = {
+            "statement_id": statement_id,
+            "topic": topic,
+            "stance": "allow",
+            "reading": "the user lifted the hold",
+        }
+        if topic == "operations":
+            claim["operations"] = ["guidance"]
+        if project is not None:
+            claim["scope"] = {"project": str(project)}
+        if corroborating is not None:
+            claim["corroborating"] = corroborating
         return claim
 
     def _decide(

@@ -71,6 +71,16 @@ them too -- which one statement cannot do, so such a claim has to rest on a
 human statement in each project and cite them together. That is what keeps one
 project's authority from becoming another's.
 
+That rule is about *authority*, and a hold is not authority. An allowance has
+to name every project a target names, or one repository's permission would be
+spent on work in another; a hold has only to name one of them, because adding a
+second repository to an action cannot make an existing hold stop reaching the
+work that still includes the first. Applicability is therefore read from the
+stance: :meth:`Scope.covers` for an allowance, :meth:`Scope.bears_on` for a
+hold, in :func:`settle`, :func:`dependencies` and :func:`resolve` alike. A hold
+in a project the target does not name stays a precedent, so repositories nobody
+mentioned remain independent.
+
 The same rule separates incidents. A decision narrowed to one incident does not
 cover the next one, and a decision that names no incident covers the plan it
 was made about and no other. What an out-of-scope decision *does* do is show up
@@ -532,12 +542,17 @@ class Scope:
         return (self.project,) if self.project else self.projects
 
     def covers(self, target: Scope) -> bool:
-        """Whether a decision made in this scope applies to ``target``.
+        """Whether authority given in this scope applies to ``target``.
 
-        Every project the target names has to be one this scope names. A
-        decision made in one repository therefore does not reach a plan that
+        Every project the target names has to be one this scope names. An
+        allowance made in one repository therefore does not reach a plan that
         also participates in another: authority is held per project, and a plan
         spanning two of them needs human evidence covering both.
+
+        This is the allowing half of applicability. A hold constrains through
+        :meth:`bears_on` instead, because a hold is not authority and refusing
+        to apply it to a wider target would let a union scope walk out from
+        under it.
         """
         mine = set(self.named_projects)
         theirs = set(target.named_projects)
@@ -548,13 +563,19 @@ class Scope:
         return self.narrows(target)
 
     def bears_on(self, target: Scope) -> bool:
-        """Whether a statement made in this scope is evidence about ``target``.
+        """Whether something said in this scope reaches ``target`` at all.
 
         Weaker than :meth:`covers` on the project alone: sharing one project is
         enough. A hold typed in one of a plan's repositories is evidence about
         that plan even though it cannot by itself authorize work spanning the
         others, and evidence that could not be seen is evidence that cannot
         make a reading stale.
+
+        It is also what a *hold* is applied through, in :func:`settle`,
+        :func:`dependencies` and :func:`resolve`: a decision to stop work in one
+        repository still stops the work that includes it when the action spans
+        others as well. Disjoint projects are still disjoint, so a hold
+        somewhere nobody named constrains nothing.
         """
         mine = set(self.named_projects)
         theirs = set(target.named_projects)
@@ -1053,11 +1074,15 @@ def dependencies(
 
     So the topics a caller names are unioned with the human topics some in-scope
     decision was claimed on, in that order and without repeats. Scope is the
-    same ``covers`` relation the rest of the module uses: a human decision made
-    about another project, plan, run or incident stays a precedent rather than
-    becoming a question about this one, because the anti-transfer rule reads in
-    both directions -- a neighbour's hold no more raises this run's questions
-    than a neighbour's allowance settles them.
+    same :func:`_applies` relation the rest of the module uses, so a topic is
+    raised exactly when :func:`settle` could report a decision on it: a human
+    decision made about another project, plan, run or incident stays a precedent
+    rather than becoming a question about this one, because the anti-transfer
+    rule reads in both directions -- a neighbour's hold no more raises this run's
+    questions than a neighbour's allowance settles them. A hold in one of *this*
+    target's own repositories is not a neighbour's, and raises the topic even
+    when the action spans repositories the hold does not name; otherwise adding a
+    second repository would hide the question entirely.
 
     Raising a topic is not settling it. A topic reaches :attr:`Request.raises`
     whether the claimed decision allows or holds, and :func:`resolve` refuses
@@ -1068,7 +1093,7 @@ def dependencies(
     claimed = tuple(
         decision.topic
         for decision in register.decisions
-        if decision.topic in HUMAN_TOPICS and decision.scope.covers(scope)
+        if decision.topic in HUMAN_TOPICS and _applies(decision, scope)
     )
     return tuple(dict.fromkeys((*raises, *claimed)))
 
@@ -1082,6 +1107,11 @@ def resolve(*, register: Register, request: Request) -> Ruling:
     reading nobody made, a hold is a decision to respect, an unsettled human
     question outranks any operational allowance, and only then is the absence of
     a decision -- or the presence of one made about something else -- reported.
+
+    Which decisions are in the partition at all is :func:`_applies`, so a hold
+    reaches a target that names its repository among others while an allowance
+    still has to cover every one of them: an action does not escape a hold by
+    growing.
 
     ``evidence_changed`` sits above the decision checks because it is not a
     verdict on them: the claims can all be in force and the allowance can be the
@@ -1365,6 +1395,31 @@ def _project_of(directory: str, roots: Sequence[tuple[str, str]]) -> str:
     return directory
 
 
+def _applies(decision: Decision, scope: Scope) -> bool:
+    """Whether one decision governs a target, which its stance decides.
+
+    An allowance has to :meth:`Scope.covers` the target. Authority is held per
+    repository, so a permission given in one of them cannot be spent on work
+    that also touches another nobody spoke about, and a plan spanning two needs
+    a human statement in each.
+
+    A hold only has to :meth:`Scope.bears_on` it. A hold is a constraint on the
+    repository it names rather than a permission for a set, and a target that
+    still includes that repository is still work the hold was about: adding a
+    second repository to an action cannot make an existing hold cease to reach
+    it. Reading a hold through ``covers`` instead is exactly what let a union
+    scope walk out from under one, and reading an allowance through ``bears_on``
+    would let one repository's allowance authorize another.
+
+    Both halves keep the plan, run and incident narrowing, since ``covers`` and
+    ``bears_on`` share :meth:`Scope.narrows`, and both leave a decision about a
+    project the target does not name a precedent.
+    """
+    if decision.stance == "hold":
+        return decision.scope.bears_on(scope)
+    return decision.scope.covers(scope)
+
+
 def _partition(
     decisions: Iterable[Decision], scope: Scope
 ) -> tuple[tuple[Decision, ...], tuple[Decision, ...]]:
@@ -1377,7 +1432,7 @@ def _partition(
     applicable: list[Decision] = []
     precedents: list[Decision] = []
     for decision in decisions:
-        target = applicable if decision.scope.covers(scope) else precedents
+        target = applicable if _applies(decision, scope) else precedents
         target.append(decision)
     applicable.sort(key=lambda item: item.order)
     precedents.sort(key=lambda item: item.order)
