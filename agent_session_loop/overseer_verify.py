@@ -69,6 +69,30 @@ repository once symlinks are followed is caught too. Both run in
 window a manifest can be rewritten in is exactly the window between them, so
 the check that runs is one the registry still agreed with a moment earlier.
 
+## Which mode a run is in is read from the record, not from the plan
+
+Binding the registry is only a binding if there is a registry to bind. Deciding
+that from the live plan alone --- manifest, therefore registered; no manifest,
+therefore legacy --- makes *deleting* the manifest the way out of it: the
+comparisons above never run, a single-repository action picks its one
+repository as the root, and a plan that was authorized as a registered
+workspace is verified as though it had never been one.
+
+So the mode comes from the run's own record. A registered run's record carries
+the registry it ran under: ``registry_digest`` and the repositories it was
+computed from are written together, from one registry, so the record attests to
+its own registry and can be checked against itself. Rebuild the registry from
+the declarations and its digest is the digest recorded beside them. A record
+whose declarations are not a registry at all, or do not hash to what it
+carries, observed no registry --- that run is legacy, and a plan with no
+manifest is what it has always been.
+
+A run the record attests as registered, whose plan now declares no registry, is
+therefore ``registry_moved`` like any other registry drift, and for the same
+reason: the participating set the authorization was issued against is no longer
+the plan's own. That the contract may also have become valid for legacy mode is
+not a second opinion --- it is the same edit seen from the other side.
+
 ## A failing check is a fact, not a refusal
 
 ``Receipt.failed`` here means the check ran and did not pass, and the detail
@@ -187,8 +211,11 @@ Refusal = Literal[
 #:   rather than worked around.
 #: * ``registry_moved`` -- the plan's repository registry is no longer the one
 #:   discovery observed for this run, so the participating set the
-#:   authorization was issued against is stale. Escalates: the remedy is fresh
-#:   discovery and a fresh reading of the record, not another attempt.
+#:   authorization was issued against is stale. Covers a registry that changed
+#:   and a registry that is gone: a run the record attests as registered whose
+#:   plan now declares none has moved just as far, and a legacy reading of it
+#:   would be no binding rather than a weaker one. Escalates: the remedy is
+#:   fresh discovery and a fresh reading of the record, not another attempt.
 #: * ``scope_unauthorized`` -- a repository this action was not authorized for
 #:   participates: either the check resolves into one, or the plan's registry
 #:   declares or resolves one the action does not carry. Escalates.
@@ -643,20 +670,39 @@ def _context(
 ) -> verification.VerificationContext | tuple[Refusal, str]:
     """Build the context this plan's checks resolve against, or say why not.
 
-    Two questions are answered here, and both from the record rather than from
-    anything this process was configured with: which directory the plan's own
-    verification context is built from, and whether the registry it is built
-    out of is still the one this action was permitted to touch. How a context
-    is then built from a plan stays :mod:`agent_session_loop.verification`'s
-    answer, so a registered plan and a legacy one differ here by one path and
-    one binding and nowhere else.
+    Three questions are answered here, and all three from the record rather
+    than from anything this process was configured with or the plan currently
+    says: which mode the run this action was authorized about is in, which
+    directory that mode's verification context is built from, and whether the
+    registry it is built out of is still the one this action was permitted to
+    touch. How a context is then built from a plan stays
+    :mod:`agent_session_loop.verification`'s answer, so a registered plan and a
+    legacy one differ here by one path and one binding and nowhere else.
     """
     try:
         registry = plans.read_repository_registry(plan_dir)
     except plans.PlanError as error:
         return ("workspace_unrecoverable", str(error))
 
+    observed = _observed_run(
+        plan_dir, state_dir=state_dir, build_inventory=build_inventory
+    )
+    if observed is None:
+        return (
+            "workspace_unrecoverable",
+            f"discovery holds no record of {plan_dir}, so neither the root its "
+            "checks resolve against nor the mode it was authorized in can be "
+            "read back",
+        )
+
     if registry is None:
+        # A plan with no manifest is legacy *now*. Whether it was legacy when
+        # this action was authorized is the different question the record
+        # answers, and asking only the plan is what would let a removed
+        # manifest turn a bound registry into no binding at all.
+        dropped = _registry_kept(observed)
+        if dropped is not None:
+            return dropped
         if len(repositories) != 1:
             return (
                 "workspace_unrecoverable",
@@ -666,10 +712,7 @@ def _context(
             )
         cwd: str = repositories[0].path
     else:
-        observed = _observed_run(
-            plan_dir, state_dir=state_dir, build_inventory=build_inventory
-        )
-        if observed is None or not observed.workspace_root:
+        if not observed.workspace_root:
             return (
                 "workspace_unrecoverable",
                 f"discovery records no workspace root for {plan_dir}, so the "
@@ -717,6 +760,70 @@ def _observed_run(
 Participants = tuple[tuple[str, Path], ...]
 
 
+def _registry_kept(
+    observed: overseer_discovery.Candidate,
+) -> tuple[Refusal, str] | None:
+    """Refuse a legacy reading of a run the record attests was registered.
+
+    The mirror of :func:`_registry_bound`, and the case that function cannot
+    see: there is no live registry to compare, because the plan no longer has
+    one. A registered run that loses its manifest has moved exactly as far as
+    one that grew a participant --- further, since a legacy reading drops the
+    binding rather than weakening it --- so it gets the same answer and the same
+    remedy.
+
+    Nothing here consults whether the contract has *also* become legacy-valid.
+    A manifest and the checks beside it are edited in the same repository by the
+    same turn, so a contract that now resolves without aliases is the other half
+    of the change being refused, not evidence that the change was intended.
+    """
+    registry = _observed_registry(observed)
+    if registry is None:
+        return None
+    return (
+        "registry_moved",
+        f"{observed.plan_dir} declares no repository registry now, and "
+        f"discovery observed {_render(_observed_participants(observed))} under "
+        f"registry {registry.digest}; the run this action was authorized about "
+        "was a registered one, so verifying it as a legacy plan would bind no "
+        "registry at all, and this needs fresh discovery and a fresh reading of "
+        "the record rather than another attempt",
+    )
+
+
+def _observed_registry(
+    observed: overseer_discovery.Candidate,
+) -> workspaces.RepositoryRegistry | None:
+    """The registry discovery recorded for this run, if it recorded one.
+
+    A registered run's record carries the digest and the repositories it was
+    computed from, written together out of one registry, so the record attests
+    to its own registry and that attestation is checkable without the plan:
+    rebuild the registry from the declarations and it names the digest recorded
+    beside them. Declarations that are not a registry at all, or that do not
+    hash to what the record carries, are not an observation of one --- and a
+    run observed with no registry is legacy, which is the only reading under
+    which a plan with no manifest is unchanged.
+    """
+    digest = (observed.registry_digest or "").strip()
+    if not digest or not observed.repositories:
+        return None
+    try:
+        registry = workspaces.RepositoryRegistry(
+            tuple(
+                workspaces.Repository(
+                    alias=declaration.alias,
+                    path=declaration.path,
+                    origin=declaration.origin,
+                )
+                for declaration in observed.repositories
+            )
+        )
+    except workspaces.WorkspaceError:
+        return None
+    return registry if registry.digest == digest else None
+
+
 def _registry_bound(
     registry: workspaces.RepositoryRegistry,
     *,
@@ -761,9 +868,23 @@ def _resolved_bound(
     repositories: Sequence[overseer_policy_client.Repository],
 ) -> tuple[Refusal, str] | None:
     """Require every resolved repository to be one the action carries."""
+    authorized = _authorized_participants(repositories)
     workspace = context.workspace
     if workspace is None:
-        return None
+        # A legacy context has one root and no aliases, so the comparison is
+        # between paths: the only root an action with a single repository has
+        # authority over is that repository. Stated rather than inherited from
+        # how ``cwd`` was chosen, so a later caller that picks the root some
+        # other way is checked rather than trusted.
+        root = plans.canonicalize_path(context.root)
+        if len(authorized) == 1 and authorized[0][1] == root:
+            return None
+        return (
+            "scope_unauthorized",
+            f"the plan's legacy verification root resolves to {root}, which is "
+            f"not the single repository this action was authorized for: "
+            f"{_render(authorized)}",
+        )
     resolved = _resolved_participants(workspace)
     authorized = _authorized_participants(repositories)
     if resolved != authorized:
