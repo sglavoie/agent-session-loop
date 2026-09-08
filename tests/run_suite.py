@@ -44,6 +44,7 @@ FAST_MODULES = (
     "tests.test_asl_docs",
     "tests.test_asl_workspaces",
     "tests.test_asl_repository_evidence",
+    "tests.test_asl_scope_recovery",
     "tests.test_asl_repository_scope",
     "tests.test_asl_repository_intent",
     "tests.test_asl_repository_registration",

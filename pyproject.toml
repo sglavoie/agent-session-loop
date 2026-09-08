@@ -199,6 +199,7 @@ module = [
     "agent_session_loop.run_selection",
     "agent_session_loop.run_termination",
     "agent_session_loop.runner",
+    "agent_session_loop.scope_recovery",
     "agent_session_loop.session_overview",
     "agent_session_loop.session_verification",
     "agent_session_loop.startup_context",

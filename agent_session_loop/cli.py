@@ -1467,6 +1467,32 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     )
     commit_parser.set_defaults(handler_ref="commit_message:commit_from_args")
 
+    accept_refs_parser = subparsers.add_parser(
+        "accept-ref-updates",
+        help="Preview or explicitly accept a paused session's remote-ref-only changes.",
+    )
+    accept_refs_parser.add_argument("plan_dir", help="Split plan directory")
+    accept_refs_parser.add_argument(
+        "--session", required=True, help="Pending session ID"
+    )
+    accept_refs_parser.add_argument(
+        "--state-dir", help="Override operational state directory"
+    )
+    accept_refs_parser.add_argument(
+        "--json", action="store_true", help="Print JSON (also the default)"
+    )
+    accept_refs_parser.add_argument(
+        "--accept",
+        metavar="DIGEST",
+        help="Accept the exact evidence digest returned by a reviewed preview",
+    )
+    accept_refs_parser.add_argument(
+        "--reason", help="Explicit operator reason for retaining these updates"
+    )
+    accept_refs_parser.set_defaults(
+        handler_ref="scope_recovery:accept_ref_updates_from_args"
+    )
+
     unlock_parser = subparsers.add_parser(
         "unlock",
         help="Remove an operational lock for a plan directory.",

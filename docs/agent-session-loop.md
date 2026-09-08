@@ -1,5 +1,17 @@
 # Agent Session Loop
 
+For a paused review whose retained changes consist only of existing remote-ref
+updates, `asl accept-ref-updates PLAN_DIR --session SESSION_ID --json` previews
+the evidence. After explicit operator approval, repeat it with `--accept DIGEST
+--reason 'Operator approved these ref updates'` using the preview's exact
+`evidence_digest`. Acceptance requires unchanged reviewed evidence, no active
+runner, complete registered repository snapshots, clean current worktrees, and
+refs still at the recorded values. It records the operator decision without
+changing session scope or completing the review. Resume with the original
+`asl run` command; ordinary readiness and write guards still apply. Source,
+local branch, tag, topology, and unavailable-evidence failures are ineligible.
+See [the recovery contract](../agent_session_loop/README.md#accepting-remote-ref-updates-after-a-paused-review).
+
 `agent-session-loop` repeatedly invokes an agent harness against a split
 session plan directory. The default short executable alias is `asl`. Each
 harness turn runs one `$session-run` or `/session-run` invocation, then the

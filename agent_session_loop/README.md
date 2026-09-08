@@ -326,3 +326,36 @@ The other half of `overseer_resume` is who is already working the plan and wheth
 The overseer's last gate is not a module but a pair. AgentMux and ASL are released separately, so the only version of the policy and history contracts that matters to an operator is the one their two *installed* programs agree on, and no gate in either repository could see that: `tests/test_asl_overseer_e2e.py` builds `amx` from the checkout beside this one, AgentMux's `just asl-integration` drives the installed `asl` from AgentMux's own sources, and its `just asl-contract-sync` compares two checkouts offline. `tests/test_asl_overseer_paired_smoke.py` is the one that judges what is deployed. It reuses the end-to-end suite's `_World` rather than building a second fixture beside it — same repositories, same state root, same `AMX_CONFIG`, same fake harness processes, with the one seam that has to move, `_World.binary`, pointed at the installed binary — because two gates whose only difference is which pair they are about should differ in exactly that. It covers the five load-bearing steps against that pair (policy, history, watch, checkpoint, resume) and compatibility in both directions: the installed binary must answer the contracts this client speaks, and a component that does not must be refused rather than read past. A genuinely older AgentMux is not one reporting a lower contract number — version 1 is the first — it is one whose payload carries no `contract` block at all, which is what `_World.install_predating_binary` stages, next to `install_mismatched_binary` for the other direction. It spawns processes and needs an installation, so its module is in `INTEGRATION_MODULES` and never in `PORTABLE_MODULES`; it skips when there is no installed pair, because a checkout is a legitimate place to have none, and `AMX_ASL_OVERSEER_SMOKE` turns that skip into a failure. AgentMux's `just overseer-integration asl_root=…` is the caller that sets it, and the paired release gate runs it in the smoke phase before `cockpit-smoke`.
 
 > **Maintenance note:** Any work on ASL should include checking this README and updating it when behavior or architecture changes.
+
+
+## Accepting remote-ref updates after a paused review
+
+A push or fetch during a read-only review can update remote-tracking refs and
+trip `workspace-write-scope-violation` even when the working files and local
+HEAD stay unchanged. After explicit operator approval, use the narrow recovery
+command to retain those historical updates without granting the review write
+access:
+
+```sh
+asl accept-ref-updates PLAN_DIR --session SESSION_ID --json
+asl accept-ref-updates PLAN_DIR --session SESSION_ID --accept DIGEST --reason 'Operator approved these ref updates' --json
+```
+
+The first command previews the exact ref transitions and current repository
+HEADs. The second requires the reviewed `evidence_digest`; a stale digest is
+refused without returning a replacement. Both commands exclude an active runner
+with the plan lock. Acceptance requires complete original snapshots differing
+only in existing `refs/remotes/` values, an unchanged registry and worktree
+topology, clean current worktrees, and refs still at the retained values. Source,
+local branch, tag, ref creation/deletion, and unavailable-evidence incidents
+need their own recovery. Clean operator commits made after the rejected turn
+are shown in the preview and bound into the approval digest.
+
+`scope_recovery.py` owns this operator action. It appends a
+`workspace_ref_updates_accepted` event bound to the retained guard hash and the
+current evidence, preserving the original violation. The event clears only that
+incident for that session; it does not pass a failed review, complete its
+handoff, edit its scope, mark readiness, or suppress future guard failures.
+The next ordinary `asl run` refreshes readiness and reruns the pending session
+with a fresh baseline and the full write guard. A fresh expansion is unnecessary
+because acceptance changes no session scope or contract.

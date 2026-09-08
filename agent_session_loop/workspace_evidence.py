@@ -502,6 +502,7 @@ def _latest_workspace_scope_repair_requirement(
         # Event history is operational evidence. If it cannot be read, the
         # ordinary readiness and pre-turn evidence gates still apply.
         return None
+    accepted_guard_hashes: set[str] = set()
     for line in reversed(lines):
         try:
             record = json.loads(line)
@@ -527,12 +528,28 @@ def _latest_workspace_scope_repair_requirement(
             continue
         if record.get("name") == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT:
             return None
+        if record.get("name") == events.WORKSPACE_REF_UPDATES_ACCEPTED_EVENT:
+            acceptance = details.get("acceptance")
+            if (
+                isinstance(acceptance, dict)
+                and acceptance.get("session_id") == session_id
+                and isinstance(acceptance.get("retained_guard_sha256"), str)
+                and isinstance(payload.get("reason"), str)
+                and payload["reason"].strip()
+            ):
+                accepted_guard_hashes.add(acceptance["retained_guard_sha256"])
+            continue
         if (
             record.get("name") == events.RUN_PAUSED_EVENT
             and payload.get("reason")
             == events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION
         ):
-            return dict(guard) if isinstance(guard, dict) else None
+            if isinstance(guard, dict):
+                guard_hash = hashlib.sha256(
+                    json.dumps(guard, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                return None if guard_hash in accepted_guard_hashes else dict(guard)
+            return None
     return None
 
 
