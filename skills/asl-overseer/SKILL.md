@@ -16,7 +16,7 @@ Every state-changing thing you do goes through `asl overseer act`. There is no f
 
 **In scope**: `reply`, `guidance`, `verify`, `commit`, `resume`. These five are the operational scope, and `asl overseer act --operation` accepts nothing else.
 
-**Out of scope**: editing application code, editing plan files, changing a project's enrollment, running or splitting plans, and any operation no adapter implements. `verify` runs a check the plan already declared: `--check` names a check in the completion contract of the session the run is on, and the argv comes from that contract. A name the contract does not declare is refused `check_undeclared` and lists the names it does declare — that refusal is correct behavior and becomes a question for a human, not a reason to run the command yourself.
+**Out of scope**: editing application code, editing plan files, changing a project's enrollment, running or splitting plans, and any operation no adapter implements. `verify` runs a check the plan already declared: `--check` names a check in the completion contract of the session the run is on, and the argv comes from that contract. A name the contract does not declare is refused `check_undeclared` and lists the names it does declare — that refusal is correct behavior and becomes a question for a human, not a reason to run the command yourself. A plan whose repository registry no longer matches the one discovery observed is refused `registry_moved` even when the named check itself resolves somewhere permitted, because the authorization was issued against a participating set that has since changed; scan the fleet again and re-read the run rather than retrying the action.
 
 A run that needs its code repaired needs a worker session, not you. Say so and move on.
 

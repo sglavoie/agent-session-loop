@@ -95,9 +95,10 @@ from agent_session_loop import (
     overseer_watch,
     plans,
     state,
+    workspaces,
 )
 
-from .support import assert_no_runner_import
+from .support import assert_no_runner_import, write_multi_repo_plan
 
 #: The fixed moment the fake clock starts from, deliberately ahead of any real
 #: "now": see the module docstring on why a lease taken in the past would make
@@ -115,6 +116,11 @@ SESSION = "session-7"
 PLAN_SESSION = "7"
 #: The access category a mutation and its reconciliation are both asked under.
 ACTION = overseer_policy_client.ACCESS_ACTION
+
+#: Where a registered fixture repository claims to come from. A registry entry
+#: names an origin and `workspaces.resolve_workspace` checks it against Git, so
+#: both sides of that comparison are answered from this one template.
+REGISTERED_ORIGIN = "https://github.com/example/{alias}.git"
 
 #: A conversation class whose ``user`` turns are written by an orchestrating
 #: agent rather than a person, and which AgentMux does not publish. The fixture
@@ -145,6 +151,10 @@ class _Policy:
     Records every question so a test can show a leaf asked again rather than
     reusing an answer, and can be told to refuse or to go unreachable -- which
     are different answers and have to stay different.
+
+    ``on_ask`` runs once the answer is settled and before the caller sees it,
+    which is the only place a test can change the world *between* two of the
+    dispatcher's own guards rather than before or after all of them.
     """
 
     def __init__(self) -> None:
@@ -153,6 +163,7 @@ class _Policy:
         self.unavailable: set[str] = set()
         self.fingerprint = FINGERPRINT
         self.digest = DIGEST
+        self.on_ask: Callable[[str], None] | None = None
 
     def __call__(
         self,
@@ -165,6 +176,8 @@ class _Policy:
         self.asked.append({"plan_dir": plan_dir, "access": access})
         available = plan_dir not in self.unavailable
         allowed = available and plan_dir not in self.refused
+        if self.on_ask is not None:
+            self.on_ask(access)
         return overseer_policy_client.Decision(
             plan_dir=plan_dir,
             access=access,
@@ -2251,6 +2264,14 @@ class VerificationOperationTests(_OverseerCase):
     pass/fail a fact about the filesystem rather than about a fake. A
     ``file_exists`` check keeps that true without spawning anything, so this
     class stays inside `test_the_loop_spawns_no_process`'s promise.
+
+    Three more tests read the same operation against a *registered* plan, whose
+    context is built from a manifest --- a file in a repository, which a turn
+    can rewrite while an action is in flight. One shows the registered plan
+    verifying normally, so the other two are known to refuse because the
+    manifest grew a participant and not because registered mode never worked
+    here; the other two expand it, once between the observation and the action
+    and once inside the dispatch itself, and require the check never to run.
     """
 
     def setUp(self) -> None:
@@ -2261,6 +2282,9 @@ class VerificationOperationTests(_OverseerCase):
             {"type": "file_exists", "name": "marker", "path": "marker.txt"},
         )
         self.marker = self.fleet.repository_root / "marker.txt"
+        #: Every directory Git was asked about, so a test can show that an
+        #: unpermitted repository was refused rather than merely not verified in.
+        self.inspected: list[str] = []
 
     def test_authorized_verify_runs_declared_check(self) -> None:
         self.marker.write_text("present\n", encoding="utf-8")
@@ -2340,6 +2364,198 @@ class VerificationOperationTests(_OverseerCase):
         self.assertEqual("preparation_declined", payload["dispatch"]["refusal"])
         self.assertIn("authority_refused: no_decision", payload["dispatch"]["detail"])
         self.assertNotIn("check_failed", payload["dispatch"]["detail"])
+
+    def test_a_registered_plan_verifies_its_own_declared_check(self) -> None:
+        """The control the two drift tests rest on: registered mode does work.
+
+        Without it, a refusal on an expanded manifest proves nothing --- it
+        would read the same if a registered plan could never be verified here
+        at all.
+        """
+        self.marker.write_text("present\n", encoding="utf-8")
+        self._register("scripts")
+        packet = self.observed()
+        reviewed, claims = self._reviewed(packet), self._claims()
+
+        with self._answering_git():
+            status, payload = self.act(
+                packet,
+                "--check",
+                "marker",
+                "--reviewed-evidence",
+                reviewed,
+                "--claims-file",
+                claims,
+                operation="verify",
+            )
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["dispatch"]["performed"], payload["dispatch"]["detail"])
+        self.assertIsNone(payload["dispatch"]["refusal"])
+        self.assertIn("marker", payload["dispatch"]["detail"])
+
+    def test_manifest_expansion_after_inspect_refuses_verify(self) -> None:
+        """A repository added to the plan after the action was authorized.
+
+        The run's own record is untouched, so every guard that reads it --- the
+        scope digest, the declared repository set, the action token --- still
+        agrees. Only the manifest moved, and the named check still resolves in
+        the one repository AgentMux permitted, which is exactly the shape that
+        would slip through a scope test asking only about the selected check.
+        """
+        self.marker.write_text("present\n", encoding="utf-8")
+        self._register("scripts")
+        packet = self.observed()
+        reviewed, claims = self._reviewed(packet), self._claims()
+
+        self._write_manifest("scripts", "excluded")
+
+        with self._answering_git():
+            status, payload = self.act(
+                packet,
+                "--check",
+                "marker",
+                "--reviewed-evidence",
+                reviewed,
+                "--claims-file",
+                claims,
+                operation="verify",
+            )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        dispatch = payload["dispatch"]
+        self.assertFalse(dispatch["performed"])
+        self.assertEqual("preparation_declined", dispatch["refusal"])
+        self.assertIn("registry_moved", dispatch["detail"])
+        self.assertIn("excluded", dispatch["detail"])
+        self._assert_the_check_never_ran(dispatch["detail"])
+        # Refused before the workspace was resolved, so the repository nobody
+        # permitted was never even inspected.
+        self.assertNotIn(str(self.fleet.root / "excluded"), self.inspected)
+
+    def test_manifest_expansion_during_preparation_refuses_verify(self) -> None:
+        """The same repository, added while the action was already in flight.
+
+        The dispatcher asks AgentMux twice about one action --- once before the
+        adapter prepares and once after --- so expanding the manifest on the
+        second ask puts the change squarely between preparation and execution.
+        The absent `refusal` is what proves the execution refused on its own
+        re-reading: a preparation that declined comes back as
+        `preparation_declined`, and only a receipt from an adapter that ran and
+        said no comes back bare.
+        """
+        self.marker.write_text("present\n", encoding="utf-8")
+        self._register("scripts")
+        packet = self.observed()
+        reviewed, claims = self._reviewed(packet), self._claims()
+        self._expand_between_the_dispatcher_two_asks()
+
+        with self._answering_git():
+            status, payload = self.act(
+                packet,
+                "--check",
+                "marker",
+                "--reviewed-evidence",
+                reviewed,
+                "--claims-file",
+                claims,
+                operation="verify",
+            )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        dispatch = payload["dispatch"]
+        self.assertFalse(dispatch["performed"])
+        self.assertIsNone(dispatch["refusal"], dispatch["detail"])
+        self.assertIn("registry_moved", dispatch["detail"])
+        self.assertIn("excluded", dispatch["detail"])
+        self._assert_the_check_never_ran(dispatch["detail"])
+
+    def _register(self, *aliases: str) -> None:
+        """Make the plan a registered one whose record agrees with its manifest.
+
+        The agreement is the point: same digest, same aliases, same resolved
+        roots is what discovery persists for a registered run, and it is what
+        the two drift tests then break from one side only.
+        """
+        self._write_manifest(*aliases)
+        # Registered checks name their repository; the legacy fixture's check
+        # has no alias and could not resolve under a registry at all.
+        self.declared = self.fleet.declare_checks(
+            self.plan,
+            {
+                "type": "file_exists",
+                "name": "marker",
+                "path": "marker.txt",
+                "repo": "scripts",
+            },
+        )
+        registry = plans.read_repository_registry(self.plan)
+        if registry is None:
+            raise AssertionError("the manifest just written declares no registry")
+        record_path = (
+            state.plan_state_dir(self.plan, self.fleet.state_root)
+            / events.STATE_FILE_NAME
+        )
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record["registry_digest"] = registry.digest
+        record["repositories"] = [
+            {
+                "alias": repository.alias,
+                "path": repository.path,
+                "origin": repository.origin,
+                "resolved_root": str(
+                    plans.canonicalize_path(self.fleet.root / repository.path)
+                ),
+            }
+            for repository in registry
+        ]
+        record_path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+
+    def _write_manifest(self, *aliases: str) -> None:
+        """Declare exactly these repositories, and nothing else, in the plan."""
+        for alias in aliases:
+            (self.fleet.root / alias).mkdir(parents=True, exist_ok=True)
+        write_multi_repo_plan(
+            self.plan,
+            ("pending",),
+            specs=tuple(
+                (alias, alias, REGISTERED_ORIGIN.format(alias=alias))
+                for alias in aliases
+            ),
+        )
+
+    def _expand_between_the_dispatcher_two_asks(self) -> None:
+        asked: list[str] = []
+
+        def expand(access: str) -> None:
+            asked.append(access)
+            if asked.count(ACTION) == 2:
+                self._write_manifest("scripts", "excluded")
+
+        self.fleet.policy.on_ask = expand
+
+    def _answering_git(self) -> Any:
+        """Answer Git for the fixture's directories, recording every question.
+
+        Resolving a registered workspace runs `git` in each declared repository,
+        and nothing here is a checkout. Recording the questions is what lets a
+        test say the unpermitted repository was never inspected, which is a
+        stronger claim than saying no check ran inside it.
+        """
+
+        def git_stdout(root: Path, *args: str) -> str:
+            self.inspected.append(str(root))
+            if args[0] == "rev-parse":
+                return str(root)
+            return REGISTERED_ORIGIN.format(alias=root.name)
+
+        return mock.patch.object(workspaces, "_git_stdout", git_stdout)
+
+    def _assert_the_check_never_ran(self, detail: str) -> None:
+        """No verdict was reached, and the marker proves one was available."""
+        self.assertTrue(self.marker.exists())
+        self.assertNotIn("passed", detail)
+        self.assertNotIn("check_failed", detail)
 
     def _reviewed(self, packet: dict[str, Any]) -> str:
         return self.fleet.reviewed(

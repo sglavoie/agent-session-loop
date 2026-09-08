@@ -43,6 +43,32 @@ run, and a legacy plan against the one repository the action names. A plan with
 no registry and more than one repository has no unambiguous root, and that is
 ``workspace_unrecoverable`` rather than a repository picked by position.
 
+## The whole registry is the scope, not the selected check
+
+A context is built from the plan's *live* manifest, and a manifest is a file in
+a repository that a turn can rewrite. Checking only the selected check's
+resolved root would therefore admit a plan that grew a participant between the
+authorization and now: the named check still resolves under an allowed
+repository, and the added one is simply never mentioned. That is a changed plan
+being verified under permission granted for a smaller one.
+
+So the *complete* current registry is bound before anything is run. It has to
+agree with what discovery persisted for this run --- same registry digest, same
+aliases, same resolved roots --- or the participating set the authorization was
+issued against is stale and the answer is ``registry_moved``: re-run discovery
+and re-read the record, rather than retry. And the participants it declares
+have to be exactly the ones the action carries, or an added, moved or removed
+repository is ``scope_unauthorized`` even when the selected check resolves
+somewhere allowed.
+
+The declared side is compared *before* the workspace is resolved, so an
+unpermitted participant is refused without Git ever being run inside it, and
+the resolved side is compared afterwards, so a path that only becomes another
+repository once symlinks are followed is caught too. Both run in
+:func:`select`, which preparation and execution each call in full --- the
+window a manifest can be rewritten in is exactly the window between them, so
+the check that runs is one the registry still agreed with a moment earlier.
+
 ## A failing check is a fact, not a refusal
 
 ``Receipt.failed`` here means the check ran and did not pass, and the detail
@@ -87,6 +113,7 @@ from . import (
     overseer_store,
     plans,
     verification,
+    workspaces,
 )
 
 __all__ = [
@@ -124,6 +151,7 @@ Refusal = Literal[
     "check_undeclared",
     "workspace_unrecoverable",
     "check_unresolvable",
+    "registry_moved",
     "scope_unauthorized",
     "not_prepared",
     "run_moved",
@@ -157,8 +185,13 @@ Refusal = Literal[
 #: * ``check_unresolvable`` -- the declared check's own location does not
 #:   resolve under its repository. That is the contract's problem, reported
 #:   rather than worked around.
-#: * ``scope_unauthorized`` -- the check resolves into a repository this action
-#:   was not authorized for. Escalates.
+#: * ``registry_moved`` -- the plan's repository registry is no longer the one
+#:   discovery observed for this run, so the participating set the
+#:   authorization was issued against is stale. Escalates: the remedy is fresh
+#:   discovery and a fresh reading of the record, not another attempt.
+#: * ``scope_unauthorized`` -- a repository this action was not authorized for
+#:   participates: either the check resolves into one, or the plan's registry
+#:   declares or resolves one the action does not carry. Escalates.
 #: * ``not_prepared`` -- execution found no preparation to consume.
 #: * ``run_moved`` -- the run left the situation the verify was prepared in, so
 #:   the check would be answering about a different state than the one asked
@@ -187,6 +220,7 @@ REFUSALS: tuple[Refusal, ...] = (
     "check_undeclared",
     "workspace_unrecoverable",
     "check_unresolvable",
+    "registry_moved",
     "scope_unauthorized",
     "not_prepared",
     "run_moved",
@@ -204,6 +238,7 @@ REFUSALS: tuple[Refusal, ...] = (
 ESCALATING_REFUSALS: tuple[Refusal, ...] = (
     "contract_unreadable",
     "workspace_unrecoverable",
+    "registry_moved",
     "scope_unauthorized",
 )
 
@@ -608,12 +643,13 @@ def _context(
 ) -> verification.VerificationContext | tuple[Refusal, str]:
     """Build the context this plan's checks resolve against, or say why not.
 
-    Only one question is answered here --- which directory the plan's own
-    verification context is built from --- and it is answered from the record
-    rather than from anything this process was configured with. How a context is
-    then built from a plan stays :mod:`agent_session_loop.verification`'s
+    Two questions are answered here, and both from the record rather than from
+    anything this process was configured with: which directory the plan's own
+    verification context is built from, and whether the registry it is built
+    out of is still the one this action was permitted to touch. How a context
+    is then built from a plan stays :mod:`agent_session_loop.verification`'s
     answer, so a registered plan and a legacy one differ here by one path and
-    nowhere else.
+    one binding and nowhere else.
     """
     try:
         registry = plans.read_repository_registry(plan_dir)
@@ -630,35 +666,151 @@ def _context(
             )
         cwd: str = repositories[0].path
     else:
-        recorded = _workspace_root(
+        observed = _observed_run(
             plan_dir, state_dir=state_dir, build_inventory=build_inventory
         )
-        if not recorded:
+        if observed is None or not observed.workspace_root:
             return (
                 "workspace_unrecoverable",
                 f"discovery records no workspace root for {plan_dir}, so the "
                 "registered checks have nothing to resolve against",
             )
-        cwd = recorded
+        cwd = observed.workspace_root
+        # Before the workspace is resolved, so an unpermitted participant is
+        # refused without Git ever being run inside it.
+        drifted = _registry_bound(
+            registry,
+            workspace_root=cwd,
+            repositories=repositories,
+            observed=observed,
+        )
+        if drifted is not None:
+            return drifted
 
     try:
-        return verification.verification_context_from_plan(plan_dir, cwd)
+        context = verification.verification_context_from_plan(plan_dir, cwd)
     except plans.PlanError as error:
         return ("workspace_unrecoverable", str(error))
+    # And again once every declared path has been followed to a real root: a
+    # location that only becomes another repository after symlinks is a
+    # participant the declared comparison could not have seen.
+    escaped = _resolved_bound(context, repositories)
+    if escaped is not None:
+        return escaped
+    return context
 
 
-def _workspace_root(
+def _observed_run(
     plan_dir: str,
     *,
     state_dir: str | Path | None,
     build_inventory: BuildInventory,
-) -> str:
-    """The workspace root the run itself recorded, as discovery read it."""
+) -> overseer_discovery.Candidate | None:
+    """The run's own persisted record, as discovery read it."""
     inventory = build_inventory(state_dir=state_dir)
     for candidate in inventory.candidates:
         if candidate.plan_dir == plan_dir:
-            return candidate.workspace_root or ""
-    return ""
+            return candidate
+    return None
+
+
+Participants = tuple[tuple[str, Path], ...]
+
+
+def _registry_bound(
+    registry: workspaces.RepositoryRegistry,
+    *,
+    workspace_root: str,
+    repositories: Sequence[overseer_policy_client.Repository],
+    observed: overseer_discovery.Candidate,
+) -> tuple[Refusal, str] | None:
+    """Require the whole live registry to be the one that was authorized.
+
+    Two comparisons, and they answer different questions. Against the run's
+    persisted record: is this still the plan discovery observed, or has its
+    participating set moved since the authorization was issued about it?
+    Against the action: is every repository the plan now declares one AgentMux
+    permitted? Neither implies the other, and a caller that only asked about
+    the selected check's repository has asked about neither.
+    """
+    declared = _declared_participants(registry, workspace_root)
+    recorded = _observed_participants(observed)
+    if registry.digest != (observed.registry_digest or "") or declared != recorded:
+        return (
+            "registry_moved",
+            f"{observed.plan_dir} now declares {_render(declared)} under "
+            f"registry {registry.digest}, and discovery observed "
+            f"{_render(recorded)} under {observed.registry_digest or '(none)'}; "
+            "the participating set this action was authorized against is no "
+            "longer the plan's own, so this needs fresh discovery and a fresh "
+            "reading of the record rather than another attempt",
+        )
+    authorized = _authorized_participants(repositories)
+    if declared != authorized:
+        return (
+            "scope_unauthorized",
+            f"the plan's repository registry declares {_render(declared)}, "
+            f"which is not the set this action was authorized for: "
+            f"{_render(authorized)}",
+        )
+    return None
+
+
+def _resolved_bound(
+    context: verification.VerificationContext,
+    repositories: Sequence[overseer_policy_client.Repository],
+) -> tuple[Refusal, str] | None:
+    """Require every resolved repository to be one the action carries."""
+    workspace = context.workspace
+    if workspace is None:
+        return None
+    resolved = _resolved_participants(workspace)
+    authorized = _authorized_participants(repositories)
+    if resolved != authorized:
+        return (
+            "scope_unauthorized",
+            f"the plan's repositories resolve to {_render(resolved)}, which is "
+            f"not the set this action was authorized for: {_render(authorized)}",
+        )
+    return None
+
+
+def _declared_participants(
+    registry: workspaces.RepositoryRegistry, workspace_root: str
+) -> Participants:
+    """Where the registry says its repositories are, before Git is consulted."""
+    root = plans.canonicalize_path(workspace_root)
+    return tuple(
+        (repository.alias, plans.canonicalize_path(root / repository.path))
+        for repository in registry
+    )
+
+
+def _observed_participants(observed: overseer_discovery.Candidate) -> Participants:
+    return tuple(
+        (declaration.alias, plans.canonicalize_path(declaration.resolved_root))
+        for declaration in observed.repositories
+    )
+
+
+def _authorized_participants(
+    repositories: Sequence[overseer_policy_client.Repository],
+) -> Participants:
+    return tuple(
+        (item.alias, plans.canonicalize_path(item.path)) for item in repositories
+    )
+
+
+def _resolved_participants(workspace: workspaces.ResolvedWorkspace) -> Participants:
+    return tuple(
+        (repository.alias, plans.canonicalize_path(repository.root))
+        for repository in workspace.repositories
+    )
+
+
+def _render(participants: Participants) -> str:
+    """One line naming every participant, so a refusal says which one moved."""
+    return ", ".join(f"{alias}={path}" for alias, path in participants) or "(none)"
 
 
 def _receipt(
