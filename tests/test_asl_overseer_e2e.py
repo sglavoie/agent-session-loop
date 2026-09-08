@@ -332,16 +332,39 @@ class _World:
 
     # -- transcripts -------------------------------------------------------
 
+    #: What a Claude record has to carry for AgentMux to classify the
+    #: conversation it belongs to. The markers are the real ones the harness
+    #: writes, not a session class named directly: the point of these fixtures
+    #: is that the built binary does the classifying.
+    CLASS_MARKERS: dict[str, dict[str, Any]] = {
+        overseer_decisions.SESSION_CLASS_MAIN: {"entrypoint": "cli"},
+        overseer_decisions.SESSION_CLASS_AUTOMATED: {
+            "entrypoint": "cli",
+            "isSidechain": True,
+        },
+        overseer_decisions.SESSION_CLASS_UNKNOWN: {},
+    }
+
     def write_transcript(
-        self, alias: str, turns: list[tuple[str, str]], *, session_id: str = ""
+        self,
+        alias: str,
+        turns: list[tuple[str, str]],
+        *,
+        session_id: str = "",
+        session_class: str = overseer_decisions.SESSION_CLASS_MAIN,
     ) -> str:
-        """Write one Claude conversation under the configured profile home."""
+        """Write one Claude conversation under the configured profile home.
+
+        It is a person's conversation by default, because that is what an
+        overseer reads when it looks for something a human said.
+        """
         directory = str(self.repos[alias])
         encoded = "-" + directory.strip("/").replace("/", "-")
         project_dir = self.home / "projects" / encoded
         project_dir.mkdir(parents=True, exist_ok=True)
         session_id = session_id or f"{alias}-session"
         started = datetime.now(UTC) - timedelta(hours=len(turns) + 1)
+        markers = self.CLASS_MARKERS[session_class]
         lines = [
             json.dumps(
                 {
@@ -352,6 +375,7 @@ class _World:
                     "cwd": directory,
                     "sessionId": session_id,
                     "message": {"role": role, "content": text},
+                    **markers,
                 }
             )
             for index, (role, text) in enumerate(turns)
@@ -1205,6 +1229,46 @@ class HistoricalReplayTests(_WorldCase):
             [item["statement_id"] for item in payload["ruling"]["superseded"]],
         )
         self.assertEqual([], self._porcelain_committed(AUTHORIZED))
+
+    def test_a_machine_conversation_authorizes_nothing_it_says(self) -> None:
+        """The same sentence, in a conversation no person was in.
+
+        Nothing here names a session class: the fixture carries the markers a
+        harness writes, the built binary classifies them, and ASL reads that
+        classification. Both halves of that contract are under test, which is
+        why this lives with the real binary rather than beside a stub.
+        """
+        for session_class in (
+            overseer_decisions.SESSION_CLASS_AUTOMATED,
+            overseer_decisions.SESSION_CLASS_UNKNOWN,
+        ):
+            with self.subTest(session_class=session_class):
+                session = self.world.write_transcript(
+                    AUTHORIZED,
+                    [("user", STANDING_INSTRUCTION)],
+                    session_id=f"tt-{session_class}",
+                    session_class=session_class,
+                )
+                packet = self.observed()
+                claims = [
+                    {
+                        "statement_id": self.world.statement_id(session, 0),
+                        "topic": "operations",
+                        "stance": "allow",
+                        "operations": ["commit"],
+                        "reading": "read as if a person had authorized checkpoints",
+                    }
+                ]
+
+                status, payload = self.decide(packet, "commit", claims)
+
+                self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+                self.assertFalse(payload["authorized"])
+                self.assertEqual(
+                    ["not_user_authored"],
+                    [item["reason"] for item in payload["rejected_claims"]],
+                )
+                self.assertEqual([], self._porcelain_committed(AUTHORIZED))
 
 
 # -- fault qualification ------------------------------------------------------

@@ -106,8 +106,9 @@ SESSION = "session-7"
 ACTION = overseer_policy_client.ACCESS_ACTION
 
 #: A conversation class whose ``user`` turns are written by an orchestrating
-#: agent rather than a person. AgentMux owns this vocabulary; the fixture only
-#: has to name one so `--generated-class` has something to mark.
+#: agent rather than a person, and which AgentMux does not publish. The fixture
+#: names one so `--generated-class` has something to mark that the default
+#: classification would have refused for a different reason.
 GENERATED_CLASS = "orchestrated"
 
 
@@ -186,7 +187,7 @@ class _Transcript:
         self.project = project
         self.calls: list[dict[str, Any]] = []
         self.failure: overseer_history.Failure | None = None
-        self.session_class = "interactive"
+        self.session_class = overseer_decisions.SESSION_CLASS_MAIN
         self.turns: list[tuple[str, str]] = [
             ("user", "answer routine tooling questions on my runs without asking me")
         ]
@@ -937,6 +938,78 @@ class EvidenceBoundaryTests(_OverseerCase):
         self.assertEqual(
             ["not_user_authored"],
             [item["reason"] for item in payload["rejected_claims"]],
+        )
+
+    def test_the_default_invocation_refuses_an_automated_conversation(self) -> None:
+        """No flags: AgentMux's own classification has to be enough.
+
+        `--generated-class` above is the caller remembering. This is the same
+        refusal with nothing remembered, which is what makes the provenance
+        boundary a boundary rather than an option.
+        """
+        for session_class in (
+            overseer_decisions.SESSION_CLASS_AUTOMATED,
+            overseer_decisions.SESSION_CLASS_UNKNOWN,
+            "",
+        ):
+            with self.subTest(session_class=session_class):
+                self.fleet.transcript.session_class = session_class
+                packet = self.observed()
+
+                status, payload = self._decide(
+                    packet,
+                    claims=self.fleet.allowing(
+                        self.fleet.transcript.statement_id(), "guidance"
+                    ),
+                )
+
+                self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+                self.assertFalse(payload["authorized"])
+                self.assertEqual(
+                    ["not_user_authored"],
+                    [item["reason"] for item in payload["rejected_claims"]],
+                )
+                self.assertEqual("no_decision", payload["ruling"]["refusal"])
+
+    def test_the_default_invocation_still_authorizes_a_main_conversation(self) -> None:
+        """The positive half: fail-closed must not mean fail-always."""
+        self.fleet.transcript.session_class = overseer_decisions.SESSION_CLASS_MAIN
+        packet = self.observed()
+
+        status, payload = self._decide(
+            packet,
+            claims=self.fleet.allowing(
+                self.fleet.transcript.statement_id(), "guidance"
+            ),
+        )
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["authorized"])
+        self.assertEqual([], payload["rejected_claims"])
+
+    def test_an_automated_conversation_dispatches_nothing_through_act(self) -> None:
+        """`act` re-derives authority, so the classification has to reach it too."""
+        packet = self.observed()
+        self.fleet.transcript.session_class = overseer_decisions.SESSION_CLASS_AUTOMATED
+
+        status, payload = self.act(
+            packet,
+            "--text",
+            "carry on",
+            "--claims-file",
+            self.fleet.claims_file(
+                self,
+                self.fleet.allowing(self.fleet.transcript.statement_id(), "guidance"),
+            ),
+        )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertFalse(payload["dispatch"]["performed"], payload["dispatch"])
+        self.assertEqual("preparation_declined", payload["dispatch"]["refusal"])
+        self.assertIsNotNone(payload["escalation"])
+        self.assertNotIn(
+            mailbox.KIND_GUIDANCE,
+            [message.kind for message in self.fleet.messages(self.plan)],
         )
 
     def test_a_transcript_statement_cannot_be_stretched_to_another_plan(self) -> None:

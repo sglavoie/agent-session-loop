@@ -1976,8 +1976,9 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="append",
         metavar="CLASS",
         help=(
-            "A conversation class whose `user` turns are written by another "
-            "agent; repeat per class. Those turns become generated prompts"
+            "A further conversation class whose `user` turns are written by "
+            "another agent; repeat per class. Only `main` sessions authorize "
+            "anyway, so this restricts and never widens"
         ),
     )
     overseer_decide_parser.add_argument(
@@ -2093,8 +2094,9 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         action="append",
         metavar="CLASS",
         help=(
-            "A conversation class whose `user` turns are written by another "
-            "agent; repeat per class. Those turns become generated prompts"
+            "A further conversation class whose `user` turns are written by "
+            "another agent; repeat per class. Only `main` sessions authorize "
+            "anyway, so this restricts and never widens"
         ),
     )
     overseer_act_parser.add_argument(

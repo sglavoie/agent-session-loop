@@ -26,6 +26,14 @@ asserted against the module that publishes it, so a reworded prompt fails here
 instead of turning a task packet into an instruction. A claim resting on one is
 rejected outright, not weighted down.
 
+*A machine's own words under the ``user`` role.* A marker catches what ASL
+composed and nothing an orchestrating agent typed itself, so the conversation's
+class is asserted separately and ahead of the text -- with no flags set, since
+a safeguard that needs remembering is the defect rather than the fix. Only
+``main`` authorizes; ``automated`` is a generated prompt, ``unknown``, an
+absent class and an unrecognized spelling are unattributable, and every value a
+caller can pass restricts further and never the reverse.
+
 *An approval from somewhere else.* An approval in another project, another
 plan, or another incident registers fine -- it was a real decision -- and is
 reported as a precedent while the ruling refuses. Suggesting a recovery and
@@ -95,7 +103,7 @@ def _conversation(
     *,
     directory: str = PROJECT,
     session_id: str = "sess-1",
-    session_class: str = "interactive",
+    session_class: str = overseer_decisions.SESSION_CLASS_MAIN,
     excerpts: tuple[overseer_history.Excerpt, ...] = (),
 ) -> overseer_history.Conversation:
     return overseer_history.Conversation(
@@ -286,7 +294,7 @@ class TranscriptProvenanceTests(unittest.TestCase):
                 _conversation(session_class="subagent", excerpts=(_excerpt(),)),
                 _conversation(
                     session_id="sess-2",
-                    session_class="interactive",
+                    session_class=overseer_decisions.SESSION_CLASS_MAIN,
                     excerpts=(_excerpt(),),
                 ),
             ),
@@ -297,6 +305,180 @@ class TranscriptProvenanceTests(unittest.TestCase):
             [item.voice for item in statements],
             ["generated_prompt", "user_instruction"],
         )
+
+
+class SessionClassProvenanceTests(unittest.TestCase):
+    """The fixture the finding names: an automated conversation, no flags set.
+
+    AgentMux already says which conversations a person started. The defect was
+    that saying so changed nothing unless the host remembered a flag, which
+    made a provenance boundary an opt-in safeguard. These tests are written
+    against the *default* call, because the default is what was wrong.
+    """
+
+    def test_only_a_main_conversation_speaks_for_a_person_by_default(self) -> None:
+        expected = {
+            overseer_decisions.SESSION_CLASS_MAIN: "user_instruction",
+            overseer_decisions.SESSION_CLASS_AUTOMATED: "generated_prompt",
+            overseer_decisions.SESSION_CLASS_UNKNOWN: "unattributed",
+        }
+        for session_class, voice in expected.items():
+            with self.subTest(session_class=session_class):
+                statements = overseer_decisions.statements_from_history(
+                    _history(
+                        _conversation(
+                            session_class=session_class, excerpts=(_excerpt(),)
+                        )
+                    )
+                )
+
+                self.assertEqual(statements[0].voice, voice)
+                self.assertEqual(
+                    statements[0].authorizing, session_class == "main", session_class
+                )
+
+    def test_an_unclassifiable_conversation_authorizes_nothing(self) -> None:
+        """Absent, unrecognized and merely differently spelled all refuse.
+
+        An empty class is what an older ``amx`` answer carries and a spelling
+        this build does not know is what a newer one could carry. Neither is a
+        person, and reading either as one is how the boundary would reopen.
+        """
+        for session_class in ("", "   ", "interactive", "Main", "MAIN", "subagent"):
+            with self.subTest(session_class=session_class):
+                statements = overseer_decisions.statements_from_history(
+                    _history(
+                        _conversation(
+                            session_class=session_class, excerpts=(_excerpt(),)
+                        )
+                    )
+                )
+
+                self.assertEqual(statements[0].voice, "unattributed")
+                self.assertFalse(statements[0].authorizing)
+
+    def test_a_class_is_read_through_surrounding_space(self) -> None:
+        statements = overseer_decisions.statements_from_history(
+            _history(_conversation(session_class="  main  ", excerpts=(_excerpt(),)))
+        )
+
+        self.assertEqual(statements[0].voice, "user_instruction")
+
+    def test_an_automated_conversation_is_generated_without_a_marker(self) -> None:
+        """The text is a plain instruction; the conversation is what refuses."""
+        statements = overseer_decisions.statements_from_history(
+            _history(
+                _conversation(
+                    session_class=overseer_decisions.SESSION_CLASS_AUTOMATED,
+                    excerpts=(_excerpt(text="commit the checkpoint and resume"),),
+                )
+            )
+        )
+
+        self.assertEqual(overseer_decisions.generated_marker(statements[0].text), "")
+        self.assertEqual(statements[0].voice, "generated_prompt")
+
+    def test_an_assistant_turn_keeps_its_voice_in_any_conversation(self) -> None:
+        """Authorship answers a question only the ``user`` role raises."""
+        for session_class in overseer_decisions.SESSION_CLASSES:
+            with self.subTest(session_class=session_class):
+                statements = overseer_decisions.statements_from_history(
+                    _history(
+                        _conversation(
+                            session_class=session_class,
+                            excerpts=(
+                                _excerpt(role="assistant", text="so you want a commit"),
+                            ),
+                        )
+                    )
+                )
+
+                self.assertEqual(statements[0].voice, "assistant_interpretation")
+                self.assertFalse(statements[0].authorizing)
+
+    def test_generated_classes_can_only_restrict(self) -> None:
+        """No value a caller passes turns a non-human class into a human one."""
+        for named in (
+            overseer_decisions.SESSION_CLASS_AUTOMATED,
+            overseer_decisions.SESSION_CLASS_UNKNOWN,
+            "",
+            "interactive",
+        ):
+            with self.subTest(generated_class=named):
+                statements = overseer_decisions.statements_from_history(
+                    _history(
+                        _conversation(
+                            session_class=named,
+                            excerpts=(_excerpt(),),
+                        )
+                    ),
+                    generated_classes=(named,),
+                )
+
+                self.assertFalse(statements[0].authorizing)
+
+    def test_naming_the_human_class_downgrades_it(self) -> None:
+        """A restriction reaches ``main`` too, which is what makes it one."""
+        statements = overseer_decisions.statements_from_history(
+            _history(
+                _conversation(
+                    session_class=overseer_decisions.SESSION_CLASS_MAIN,
+                    excerpts=(_excerpt(),),
+                )
+            ),
+            generated_classes=(overseer_decisions.SESSION_CLASS_MAIN,),
+        )
+
+        self.assertEqual(statements[0].voice, "generated_prompt")
+
+    def test_the_published_classes_match_agentmux(self) -> None:
+        """The vocabulary is restated, so a drift has to fail somewhere."""
+        self.assertEqual(
+            overseer_decisions.SESSION_CLASSES,
+            ("main", "automated", "unknown"),
+        )
+        self.assertEqual(
+            overseer_decisions.HUMAN_SESSION_CLASSES,
+            (overseer_decisions.SESSION_CLASS_MAIN,),
+        )
+        self.assertEqual(
+            set(overseer_decisions.AUTHORSHIPS),
+            set(get_args(overseer_decisions.Authorship)),
+        )
+
+    def test_an_automated_run_cannot_authorize_a_resume(self) -> None:
+        """The whole path, since a voice is only worth what a ruling does.
+
+        The probe in the finding stopped at ``authorized=True``; this asserts
+        the same call with each class, so a future change that fixes the voice
+        while leaving the ruling permissive still fails.
+        """
+        for session_class in overseer_decisions.SESSION_CLASSES:
+            with self.subTest(session_class=session_class):
+                statements = overseer_decisions.statements_from_history(
+                    _history(
+                        _conversation(
+                            session_class=session_class, excerpts=(_excerpt(),)
+                        )
+                    )
+                )
+                register = overseer_decisions.register(
+                    statements=statements,
+                    claims=tuple(_claim(item.statement_id) for item in statements),
+                )
+                ruling = overseer_decisions.resolve(
+                    register=register,
+                    request=overseer_decisions.Request(
+                        operation="resume", scope=PLAN_SCOPE
+                    ),
+                )
+
+                self.assertEqual(ruling.authorized, session_class == "main")
+                if not ruling.authorized:
+                    self.assertEqual(
+                        [item.reason for item in register.rejections],
+                        ["not_user_authored"],
+                    )
 
     def test_unpermitted_evidence_yields_no_statements(self) -> None:
         for label, history in (

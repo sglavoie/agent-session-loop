@@ -625,9 +625,14 @@ statement is scoped to the working directory AgentMux authorized it under — it
 names no plan, so a claim that wants one must narrow the scope itself or be
 rejected `scope_widened`. `decide` and `act` read both boundaries by default;
 `--no-history` reads the mailbox alone, which authorizes nothing by
-construction, and `--generated-class CLASS` (repeatable) marks conversation
-classes whose `user` turns are written by another agent so they contribute
-generated prompts instead of instructions. A transcript that could not be read
+construction. Authorship comes from AgentMux's own classification of the whole
+conversation, before the turn is read and with no flag to set: only a `main`
+session contributes instructions, an `automated` one contributes generated
+prompts, and `unknown`, an absent class and any spelling this build does not
+know all contribute `unattributed` statements that authorize nothing.
+`--generated-class CLASS` (repeatable) marks further classes machine-written;
+it can only restrict, so no value it carries turns a class into a human one and
+forgetting it costs no safeguard. A transcript that could not be read
 comes back as a `history` object carrying its own `failure` and contributing no
 statements, which keeps "no authorization was found" distinct from "the evidence
 could not be reached".

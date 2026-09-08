@@ -31,6 +31,25 @@ rejected rather than downgraded. That is deliberately strict: the relay is
 where an instruction *arrives*, and the transcript is the only record that says
 who *spoke*.
 
+## Whose conversation it was, before whose turn it is
+
+A marker catches the prompts ASL itself composes, and it catches nothing an
+orchestrating agent typed in its own words. AgentMux answers that separately:
+every admitted conversation carries a :data:`session class <SESSION_CLASSES>`
+-- ``main`` for a session a person started, ``automated`` for programmatic
+``exec`` runs, ASL workers, subagents and sidechains, ``unknown`` when the
+harness could not be asked -- and the classification is the first check, ahead
+of the role and ahead of the marker.
+
+It is read fail-closed, so authorship has to be *established* rather than
+merely not disproved: only ``main`` yields human turns. ``automated`` yields
+generated prompts, and ``unknown``, an absent class from an older answer, and
+any spelling this build does not know all yield ``unattributed`` -- a
+conversation nobody can attribute cannot supply the one voice that authorizes.
+:data:`generated_classes <statements_from_history>` remains available and can
+only narrow this further: it can mark a class machine-authored, and there is no
+value it can carry that turns a class into a human one.
+
 ## Scope is what stops an approval from travelling
 
 Every statement carries the scope it was made in -- a transcript message the
@@ -92,11 +111,13 @@ from . import clock, mailbox, overseer_history, overseer_policy_client
 __all__ = [
     "AUDIT_PROMPT_MARKER",
     "AUTHORIZING_VOICES",
+    "AUTHORSHIPS",
     "CLAIM_REJECTIONS",
     "CONTEXT_ACCESS",
     "DRAFT_PROMPT_MARKER",
     "GENERATED_PROMPT_MARKERS",
     "GUIDANCE_ENVELOPE_MARKER",
+    "HUMAN_SESSION_CLASSES",
     "HUMAN_TOPICS",
     "MAILBOX_PROTOCOL_MARKER",
     "MAX_STATEMENT_CHARS",
@@ -106,6 +127,10 @@ __all__ = [
     "REPLY_ENVELOPE_MARKER",
     "RESOLUTION_CONTEXT_MARKER",
     "RESOLUTION_ENVELOPE_MARKER",
+    "SESSION_CLASSES",
+    "SESSION_CLASS_AUTOMATED",
+    "SESSION_CLASS_MAIN",
+    "SESSION_CLASS_UNKNOWN",
     "STANCES",
     "STATE_SPACE",
     "SUPERVISION_VOICES",
@@ -128,6 +153,7 @@ __all__ = [
     "settle",
     "statements_from_history",
     "statements_from_supervision",
+    "transcript_authorship",
 ]
 
 #: The access category evidence is gathered under. Reading a conversation or a
@@ -190,6 +216,37 @@ VOICES: tuple[Voice, ...] = (
 #: check reads as membership and so widening it is a visible edit to a published
 #: name rather than a changed comparison buried in a validator.
 AUTHORIZING_VOICES: tuple[Voice, ...] = ("user_instruction",)
+
+#: AgentMux's classification of a whole conversation, restated here for the same
+#: reason the prompt markers are: this module's import surface is four ASL
+#: modules and the vocabulary is published by another repository. The spellings
+#: are ``transcript.SessionClass`` in ``sglavoie_agentmux``, and
+#: ``amx overseer history`` normalizes anything it cannot classify to
+#: ``unknown`` before answering -- so an empty or unrecognized value reaching
+#: here is an older or unexpected answer, and is treated as unattributable.
+SESSION_CLASS_MAIN = "main"
+SESSION_CLASS_AUTOMATED = "automated"
+SESSION_CLASS_UNKNOWN = "unknown"
+
+#: Every class this build knows how to attribute. A class outside it is not an
+#: error and not a person: it is unattributable, which refuses.
+SESSION_CLASSES: tuple[str, ...] = (
+    SESSION_CLASS_MAIN,
+    SESSION_CLASS_AUTOMATED,
+    SESSION_CLASS_UNKNOWN,
+)
+
+#: The classes whose ``user`` turns may be read as a person's own words. Only a
+#: session AgentMux positively identified as human-started qualifies, so the
+#: provenance boundary holds without a caller remembering to name anything.
+HUMAN_SESSION_CLASSES: tuple[str, ...] = (SESSION_CLASS_MAIN,)
+
+Authorship = Literal["human", "generated", "unattributed"]
+
+#: What a conversation's classification says about who wrote its ``user`` turns,
+#: before the turn itself is looked at. ``human`` still has to survive the
+#: marker check; the other two are already disqualifying.
+AUTHORSHIPS: tuple[Authorship, ...] = ("human", "generated", "unattributed")
 
 Operation = Literal["reply", "guidance", "verify", "commit", "resume"]
 
@@ -587,6 +644,29 @@ def generated_marker(text: str) -> str:
     return ""
 
 
+def transcript_authorship(
+    session_class: str,
+    *,
+    generated_classes: Sequence[str] = (),
+) -> Authorship:
+    """What one conversation's class says about who wrote its ``user`` turns.
+
+    Checked in the order that keeps ``generated_classes`` a restriction: a
+    named class is machine-authored whatever AgentMux called it, ``automated``
+    is machine-authored on AgentMux's own word, ``main`` is the one human
+    answer, and everything else -- ``unknown``, the empty class an older answer
+    carries, a spelling from a newer AgentMux -- is unattributable.
+    """
+    named = session_class.strip()
+    if named in {value.strip() for value in generated_classes if value.strip()}:
+        return "generated"
+    if named == SESSION_CLASS_AUTOMATED:
+        return "generated"
+    if named in HUMAN_SESSION_CLASSES:
+        return "human"
+    return "unattributed"
+
+
 def statements_from_history(
     history: overseer_history.History,
     *,
@@ -602,23 +682,31 @@ def statements_from_history(
     under, and no more -- a transcript names no plan, so a claim that wants one
     has to narrow the scope itself and be checked for it.
 
-    ``generated_classes`` names conversation classes whose ``user``-role
-    messages are written by another agent rather than a person. It defaults to
-    empty because this module cannot verify AgentMux's classification
-    vocabulary from here; a caller that knows which class means "driven by an
-    orchestrating agent" passes it and those conversations contribute
-    ``generated_prompt`` statements instead of instructions.
+    Authorship comes from the conversation's own class before anything about
+    the turn is read, on the fail-closed reading in
+    :func:`transcript_authorship`: an ``automated`` conversation contributes
+    ``generated_prompt`` statements and an unattributable one contributes
+    ``unattributed`` statements, neither of which can carry a decision, whether
+    or not the text holds a recognized marker.
+
+    ``generated_classes`` names further conversation classes whose ``user``
+    turns are written by another agent. It is a restriction and only a
+    restriction: no value in it can make a class human, so a caller that
+    forgets it loses no safeguard.
     """
     if history.grant() is None:
         return ()
-    machine_classes = {value for value in generated_classes if value}
     statements: list[Statement] = []
     for conversation in history.conversations:
-        machine = conversation.session_class in machine_classes
+        authorship = transcript_authorship(
+            conversation.session_class, generated_classes=generated_classes
+        )
         locator = f"{conversation.harness}:{conversation.session_id}"
         for excerpt in conversation.excerpts:
             marker = generated_marker(excerpt.text)
-            voice = _transcript_voice(role=excerpt.role, marker=marker, machine=machine)
+            voice = _transcript_voice(
+                role=excerpt.role, marker=marker, authorship=authorship
+            )
             statements.append(
                 _statement(
                     statement_id=f"{TRANSCRIPT_SPACE}:{locator}#{excerpt.index}",
@@ -975,14 +1063,21 @@ def _refused(
     )
 
 
-def _transcript_voice(*, role: str, marker: str, machine: bool) -> Voice:
-    """Attribute one transcript message from its role and its own text."""
+def _transcript_voice(*, role: str, marker: str, authorship: Authorship) -> Voice:
+    """Attribute one transcript message from its conversation, role and text.
+
+    Only the ``user`` role is ambiguous, so only it consults the conversation's
+    authorship: an assistant is an assistant in an automated conversation too,
+    and neither answer authorizes anything.
+    """
     normalized = role.strip().lower()
     if normalized == "assistant":
         return "assistant_interpretation"
     if normalized != "user":
         return "unattributed"
-    if machine or marker:
+    if authorship == "unattributed":
+        return "unattributed"
+    if authorship == "generated" or marker:
         return "generated_prompt"
     return "user_instruction"
 
