@@ -93,12 +93,26 @@ look, never a reason to act.
 
 Applicable decisions on one topic are ordered by the moment their statement was
 made -- ties broken by statement identity, so the order is total and stable --
-and the last one governs. Every earlier one is reported as ``superseded``
-rather than dropped, because "the user changed their mind" and "the user never
-said" are different situations and an overseer that cannot tell them apart will
-eventually re-apply a decision that was revoked. A statement whose timestamp
-cannot be read is refused outright: without a moment there is no order, and
-without an order supersession is a guess.
+and the last one governs. Every other applicable decision is reported as
+``superseded`` rather than dropped, because "the user changed their mind" and
+"the user never said" are different situations and an overseer that cannot tell
+them apart will eventually re-apply a decision that was revoked. A statement
+whose timestamp cannot be read is refused outright: without a moment there is no
+order, and without an order supersession is a guess.
+
+A hold is ordered against the repository it was typed in, and so is the
+allowance that lifts it. Each participating repository has its own chain -- the
+applicable decisions naming it, in order -- and the repository is stopped when
+the last decision in that chain is a hold. The target is refused while any of
+its repositories is stopped, and only a decision naming a repository can start
+it again: an allowance covering the checkout beside it lifts nothing. Once
+nothing is stopped, authority is read as it always was -- the last applicable
+allowance :meth:`covering <Scope.covers>` every repository the target names --
+so a release restores the authority that was already established rather than
+creating one. That is what keeps a release proportionate to its hold: the person
+who stopped one checkout can start it again without the checkout beside it being
+asked to authorize unchanged work a second time, and a repository nobody
+released stays stopped however many others were.
 
 ## A reading is bound to the evidence it was read from
 
@@ -1043,21 +1057,24 @@ def register(
 def settle(*, register: Register, topic: Topic, scope: Scope) -> Settlement:
     """Which decision on one topic is in force for one scope.
 
-    Applicable decisions are ordered and the last one governs; the rest are
-    superseded, and decisions on the topic that were made about something else
-    are precedents. It is the same partition :func:`resolve` performs for an
-    operation, so a topic and an operation are answered by one rule rather than
-    two that could drift apart.
+    Applicable decisions are ordered, a hold still standing over any
+    participating repository governs, and otherwise the last allowance covering
+    the target does; the rest are superseded, and decisions on the topic that
+    were made about something else are precedents. It is the same partition and
+    the same governing rule :func:`resolve` performs for an operation, so a topic
+    and an operation are answered by one rule rather than two that could drift
+    apart -- which is what makes a per-repository release of a human hold read
+    the same way as a release of an operational one.
     """
     applicable, precedents = _partition(
         (item for item in register.decisions if item.topic == topic), scope
     )
-    governing = applicable[-1] if applicable else None
+    governing = _governing(applicable, scope)
     return Settlement(
         topic=topic,
         scope=scope,
         decision=governing,
-        superseded=tuple(applicable[:-1]),
+        superseded=_superseded(applicable, governing),
         precedents=precedents,
     )
 
@@ -1077,15 +1094,18 @@ def dependencies(
 
     So the topics a caller names are unioned with the human topics some in-scope
     decision was claimed on, in that order and without repeats. Scope is the
-    same :func:`_applies` relation the rest of the module uses, so a topic is
-    raised exactly when :func:`settle` could report a decision on it: a human
+    same :func:`_participates` relation :func:`settle` partitions by, so a topic
+    is raised exactly when :func:`settle` could report a decision on it: a human
     decision made about another project, plan, run or incident stays a precedent
     rather than becoming a question about this one, because the anti-transfer
     rule reads in both directions -- a neighbour's hold no more raises this run's
-    questions than a neighbour's allowance settles them. A hold in one of *this*
-    target's own repositories is not a neighbour's, and raises the topic even
-    when the action spans repositories the hold does not name; otherwise adding a
-    second repository would hide the question entirely.
+    questions than a neighbour's allowance settles them. A decision in one of
+    *this* target's own repositories is not a neighbour's, and raises the topic
+    even when the action spans repositories it does not name; otherwise adding a
+    second repository would hide the question entirely. That reaches an
+    acceptance given in one repository as well as a hold typed in one, and
+    raising it is what makes the missing half a visible unsettled question rather
+    than a silence: settling still takes an allowance covering every repository.
 
     Raising a topic is not settling it. A topic reaches :attr:`Request.raises`
     whether the claimed decision allows or holds, and :func:`resolve` refuses
@@ -1096,7 +1116,7 @@ def dependencies(
     claimed = tuple(
         decision.topic
         for decision in register.decisions
-        if decision.topic in HUMAN_TOPICS and _applies(decision, scope)
+        if decision.topic in HUMAN_TOPICS and _participates(decision, scope)
     )
     return tuple(dict.fromkeys((*raises, *claimed)))
 
@@ -1111,10 +1131,15 @@ def resolve(*, register: Register, request: Request) -> Ruling:
     question outranks any operational allowance, and only then is the absence of
     a decision -- or the presence of one made about something else -- reported.
 
-    Which decisions are in the partition at all is :func:`_applies`, so a hold
-    reaches a target that names its repository among others while an allowance
-    still has to cover every one of them: an action does not escape a hold by
-    growing.
+    Which decisions are in the partition at all is :func:`_participates`: every
+    decision reaching the target or any single repository it names, so a hold
+    reaches a target that names its repository among others and the allowance
+    that later releases that repository is in the same history rather than
+    filed away as somebody else's business. What each of them can *do* is
+    :func:`_governing`: a hold still standing over any participating repository
+    refuses, and authority remains the last allowance covering every one of them,
+    so an action does not escape a hold by growing and a release does not become
+    a permission by arriving.
 
     ``evidence_changed`` sits above the decision checks because it is not a
     verdict on them: the claims can all be in force and the allowance can be the
@@ -1167,16 +1192,20 @@ def resolve(*, register: Register, request: Request) -> Ruling:
         (item for item in register.decisions if item.speaks_to(request.operation)),
         request.scope,
     )
-    governing = applicable[-1] if applicable else None
-    superseded = tuple(applicable[:-1])
+    governing = _governing(applicable, request.scope)
+    superseded = _superseded(applicable, governing)
 
     if governing is None:
-        refusal: Refusal = "unsupported_recovery" if precedents else "no_decision"
-        detail = (
-            f"{len(precedents)} decision(s) elsewhere allow {request.operation} "
-            "and none of them was made about this run"
-            if precedents
-            else f"no user decision speaks to {request.operation} here"
+        partial = tuple(item for item in applicable if item.stance == "allow")
+        unauthorized = _unauthorized_projects(applicable, request.scope)
+        refusal: Refusal = (
+            "unsupported_recovery" if precedents or partial else "no_decision"
+        )
+        detail = _no_authority_detail(
+            request.operation,
+            precedents=precedents,
+            partial=partial,
+            unauthorized=unauthorized,
         )
         return _refused(
             request,
@@ -1429,10 +1458,55 @@ def _applies(decision: Decision, scope: Scope) -> bool:
     Both halves keep the plan, run and incident narrowing, since ``covers`` and
     ``bears_on`` share :meth:`Scope.narrows`, and both leave a decision about a
     project the target does not name a precedent.
+
+    It is asked of a whole target and of one repository at a time -- the two
+    questions :func:`_participates` and :func:`_standing_holds` ask -- and on a
+    scope naming one project the two stances coincide, since a set of one is
+    covered exactly when it is shared. That is why a repository's own chain can
+    be read with the same predicate that decides authority over the target: the
+    difference between a hold and an allowance is a difference about *sets* of
+    repositories, and inside one repository there is no set to disagree about.
     """
     if decision.stance == "hold":
         return decision.scope.bears_on(scope)
     return decision.scope.covers(scope)
+
+
+def _project_scopes(scope: Scope) -> tuple[Scope, ...]:
+    """One target, seen one participating repository at a time.
+
+    Everything but the project is carried through, because narrowing a target to
+    a repository must not widen it in any other direction: a decision about
+    another plan, run or incident is no more applicable to one of this target's
+    repositories than it is to the target.
+    """
+    return tuple(
+        Scope(
+            project=project,
+            plan_dir=scope.plan_dir,
+            run_id=scope.run_id,
+            incident=scope.incident,
+        )
+        for project in scope.named_projects
+    )
+
+
+def _participates(decision: Decision, scope: Scope) -> bool:
+    """Whether a decision takes part in the target's history at all.
+
+    A decision participates when it :func:`applies <_applies>` to the target or
+    to any single repository the target names. The second half is what a
+    per-repository release needs: an allowance naming one of two repositories
+    cannot authorize the pair, but it is a decision about work the target
+    includes, and one that arrived after a hold on that repository is the answer
+    to whether the repository is still stopped. Excluding it -- which reading
+    applicability against the whole target alone did -- left the hold governing a
+    target the person had already released.
+
+    A decision reaching none of the repositories reaches nothing here and stays
+    a precedent, so the anti-transfer rule is untouched.
+    """
+    return any(_applies(decision, narrowed) for narrowed in _project_scopes(scope))
 
 
 def _partition(
@@ -1447,11 +1521,118 @@ def _partition(
     applicable: list[Decision] = []
     precedents: list[Decision] = []
     for decision in decisions:
-        target = applicable if _applies(decision, scope) else precedents
+        target = applicable if _participates(decision, scope) else precedents
         target.append(decision)
     applicable.sort(key=lambda item: item.order)
     precedents.sort(key=lambda item: item.order)
     return tuple(applicable), tuple(precedents)
+
+
+def _standing_holds(
+    applicable: Sequence[Decision], scope: Scope
+) -> tuple[Decision, ...]:
+    """The hold still in force over each participating repository.
+
+    One chain per repository: the applicable decisions naming it, in order,
+    which ``applicable`` already is. The repository is stopped when the last of
+    them is a hold -- so a hold is lifted by a later decision naming the same
+    repository and by nothing else, and a repository nobody spoke about again
+    stays stopped however many others were released.
+    """
+    holds: list[Decision] = []
+    for narrowed in _project_scopes(scope):
+        chain = [item for item in applicable if _applies(item, narrowed)]
+        if chain and chain[-1].stance == "hold":
+            holds.append(chain[-1])
+    return tuple(holds)
+
+
+def _governing(applicable: Sequence[Decision], scope: Scope) -> Decision | None:
+    """Which applicable decision is in force over the target as a whole.
+
+    A hold standing over any participating repository governs, because the
+    target includes work that repository was stopped for; the latest of them is
+    reported when more than one repository is stopped, so an operator is shown
+    the most recent word rather than an arbitrary one.
+
+    Otherwise the governing decision is the last allowance
+    :meth:`covering <Scope.covers>` every repository the target names. Authority
+    is still held per repository and is still read over the whole target, so
+    lifting a hold restores the authority that was already established and never
+    manufactures one: an allowance naming a subset can end that subset's hold and
+    can never be the permission an action rests on.
+    """
+    stopped = _standing_holds(applicable, scope)
+    if stopped:
+        return max(stopped, key=lambda item: item.order)
+    authority: Decision | None = None
+    for item in applicable:
+        if item.stance == "allow" and item.scope.covers(scope):
+            authority = item
+    return authority
+
+
+def _superseded(
+    applicable: Sequence[Decision], governing: Decision | None
+) -> tuple[Decision, ...]:
+    """Every applicable decision that is not the one in force, in order.
+
+    Both the decisions the governing one replaced and the ones replaced under it
+    -- a hold a release ended, a release that ended a hold in a repository that
+    is not the one still stopping the target. They are reported rather than
+    dropped for the reason supersession is reported at all: "replaced" and
+    "never said" are different, and an operator reading a refusal needs to see
+    the whole chain that produced it.
+    """
+    return tuple(item for item in applicable if item is not governing)
+
+
+def _unauthorized_projects(
+    applicable: Sequence[Decision], scope: Scope
+) -> tuple[str, ...]:
+    """Which participating repositories no applicable allowance speaks for."""
+    allowed = {
+        project
+        for item in applicable
+        if item.stance == "allow"
+        for project in item.scope.named_projects
+    }
+    return tuple(project for project in scope.named_projects if project not in allowed)
+
+
+def _no_authority_detail(
+    operation: str,
+    *,
+    precedents: Sequence[Decision],
+    partial: Sequence[Decision],
+    unauthorized: Sequence[str],
+) -> str:
+    """Why nothing authorizes an operation, in the terms that make it actionable.
+
+    Three different absences, and telling an operator which one this is decides
+    what they do next: nobody spoke, somebody spoke about another run, or
+    somebody spoke about some of this run's repositories and not the rest --
+    which is answered by a statement in the repository that is short, cited
+    beside the one that already spoke, rather than by re-asking the repository
+    that did.
+    """
+    if partial and unauthorized:
+        return (
+            f"no decision authorizes {operation} in {', '.join(unauthorized)}, "
+            "which this run participates in"
+        )
+    if partial:
+        return (
+            f"{len(partial)} decision(s) allow {operation} in this run's "
+            "repositories one at a time, and authority over all of them has to "
+            "rest on one claim citing a statement in each"
+        )
+    if precedents:
+        return (
+            f"{len(precedents)} decision(s) elsewhere allow {operation} "
+            "and none of them was made about this run"
+        )
+    return f"no user decision speaks to {operation} here"
 
 
 def _refused(

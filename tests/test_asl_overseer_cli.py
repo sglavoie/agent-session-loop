@@ -1462,7 +1462,135 @@ class ProjectScopeTests(unittest.TestCase):
             self.assertTrue(payload["authorized"])
             self.assertEqual(allow, payload["ruling"]["decision"]["statement_id"])
 
+    def test_a_release_in_the_held_repository_restores_standing_authority(
+        self,
+    ) -> None:
+        """The checkout that was stopped is the checkout that can start it again.
+
+        A hold names one repository, so the question it leaves open is whether
+        *that* repository is still stopped --- and the person who stopped it can
+        answer it alone. Resolving supersession over the target as a whole
+        instead made an A-only release inapplicable to A+B work, so the hold went
+        on governing and the other repository was asked to authorize unchanged
+        work a second time. Every topic is driven, because a human hold and an
+        operational one are released the same way, with the two directions that
+        must keep refusing beside them: the checkout beside the held one releases
+        nothing, and a release is not itself the authority the action rests on.
+        """
+        self.fleet.transcript.turns = [
+            ("user", "the scripts checkout is clear again; carry on as before"),
+            ("user", "hold every run in the scripts checkout until I have reviewed it"),
+            ("user", "answer routine tooling questions on my runs without asking me"),
+        ]
+        release, hold, allow = (self.fleet.transcript.statement_id(i) for i in range(3))
+        in_api = self.fleet.transcript.also_in(
+            str(self.api_root),
+            "same for the api checkout: handle routine tooling without asking me",
+        )
+        packet = self._observe(self.shared)
+
+        for topic in ("operations", *overseer_decisions.HUMAN_TOPICS):
+            baseline = self._allowing(allow, corroborating=[in_api])
+            if topic != "operations":
+                baseline.append(self._releasing(allow, topic, corroborating=[in_api]))
+            held = [*baseline, self._holding(hold, topic, self.scripts_root)]
+
+            with self.subTest(topic=topic, case="held"):
+                status, payload = self._decide(self.shared, packet, held)
+
+                self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+                self.assertEqual([], payload["rejected_claims"])
+                self.assertFalse(payload["authorized"])
+
+            with self.subTest(topic=topic, case="the checkout beside it releases it"):
+                status, payload = self._decide(
+                    self.shared,
+                    packet,
+                    [*held, self._releasing(in_api, topic, project=self.api_root)],
+                )
+
+                self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+                self.assertEqual([], payload["rejected_claims"])
+                self.assertFalse(payload["authorized"])
+                self.assertEqual(
+                    "held" if topic == "operations" else "human_decision",
+                    payload["ruling"]["refusal"],
+                )
+
+            with self.subTest(topic=topic, case="the held checkout releases itself"):
+                status, payload = self._decide(
+                    self.shared,
+                    packet,
+                    [*held, self._releasing(release, topic, project=self.scripts_root)],
+                )
+
+                self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+                self.assertEqual([], payload["rejected_claims"])
+                self.assertTrue(payload["authorized"])
+                self.assertEqual([], payload["ruling"]["unresolved"])
+                self.assertEqual(
+                    allow,
+                    payload["ruling"]["decision"]["statement_id"],
+                    "a release lifts the hold; the standing allowance still governs",
+                )
+                self.assertEqual(
+                    {hold, release},
+                    self._chain(payload, topic),
+                    "the release and the hold it ended are one history, "
+                    "not somebody else's business",
+                )
+                self.assertEqual([], payload["ruling"]["precedents"])
+
+    def test_a_release_is_not_the_authority_it_restores(self) -> None:
+        """Lifting a hold answers the hold and never answers for the other checkout.
+
+        With nobody having spoken in the api checkout, the scripts hold and the
+        scripts release cancel out and leave the run exactly where it started:
+        one repository short of authority. The refusal has to name that
+        repository, because the remedy is a statement in it rather than another
+        reading of the ones already in hand.
+        """
+        self.fleet.transcript.turns = [
+            ("user", "the scripts checkout is clear again; carry on as before"),
+            ("user", "hold every run in the scripts checkout until I have reviewed it"),
+        ]
+        release, hold = (self.fleet.transcript.statement_id(i) for i in range(2))
+        packet = self._observe(self.shared)
+
+        status, payload = self._decide(
+            self.shared,
+            packet,
+            [
+                self._holding(hold, "operations", self.scripts_root),
+                self._releasing(release, "operations", project=self.scripts_root),
+            ],
+        )
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertEqual([], payload["rejected_claims"])
+        self.assertFalse(payload["authorized"])
+        self.assertIsNone(payload["ruling"]["decision"])
+        self.assertIn(
+            str(self.api_root),
+            payload["ruling"]["summary"],
+            "the refusal has to name the repository nobody spoke for",
+        )
+
     # -- helpers -----------------------------------------------------------
+
+    def _chain(self, payload: dict[str, Any], topic: str) -> set[str]:
+        """Every decision the ruling reports as replaced, on one topic.
+
+        An operational decision is superseded inside the ruling itself; a human
+        one inside the settlement of its own topic, since a human decision never
+        speaks to the operation.
+        """
+        ruling = payload["ruling"]
+        if topic == "operations":
+            return {item["statement_id"] for item in ruling["superseded"]}
+        settlements = [item for item in ruling["settlements"] if item["topic"] == topic]
+        self.assertEqual(1, len(settlements), ruling)
+        return {item["statement_id"] for item in settlements[0]["superseded"]}
 
     def _declaration(self, alias: str, root: Path) -> dict[str, Any]:
         return {
