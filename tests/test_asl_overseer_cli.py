@@ -1,6 +1,6 @@
 """The operator surface: one whole invocation, and the doors it cannot open.
 
-Four claims, and none of them is readable off ``overseer_cli`` alone.
+Five claims, and none of them is readable off ``overseer_cli`` alone.
 
 *A complete invocation.* ``InvocationWorkflowTests`` drives the seven-step loop
 end to end against a real state corpus, a real ledger and a real mailbox --
@@ -24,6 +24,13 @@ relay, an unreadable transcript. The structural test is the important one --
 :class:`overseer_cli.Escalation` is inspected for a ``default``, ``timeout`` or
 ``deadline`` field, because "silence is not consent" enforced by instruction is
 enforced by nothing.
+
+*Permission before content.* ``ReconciliationPermissionTests`` covers the leaf
+whose whole job is reading what a previous process touched, and which is
+therefore the easiest place for a withdrawn opt-in to be read straight past.
+The assertion is about ``_Fleet.reads`` rather than about an exit status: a
+refused or unreachable answer has to leave the run unopened, not merely leave
+the command failing after it looked.
 
 *One door.* ``GuardedOperationTests`` reads this module's own AST. No adapter's
 ``prepare`` or ``execute`` is called here, ``overseer_dispatch.dispatch`` is,
@@ -95,6 +102,8 @@ FINGERPRINT = "fp-1"
 DIGEST = "rd-1"
 HARNESS = "claude"
 SESSION = "session-7"
+#: The access category a mutation and its reconciliation are both asked under.
+ACTION = overseer_policy_client.ACCESS_ACTION
 
 #: A conversation class whose ``user`` turns are written by an orchestrating
 #: agent rather than a person. AgentMux owns this vocabulary; the fixture only
@@ -285,6 +294,7 @@ class _Fleet:
         self.policy = _Policy()
         self.transcript = _Transcript(str(self.root))
         self.facts: dict[str, intervention.RunFacts] = {}
+        self.reads: list[str] = []
         self.parser = cli.build_parser(prog="asl")
         self.ledgers: list[overseer_store.Ledger] = []
         case.addCleanup(self._close_ledgers)
@@ -374,6 +384,10 @@ class _Fleet:
     # -- seams -------------------------------------------------------------
 
     def inspect_run(self, plan_dir: Any, **_: Any) -> intervention.RunFacts:
+        # Recorded because opening a run's state and mailbox is content access:
+        # `ReconciliationPermissionTests` asserts a refused plan is never read,
+        # which is a claim about this list rather than about an exit status.
+        self.reads.append(str(plan_dir))
         return self.facts[str(plan_dir)]
 
     def open_ledger(self, **kwargs: Any) -> overseer_store.Ledger:
@@ -726,6 +740,118 @@ _MINIMAL_ARGV: dict[str, Any] = {
     ),
     "reconcile": lambda plan, question: ("reconcile", plan),
 }
+
+
+class ReconciliationPermissionTests(_OverseerCase):
+    """That `reconcile` asks before it looks, and looks at nothing when refused.
+
+    `reconcile` is the standalone door into the same content `act` reads --
+    state files, mailboxes, Git history -- reached without an incident, a token
+    or a lease. Every test here starts from one `attempted` row, because a row
+    left in doubt is the only thing that makes the leaf do any work at all, and
+    it is also the thing a refusal must not quietly settle.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.watch()
+        self.record = self._leave_in_doubt()
+
+    def test_a_permitted_reconcile_asks_first_and_then_reads_the_run(self) -> None:
+        status, payload = self.fleet.invoke("reconcile", str(self.plan))
+
+        self.assertEqual(overseer_cli.EXIT_OK, status, payload)
+        self.assertTrue(payload["authorized"])
+        self.assertTrue(payload["settled"])
+        self.assertEqual([str(self.plan)], self.fleet.reads)
+        self.assertEqual(1, self.fleet.policy.asked_under(ACTION))
+        self.assertEqual("executed", self._status())
+
+    def test_a_revoked_opt_in_settles_nothing_and_reads_nothing(self) -> None:
+        self.fleet.policy.refused.add(str(self.plan))
+
+        status, payload = self.fleet.invoke("reconcile", str(self.plan))
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("unauthorized", payload["reason"])
+        self.assertFalse(payload["authorized"])
+        self.assertEqual([], self.fleet.reads)
+
+    def test_an_unreachable_policy_settles_nothing_and_reads_nothing(self) -> None:
+        """Unreachable is a different answer from refused, and refuses alike."""
+        self.fleet.policy.unavailable.add(str(self.plan))
+
+        status, payload = self.fleet.invoke("reconcile", str(self.plan))
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)
+        self.assertEqual("policy_unavailable", payload["reason"])
+        self.assertEqual([], self.fleet.reads)
+
+    def test_a_refusal_leaves_the_already_dispatched_action_in_doubt(self) -> None:
+        """The row survives the refusal, because the dispatch really happened.
+
+        "Already-dispatched actions are not automatically undone" and "a refused
+        policy reads nothing" have to hold at once: the refusal may not settle
+        the row, and it may not abandon it either.
+        """
+        self.fleet.policy.refused.add(str(self.plan))
+
+        self.fleet.invoke("reconcile", str(self.plan))
+
+        self.assertEqual("attempted", self._status())
+        ledger = self.fleet.open_ledger(state_dir=str(self.fleet.state_root))
+        in_doubt = ledger.in_doubt_actions(plan_dir=str(self.plan))
+        self.assertEqual([self.record.action_id], [item.action_id for item in in_doubt])
+
+    def test_a_refusal_leaves_a_settled_record_alone(self) -> None:
+        """A revoked opt-in does not reopen what an earlier run already closed."""
+        self.fleet.invoke("reconcile", str(self.plan))
+        self.fleet.policy.refused.add(str(self.plan))
+
+        status, _ = self.fleet.invoke("reconcile", str(self.plan))
+
+        self.assertEqual(overseer_cli.EXIT_REFUSED, status)
+        self.assertEqual("executed", self._status())
+
+    # -- helpers -----------------------------------------------------------
+
+    def _leave_in_doubt(self) -> overseer_store.ActionRecord:
+        """The trace a dispatch that died mid-flight leaves behind.
+
+        Written straight to the ledger rather than through `act`, because a
+        dispatch that completes settles its own row: the state under test is by
+        definition the one no successful invocation produces. The progress token
+        is one the run has since left, so a permitted reconcile has an
+        unambiguous answer -- `executed` -- and the test is about who was asked
+        before that answer was reached, not about which answer it was.
+        """
+        ledger = self.fleet.open_ledger(state_dir=str(self.fleet.state_root))
+        decision = self.fleet.policy(
+            plan_dir=str(self.plan),
+            access=ACTION,
+            repositories=(),
+            timeout=1.0,
+        )
+        ledger.note_policy(config_fingerprint=decision.config_fingerprint)
+        grant = decision.grant()
+        assert grant is not None
+        record = ledger.attempt_action(
+            grant=grant,
+            plan_dir=str(self.plan),
+            operation="resume",
+            target="run",
+            progress_token="the-situation-the-run-has-since-left",
+        )
+        self.fleet.policy.asked.clear()
+        self.fleet.reads.clear()
+        return record
+
+    def _status(self) -> str:
+        ledger = self.fleet.open_ledger(state_dir=str(self.fleet.state_root))
+        settled = ledger.action(self.record.action_id)
+        assert settled is not None
+        return settled.status
 
 
 class EvidenceBoundaryTests(_OverseerCase):

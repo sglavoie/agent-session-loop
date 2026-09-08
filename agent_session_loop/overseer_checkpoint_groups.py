@@ -524,6 +524,16 @@ class GroupAdapter:
         the retry that reconciles it into the group's own outcomes --- writing
         it here as well would give one commit two authors, and one of them no
         surviving evidence of the head it was made on.
+
+        Reading Git history is reading a repository, so this asks AgentMux
+        before it opens one, and it asks about the registry the plan declares
+        *now*. The stored group's own roots are then required to be in that
+        answer. A group prepared over a repository an operator has since
+        excluded --- or moved --- would otherwise send reconciliation to a path
+        nobody currently permits, on the strength of a record written when they
+        did. Anything short of a complete yes is ``uncertain`` rather than
+        ``failed``: a checkpoint we may not look for is not a checkpoint we
+        know did not happen.
         """
         if record.operation != "commit":
             return overseer_dispatch.Receipt.uncertain(
@@ -534,6 +544,20 @@ class GroupAdapter:
             incident_id=record.incident_id,
             target=record.target,
         )
+        declared = self.repositories(record.plan_dir, state_dir=self.state_dir)
+        if not declared:
+            return overseer_dispatch.Receipt.uncertain(
+                detail=_phrase("registry_empty", "the plan now declares no repository"),
+                locator=key,
+            )
+        permission = self._permit_registry(record.plan_dir, declared)
+        if permission.grant is None:
+            return overseer_dispatch.Receipt.uncertain(
+                detail=_phrase(
+                    permission.refusal or "policy_unavailable", permission.detail
+                ),
+                locator=key,
+            )
         try:
             stored = self.ledger.checkpoint_group(key)
         except overseer_store.LedgerError as error:
@@ -544,15 +568,27 @@ class GroupAdapter:
             return overseer_dispatch.Receipt.executed(
                 detail=summarize(stored.record), locator=key
             )
+        permitted = {repository.alias: Path(repository.path) for repository in declared}
         aliases = _group_roots(stored) or {
-            repository.alias: repository.path
-            for repository in self.repositories(
-                record.plan_dir, state_dir=self.state_dir
-            )
+            alias: str(root) for alias, root in permitted.items()
         }
         if not aliases:
             return overseer_dispatch.Receipt.uncertain(
                 detail=_phrase("registry_empty", "the plan now declares no repository"),
+                locator=key,
+            )
+        unpermitted = sorted(
+            alias
+            for alias, path in aliases.items()
+            if permitted.get(alias) != Path(path)
+        )
+        if unpermitted:
+            return overseer_dispatch.Receipt.uncertain(
+                detail=_phrase(
+                    "registry_changed",
+                    f"the group's roots for {', '.join(unpermitted)} are not the "
+                    "ones the run now declares and AgentMux now permits",
+                ),
                 locator=key,
             )
         landed: list[str] = []
@@ -604,10 +640,24 @@ class GroupAdapter:
         Repeating it is the point: a grant is an answer about the moment it was
         given, and a group spends several moments.
         """
+        return self._permit_registry(action.plan_dir, action.repositories)
+
+    def _permit_registry(
+        self,
+        plan_dir: str,
+        repositories: tuple[overseer_policy_client.Repository, ...],
+    ) -> Permission:
+        """The same question, asked about a registry rather than about an action.
+
+        Reconciliation has a ledger row and no action, so it has no
+        ``action.repositories`` to ask about and has to name the set discovery
+        reads now. Both callers arrive here so there is one place the answer is
+        interpreted and one place it is recorded.
+        """
         decision = self.authorize(
-            plan_dir=action.plan_dir,
+            plan_dir=plan_dir,
             access=overseer_policy_client.ACCESS_ACTION,
-            repositories=action.repositories,
+            repositories=repositories,
             timeout=self.timeout,
         )
         self.ledger.record_decision(decision)

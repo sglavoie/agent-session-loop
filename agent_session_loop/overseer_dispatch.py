@@ -26,20 +26,35 @@ ledger row. An unsupported operation costs a subprocess nowhere.
 
 ## Authorization is asked twice, and the second one is the one that counts
 
-The sequence is: establish identity, ask AgentMux, reconcile anything left in
-doubt, let the adapter prepare, then **establish identity and ask AgentMux
-again** and require both answers to be identical to the first. Preparation may
-wait -- on a subprocess, on a lock, on a mailbox -- and a decision that was
-true before a wait is not evidence about the moment after it. A run that was
-replaced, a lease that expired, a policy that moved, an operator who withdrew
-the opt-in mid-wait: all of them land between the two passes and all of them
-refuse.
+The sequence is: locate the run from identity metadata, ask AgentMux, read the
+run's content, reconcile anything left in doubt, let the adapter prepare, then
+**locate and ask AgentMux again** and require both answers to be identical to
+the first before content is read a second time. Preparation may wait -- on a
+subprocess, on a lock, on a mailbox -- and a decision that was true before a
+wait is not evidence about the moment after it. A run that was replaced, a
+lease that expired, a policy that moved, an operator who withdrew the opt-in
+mid-wait: all of them land between the two passes and all of them refuse.
+
+The split between :func:`_locate` and :func:`_examine` is where "authorize
+before access" is enforced rather than described. :func:`_locate` reads only
+identity metadata -- discovery's own record of the plan and this ledger's watch
+lease -- which is the entire budget the shared requirements allow before
+permission. Everything that opens the run itself, starting with the run state
+and the mailbox behind :func:`agent_session_loop.intervention.inspect_run`,
+lives in :func:`_examine` and runs only under a grant established moments
+earlier. A revoked opt-in therefore costs a discovery walk and nothing else, on
+both passes.
 
 The recheck earns its keep in one more case that no single pass could catch.
 Reconciliation settles a dispatch that a crashed process left in doubt, which
 can turn an action that *looks* new into one that already executed -- so the
 duplicate check has to run after reconciliation, and the only place after
 reconciliation is the second pass.
+
+For the same reason :func:`reconcile` takes a :class:`Grant` and not a flag:
+its adapters read run state, mailboxes and Git history to answer "did this
+happen?", so it is content access, and there is no way to call it without
+having asked.
 
 ## Attempted is not executed
 
@@ -594,14 +609,16 @@ def dispatch(
 ) -> Dispatch:
     """Perform one action, or refuse it and say which guard said no.
 
-    The order of the guards is the order of the questions, cheapest and most
-    fundamental first: what is this, is the plan there, is it the same run, is
-    it the same scope, is it ours, is our picture current, have we already
-    burned our recoveries, is the incident real, is the question open, have we
-    already done this. Only then is AgentMux asked, only then is anything in
-    doubt reconciled, only then does an adapter get to prepare -- and then the
-    whole identity and the whole authorization are established a second time
-    and required to match, because everything above was true before a wait.
+    The order of the guards is the order of the questions, and the pivot in the
+    middle is AgentMux. First, from identity metadata alone: what is this, is
+    the plan there, is it the same run, is it the same scope, is it ours. Then
+    AgentMux is asked about that scope. Only under its answer is the run itself
+    opened -- is our picture current, have we already burned our recoveries, is
+    the incident real, is the question open, have we already done this -- and
+    only then is anything in doubt reconciled and an adapter allowed to prepare.
+    Then the metadata and the authorization are established a second time and
+    required to match *before* the content is read again, because everything
+    above was true before a wait.
 
     Nothing here rolls anything back. An action that executed stays executed
     and an action left in doubt stays in doubt until an adapter says otherwise;
@@ -622,21 +639,20 @@ def dispatch(
             f"no adapter is registered for {action.operation!r}",
         )
 
-    identity = _identify(
+    located = _locate(
         action=action,
         watcher_id=watcher_id,
         ledger=ledger,
         build_inventory=build_inventory,
-        inspect_run=inspect_run,
         state_dir=state_dir,
         now=now,
     )
-    if isinstance(identity, _Refused):
-        return _settle_refusal(action, identity, ledger)
+    if isinstance(located, _Refused):
+        return _settle_refusal(action, located, ledger)
 
     grant = _permit(
         action=action,
-        identity=identity,
+        repositories=located.repositories,
         ledger=ledger,
         authorize=authorize,
         timeout=timeout,
@@ -644,7 +660,19 @@ def dispatch(
     if isinstance(grant, _Refused):
         return _settle_refusal(action, grant, ledger)
 
-    outstanding = reconcile(plan_dir=action.plan_dir, ledger=ledger, adapters=adapters)
+    identity = _examine(
+        action=action,
+        located=located,
+        ledger=ledger,
+        inspect_run=inspect_run,
+        state_dir=state_dir,
+    )
+    if isinstance(identity, _Refused):
+        return _settle_refusal(action, identity, ledger)
+
+    outstanding = reconcile(
+        plan_dir=action.plan_dir, ledger=ledger, adapters=adapters, grant=grant
+    )
     unsettled = tuple(item for item in outstanding if not item.settled)
     if unsettled:
         return _refusal(
@@ -658,27 +686,20 @@ def dispatch(
     if not preparation.ready:
         return _refusal(action, "preparation_declined", preparation.detail)
 
-    rechecked = _identify(
+    relocated = _locate(
         action=action,
         watcher_id=watcher_id,
         ledger=ledger,
         build_inventory=build_inventory,
-        inspect_run=inspect_run,
         state_dir=state_dir,
         now=now,
     )
-    if isinstance(rechecked, _Refused):
-        return _settle_refusal(action, rechecked, ledger)
-    if rechecked.fingerprint() != identity.fingerprint():
-        return _refusal(
-            action,
-            "stale_action",
-            "the run changed while the action was being prepared",
-        )
+    if isinstance(relocated, _Refused):
+        return _settle_refusal(action, relocated, ledger)
 
     regrant = _permit(
         action=action,
-        identity=rechecked,
+        repositories=relocated.repositories,
         ledger=ledger,
         authorize=authorize,
         timeout=timeout,
@@ -695,6 +716,22 @@ def dispatch(
             "authorization changed while the action was being prepared",
         )
 
+    rechecked = _examine(
+        action=action,
+        located=relocated,
+        ledger=ledger,
+        inspect_run=inspect_run,
+        state_dir=state_dir,
+    )
+    if isinstance(rechecked, _Refused):
+        return _settle_refusal(action, rechecked, ledger)
+    if rechecked.fingerprint() != identity.fingerprint():
+        return _refusal(
+            action,
+            "stale_action",
+            "the run changed while the action was being prepared",
+        )
+
     return _perform(
         action=action,
         identity=rechecked,
@@ -709,6 +746,7 @@ def reconcile(
     plan_dir: str,
     ledger: overseer_store.Ledger,
     adapters: Registry,
+    grant: overseer_policy_client.Grant,
 ) -> tuple[Reconciliation, ...]:
     """Ask the adapters what became of every dispatch left in doubt.
 
@@ -718,7 +756,23 @@ def reconcile(
     grounds that it probably worked, and never rolled back on the grounds that
     it probably did not. Both are guesses, and the shared requirements say an
     already-dispatched action is not undone.
+
+    ``grant`` is required and is checked, not merely accepted. Answering "did
+    this happen?" means opening run state, mailboxes and Git history, so
+    reconciliation is content access however little it writes -- and a caller
+    that has not just asked AgentMux about this plan under
+    :data:`ACTION_ACCESS` has nothing to pass. That is why it is a
+    :class:`~agent_session_loop.overseer_policy_client.Grant` and not a
+    boolean: a grant is only ever built from a live allowed answer, so it
+    cannot be assembled by a caller who would like to proceed.
     """
+    if grant.access != ACTION_ACCESS:
+        raise DispatchError(
+            f"reconciliation runs under {ACTION_ACCESS!r} permission; this grant "
+            f"is for {grant.access!r}"
+        )
+    if grant.plan_dir != plan_dir:
+        raise DispatchError(f"this grant permits {grant.plan_dir!r}, not {plan_dir!r}")
     results: list[Reconciliation] = []
     for record in ledger.in_doubt_actions(plan_dir=plan_dir):
         adapter = adapters.adapter(record.operation)
@@ -793,21 +847,41 @@ class _Refused:
     recoveries: int = 0
 
 
-def _identify(
+@dataclass(frozen=True)
+class _Located:
+    """The run, as much of it as may be read before permission is asked.
+
+    Discovery's own record of the plan and this ledger's watch lease, and
+    nothing from inside the run: no state file, no mailbox, no repository. The
+    shared requirements allow minimal identity metadata before authorization
+    and nothing else, so this type is the shape of that allowance -- and
+    :func:`_examine` cannot be reached without going past :func:`_permit`.
+    """
+
+    scope: str
+    repositories: tuple[overseer_policy_client.Repository, ...]
+
+
+def _locate(
     *,
     action: Action,
     watcher_id: str,
     ledger: overseer_store.Ledger,
     build_inventory: BuildInventory,
-    inspect_run: InspectRun,
     state_dir: str | Path | None,
     now: Now,
-) -> Identity | _Refused:
-    """Establish what is true about the run right now, or refuse.
+) -> _Located | _Refused:
+    """Identify the run from metadata alone, or refuse before asking anybody.
 
     Read-only, and re-runnable for exactly that reason: the recheck after
     preparation is this function called again, so anything it wrote would be
     written twice.
+
+    The scope guards live here rather than after authorization because they
+    decide *what question to ask*. An action naming repositories the run does
+    not declare is refused without AgentMux hearing about it at all, which is
+    the difference between refusing an out-of-scope request and asking whether
+    an out-of-scope request is permitted.
     """
     inventory = build_inventory(state_dir=state_dir)
     candidate = _candidate(inventory, action.plan_dir)
@@ -859,6 +933,25 @@ def _identify(
             f"the lease names run {lease.run_id!r}, not {action.run_id!r}",
         )
 
+    return _Located(scope=scope, repositories=declared)
+
+
+def _examine(
+    *,
+    action: Action,
+    located: _Located,
+    ledger: overseer_store.Ledger,
+    inspect_run: InspectRun,
+    state_dir: str | Path | None,
+) -> Identity | _Refused:
+    """Open the run and establish the rest of the identity, or refuse.
+
+    Everything here reads the run's own content -- the state file and the
+    mailbox behind :func:`agent_session_loop.intervention.inspect_run` -- so it
+    is only ever called under a grant :func:`_permit` established moments
+    before. Read-only and re-runnable, like :func:`_locate`, because the second
+    pass is this function called again.
+    """
     facts = inspect_run(action.plan_dir, state_dir=state_dir)
     if facts.run_id != action.run_id:
         return _Refused(
@@ -929,10 +1022,10 @@ def _identify(
     return Identity(
         plan_dir=action.plan_dir,
         run_id=action.run_id,
-        scope=scope,
+        scope=located.scope,
         token=token,
         progress=progress,
-        repositories=declared,
+        repositories=located.repositories,
         question_id=question_id,
     )
 
@@ -940,7 +1033,7 @@ def _identify(
 def _permit(
     *,
     action: Action,
-    identity: Identity,
+    repositories: tuple[overseer_policy_client.Repository, ...],
     ledger: overseer_store.Ledger,
     authorize: Authorize,
     timeout: float,
@@ -949,13 +1042,16 @@ def _permit(
 
     The repositories asked about are the run's declared set as discovery reads
     it now, not the set the action carries: the action's set was already
-    required to equal it, so asking about the run's own is the same question
-    asked against the current corpus rather than against a caller's copy.
+    required to equal it by :func:`_locate`, so asking about the run's own is
+    the same question asked against the current corpus rather than against a
+    caller's copy. Taking them as a plain tuple rather than off an
+    :class:`Identity` is what lets this run before any content is read, since an
+    ``Identity`` cannot exist until it has been.
     """
     decision = authorize(
         plan_dir=action.plan_dir,
         access=ACTION_ACCESS,
-        repositories=identity.repositories,
+        repositories=repositories,
         timeout=timeout,
     )
     ledger.record_decision(decision)

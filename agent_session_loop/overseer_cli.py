@@ -491,9 +491,16 @@ def _grant_for(
     seams: Seams,
     timeout: float,
 ) -> tuple[overseer_policy_client.Decision, overseer_policy_client.Grant | None]:
-    """Ask AgentMux now. Never reuse an answer from an earlier leaf."""
+    """Ask AgentMux now. Never reuse an answer from an earlier leaf.
+
+    The plan directory goes on the wire in :func:`plan_dir_of`'s spelling, which
+    is the one every other comparison in this module uses. A grant naming a
+    different spelling than the caller passes on -- ``None`` against ``""``, for
+    the truncated record discovery still reports -- is a grant the dispatcher
+    would refuse to match, and the refusal would read as a policy problem.
+    """
     decision = seams.authorize(
-        plan_dir=candidate.plan_dir,
+        plan_dir=plan_dir_of(candidate),
         access=access,
         repositories=overseer_policy_client.repositories_for(candidate.repositories),
         timeout=timeout,
@@ -1222,6 +1229,13 @@ def reconcile_from_args(
     can answer, and it answers from the ledger row alone, because the process
     that held the action is gone. Running this before acting again is what keeps
     a retry from becoming a duplicate.
+
+    Answering that question means reading the run: state files, mailboxes, Git
+    history. So this leaf asks AgentMux first, exactly as ``act`` does and under
+    the same access category, and a refused or unreachable answer ends the
+    invocation before an adapter is built. Reconciliation is the one operation
+    whose whole job is to look at what a previous process touched, which makes
+    it the easiest place for a withdrawn opt-in to be read straight past.
     """
     as_json = bool(getattr(args, "json", False))
     state_dir = _state_dir(args)
@@ -1231,6 +1245,34 @@ def reconcile_from_args(
         candidate = _resolve_candidate(inventory, args.plan_dir)
     except OverseerCliError as error:
         return _failure("overseer-reconcile", error, as_json=as_json)
+
+    decision, grant = _grant_for(
+        candidate,
+        access=overseer_policy_client.ACCESS_ACTION,
+        seams=seams,
+        timeout=float(args.timeout),
+    )
+    ledger.record_decision(decision)
+    if decision.config_fingerprint:
+        ledger.note_policy(config_fingerprint=decision.config_fingerprint)
+    if grant is None:
+        refusal = "unauthorized" if decision.available else "policy_unavailable"
+        detail = decision.summary or decision.reason
+        payload = responses.error_payload(
+            "overseer-reconcile",
+            reason=refusal,
+            error=detail,
+            plan_dir=candidate.plan_dir,
+            authorized=False,
+            settled=False,
+            outcomes=[],
+        )
+        _emit(
+            payload,
+            [f"reconcile on {candidate.plan_dir}: refused ({refusal})", f"  {detail}"],
+            as_json=as_json,
+        )
+        return EXIT_REFUSED
 
     def authority(
         action: overseer_dispatch.Action,
@@ -1247,11 +1289,13 @@ def reconcile_from_args(
             seams=seams,
             timeout=float(args.timeout),
         ),
+        grant=grant,
     )
     settled = all(item.settled for item in outcomes)
     payload = responses.success_payload(
         "overseer-reconcile",
         plan_dir=candidate.plan_dir,
+        authorized=True,
         settled=settled,
         outcomes=[
             {
