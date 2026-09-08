@@ -769,6 +769,10 @@ def _rule(
     conversation stops the operation whether or not the invocation named safety.
     Deriving it here rather than at each leaf is what keeps every authority
     recheck asking the same question as the first one.
+
+    Whether ``reviewed`` was *owed* is not asked here. This function is handed
+    claims and cannot tell what the host was shown; :func:`unbound` is the
+    answer the leaves give for the case where nothing was named.
     """
     register = overseer_decisions.register(
         statements=evidence.statements, claims=claims
@@ -785,6 +789,45 @@ def _rule(
         ),
     )
     return ruling, register
+
+
+#: The refusals that say the reading itself cannot be used, whatever the claims
+#: in it turned out to say. A leaf that answers with one of these publishes no
+#: ``evidence_digest``: a digest printed beside "your reading is unusable" is a
+#: fresh record's name handed to a caller holding an old record's claims, which
+#: is the manufactured binding this boundary exists to refuse.
+UNUSABLE_READING: frozenset[str] = frozenset({"evidence_unbound", "evidence_changed"})
+
+
+def unbound(
+    *, scope: overseer_decisions.Scope, operation: str
+) -> overseer_decisions.Ruling:
+    """The ruling for claims that name no record they were read from.
+
+    Claims are a reading, and a reading is of something. ``decide`` prints the
+    statements and the ``evidence_digest`` that names them together, so a host
+    that composed claims was shown a record and can say which one; a claim-
+    bearing invocation that names none is either a reading of a record nobody
+    can identify or no reading at all, and neither is something to weigh
+    decisions against.
+
+    The alternative -- reading the record now and calling *that* what the claims
+    were read from -- is the failure this refuses. It cannot fail: the digest is
+    taken from the same read the claims are resolved against, so it always
+    agrees, and every hold that arrived before the invocation is silently
+    absorbed into the record the host is then said to have reviewed.
+    """
+    return overseer_decisions.Ruling(
+        operation=operation,
+        scope=scope,
+        authorized=False,
+        refusal="evidence_unbound",
+        summary=(
+            "the claims name no reviewed evidence; re-read the record with "
+            "`asl overseer decide --list-statements` and pass its "
+            "`evidence_digest` as --reviewed-evidence"
+        ),
+    )
 
 
 def _adapters(
@@ -1099,11 +1142,22 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
     lives, and the ids being derived rather than invented is what keeps a claim
     from citing a statement nobody made.
 
-    ``evidence_digest`` names the record those claims were read from. It is
-    printed rather than stored, because storing it would be the cached
-    permission this boundary refuses to keep; the host carries it to
-    ``asl overseer act --reviewed-evidence`` and the action is refused
-    ``evidence_changed`` if human evidence in scope moved in the meantime.
+    ``evidence_digest`` names the record those claims were read from, and only
+    the reading that *shows* the record issues one: ``--list-statements`` prints
+    the statements and their digest together, so a digest a host holds is a
+    record a host was shown. It is printed rather than stored, because storing
+    it would be the cached permission this boundary refuses to keep; the host
+    carries it back through ``--reviewed-evidence`` here and at
+    ``asl overseer act``, and either is refused ``evidence_changed`` if human
+    evidence in scope moved in the meantime.
+
+    Claims therefore have to name one. A claim-bearing invocation that names no
+    digest is refused ``evidence_unbound`` rather than resolved against a record
+    read here and now, which would be this leaf writing the host's reading for
+    it. A refused reading publishes no digest either: the whole point of the
+    window between the listing and the claims is that a hold can land in it, so
+    handing back the *new* record's name would let the old claims travel on to
+    ``act`` as though that record had been reviewed.
 
     A refusal is not a failure to try harder. ``held`` and ``human_decision``
     both mean a person already settled this, or has not, and the honest next
@@ -1135,13 +1189,13 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
         generated_classes=tuple(args.generated_classes or ()),
         timeout=float(args.timeout),
     )
-    reviewed = overseer_decisions.evidence_digest(evidence.statements, scope=scope)
     if args.list_statements:
+        listed = overseer_decisions.evidence_digest(evidence.statements, scope=scope)
         payload = responses.success_payload(
             "overseer-decide",
             listed=True,
             scope=_scope_payload(scope),
-            evidence_digest=reviewed,
+            evidence_digest=listed,
             history=_history_payload(evidence.history),
             statements=[_statement_payload(item) for item in evidence.statements],
         )
@@ -1150,15 +1204,30 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
             f"  {item.statement_id} [{item.voice}] {item.text[:72]}"
             for item in evidence.statements
         )
-        lines.append(f"  evidence digest: {reviewed}")
+        lines.append(f"  evidence digest: {listed}")
         _emit(payload, lines, as_json=as_json)
         return EXIT_OK
-    ruling, register = _rule(
-        evidence=evidence,
-        claims=claims,
-        operation=args.operation,
-        raises=_raises(args),
-    )
+    reviewed = str(getattr(args, "reviewed_evidence", "") or "")
+    ruling: overseer_decisions.Ruling
+    register: overseer_decisions.Register
+    if claims and not reviewed:
+        ruling = unbound(scope=scope, operation=args.operation)
+        # Still registered, so a host that forgot the binding and miswrote its
+        # claims hears about both in one answer.
+        register = overseer_decisions.register(
+            statements=evidence.statements, claims=claims
+        )
+    else:
+        ruling, register = _rule(
+            evidence=evidence,
+            claims=claims,
+            operation=args.operation,
+            raises=_raises(args),
+            reviewed=reviewed,
+        )
+    # Echoed back, never minted: the digest a refused reading would be handed
+    # is the name of the record that refused it.
+    published = "" if ruling.refusal in UNUSABLE_READING else reviewed
     settlements = [
         overseer_decisions.settle(register=register, topic=topic, scope=scope)
         for topic in overseer_decisions.HUMAN_TOPICS
@@ -1179,7 +1248,7 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
         listed=False,
         authorized=ruling.authorized,
         ruling=_ruling_payload(ruling),
-        evidence_digest=reviewed,
+        evidence_digest=published or None,
         history=_history_payload(evidence.history),
         human_settlements=[
             {
@@ -1205,7 +1274,12 @@ def decide_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) 
         f"{args.operation} on {candidate.plan_dir}: "
         f"{'authorized' if ruling.authorized else f'refused ({ruling.refusal})'}",
         f"  {ruling.summary}",
-        f"  evidence digest: {reviewed}",
+        (
+            f"  evidence digest: {published}"
+            if published
+            else "  evidence digest: none issued; read the record with "
+            "--list-statements and claim what it says"
+        ),
     ]
     for rejection in register.rejections:
         lines.append(f"  rejected {rejection.claim.statement_id}: {rejection.reason}")
@@ -1236,13 +1310,17 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
     claimed never becomes a decision, so the second reading of the same claims
     agrees with the first however the record moved.
 
-    ``--reviewed-evidence`` is what closes that. It carries the digest
-    ``asl overseer decide`` printed for the evidence the host actually read, and
-    a mismatch is refused ``evidence_changed`` before any decision is weighed.
-    When it is absent the first authority check pins the digest it observes, so
-    a hold arriving *during* preparation is still caught -- what is not caught
-    without the flag is a hold that arrived between ``decide`` and ``act``,
-    which is the window the host closes by passing what it reviewed.
+    ``--reviewed-evidence`` is what closes that, and a claim-bearing action
+    requires it. It carries the digest ``asl overseer decide --list-statements``
+    printed for the record it showed the host, and a mismatch is refused
+    ``evidence_changed`` before any decision is weighed -- at the first check,
+    which closes the ``decide``-to-``act`` window, and again at the second,
+    which closes the one inside the dispatch. Claims arriving without it are
+    refused ``evidence_unbound`` at every check rather than resolved against a
+    digest read here: pinning what this invocation happens to observe would
+    write the host's reading for it, and would silently absorb every hold that
+    landed before the invocation into the record the host is then said to have
+    reviewed.
 
     ``--raises`` is read once and handed to both rechecks, so the human
     questions this action depends on cannot be answered by the first reading and
@@ -1269,10 +1347,19 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
         "reviewed": str(getattr(args, "reviewed_evidence", "") or ""),
         "observed": "",
     }
+    bound = bool(binding["reviewed"]) or not claims
 
     def authority(
         action: overseer_dispatch.Action,
     ) -> overseer_decisions.Ruling | None:
+        if not bound:
+            # Before the grant and before the read: there is nothing to weigh,
+            # and reading the record now is exactly what must not become the
+            # binding.
+            return unbound(
+                scope=_scope_for(candidate, incident_id=action.incident_id),
+                operation=action.payload.operation,
+            )
         _decision, grant = _grant_for(
             candidate,
             access=overseer_policy_client.ACCESS_CONTEXT,
@@ -1294,8 +1381,6 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
         binding["observed"] = overseer_decisions.evidence_digest(
             evidence.statements, scope=evidence.scope
         )
-        if not binding["reviewed"]:
-            binding["reviewed"] = binding["observed"]
         ruling, _register = _rule(
             evidence=evidence,
             claims=claims,
@@ -1342,7 +1427,11 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
             blocked=(f"{candidate.plan_dir}::{args.operation}",),
             independent=_independent_plans(inventory, excluding=plan_dir_of(candidate)),
         )
-    changed = bool(binding["observed"]) and binding["observed"] != binding["reviewed"]
+    changed = (
+        bool(binding["observed"])
+        and bool(binding["reviewed"])
+        and binding["observed"] != binding["reviewed"]
+    )
     payload = responses.success_payload(
         "overseer-act",
         dispatch=_dispatch_payload(dispatch),
@@ -1350,6 +1439,7 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
             "reviewed": binding["reviewed"],
             "observed": binding["observed"],
             "changed": changed,
+            "bound": bound,
         },
         escalation=None if escalation is None else escalation.payload(),
     )
@@ -1359,6 +1449,12 @@ def act_from_args(args: argparse.Namespace, *, seams: Seams = DEFAULT_SEAMS) -> 
     ]
     if dispatch.detail:
         lines.append(f"  {dispatch.detail}")
+    if not bound:
+        lines.append(
+            "  the claims name no reviewed evidence: re-read the record with "
+            "`asl overseer decide --list-statements` and pass its "
+            "`evidence_digest` as --reviewed-evidence"
+        )
     if changed:
         lines.append(
             f"  evidence moved: reviewed {binding['reviewed']}, "

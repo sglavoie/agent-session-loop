@@ -836,6 +836,23 @@ class _WorldCase(unittest.TestCase):
             claim["corroborating"] = list(corroborating)
         return [claim]
 
+    def reviewed(self, packet: dict[str, Any], *, plan: Path | None = None) -> str:
+        """The digest naming the record a host was shown, which binds its claims.
+
+        Claims are a reading of something, and only the reading that prints the
+        statements issues a name for what was read. Every claim-bearing step
+        below carries one, the way a host has to.
+        """
+        status, listing = self.world.invoke(
+            "decide",
+            str(plan or self.plan),
+            "--incident-id",
+            str(packet["packet"]["incident_id"]),
+            "--list-statements",
+        )
+        assert status == 0, listing
+        return str(listing["evidence_digest"])
+
     def decide(
         self, packet: dict[str, Any], operation: str, claims: list[dict[str, Any]]
     ) -> tuple[int, dict[str, Any]]:
@@ -846,6 +863,8 @@ class _WorldCase(unittest.TestCase):
             operation,
             "--incident-id",
             str(packet["packet"]["incident_id"]),
+            "--reviewed-evidence",
+            self.reviewed(packet),
             "--claims-file",
             self.world.claims_file(claims),
         )
@@ -858,6 +877,7 @@ class _WorldCase(unittest.TestCase):
         *extra: str,
         plan: Path | None = None,
         watcher: str = WATCHER,
+        reviewed: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
         return self.world.invoke(
             "act",
@@ -874,6 +894,8 @@ class _WorldCase(unittest.TestCase):
             packet["token"],
             "--scope",
             packet["scope"],
+            "--reviewed-evidence",
+            self.reviewed(packet, plan=plan) if reviewed is None else reviewed,
             "--claims-file",
             self.world.claims_file(claims),
             *extra,
@@ -1341,6 +1363,9 @@ class FaultQualificationTests(_WorldCase):
         comparison this guard is.
         """
         packet = self.observed()
+        # Bound before the hook is armed, so the rewrite lands inside the
+        # dispatch rather than inside the reading that names the record.
+        reviewed = self.reviewed(packet)
 
         def rewrite(argv: list[str]) -> None:
             if "history" in argv:
@@ -1354,6 +1379,7 @@ class FaultQualificationTests(_WorldCase):
             self.allowing("guidance"),
             "--text",
             "commit what you have and carry on",
+            reviewed=reviewed,
         )
 
         self.assertEqual(overseer_cli.EXIT_REFUSED, status, payload)

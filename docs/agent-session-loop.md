@@ -573,7 +573,7 @@ asl diagnostics export --agent-mux [--state-dir DIR] [--run-id ID] [--plan-dir D
 asl overseer scan [--plan PLAN_DIR ...] [--project DIR ...] [--pause-window-hours H] [--state-dir DIR] [--json]
 asl overseer watch --watcher-id ID [--plan PLAN_DIR ...] [--project DIR ...] [--for-seconds SEC] [--interval-seconds SEC] [--sweep-seconds SEC] [--lease-seconds SEC] [--pause-window-hours H] [--release] [--timeout SEC] [--state-dir DIR] [--json]
 asl overseer inspect PLAN_DIR [--kind KIND] [--summary TEXT] [--incident-id ID] [--expand status|questions|run_config|verification|worker_changes|supervision ...] [--limit CHARS] [--timeout SEC] [--state-dir DIR] [--json]
-asl overseer decide PLAN_DIR [--operation reply|guidance|verify|commit|resume] [--incident-id ID] [--raises TOPIC ...] [--list-statements] [--claims-file PATH|--claims-stdin] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
+asl overseer decide PLAN_DIR [--operation reply|guidance|verify|commit|resume] [--incident-id ID] [--raises TOPIC ...] [--list-statements] [--claims-file PATH|--claims-stdin] [--reviewed-evidence DIGEST] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
 asl overseer act PLAN_DIR --watcher-id ID --operation reply|guidance|verify|commit|resume --run-id ID --incident-id ID --token TOKEN --scope DIGEST [--raises TOPIC ...] [--question-id ID] [--text TEXT] [--check NAME] [--message TEXT] [--session-id ID] [--claims-file PATH|--claims-stdin] [--reviewed-evidence DIGEST] [--no-history] [--generated-class CLASS ...] [--timeout SEC] [--state-dir DIR] [--json]
 asl overseer reconcile PLAN_DIR [--timeout SEC] [--state-dir DIR] [--json]
 ```
@@ -607,8 +607,11 @@ captured at read time on purpose, so a run that moves in between produces a
 
 `decide` resolves one operation against decisions humans already recorded.
 `--list-statements` prints every statement in scope with the stable ID a claim
-must cite; the host reads what those statements mean and passes claims back
-through `--claims-file` or `--claims-stdin`. The register rejects claims that
+must cite, and the `evidence_digest` naming that reading; the host reads what
+those statements mean and passes claims back through `--claims-file` or
+`--claims-stdin`, together with that digest as `--reviewed-evidence`. Claims
+arriving without one are refused `evidence_unbound`: claims about a record
+nobody named are not a reading of anything. The register rejects claims that
 cite nothing, widen their scope, or name an unknown topic, and reports each
 rejection rather than failing the command. A refusal is an escalation: the
 payload carries the question to put to a human, the work that stays blocked, and
@@ -676,16 +679,26 @@ neither pass can authorize a human question the other refused.
 Re-deriving catches a withdrawn grant and does not on its own catch a *new*
 statement: claims cite what the host read, a hold nobody claimed never becomes a
 decision, and the second reading of the same claims agrees with the first
-however the record moved. `--reviewed-evidence DIGEST` closes that. `decide`
-prints an `evidence_digest` summarizing every human statement in scope — the
-instructions and relays a host would have read, and deliberately not ASL's own
-acks and receipts, which would otherwise report a change on every action — and
-naming it here refuses `evidence_changed` when the record has moved since. It is
-opt-in, so an invocation that omits it keeps its meaning; what the first
-authority check then pins is whatever it observed, which still catches a hold
-arriving during the dispatch and not one that arrived between `decide` and
-`act`. `evidence_changed` is not a retry: the reading was about a record that
-has changed, and the answer is another reading. `commit` writes a checkpoint across every
+however the record moved. `--reviewed-evidence DIGEST` closes that.
+`decide --list-statements` prints an `evidence_digest` summarizing every human
+statement in scope — the instructions and relays a host would have read, and
+deliberately not ASL's own acks and receipts, which would otherwise report a
+change on every action. That listing is the only reading that mints one, because
+it is the only reading that *shows* the host the record it names. The host
+carries it back to `decide --claims-file` and to `act`, and each refuses
+`evidence_changed` when the record has moved since: at `decide`, closing the
+window between the listing and the claims written from it; at the first
+authority check, closing the window between `decide` and `act`; and at the
+second, closing the window inside the dispatch. It is required whenever claims
+are passed. An invocation that omits it is refused `evidence_unbound` rather
+than bound to whatever it happens to observe — pinning a fresh read would be the
+CLI writing the host's reading for it, and would absorb every hold that landed
+beforehand into the record the host is then said to have reviewed. A refused
+`decide` publishes no digest for the same reason read from the other end: the
+new record's name in the host's hand would match at `act`, and the stale claims
+would go through as though the hold had been reviewed. `evidence_changed` is not
+a retry: the reading was about a record that has changed, and the answer is
+another reading. `commit` writes a checkpoint across every
 declared repository as one durable group, so a crash partway through leaves a
 group `reconcile` can finish. A recoverable refusal is retried at most twice
 before it becomes `recovery_exhausted`.

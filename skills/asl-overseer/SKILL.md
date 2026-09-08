@@ -80,7 +80,7 @@ Record the `scope` and `token` this prints. You will need them at step 5, and th
 asl overseer decide "$PLAN" --operation reply --incident-id "$INCIDENT" --list-statements --json
 ```
 
-That prints every statement in scope with a stable ID, from both evidence boundaries.
+That prints every statement in scope with a stable ID, from both evidence boundaries, and an `evidence_digest` naming the record it just showed you. **This listing is the only thing that issues a digest**, and everything after it needs one: it is the reading you were actually shown, so it is the only reading your claims can honestly be bound to. Record it as `$DIGEST` now.
 
 **The two boundaries are not interchangeable.** A plan's mailbox records that an instruction *arrived*; it records no author, so everything it yields is a relayed instruction. Relayed instructions are readable and citable as corroboration, and **on their own they authorize nothing** — a claim resting only on one comes back `not_user_authored`. Only the harness transcript carries a turn a person actually typed. `decide` and `act` read both by default; `--no-history` reads the mailbox alone, which is a legitimate way to prove an action does not need the transcript and a guarantee that nothing will be authorized. Authorship is AgentMux's answer, not yours to remember: only a conversation it classified `main` yields instructions, an `automated` one yields generated prompts, and `unknown` or an unrecognized class yields statements that authorize nothing. `--generated-class CLASS` marks further classes machine-written and can only restrict, so there is nothing you have to pass to keep the boundary closed.
 
@@ -108,7 +108,7 @@ Then resolve:
 
 ```bash
 asl overseer decide "$PLAN" --operation reply --incident-id "$INCIDENT" \
-  --claims-file claims.json --json
+  --claims-file claims.json --reviewed-evidence "$DIGEST" --json
 ```
 
 **Name the human questions this operation depends on.** `acceptance`, `scope`, `design` and `safety` are the topics that stay human, and a decision on one of them never authorizes an operation by itself — it settles a question the operation waits on. Pass `--raises TOPIC` (repeat it) for every such question you know is open, and a topic no in-scope decision settles refuses `human_decision` no matter what the operational allowance said. You do not have to name a topic you already wrote a claim about: any human topic a surviving claim spoke to about this run is raised for you, so a safety hold you read honestly and claimed honestly stops the operation even if you forgot the flag. The ruling's `unresolved` list is what is still outstanding, and it does not distinguish a hold from silence — neither one is an answer.
@@ -117,7 +117,11 @@ This is the only place your judgement enters, and it enters as data the register
 
 **Reusing decisions is the point.** A human who already settled something settled it. Cite the statement and proceed. What you must not do is manufacture a settlement out of a statement that does not carry one.
 
-**Record the `evidence_digest`.** Both `decide` outputs carry one: it names the record your claims were read from. Your claims cite statements, and a statement nobody has seen yet cannot be cited — so a hold typed while you were writing claims is invisible to a re-check that only re-resolves those claims. The digest is what makes it visible. Carry it to step 5.
+**`--reviewed-evidence` is not optional here.** Your claims cite statements, and a statement nobody has seen yet cannot be cited — so a hold typed while you were writing claims is invisible to a re-check that only re-resolves those claims. Naming the record you read is what makes it visible. Claims submitted without it are refused `evidence_unbound`: the leaf will not read the record itself and call that your reading, because doing so would quietly absorb every hold that landed while you were writing.
+
+**A refused evaluation issues no digest.** If the record moved between the listing and your claims, this comes back `evidence_changed` and `evidence_digest` is null — there is nothing to carry forward, because a digest for the *new* record would let the claims you wrote about the old one travel to step 5 as though the hold had been reviewed. Go back to `--list-statements`, read what is there now, and write claims about it.
+
+An authorized `decide` echoes the same `$DIGEST` back. Carry it to step 5.
 
 ### 5. Dispatch
 
@@ -134,7 +138,9 @@ Pass the same `--raises` topics you passed to `decide`. They are read once and c
 
 The dispatcher re-checks authority twice — once before the adapter prepares and once immediately before it performs. That catches a revocation, because a withdrawn grant is a missing grant. It does not on its own catch a *new statement*: your claims cite what you read, an unclaimed hold never becomes a decision, and so the second reading of the same claims agrees with the first however the record moved.
 
-**`--reviewed-evidence` is what closes that**, and it is the digest step 4 printed. Pass it on every `act`. A new hold, a changed statement, or a superseding decision arriving since you read the record is refused `evidence_changed` before any decision is weighed. Without the flag the first authority check pins whatever it sees, so a hold arriving *during* the dispatch is still caught — what goes uncaught is one that arrived between your `decide` and your `act`, which is precisely the window you close by saying what you reviewed.
+**`--reviewed-evidence` is what closes that**, and it is the digest step 4's listing printed. It is required on every claim-bearing `act`. A new hold, a changed statement, or a superseding decision arriving since you read the record is refused `evidence_changed` before any decision is weighed — at the check before the adapter prepares, which closes the window between your `decide` and your `act`, and again at the check before it performs, which closes the window inside the dispatch itself.
+
+Omitting it is refused `evidence_unbound` rather than treated as a weaker check. The leaf could read the record itself and pin what it saw, and that is exactly the wrong answer: it would be writing your reading for you, and every hold that arrived before you invoked it would be silently absorbed into the record you are then said to have reviewed.
 
 `evidence_changed` is not a stale token and not a retry. The record you reasoned about has moved, so go back to step 4, read what is there now, and write claims about it.
 

@@ -1922,9 +1922,13 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         description=(
             "Reuse what a person already settled on this plan instead of "
             "settling it again. `--list-statements` prints the supervision "
-            "record with the stable statement IDs a claim must cite; the host "
-            "reads what those statements mean and passes claims back through "
-            "`--claims-file` or `--claims-stdin`. Everything after that is "
+            "record with the stable statement IDs a claim must cite along with "
+            "the `evidence_digest` of that reading; the host reads what those "
+            "statements mean and passes claims back through `--claims-file` or "
+            "`--claims-stdin` together with that digest as "
+            "`--reviewed-evidence`. Claims without it are refused "
+            "`evidence_unbound`, because claims about a record nobody named are "
+            "not a reading of anything. Everything after that is "
             "mechanical: the register rejects claims that cite nothing, widen "
             "their scope or name an unknown topic, and the ruling follows from "
             "what survives. A refusal is an escalation, printed with the "
@@ -1973,6 +1977,17 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         "--claims-stdin",
         action="store_true",
         help="Read the host's claims from standard input",
+    )
+    overseer_decide_parser.add_argument(
+        "--reviewed-evidence",
+        metavar="DIGEST",
+        help=(
+            "The `evidence_digest` the `--list-statements` reading these "
+            "claims were written from reported. Required with claims: without "
+            "it the evaluation is refused `evidence_unbound`, and if human "
+            "evidence in scope moved since that reading it is refused "
+            "`evidence_changed` instead of ruling on a stale reading"
+        ),
     )
     overseer_decide_parser.add_argument(
         "--no-history",
@@ -2025,8 +2040,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
             "inspect` and are never recomputed here, because a token recomputed "
             "now would agree with itself. `--reviewed-evidence` binds the "
             "claims to the record they were read from, so a hold that arrived "
-            "since is refused `evidence_changed` rather than resolved past. "
-            "The operational scope is reply, "
+            "since is refused `evidence_changed` rather than resolved past. It "
+            "is required whenever claims are passed: unbound claims are refused "
+            "`evidence_unbound` rather than pinned to whatever this invocation "
+            "happens to read. The operational scope is reply, "
             "guidance, verify, commit and resume; anything else, and anything "
             "no adapter implements, is refused and escalated rather than "
             "improvised. `--check` names a check the session's completion "
@@ -2116,8 +2133,10 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         metavar="DIGEST",
         help=(
             "The `evidence_digest` the `asl overseer decide` that produced "
-            "these claims reported; the action is refused `evidence_changed` "
-            "if human evidence in scope moved since it was read"
+            "these claims reported. Required with claims: without it the "
+            "action is refused `evidence_unbound`, and it is refused "
+            "`evidence_changed` if human evidence in scope moved since that "
+            "reading"
         ),
     )
     overseer_act_parser.add_argument(

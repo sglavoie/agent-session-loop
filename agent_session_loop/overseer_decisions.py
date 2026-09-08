@@ -110,8 +110,17 @@ digest in ``reviewed``, and :func:`resolve` refuses
 to it. The refusal is not a verdict on the new statement: it says the reading
 is about a record that has moved, and the answer is another reading rather than
 a retry. ``reviewed`` empty means the caller is not making the binding, which
-is what keeps this a check a caller opts into rather than a second place a
+is what keeps this a check a caller offers rather than a second place a
 decision could be made.
+
+Who is *owed* a binding is a different question, and it is not answerable here.
+This module is handed claims and never sees where they came from, so it cannot
+tell a caller that composed them against a record it was shown from one that
+invented them. The surface that showed the record can: :mod:`overseer_cli`
+issues a digest only from the reading that prints the statements, requires
+every claim-bearing invocation to name one, and refuses
+:data:`evidence_unbound <REFUSALS>` when none is named -- a refusal spelled in
+this vocabulary and raised only there.
 
 ## What stays human
 
@@ -382,6 +391,7 @@ CLAIM_REJECTIONS: tuple[RejectionReason, ...] = (
 Refusal = Literal[
     "target_unscoped",
     "operation_unsupported",
+    "evidence_unbound",
     "evidence_changed",
     "held",
     "human_decision",
@@ -394,6 +404,12 @@ Refusal = Literal[
 #: * ``target_unscoped`` -- the request names no project, so no decision can
 #:   apply to it.
 #: * ``operation_unsupported`` -- outside :data:`OPERATIONS` entirely.
+#: * ``evidence_unbound`` -- claims were submitted without naming the record
+#:   they were read from, so there is no reading to check. :func:`resolve`
+#:   never raises it: an empty ``reviewed`` here is a caller declining to make
+#:   the binding, and only the surface that *presented* a record to a host can
+#:   say that a reading of it was owed. :mod:`overseer_cli` raises it for every
+#:   claim-bearing invocation, which is where the presentation happens.
 #: * ``evidence_changed`` -- the request names the evidence its claims were read
 #:   from and the evidence in hand is no longer that evidence. The claims may
 #:   all still stand; what cannot stand is a reading of a record that has moved.
@@ -406,6 +422,7 @@ Refusal = Literal[
 REFUSALS: tuple[Refusal, ...] = (
     "target_unscoped",
     "operation_unsupported",
+    "evidence_unbound",
     "evidence_changed",
     "held",
     "human_decision",
@@ -726,7 +743,10 @@ class Request:
     read from. Empty means the caller is not binding its reading to a record,
     which is the default so that every existing request keeps its meaning;
     naming one asks for :data:`evidence_changed <REFUSALS>` if human evidence in
-    scope has moved since.
+    scope has moved since. A caller that *presented* the record to whoever wrote
+    the claims owes the binding rather than merely offering it, and enforces
+    that where the presentation happened: see
+    :data:`evidence_unbound <REFUSALS>`.
     """
 
     operation: str
