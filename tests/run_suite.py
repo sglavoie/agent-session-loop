@@ -239,6 +239,7 @@ INTEGRATION_MODULES = (
     "tests.test_asl_workbench_launch",
     "tests.test_asl_pause_ux",
     "tests.test_asl_bridge_server",
+    "tests.test_asl_overseer_e2e",
     "tests.test_brainnotes_vault_guard",
 )
 
