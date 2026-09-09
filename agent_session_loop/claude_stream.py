@@ -8,10 +8,11 @@ the turn is running.
 
 What that buys, and what it does not. A stdin write is a write to a pipe: it
 proves the bytes left this process and nothing whatsoever about a model reading
-them. The CLI acknowledges a message only when it starts processing it, and a
-message written mid-turn is *queued* as its own follow-up turn rather than
-folded into the running one. So this module never reports a delivery from a
-successful write. It reports one only from evidence:
+them. With ``--replay-user-messages`` the CLI acknowledges a message when it
+takes it up. Guidance may join an active tool loop or wait for a follow-up
+turn, so counting one result per write does not tell us when it is done. This
+module never reports a delivery from a successful write. It reports one only
+from evidence:
 
 - a **protocol acknowledgement**: the CLI echoes a user message back on the
   output stream as a ``{"type": "user"}`` record once it takes it up; or
@@ -19,10 +20,9 @@ successful write. It reports one only from evidence:
   overlay, which injects pending guidance as ``additionalContext`` for the
   model's next request and leaves a receipt saying it did.
 
-The two routes are complementary rather than redundant: the hook reaches the
-turn that is running *now*, the stdin queue reaches the turn after it, and each
-guidance record is claimed by exactly one of them (see
-:class:`ClaudeGuidanceSpool`). Until one of them reports in, an attempt is
+The hook can reach the running turn before the stdin queue is consumed. Its
+receipt confirms delivery but does not acknowledge consumption of the queued
+stdin message. Until one of the routes reports in, an attempt is
 ``awaiting-confirmation`` — deferred, still deliverable, and never a receipt.
 
 Privacy. Guidance bodies live in memory and on the stdin pipe and in the
@@ -289,7 +289,7 @@ class ClaudeStreamSession:
         self._offers: dict[str, _Offer] = {}
         self._echo_expectations: list[_EchoExpectation] = []
         self._messages_written = 0
-        self._results_seen = 0
+        self._messages_answered = 0
         self._stdin_closed = False
         self._prompt_error: str | None = None
 
@@ -339,15 +339,29 @@ class ClaudeStreamSession:
 
         The CLI in streaming-input mode runs until its stdin reaches EOF, so
         something has to close it or the turn never ends. It is closed once
-        every message written has been answered by a result: a guidance message
-        queued before this result is a follow-up turn that has not run yet, and
-        cutting stdin here would discard it.
+        every written message has been answered. A result covers all messages
+        echoed before it, including guidance taken up in the active tool loop.
+        Without a new echo it covers one message, preserving the older CLI
+        behavior. Unacknowledged queued guidance keeps stdin open.
         """
-        with self._state_lock:
-            self._results_seen += 1
-            idle = self._results_seen >= self._messages_written
-        if idle:
-            self.close_stdin()
+        # Serialize the decision and close with writes: a guidance write must
+        # either be counted before the decision or observe the closed pipe.
+        with self._write_lock:
+            with self._state_lock:
+                echoed_through = max(
+                    (
+                        index + 1
+                        for index, expectation in enumerate(self._echo_expectations)
+                        if expectation.consumed
+                    ),
+                    default=0,
+                )
+                self._messages_answered = max(
+                    self._messages_answered + 1, echoed_through
+                )
+                idle = self._messages_answered >= self._messages_written
+            if idle:
+                self._close_stdin_locked()
 
     def note_user_echo(self, text: str) -> None:
         """Record the CLI echoing a user message it has taken up.
@@ -518,17 +532,21 @@ class ClaudeStreamSession:
     def close_stdin(self) -> None:
         """End the conversation, which is how the CLI is asked to finish."""
         with self._write_lock:
-            with self._state_lock:
-                if self._stdin_closed:
-                    return
-                self._stdin_closed = True
-            stdin = self._process.stdin
-            if stdin is None:
+            self._close_stdin_locked()
+
+    def _close_stdin_locked(self) -> None:
+        """Close with the caller holding the write lock."""
+        with self._state_lock:
+            if self._stdin_closed:
                 return
-            # An already-gone CLI is the state closing stdin was trying to
-            # reach, so every failure mode here is a success.
-            with contextlib.suppress(BrokenPipeError, OSError, ValueError):
-                stdin.close()
+            self._stdin_closed = True
+        stdin = self._process.stdin
+        if stdin is None:
+            return
+        # An already-gone CLI is the state closing stdin was trying to
+        # reach, so every failure mode here is a success.
+        with contextlib.suppress(BrokenPipeError, OSError, ValueError):
+            stdin.close()
 
     def shutdown(self) -> None:
         """Release the conversation once the harness process is gone."""

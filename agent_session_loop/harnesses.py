@@ -1743,6 +1743,9 @@ class ClaudeAdapter(HarnessAdapter):
             # the first message, and guidance can follow it while the turn runs.
             "--input-format",
             "stream-json",
+            # Echoes prove which messages a result covers, including guidance
+            # consumed inside the current tool loop rather than a new turn.
+            "--replay-user-messages",
         ]
         if access.is_audit:
             for root in access.read_roots:

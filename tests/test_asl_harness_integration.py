@@ -9111,6 +9111,7 @@ class AuditAccessProfileTests(unittest.TestCase):
                 "--include-partial-messages",
                 "--input-format",
                 "stream-json",
+                "--replay-user-messages",
                 "--add-dir",
                 "/plan",
                 "--permission-mode",

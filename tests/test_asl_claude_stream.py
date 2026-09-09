@@ -18,6 +18,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -237,6 +238,45 @@ class StreamSessionPromptTests(TempDirTestCase):
 
         session.note_result()
         self.assertTrue(session.stdin_closed)
+
+    def test_guidance_taken_up_mid_turn_shares_the_prompts_result(self) -> None:
+        session, stdin = session_with()
+        session.send_prompt()
+        session.note_user_echo("do the work")
+        session.steer(request_for())
+        session.note_user_echo("prefer the smaller change")
+
+        session.note_result()
+
+        self.assertTrue(stdin.closed_by_asl)
+
+    def test_merged_guidance_does_not_settle_a_still_queued_message(self) -> None:
+        session, stdin = session_with()
+        session.send_prompt()
+        session.note_user_echo("do the work")
+        session.steer(request_for())
+        session.note_user_echo("prefer the smaller change")
+        session.steer(request_for(guidance_id="second", seq=2, text="check tests"))
+
+        session.note_result()
+        self.assertFalse(stdin.closed_by_asl)
+        session.note_user_echo("check tests")
+        session.note_result()
+
+        self.assertTrue(stdin.closed_by_asl)
+
+    def test_replayed_old_echo_does_not_settle_new_guidance(self) -> None:
+        session, stdin = session_with()
+        session.send_prompt()
+        session.note_user_echo("do the work")
+        session.steer(request_for())
+        session.note_user_echo("prefer the smaller change")
+        session.steer(request_for(guidance_id="second", seq=2, text="check tests"))
+        session.note_user_echo("prefer the smaller change")
+
+        session.note_result()
+
+        self.assertFalse(stdin.closed_by_asl)
 
     def test_shutdown_ends_the_conversation(self) -> None:
         session, stdin = session_with()
@@ -517,6 +557,55 @@ class StreamOutputProcessorTests(unittest.TestCase):
         self.assertNotIn("the prompt", rendered)
         self.assertEqual("opus-x", processor.observed_model)
 
+    def test_a_process_with_merged_guidance_gets_eof_and_exits_successfully(
+        self,
+    ) -> None:
+        # A real pipe reproduces the deadlock: the CLI has consumed both
+        # messages in one turn, emits one result, and waits for stdin EOF.
+        script = """
+import json, sys
+for _ in range(2):
+    message = json.loads(sys.stdin.readline())
+    message['isReplay'] = True
+    print(json.dumps(message), flush=True)
+print(json.dumps({'type': 'result', 'subtype': 'success'}), flush=True)
+sys.stdin.read()
+"""
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        session = claude_stream.ClaudeStreamSession(process=process, prompt="do work")
+        processor = self.processor(session)
+        rendered: list[str] = []
+
+        def read_output() -> None:
+            assert process.stdout is not None
+            for line in process.stdout:
+                rendered.append(processor.process_chunk("stdout", line))
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        try:
+            session.send_prompt()
+            session.steer(request_for())
+            reader.start()
+            self.assertEqual(0, process.wait(timeout=5))
+            reader.join(timeout=5)
+            self.assertFalse(reader.is_alive())
+            self.assertEqual("claude result: success\n", "".join(rendered))
+        finally:
+            session.shutdown()
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            reader.join(timeout=5)
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+
 
 class GuidanceHookScriptTests(TempDirTestCase):
     """The hook as the CLI runs it: a script, a payload, a JSON answer."""
@@ -639,6 +728,7 @@ class ClaudeAdapterTransportTests(TempDirTestCase):
         self.assertEqual(claude_stream.TRANSPORT_STREAM_JSON, invocation.transport)
         self.assertNotEqual(harnesses.TRANSPORT_EXEC, invocation.transport)
         self.assertIn("--input-format", invocation.argv)
+        self.assertIn("--replay-user-messages", invocation.argv)
 
     def test_opening_the_transport_sends_the_prompt_over_stdin(self) -> None:
         stdin = _Stdin()
