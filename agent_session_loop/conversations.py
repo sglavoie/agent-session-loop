@@ -86,6 +86,7 @@ from .harnesses import (
     HARNESS_NAMES,
     AccessProfileName,
     HarnessName,
+    continues_conversations,
 )
 from .literals import as_literal
 from .plans import canonicalize_path, is_valid_session_id
@@ -897,30 +898,42 @@ class CapabilityReport:
         }
 
 
-#: Why each harness is staged rather than available today. The contracts and the
-#: durable store land in this session; native capture, cancellation, and recovery
-#: do not, and an operator action backed by incomplete recovery must not be
-#: offered. A later session flips a harness to ``available`` once its own
-#: prerequisites pass, and :func:`capability_report` is the one place that
-#: changes.
+#: Why a harness is staged rather than available. The contracts, the durable
+#: store, and the turn-lifecycle seam exist; no adapter reports or resumes a
+#: native conversation through that seam yet, and an operator action backed by
+#: incomplete recovery must not be offered.
 STAGED_CAPABILITY_DETAIL = (
-    "conversation contracts and durable storage are in place; native capture, "
-    "cancellation, and recovery are not yet wired for this harness"
+    "conversation contracts, durable storage, and the turn lifecycle seam are "
+    "in place; this harness does not capture or resume a native conversation yet"
+)
+
+#: Why a harness whose adapter does capture and resume is available.
+AVAILABLE_CAPABILITY_DETAIL = (
+    "this harness reports the conversation each turn runs on and can start a "
+    "turn on a conversation it is handed"
 )
 
 
 def capability_report() -> CapabilityReport:
     """Return this build's conversation-continuity capability for each harness.
 
-    Everything is ``staged``: the reference, intent, report, and ledger exist,
-    but nothing captures a native identifier or resumes against one yet.
-    Reporting ``available`` before those land would expose an operator action
-    backed by incomplete recovery.
+    Derived from the adapters rather than declared here: a harness is
+    ``available`` exactly when its adapter both reports the conversation a turn
+    ran on and accepts one to resume, which is the same pair of flags
+    ``HarnessAdapter.run`` enforces when it refuses a capture sink or a resume
+    intent. One producer, so this report cannot promise recovery the turn
+    boundary would refuse to perform. Every harness is ``staged`` today.
     """
     return CapabilityReport(
         capabilities=tuple(
             HarnessCapability(
-                harness=name, state="staged", detail=STAGED_CAPABILITY_DETAIL
+                harness=name,
+                state="available" if continues_conversations(name) else "staged",
+                detail=(
+                    AVAILABLE_CAPABILITY_DETAIL
+                    if continues_conversations(name)
+                    else STAGED_CAPABILITY_DETAIL
+                ),
             )
             for name in HARNESS_NAMES
         )

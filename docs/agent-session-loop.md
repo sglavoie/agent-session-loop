@@ -5076,10 +5076,44 @@ later run.
 
 Conversation-continuity capability is reported per harness as `available`,
 `staged`, or `unsupported`, and a report always names every harness exactly
-once. Every harness is currently `staged`: the reference, intent, report, and
-durable ledger exist, but nothing captures a native identifier or resumes
-against one yet, and an operator action backed by incomplete recovery must not
-be offered.
+once. The state is derived from the harness adapters rather than declared
+beside them: a harness is `available` exactly when its adapter both reports the
+conversation a turn ran on and accepts one to resume, which is the same pair of
+flags a turn checks when it refuses a capture sink or a resume intent. Every
+harness is currently `staged`: the reference, intent, report, durable ledger,
+and the turn-lifecycle seam described below exist, but no adapter captures a
+native identifier or resumes against one yet, and an operator action backed by
+incomplete recovery must not be offered.
+
+The turn boundary is where a native identifier would be learned, so the seam
+that would carry it is part of a harness turn rather than part of the ledger. A
+transport reports the conversation its handshake learned, the sink persists it,
+and the transport submits work only if that call returned — a conversation
+recorded after submission is one a crash in between could lose while the work
+went ahead. The same identifier named twice is recorded once; a different
+identifier is refused, because one turn runs on one conversation. A capture
+that fails to persist abandons the turn with nothing submitted and reports the
+persistence error, rather than running work into a conversation nothing could
+find again. The seam is turn-scoped like the live-guidance endpoint: closing it
+waits out a capture already in flight and refuses every capture afterwards, so
+a late protocol callback cannot record against a turn that is already over. A
+resume intent travels the other way on the invocation, and a turn refuses one
+its adapter cannot honor instead of quietly starting a fresh conversation.
+
+Cancelling a turn is two observations rather than one. Requesting the
+cancellation records it and returns immediately, taking no lock a guidance
+delivery could be holding, so a request never queues behind the very turn it is
+cancelling. Whether the worker stopped is observed separately, and is reported
+only once the process is reaped and its transport is shut down. A cancellation
+is acted on in one of four windows, which is what the turn's `cancel_stage`
+names: `unstarted` before the process is spawned, so nothing is started and
+nothing is killed; `handshake` at the transport's next checkpoint, so no work is
+submitted and only the spawn is torn down; `execution`, the wait loop's kill of
+a turn already doing work; and `shutdown`, once the turn is past its wait loop.
+A request inside its grace period is not yet due and stops nothing, so a turn
+that finishes inside its grace was never aborted. A request that arrives after
+the turn is over is completed on the spot and staged `shutdown` rather than
+leaving its caller waiting for a kill that will never be issued.
 
 The invariants later work must preserve: a reference is written before the work
 that uses it is submitted and confirmed only once the harness has accepted work

@@ -70,6 +70,36 @@ _ABANDONED_READER_JOIN_SECONDS = 5.0
 #: cancellable and the upper bound on how late a kill lands.
 _ABORT_POLL_INTERVAL_SECONDS = 0.1
 
+#: The four windows a cancellation request can land in, named on the result and
+#: on the signal itself. A caller that only saw "aborted" could not tell a turn
+#: that was killed mid-flight from one that never ran, and the two mean
+#: different things to a continuation: nothing was submitted in the first two
+#: windows, so there is no interrupted work to resume from.
+CancelStage = Literal["unstarted", "handshake", "execution", "shutdown"]
+#: Requested before the harness process was spawned. Nothing ever ran.
+CANCEL_STAGE_UNSTARTED: CancelStage = "unstarted"
+#: Requested while the turn's conversation was being opened, before its work was
+#: submitted. The process existed; the turn did not.
+CANCEL_STAGE_HANDSHAKE: CancelStage = "handshake"
+#: Requested against a running turn. This is the window that kills a process
+#: group and the only one that interrupts work in progress.
+CANCEL_STAGE_EXECUTION: CancelStage = "execution"
+#: Requested once the turn's outcome was already decided. Nothing was killed and
+#: the verdict stands; the request is complete because the turn already is.
+CANCEL_STAGE_SHUTDOWN: CancelStage = "shutdown"
+CANCEL_STAGES: tuple[CancelStage, ...] = (
+    CANCEL_STAGE_UNSTARTED,
+    CANCEL_STAGE_HANDSHAKE,
+    CANCEL_STAGE_EXECUTION,
+    CANCEL_STAGE_SHUTDOWN,
+)
+
+#: Exit code for a turn abandoned because its conversation was not recorded.
+#: Distinct from the cancellation and timeout codes because it is neither: the
+#: turn was refused before it submitted anything, and a caller reading only the
+#: return code still has to be able to tell that apart from a turn that ran.
+_CONVERSATION_ABANDON_RETURNCODE = 70
+
 
 @dataclass
 class AbortSignal:
@@ -80,19 +110,42 @@ class AbortSignal:
     scope: signalling a bare PID from outside would bypass the pre-kill
     descendant snapshot and the post-turn sweep, which is how a descendant that
     left the process group is reached at all.
+
+    Initiation and completion are deliberately two different observations.
+    :meth:`arm` records the request and returns; it takes this signal's own leaf
+    lock and nothing else, so an initiation can never queue behind a guidance
+    transport holding the live-delivery endpoint's lock. Whether the worker
+    actually stopped is read afterwards through :meth:`wait_completed`, which
+    the turn's owner satisfies only once the process is reaped and its transport
+    is shut down.
     """
 
     event: threading.Event = field(default_factory=threading.Event)
     deadline: float | None = None
     reason: str = ""
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _completed: threading.Event = field(default_factory=threading.Event, repr=False)
+    _stage: CancelStage | None = None
+    _turn_over: bool = False
 
     def arm(self, reason: str, *, grace_seconds: float = 0.0) -> None:
-        """Request the kill, giving the harness ``grace_seconds`` to wind down."""
+        """Request the kill, giving the harness ``grace_seconds`` to wind down.
+
+        Returns as soon as the request is recorded, whatever the turn is doing.
+        A request that arrives after the turn is already over cannot revive it:
+        it is recorded, staged as ``shutdown``, and completed on the spot, so a
+        caller waiting on it is answered rather than left waiting for a kill
+        that will never be issued.
+        """
         with self._lock:
             self.deadline = time.monotonic() + max(0.0, grace_seconds)
             self.reason = reason
+            already_over = self._turn_over
+            if already_over and self._stage is None:
+                self._stage = CANCEL_STAGE_SHUTDOWN
         self.event.set()
+        if already_over:
+            self._completed.set()
 
     @property
     def armed(self) -> bool:
@@ -109,6 +162,80 @@ class AbortSignal:
         with self._lock:
             deadline = self.deadline
         return now if deadline is None else deadline
+
+    def is_due(self, now: float | None = None) -> bool:
+        """Whether the kill is due, rather than merely requested.
+
+        A request inside its grace period is not due: the grace exists so the
+        harness gets to wind down and possibly finish on its own, and a turn
+        that finishes inside it was never aborted. Every lifecycle checkpoint
+        asks this rather than :attr:`armed`, so an unexpired request stops
+        nothing that the wait loop would have let run.
+        """
+        moment = time.monotonic() if now is None else now
+        deadline = self.expires_at(moment)
+        return deadline is not None and moment >= deadline
+
+    def begin_turn(self) -> None:
+        """Bind this signal to a turn that is about to start.
+
+        A signal belongs to one turn, but the codex adapter runs a second turn
+        on the same one when an app-server handshake falls back to ``codex
+        exec``. An unarmed signal therefore starts each turn with no stage and
+        no completion; an armed one keeps both, because that request predates
+        the turn and the spawn gate is about to refuse it rather than run it.
+        """
+        with self._lock:
+            self._turn_over = False
+            if not self.event.is_set():
+                self._stage = None
+                self._completed.clear()
+            elif self._stage == CANCEL_STAGE_SHUTDOWN:
+                # That stage belongs to the turn that just ended, not to the
+                # one starting now; this turn names its own window.
+                self._stage = None
+
+    def observed(self, stage: CancelStage) -> None:
+        """Name the window this request was acted on in. First naming wins."""
+        with self._lock:
+            if self._stage is None:
+                self._stage = stage
+
+    @property
+    def cancel_stage(self) -> CancelStage | None:
+        """The window the request was acted on in, or ``None`` if it never was."""
+        with self._lock:
+            return self._stage
+
+    def release(self) -> None:
+        """Report that the turn this signal governs has stopped.
+
+        Called once by the boundary that owns the process, after the process is
+        reaped and its transport is shut down, so completion means the worker is
+        gone rather than that a kill was merely issued. It also closes the
+        signal: any later :meth:`arm` completes immediately instead of arming a
+        turn that no longer exists.
+        """
+        with self._lock:
+            self._turn_over = True
+            if self.event.is_set() and self._stage is None:
+                self._stage = CANCEL_STAGE_SHUTDOWN
+        self._completed.set()
+
+    @property
+    def completed(self) -> bool:
+        """Whether the turn this signal governs has stopped."""
+        return self._completed.is_set()
+
+    def wait_completed(self, timeout: float | None = None) -> bool:
+        """Wait out the turn, reporting whether it stopped within ``timeout``.
+
+        The only blocking call on this signal, and the counterpart to
+        :meth:`arm`: cancellation is initiated without waiting for anything and
+        observed here, so the caller decides how long it is willing to wait for
+        the worker to be gone.
+        """
+        return self._completed.wait(timeout)
 
 
 def _wait_for_turn_exit(
@@ -241,6 +368,179 @@ class HarnessError(Exception):
     """Raised when a harness adapter cannot build or run a command."""
 
 
+class ConversationCaptureError(HarnessError):
+    """Raised when a turn's native conversation could not be recorded.
+
+    The one failure a transport may not work around. Continuity requires the
+    native identifier to be durable *before* work is submitted, so a transport
+    that cannot record it has to abandon the turn rather than run one that
+    could never be continued.
+    """
+
+
+class TurnCancelled(HarnessError):
+    """Raised inside a transport when the turn it is opening was cancelled.
+
+    Never escapes :meth:`HarnessAdapter.run`, which turns it into a cancelled
+    result. It exists so a handshake can stop at its next checkpoint without
+    submitting anything, which is the difference between a cancellation that
+    costs nothing and one that has to interrupt work already in flight.
+    """
+
+
+#: What a turn calls with the native conversation identifier its harness
+#: reported. Unlike ``on_spawn`` and the other turn hooks, an exception from
+#: this one is *not* suppressed: it is the persistence failure that must stop
+#: the turn before it submits work.
+ConversationCallback = Callable[[str], None]
+
+
+class TurnConversation:
+    """One turn's conversation-capture seam.
+
+    A protocol harness learns its native conversation identifier during the
+    handshake, before the turn's work is submitted, and that ordering is the
+    whole point: a conversation recorded afterwards would be one a crash in
+    between could lose while the work went ahead. A transport therefore reports
+    the identifier here and only submits if this call returns.
+
+    Turn-scoped by construction, exactly like
+    :class:`~agent_session_loop.guidance_delivery.LiveDeliveryEndpoint`: the
+    lock is held across the sink call, so :meth:`close` cannot return while a
+    capture is still running and no capture can start after it returns. A late
+    callback from an abandoned reader or a straggling protocol thread therefore
+    cannot persist a conversation for a turn that is already over.
+    """
+
+    def __init__(self, sink: ConversationCallback | None = None) -> None:
+        self._sink = sink
+        self._lock = threading.Lock()
+        self._native_id: str | None = None
+        self._closed = False
+
+    @property
+    def native_id(self) -> str | None:
+        """The conversation this turn runs on, or ``None`` if none was captured."""
+        with self._lock:
+            return self._native_id
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def capture(self, native_id: str) -> None:
+        """Record ``native_id`` durably, or raise so nothing is submitted.
+
+        Idempotent for the identifier already captured, because a transport may
+        see the same conversation named more than once in its protocol. A
+        *different* identifier is refused: one turn runs on one conversation,
+        and continuing the wrong one is the failure this whole seam exists to
+        prevent.
+        """
+        if not isinstance(native_id, str) or not native_id.strip():
+            raise ConversationCaptureError(
+                f"a native conversation id must be non-empty text; got {native_id!r}"
+            )
+        native_id = native_id.strip()
+        with self._lock:
+            if self._closed:
+                raise ConversationCaptureError(
+                    f"the turn is over; refusing to record conversation {native_id}"
+                )
+            recorded = self._native_id
+            if recorded is not None:
+                if recorded == native_id:
+                    return
+                raise ConversationCaptureError(
+                    f"this turn already runs on conversation {recorded}; "
+                    f"refusing to also record {native_id}"
+                )
+            sink = self._sink
+            if sink is not None:
+                try:
+                    sink(native_id)
+                except Exception as error:
+                    raise ConversationCaptureError(
+                        f"conversation {native_id} was not persisted: "
+                        f"{type(error).__name__}: {error}"
+                    ) from error
+            self._native_id = native_id
+
+    def close(self) -> None:
+        """Close the seam, waiting out a capture already in flight."""
+        with self._lock:
+            self._closed = True
+            self._sink = None
+
+
+@dataclass(frozen=True)
+class TurnLifecycle:
+    """What a transport may say and ask about the turn it is opening.
+
+    Handed to :meth:`HarnessAdapter.open_transport` so a protocol conversation
+    has somewhere to report its native identifier and somewhere to look before
+    it submits. Both halves are turn-scoped and both are closed by the boundary
+    that owns the process, which is what keeps a late protocol callback from
+    reviving a turn that has already ended.
+    """
+
+    conversation: TurnConversation
+    abort: AbortSignal | None = None
+
+    @property
+    def cancel_due(self) -> bool:
+        """Whether a cancellation is due for this turn.
+
+        Due, not merely requested: a request still inside its grace period is
+        one the wait loop would let the turn finish under, and a checkpoint
+        that stopped on it would abort turns that used to complete.
+        """
+        return self.abort is not None and self.abort.is_due()
+
+    @property
+    def cancel_stage(self) -> CancelStage | None:
+        """Which window this turn's cancellation was acted on in, if any."""
+        return None if self.abort is None else self.abort.cancel_stage
+
+    def check_not_cancelled(self) -> None:
+        """Stop the handshake if a cancellation is already due.
+
+        A transport calls this at every point where it is about to submit
+        something. Raising here means the turn is abandoned without work having
+        been sent, so there is nothing to interrupt and nothing to continue.
+        """
+        abort = self.abort
+        if abort is not None and abort.is_due():
+            raise TurnCancelled(abort.reason or "cancellation requested")
+
+    def capture_conversation(self, native_id: str) -> None:
+        """Record the turn's native conversation; raises if it was not stored."""
+        self.conversation.capture(native_id)
+
+    def begin(self) -> None:
+        """Bind the lifecycle to a turn that is about to start."""
+        if self.abort is not None:
+            self.abort.begin_turn()
+
+    def note_cancelled(self, stage: CancelStage) -> None:
+        """Name the window a pending cancellation was acted on in."""
+        if self.abort is not None:
+            self.abort.observed(stage)
+
+    def close(self) -> None:
+        """End the turn: no further capture, and any request is complete.
+
+        Ordered so completion is the last thing that happens. The conversation
+        seam closes first, so nothing can still be recorded for this turn, and
+        the cancellation is reported complete only once there is nothing left of
+        the turn at all.
+        """
+        self.conversation.close()
+        if self.abort is not None:
+            self.abort.release()
+
+
 @dataclass(frozen=True)
 class AccessProfile:
     """What one harness turn is allowed to reach.
@@ -324,6 +624,11 @@ class HarnessInvocation:
     #: its guidance spool — and is created by ``run`` and deleted by it, so a
     #: turn's private channel cannot be reached from the next turn.
     overlay_dir: Path | None = None
+    #: The native conversation this turn intends to continue, when the caller
+    #: has one to continue. Intent only: an adapter that cannot honour it
+    #: refuses the turn rather than quietly starting a fresh conversation, so
+    #: this never silently degrades into "resumed nothing".
+    resume_conversation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -343,6 +648,18 @@ class HarnessResult:
     observed_model: str | None = None
     stream_io: dict[str, int | float] | None = None
     transport: str = TRANSPORT_EXEC
+    #: The native conversation this turn actually ran on, when its transport
+    #: reported one. ``None`` for every exec-transport turn and for any turn
+    #: that stopped before its handshake named a conversation.
+    conversation_id: str | None = None
+    #: Which window a cancellation was acted on in, or ``None`` when the turn
+    #: was not cancelled. Distinguishes the cancellations that cost nothing
+    #: (``unstarted``, ``handshake``) from the ones that had to interrupt work
+    #: already submitted (``execution``, ``shutdown``).
+    cancel_stage: CancelStage | None = None
+    #: Why the turn refused to submit work, when a conversation could not be
+    #: recorded. Present only on a turn abandoned by that failure.
+    conversation_error: str | None = None
 
 
 class _OutputProcessor:
@@ -647,6 +964,17 @@ class HarnessAdapter:
     #: coverage must say so rather than imply the guard is enforced twice.
     enforces_guard_pretool: bool = False
 
+    #: Whether this adapter's transport reports the native conversation its
+    #: turn runs on. False on every shipped adapter: the seam exists, but no
+    #: protocol wiring reads an identifier out of it yet.
+    captures_conversations: bool = False
+
+    #: Whether this adapter can start a turn on a conversation it is handed.
+    #: False on every shipped adapter, and :meth:`run` refuses a resume intent
+    #: while it is false — an adapter that quietly started a fresh conversation
+    #: instead would leave the caller believing it had continued one.
+    resumes_conversations: bool = False
+
     def __init__(self, executable: str | None = None) -> None:
         try:
             self.executable = executable or config.configured_harness_executable(
@@ -750,6 +1078,7 @@ class HarnessAdapter:
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
         env: Mapping[str, str] | None = None,
+        resume_conversation_id: str | None = None,
     ) -> HarnessInvocation:
         self.check_access(access, plan_dir=plan_dir, unsafe_bypass=unsafe_bypass)
         return HarnessInvocation(
@@ -769,6 +1098,7 @@ class HarnessAdapter:
             last_message_path=last_message_path,
             model=model,
             effort=effort,
+            resume_conversation_id=resume_conversation_id,
         )
 
     def open_transport(
@@ -777,6 +1107,7 @@ class HarnessAdapter:
         process: subprocess.Popen,
         invocation: HarnessInvocation,
         prompt: str,
+        lifecycle: TurnLifecycle | None = None,
     ) -> HarnessTransport | None:
         """Open this turn's protocol conversation, if the transport has one.
 
@@ -785,8 +1116,17 @@ class HarnessAdapter:
         to hold. Called once, immediately after the process exists and before
         the output readers start, so a conversation can be underway by the
         time the first byte arrives.
+
+        ``lifecycle`` is this turn's handle on the two things a handshake has
+        to be able to do: report the native conversation it just learned, and
+        find out that the turn was cancelled while it was talking. A transport
+        that submits work calls ``lifecycle.check_not_cancelled()`` immediately
+        before doing so, which is what keeps a cancellation arriving mid-
+        handshake from costing a whole turn's work. Optional because a caller
+        may open a transport outside a turn, where there is no lifecycle to
+        speak of.
         """
-        del process, invocation, prompt
+        del process, invocation, prompt, lifecycle
         return None
 
     def live_delivery_transport(
@@ -807,6 +1147,57 @@ class HarnessAdapter:
         if transport is None:
             return None
         return transport.guidance_transport()
+
+    def _cancelled_result(
+        self,
+        invocation: HarnessInvocation,
+        stage: CancelStage,
+        *,
+        process_sweep: dict[str, Any] | None = None,
+        conversation_id: str | None = None,
+    ) -> HarnessResult:
+        """The result for a turn stopped before it produced any output.
+
+        Reported with the same ``aborted``/137 shape a mid-execution
+        cancellation uses, so nothing downstream has to learn a second spelling
+        of "the operator stopped this"; ``cancel_stage`` is what says how much
+        work it cost.
+        """
+        return HarnessResult(
+            name=self.name,
+            argv=invocation.argv,
+            transport=invocation.transport,
+            returncode=137,
+            stdout="",
+            stderr="",
+            aborted=True,
+            process_sweep=process_sweep,
+            conversation_id=conversation_id,
+            cancel_stage=stage,
+        )
+
+    def _stop_before_submission(
+        self,
+        process: subprocess.Popen,
+    ) -> dict[str, Any] | None:
+        """Take down a spawned process that never got work, and account for it.
+
+        The output readers have not started on this path, so the pipes are
+        closed here rather than by them. The descendant snapshot is still taken
+        before the kill for the same reason it is on the execution path: a
+        child that left the process group is only reachable from a list made
+        while it was still running.
+        """
+        prior_snapshot: tuple[Mapping[str, Any], ...] = ()
+        if process.poll() is None:
+            prior_snapshot = _snapshot_descendants(process.pid, _sweep_process_table())
+            _kill_process_group(process)
+            process.wait()
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                with contextlib.suppress(Exception):
+                    pipe.close()
+        return _sweep_turn_descendants(process, prior_snapshot)
 
     def run(
         self,
@@ -829,6 +1220,7 @@ class HarnessAdapter:
         invocation: HarnessInvocation | None = None,
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
+        on_conversation: ConversationCallback | None = None,
     ) -> HarnessResult:
         if invocation is None:
             invocation = self.build_invocation(
@@ -847,8 +1239,36 @@ class HarnessAdapter:
                 # were compiled into.
                 env=env,
             )
+        # Both refusals are the same rule read from both ends: a caller must
+        # not be told a conversation was captured or continued by an adapter
+        # that cannot do it. Raising is deliberate — a turn that ran anyway
+        # would be one the caller believed was continuable and is not.
+        if on_conversation is not None and not self.captures_conversations:
+            raise HarnessError(
+                f"{self.name} cannot report the conversation a turn runs on"
+            )
+        if invocation.resume_conversation_id is not None and (
+            not self.resumes_conversations
+        ):
+            raise HarnessError(
+                f"{self.name} cannot resume conversation "
+                f"{invocation.resume_conversation_id}"
+            )
         if invocation.last_message_path is not None:
             invocation.last_message_path.parent.mkdir(parents=True, exist_ok=True)
+
+        lifecycle = TurnLifecycle(
+            conversation=TurnConversation(on_conversation),
+            abort=abort,
+        )
+        lifecycle.begin()
+        if lifecycle.cancel_due:
+            # Cancelled before spawn: the cheapest window there is. Nothing is
+            # started, so nothing has to be killed, and the completion the
+            # caller waits on is satisfied immediately.
+            lifecycle.note_cancelled(CANCEL_STAGE_UNSTARTED)
+            lifecycle.close()
+            return self._cancelled_result(invocation, CANCEL_STAGE_UNSTARTED)
 
         try:
             process = subprocess.Popen(
@@ -878,6 +1298,10 @@ class HarnessAdapter:
                 env=None if env is None else dict(env),
             )
         except FileNotFoundError as error:
+            # Nothing started, so nothing is left to stop -- but a caller
+            # waiting on a cancellation must be answered rather than left
+            # waiting for a turn that does not exist.
+            lifecycle.close()
             raise HarnessError(
                 f"{self.name} executable not found: {self.executable}"
             ) from error
@@ -892,11 +1316,49 @@ class HarnessAdapter:
         # therefore only ever reach this exact live process: once the turn is
         # over the endpoint answers ``stale-turn`` instead of injecting into a
         # dead PID or into whatever turn started next.
-        transport = self.open_transport(
-            process=process,
-            invocation=invocation,
-            prompt=prompt,
-        )
+        try:
+            transport = self.open_transport(
+                process=process,
+                invocation=invocation,
+                prompt=prompt,
+                lifecycle=lifecycle,
+            )
+        except TurnCancelled:
+            # Cancelled mid-handshake: the process exists but the transport
+            # stopped short of submitting, so this stops a spawn rather than
+            # interrupting work.
+            lifecycle.note_cancelled(CANCEL_STAGE_HANDSHAKE)
+            sweep = self._stop_before_submission(process)
+            lifecycle.close()
+            return self._cancelled_result(
+                invocation,
+                CANCEL_STAGE_HANDSHAKE,
+                process_sweep=sweep,
+            )
+        except ConversationCaptureError as error:
+            # The turn is abandoned rather than run: a conversation that was
+            # not recorded before submission is one no later session could
+            # continue, and running the work anyway would spend it into a
+            # conversation nothing can find again.
+            sweep = self._stop_before_submission(process)
+            lifecycle.close()
+            return HarnessResult(
+                name=self.name,
+                argv=invocation.argv,
+                transport=invocation.transport,
+                returncode=_CONVERSATION_ABANDON_RETURNCODE,
+                stdout="",
+                stderr=f"{self.name} turn abandoned: {error}\n",
+                process_sweep=sweep,
+                conversation_error=str(error),
+            )
+        except BaseException:
+            # A handshake that failed for any other reason leaves a spawned
+            # process nobody will ever wait on, and a lifecycle nobody will
+            # ever close. Both are ended here before the failure is reported.
+            self._stop_before_submission(process)
+            lifecycle.close()
+            raise
         if on_transport is not None:
             on_transport(transport)
         if live_delivery is not None:
@@ -1024,6 +1486,10 @@ class HarnessAdapter:
                 if expired is not None:
                     timed_out = expired == "timeout"
                     aborted = expired == "abort"
+                    if aborted:
+                        # Work was already submitted, so this is the expensive
+                        # window: the kill below is what stops it.
+                        lifecycle.note_cancelled(CANCEL_STAGE_EXECUTION)
                     prior_snapshot = _snapshot_descendants(
                         process.pid, _sweep_process_table()
                     )
@@ -1069,6 +1535,8 @@ class HarnessAdapter:
                     process_sweep=interrupt_sweep,
                     observed_model=output_processor.observed_model,
                     stream_io=dict(stream_io),
+                    conversation_id=lifecycle.conversation.native_id,
+                    cancel_stage=lifecycle.cancel_stage,
                 )
 
             if reader_errors:
@@ -1095,6 +1563,8 @@ class HarnessAdapter:
                     process_sweep=process_sweep,
                     observed_model=output_processor.observed_model,
                     stream_io=dict(stream_io),
+                    conversation_id=lifecycle.conversation.native_id,
+                    cancel_stage=lifecycle.cancel_stage,
                 )
             if timed_out:
                 return HarnessResult(
@@ -1113,6 +1583,8 @@ class HarnessAdapter:
                     process_sweep=process_sweep,
                     observed_model=output_processor.observed_model,
                     stream_io=dict(stream_io),
+                    conversation_id=lifecycle.conversation.native_id,
+                    cancel_stage=lifecycle.cancel_stage,
                 )
 
             interrupted = process.returncode == -signal.SIGINT
@@ -1132,15 +1604,23 @@ class HarnessAdapter:
                 process_sweep=process_sweep,
                 observed_model=output_processor.observed_model,
                 stream_io=dict(stream_io),
+                conversation_id=lifecycle.conversation.native_id,
+                cancel_stage=lifecycle.cancel_stage,
             )
         finally:
             # Endpoint first: closing it waits out any delivery already in
             # flight, so no steer can still be using the conversation the
-            # transport shutdown is about to tear down.
+            # transport shutdown is about to tear down. The lifecycle closes
+            # last, so a request arriving in this window is staged
+            # ``shutdown`` and completed rather than left waiting: by the time
+            # completion is reported there is no turn left to cancel, and a
+            # protocol thread that outlives the shutdown can no longer record
+            # a conversation against it either.
             if live_delivery is not None:
                 live_delivery.close()
             if transport is not None:
                 transport.shutdown()
+            lifecycle.close()
 
 
 class _CodexAppServerOutputProcessor(_OutputProcessor):
@@ -1403,6 +1883,7 @@ class CodexAdapter(HarnessAdapter):
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
         env: Mapping[str, str] | None = None,
+        resume_conversation_id: str | None = None,
     ) -> HarnessInvocation:
         self.check_access(access, plan_dir=plan_dir, unsafe_bypass=unsafe_bypass)
         return HarnessInvocation(
@@ -1422,6 +1903,7 @@ class CodexAdapter(HarnessAdapter):
             last_message_path=last_message_path,
             model=model,
             effort=effort,
+            resume_conversation_id=resume_conversation_id,
             transport=TRANSPORT_APP_SERVER,
             turn_plan=self.build_turn_plan(
                 cwd=cwd,
@@ -1444,6 +1926,7 @@ class CodexAdapter(HarnessAdapter):
         model: str | None = None,
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
+        resume_conversation_id: str | None = None,
     ) -> HarnessInvocation:
         self.check_access(access, plan_dir=plan_dir, unsafe_bypass=unsafe_bypass)
         return HarnessInvocation(
@@ -1462,6 +1945,7 @@ class CodexAdapter(HarnessAdapter):
             last_message_path=last_message_path,
             model=model,
             effort=effort,
+            resume_conversation_id=resume_conversation_id,
             transport=TRANSPORT_EXEC,
         )
 
@@ -1471,6 +1955,7 @@ class CodexAdapter(HarnessAdapter):
         process: subprocess.Popen,
         invocation: HarnessInvocation,
         prompt: str,
+        lifecycle: TurnLifecycle | None = None,
     ) -> HarnessTransport | None:
         if invocation.transport != TRANSPORT_APP_SERVER:
             return None
@@ -1481,6 +1966,11 @@ class CodexAdapter(HarnessAdapter):
             plan=invocation.turn_plan,
             prompt=prompt,
         )
+        # The last checkpoint before the thread and the turn are created. A
+        # cancellation seen here costs an app-server spawn; the same
+        # cancellation a moment later costs the turn.
+        if lifecycle is not None:
+            lifecycle.check_not_cancelled()
         session.start()
         return _CodexAppServerTransport(session)
 
@@ -1505,6 +1995,7 @@ class CodexAdapter(HarnessAdapter):
         invocation: HarnessInvocation | None = None,
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
+        on_conversation: ConversationCallback | None = None,
     ) -> HarnessResult:
         """Run the turn on the app-server, falling back only before it starts.
 
@@ -1537,6 +2028,7 @@ class CodexAdapter(HarnessAdapter):
                 env=env,
                 invocation=invocation,
                 on_transport=on_transport,
+                on_conversation=on_conversation,
             )
 
         if invocation is None:
@@ -1582,6 +2074,7 @@ class CodexAdapter(HarnessAdapter):
             env=env,
             invocation=invocation,
             on_transport=capture,
+            on_conversation=on_conversation,
         )
         if not opened:
             window.release()
@@ -1630,6 +2123,7 @@ class CodexAdapter(HarnessAdapter):
             env=env,
             invocation=legacy,
             on_transport=on_transport,
+            on_conversation=on_conversation,
         )
         return self._with_stderr_note(
             fallback_result,
@@ -1797,6 +2291,7 @@ class ClaudeAdapter(HarnessAdapter):
         effort: str | None = None,
         access: AccessProfile = WORKER_ACCESS,
         env: Mapping[str, str] | None = None,
+        resume_conversation_id: str | None = None,
     ) -> HarnessInvocation:
         invocation = super().build_invocation(
             cwd=cwd,
@@ -1808,6 +2303,7 @@ class ClaudeAdapter(HarnessAdapter):
             effort=effort,
             access=access,
             env=env,
+            resume_conversation_id=resume_conversation_id,
         )
         return dataclasses.replace(invocation, transport=TRANSPORT_STREAM_JSON)
 
@@ -1817,6 +2313,7 @@ class ClaudeAdapter(HarnessAdapter):
         process: subprocess.Popen,
         invocation: HarnessInvocation,
         prompt: str,
+        lifecycle: TurnLifecycle | None = None,
     ) -> HarnessTransport | None:
         if invocation.transport != TRANSPORT_STREAM_JSON:
             return None
@@ -1828,6 +2325,11 @@ class ClaudeAdapter(HarnessAdapter):
             prompt=prompt,
             spool=spool,
         )
+        # The prompt is the submission here, so this is the checkpoint: past it
+        # the CLI is working, and a cancellation has to interrupt rather than
+        # decline.
+        if lifecycle is not None:
+            lifecycle.check_not_cancelled()
         # The prompt goes out before the readers start, so the CLI has work to
         # do from its first byte. A write failure here is not raised: the
         # process exists and has to be collected like any other failed turn,
@@ -1856,6 +2358,7 @@ class ClaudeAdapter(HarnessAdapter):
         invocation: HarnessInvocation | None = None,
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
+        on_conversation: ConversationCallback | None = None,
     ) -> HarnessResult:
         """Run the turn, arming its guidance hook for the turn's lifetime only.
 
@@ -1925,6 +2428,7 @@ class ClaudeAdapter(HarnessAdapter):
                 env=env,
                 invocation=invocation,
                 on_transport=capture,
+                on_conversation=on_conversation,
             )
         finally:
             claude_stream.remove_overlay(overlay_dir)
@@ -2049,8 +2553,12 @@ class CopilotAdapter(HarnessAdapter):
         process: subprocess.Popen,
         invocation: HarnessInvocation,
         prompt: str,
+        lifecycle: TurnLifecycle | None = None,
     ) -> HarnessTransport | None:
-        del process, invocation, prompt
+        # Nothing is submitted here: copilot's prompt already went out on argv,
+        # so there is no checkpoint to offer and a cancellation is handled by
+        # the execution window like any other one-shot turn.
+        del process, invocation, prompt, lifecycle
         return _CopilotOneShotTransport()
 
 
@@ -2105,6 +2613,7 @@ def run_harness(
     abort: AbortSignal | None = None,
     live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
     env: Mapping[str, str] | None = None,
+    on_conversation: ConversationCallback | None = None,
 ) -> HarnessResult:
     """Run one harness turn through the selected adapter."""
     return get_adapter(name).run(
@@ -2124,6 +2633,7 @@ def run_harness(
         abort=abort,
         live_delivery=live_delivery,
         env=env,
+        on_conversation=on_conversation,
     )
 
 
@@ -2137,6 +2647,28 @@ _SKILL_PREFIX_ADAPTERS: tuple[type[HarnessAdapter], ...] = (
 SKILL_PREFIXES: dict[HarnessName, str] = {
     adapter.name: adapter.skill_prefix for adapter in _SKILL_PREFIX_ADAPTERS
 }
+
+#: Which harnesses can both report and resume a native conversation. Read off
+#: the adapter classes rather than restated, so the capability a continuity
+#: caller is told about and the capability :meth:`HarnessAdapter.run` enforces
+#: are the same fact: an adapter cannot be advertised as wired without also
+#: accepting the calls that make it wired.
+CONTINUES_CONVERSATIONS: dict[HarnessName, bool] = {
+    adapter.name: bool(adapter.captures_conversations and adapter.resumes_conversations)
+    for adapter in _SKILL_PREFIX_ADAPTERS
+}
+
+
+def continues_conversations(name: str) -> bool:
+    """Whether ``name`` can carry one conversation across turns.
+
+    Read from the adapter classes, so it needs no local harness configuration
+    and answers the same for an operator who has never installed the harness.
+    """
+    for harness, wired in CONTINUES_CONVERSATIONS.items():
+        if harness == name:
+            return wired
+    return False
 
 
 def detect_invoking_harness(
