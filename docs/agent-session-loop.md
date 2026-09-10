@@ -4632,13 +4632,53 @@ an ordinary one-shot turn is not missing something it was never meant to have.
 Claude runs over bidirectional stream JSON, so its prompt is not on argv either:
 
 ```text
-claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --add-dir <plan-dir> --permission-mode bypassPermissions [--model <model>] [--effort <effort>] --settings <overlay>
+claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --add-dir <plan-dir> --permission-mode bypassPermissions [--model <model>] [--effort <effort>] [--session-id <uuid>|--resume <id>] --settings <overlay>
 ```
 
 `--input-format stream-json` makes stdin a message stream. The prompt is
 written to it as the conversation's first user message, and supervisor guidance
 can be written to it while the turn runs. `invocation.transport` says
 `stream-json` for such a turn.
+
+A claude turn states its conversation on argv rather than discovering it.
+`--session-id <uuid>` assigns the identifier the CLI would otherwise have
+minted, and `--resume <id>` restores exactly the one named; `invocation.
+assigned_conversation_id` carries whichever applies. Because it is settled
+before the process is spawned, the turn persists its conversation *before* the
+prompt is written, and a sink that fails abandons the turn with nothing
+submitted (returncode 70, `conversation_error`) exactly as the codex handshake
+does. `--fork-session` is never passed: it answers "continue conversation X"
+with a different one. An audit turn runs with `--no-session-persistence`, so it
+is assigned nothing and refuses a resume outright.
+
+The `system`/`init` record echoes the session the CLI actually opened, and it is
+re-checked against the stated one. A disagreement does not stop the turn — the
+prompt went out before the first record arrived, so the model is already
+changing the workspace — but it is rendered on the turn log as `claude session
+mismatch: ...`, repeated on stderr, and reported as `continuity_unavailable`
+with `conversation_id` cleared, so nothing resumes from an identifier the work
+did not go into.
+
+Interruption rides the same stdin stream, as the CLI's own control protocol
+rather than an ASL invention: a `control_request` naming a `request_id` with
+subtype `interrupt`, answered by a `control_response` carrying that identifier
+back. Attribution is by `request_id` and nothing else, because arrival order is
+exactly what lets a late answer to one request stand in for the next. The
+request is sent once per turn, from the daemon thread beside the wait loop's
+forced kill, while the stdout readers are still alive to deliver the answer; it
+gives up on a five-second bound or the moment the process is gone, and neither
+outcome changes what the kill does. Nothing is sent from the transport's
+shutdown, unlike the app-server: by then the process has been waited on and the
+readers abandoned, so a request from there could never be correlated.
+
+Past an interrupt the turn stops accepting evidence for anything it might still
+be asked to have done. The result that follows is drained rather than credited,
+so it can neither settle guidance the model never ran nor leave a later result
+looking like a resumed turn's own; an echo the CLI emits while draining stdin on
+the way out is consumed for accounting but confirms nothing; and guidance
+offered afterwards defers as `stale-turn` instead of being written. A receipt
+the `PreToolUse` hook already wrote is the one exception, because the hook
+writes one only after handing the text to a tool call that then ran.
 
 `--settings <overlay>` names an ephemeral per-turn settings file created under a
 temporary directory, holding exactly one `PreToolUse` hook entry and nothing
@@ -5110,16 +5150,17 @@ once. The state is derived from the harness adapters rather than declared
 beside them: a harness is `available` exactly when its adapter both reports the
 conversation a turn ran on and accepts one to resume, which is the same pair of
 flags a turn checks when it refuses a capture sink or a resume intent. `codex`
-is `available`; `claude` and `copilot` remain `staged`, because the reference,
+and `claude` are `available`; `copilot` remains `staged`, because the reference,
 intent, report, durable ledger, and the turn-lifecycle seam described below
-exist for them but their adapters neither capture a native identifier nor resume
+exist for it but its adapter neither captures a native identifier nor resumes
 against one, and an operator action backed by incomplete recovery must not be
 offered.
 
-The turn boundary is where a native identifier is learned, so the seam that
+The turn boundary is where a native identifier is settled, so the seam that
 carries it is part of a harness turn rather than part of the ledger. A transport
-reports the conversation its handshake learned, the sink persists it, and the
-transport submits work only if that call returned — a conversation recorded
+reports the conversation it learned from its handshake, or the one it stated on
+argv where the protocol allows that; the sink persists it, and the transport
+submits work only if that call returned — a conversation recorded
 after submission is one a crash in between could lose while the work went ahead.
 The same identifier named twice is recorded once; a different identifier is
 refused, because one turn runs on one conversation. A capture that fails to

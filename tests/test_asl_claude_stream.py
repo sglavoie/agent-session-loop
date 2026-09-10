@@ -19,7 +19,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -59,6 +61,8 @@ class _Stdin(io.StringIO):
         super().__init__()
         self.broken = False
         self.closed_by_asl = False
+        #: Set by the fake process that owns this pipe.
+        self.process: Any = None
         #: Stands in for the output-processing thread reaching the session
         #: while a write is still in flight.
         self.on_flush: Any = None
@@ -85,16 +89,36 @@ class _Stdin(io.StringIO):
         ]
 
 
+class _Process(SimpleNamespace):
+    """The CLI as the session sees it: a stdin pipe and a liveness answer."""
+
+    def __init__(self, stdin: _Stdin) -> None:
+        super().__init__(stdin=stdin)
+        self.returncode: int | None = None
+        # So a test holding only the pipe can still make the CLI die.
+        stdin.process = self
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def exit(self, code: int = 0) -> None:
+        self.returncode = code
+
+
 def session_with(
     *,
     prompt: str = "do the work",
     spool: claude_stream.ClaudeGuidanceSpool | None = None,
+    session_id: str | None = None,
+    interrupt_timeout: float = claude_stream.INTERRUPT_TIMEOUT_SECONDS,
 ) -> tuple[claude_stream.ClaudeStreamSession, _Stdin]:
     stdin = _Stdin()
     session = claude_stream.ClaudeStreamSession(
-        process=SimpleNamespace(stdin=stdin),
+        process=_Process(stdin),
         prompt=prompt,
         spool=spool,
+        session_id=session_id,
+        interrupt_timeout=interrupt_timeout,
     )
     return session, stdin
 
@@ -475,6 +499,293 @@ class StreamSessionSteerTests(TempDirTestCase):
         self.assertIn("stdin", session.prompt_error or "")
 
 
+class StreamSessionInterruptTests(TempDirTestCase):
+    """Stopping a turn is a request that must be answered, by name.
+
+    ``interrupt()`` blocks on a reply that only the stdout reader can deliver,
+    so every test here runs it on a thread and plays the reader itself. That is
+    also how the real turn works: the daemon thread beside the forced kill
+    sends it while the readers are still alive.
+    """
+
+    def spool(self) -> claude_stream.ClaudeGuidanceSpool:
+        return claude_stream.ClaudeGuidanceSpool(self.tmp / "spool")
+
+    def started(
+        self, **kwargs: Any
+    ) -> tuple[claude_stream.ClaudeStreamSession, _Stdin]:
+        session, stdin = session_with(**kwargs)
+        session.send_prompt()
+        return session, stdin
+
+    def interrupt_async(
+        self, session: claude_stream.ClaudeStreamSession
+    ) -> tuple[threading.Thread, list[bool]]:
+        answered: list[bool] = []
+        thread = threading.Thread(
+            target=lambda: answered.append(session.interrupt()), daemon=True
+        )
+        thread.start()
+        return thread, answered
+
+    def sent_control_request(self, stdin: _Stdin) -> dict[str, Any]:
+        """Wait for the control request and return it, failing if none comes."""
+        deadline = time.monotonic() + HOOK_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            for message in stdin.messages():
+                if message.get("type") == claude_stream.CONTROL_REQUEST:
+                    return message
+            time.sleep(0.01)
+        self.fail("no control request was written to stdin")
+
+    def answer(
+        self,
+        session: claude_stream.ClaudeStreamSession,
+        request_id: str,
+        subtype: str = "success",
+    ) -> None:
+        session.note_control_response({"subtype": subtype, "request_id": request_id})
+
+    def settle(self, thread: threading.Thread, answered: list[bool]) -> bool:
+        thread.join(timeout=HOOK_WAIT_SECONDS)
+        self.assertFalse(thread.is_alive())
+        return answered[0]
+
+    def test_an_interrupt_is_a_correlated_control_request(self) -> None:
+        session, stdin = self.started()
+
+        thread, answered = self.interrupt_async(session)
+        request = self.sent_control_request(stdin)
+        self.answer(session, request["request_id"])
+
+        self.assertTrue(self.settle(thread, answered))
+        self.assertEqual(claude_stream.SUBTYPE_INTERRUPT, request["request"]["subtype"])
+        self.assertTrue(request["request_id"])
+        self.assertTrue(session.interrupt_requested)
+
+    def test_an_answer_naming_another_request_acknowledges_nothing(self) -> None:
+        session, stdin = self.started(interrupt_timeout=0.2)
+
+        thread, answered = self.interrupt_async(session)
+        request = self.sent_control_request(stdin)
+        self.answer(session, f"{request['request_id']}-other")
+
+        # Arrival order would have made this the answer. Correlation is the
+        # whole reason it is not.
+        self.assertFalse(self.settle(thread, answered))
+
+    def test_an_error_response_is_not_an_acknowledgement(self) -> None:
+        session, stdin = self.started()
+
+        thread, answered = self.interrupt_async(session)
+        request = self.sent_control_request(stdin)
+        self.answer(session, request["request_id"], subtype="error")
+
+        self.assertFalse(self.settle(thread, answered))
+
+    def test_a_dead_cli_ends_the_wait_without_spending_the_timeout(self) -> None:
+        # The timeout is far longer than this test may take, so finishing at
+        # all proves the wait noticed the process rather than expiring.
+        session, stdin = self.started(interrupt_timeout=600.0)
+
+        thread, answered = self.interrupt_async(session)
+        self.sent_control_request(stdin)
+        stdin.process.exit()
+
+        self.assertFalse(self.settle(thread, answered))
+
+    def test_an_unanswered_request_gives_up_at_the_timeout(self) -> None:
+        session, stdin = self.started(interrupt_timeout=0.1)
+
+        thread, answered = self.interrupt_async(session)
+        self.sent_control_request(stdin)
+
+        self.assertFalse(self.settle(thread, answered))
+
+    def test_a_turn_is_asked_to_stop_exactly_once(self) -> None:
+        session, stdin = self.started()
+
+        thread, answered = self.interrupt_async(session)
+        request = self.sent_control_request(stdin)
+        self.answer(session, request["request_id"])
+        self.assertTrue(self.settle(thread, answered))
+
+        self.assertFalse(session.interrupt())
+        requests = [
+            message
+            for message in stdin.messages()
+            if message.get("type") == claude_stream.CONTROL_REQUEST
+        ]
+        self.assertEqual(1, len(requests))
+
+    def test_a_turn_that_submitted_nothing_has_nothing_to_stop(self) -> None:
+        session, stdin = session_with()
+
+        self.assertFalse(session.interrupt())
+        self.assertEqual([], stdin.messages())
+
+    def test_a_closed_conversation_has_nothing_to_stop(self) -> None:
+        session, _ = self.started()
+        session.note_result()
+        self.assertTrue(session.stdin_closed)
+
+        self.assertFalse(session.interrupt())
+
+    def test_a_broken_pipe_leaves_no_request_outstanding(self) -> None:
+        session, stdin = self.started(interrupt_timeout=600.0)
+        stdin.broken = True
+
+        # Returns rather than waiting out the timeout: the request never left.
+        self.assertFalse(session.interrupt())
+
+    def test_stray_control_traffic_never_disturbs_the_accounting(self) -> None:
+        session, stdin = self.started()
+
+        session.note_control_response({"subtype": "success", "request_id": "req_9"})
+        session.note_control_response({"subtype": "success"})
+        session.note_control_response("not a record")
+
+        session.note_result()
+        self.assertTrue(stdin.closed_by_asl)
+        self.assertFalse(session.turn_interrupted)
+
+    def test_the_interrupted_result_is_drained_rather_than_credited(self) -> None:
+        session, stdin = self.started()
+        session.steer(request_for())
+        thread, answered = self.interrupt_async(session)
+        request = self.sent_control_request(stdin)
+        self.answer(session, request["request_id"])
+        self.settle(thread, answered)
+
+        session.note_result()
+
+        # Queued guidance would ordinarily hold the conversation open for its
+        # own result. There is no such turn coming.
+        self.assertTrue(session.turn_interrupted)
+        self.assertTrue(stdin.closed_by_asl)
+
+    def test_a_later_result_is_still_not_a_resumed_turns_result(self) -> None:
+        session, stdin = self.started()
+        session.steer(request_for())
+        thread, answered = self.interrupt_async(session)
+        request = self.sent_control_request(stdin)
+        self.answer(session, request["request_id"])
+        self.settle(thread, answered)
+
+        session.note_result()
+        session.note_user_echo("prefer the smaller change")
+        session.note_result()
+
+        outcome = session.steer(request_for())
+        self.assertFalse(outcome.delivered)
+        self.assertEqual(guidance_delivery.REASON_STALE_TURN, outcome.reason)
+
+    def test_an_echo_drained_on_the_way_out_confirms_nothing(self) -> None:
+        session, stdin = self.started()
+        session.steer(request_for())
+        thread, answered = self.interrupt_async(session)
+        request = self.sent_control_request(stdin)
+        self.answer(session, request["request_id"])
+        self.settle(thread, answered)
+
+        session.note_user_echo("prefer the smaller change")
+
+        outcome = session.steer(request_for())
+        self.assertFalse(outcome.delivered)
+        self.assertEqual(guidance_delivery.REASON_STALE_TURN, outcome.reason)
+
+    def test_guidance_offered_after_an_interrupt_waits_for_the_next_turn(
+        self,
+    ) -> None:
+        session, stdin = self.started(spool=self.spool())
+        thread, answered = self.interrupt_async(session)
+        request = self.sent_control_request(stdin)
+        self.answer(session, request["request_id"])
+        self.settle(thread, answered)
+
+        outcome = session.steer(request_for())
+
+        self.assertFalse(outcome.delivered)
+        self.assertEqual(guidance_delivery.REASON_STALE_TURN, outcome.reason)
+        bodies = [
+            message
+            for message in stdin.messages()
+            if message.get("type") == "user"
+            and "prefer the smaller change" in json.dumps(message)
+        ]
+        self.assertEqual([], bodies)
+
+    def test_a_receipt_the_hook_already_wrote_still_counts(self) -> None:
+        spool = self.spool()
+        session, stdin = self.started(spool=spool)
+        session.steer(request_for())
+        # The hook handed the text to a tool call that then ran; the interrupt
+        # came afterwards and cannot unrun it.
+        (spool.root / "receipts" / f"{GUIDANCE_ID}.json").write_text(
+            json.dumps({"id": GUIDANCE_ID}), encoding="utf-8"
+        )
+        thread, answered = self.interrupt_async(session)
+        request = self.sent_control_request(stdin)
+        self.answer(session, request["request_id"])
+        self.settle(thread, answered)
+
+        outcome = session.steer(request_for())
+
+        self.assertTrue(outcome.delivered)
+
+
+class StreamSessionContinuityTests(unittest.TestCase):
+    """The conversation this turn runs on is stated, then re-checked."""
+
+    def test_a_turn_knows_its_conversation_before_it_writes_anything(self) -> None:
+        session, stdin = session_with(session_id="sess-1")
+
+        self.assertEqual("sess-1", session.session_id)
+        self.assertEqual([], stdin.messages())
+
+    def test_the_reported_session_is_checked_against_the_stated_one(self) -> None:
+        session, _ = session_with(session_id="sess-1")
+
+        mismatch = session.note_session_id("sess-2")
+
+        self.assertIsNotNone(mismatch)
+        self.assertIn("sess-1", mismatch or "")
+        self.assertIn("sess-2", mismatch or "")
+        self.assertEqual(mismatch, session.session_mismatch)
+
+    def test_the_first_disagreement_is_the_one_reported(self) -> None:
+        session, _ = session_with(session_id="sess-1")
+
+        first = session.note_session_id("sess-2")
+        session.note_session_id("sess-3")
+
+        self.assertEqual(first, session.session_mismatch)
+
+    def test_the_session_the_turn_asked_for_is_no_disagreement(self) -> None:
+        session, _ = session_with(session_id="sess-1")
+
+        self.assertIsNone(session.note_session_id("sess-1"))
+        self.assertIsNone(session.session_mismatch)
+
+    def test_a_turn_that_stated_no_session_has_nothing_to_contradict(self) -> None:
+        # An audit turn persists no session, so whatever the CLI names is its
+        # own business.
+        session, _ = session_with()
+
+        self.assertIsNone(session.note_session_id("sess-2"))
+        self.assertIsNone(session.session_mismatch)
+
+    def test_a_mismatch_does_not_stop_the_turn(self) -> None:
+        session, stdin = session_with(session_id="sess-1")
+        session.send_prompt()
+
+        session.note_session_id("sess-2")
+
+        self.assertFalse(session.stdin_closed)
+        self.assertTrue(session.steer(request_for()) is not None)
+        self.assertIn("prefer the smaller change", json.dumps(stdin.messages()))
+
+
 class StreamOutputProcessorTests(unittest.TestCase):
     """The one stdout reader is also the session's acknowledgement channel."""
 
@@ -534,6 +845,74 @@ class StreamOutputProcessorTests(unittest.TestCase):
         self.assertIn("claude result: success", rendered)
         self.assertTrue(processor.final_result_seen)
         self.assertTrue(stdin.closed_by_asl)
+
+    def test_a_control_response_answers_the_session_without_being_rendered(
+        self,
+    ) -> None:
+        session, stdin = session_with()
+        session.send_prompt()
+        processor = self.processor(session)
+        answered: list[bool] = []
+        thread = threading.Thread(
+            target=lambda: answered.append(session.interrupt()), daemon=True
+        )
+        thread.start()
+        deadline = time.monotonic() + HOOK_WAIT_SECONDS
+        request: dict[str, Any] | None = None
+        while request is None and time.monotonic() < deadline:
+            for message in stdin.messages():
+                if message.get("type") == claude_stream.CONTROL_REQUEST:
+                    request = message
+            time.sleep(0.01)
+        assert request is not None
+
+        rendered = processor.process_chunk(
+            "stdout",
+            json.dumps(
+                {
+                    "type": claude_stream.CONTROL_RESPONSE,
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request["request_id"],
+                    },
+                }
+            )
+            + "\n",
+        )
+
+        thread.join(timeout=HOOK_WAIT_SECONDS)
+        self.assertEqual([True], answered)
+        # Protocol bookkeeping is not turn output.
+        self.assertEqual("", rendered)
+
+    def test_the_init_record_is_rechecked_against_the_stated_session(self) -> None:
+        session, _ = session_with(session_id="sess-1")
+        processor = self.processor(session)
+
+        rendered = processor.process_chunk(
+            "stdout",
+            json.dumps({"type": "system", "subtype": "init", "session_id": "sess-2"})
+            + "\n",
+        )
+
+        self.assertIn("claude session mismatch", rendered)
+        self.assertIn("sess-1", rendered)
+        self.assertIn("sess-2", rendered)
+        self.assertIsNotNone(session.session_mismatch)
+
+    def test_the_session_the_turn_asked_for_is_reported_without_alarm(self) -> None:
+        session, _ = session_with(session_id="sess-1")
+        processor = self.processor(session)
+
+        rendered = processor.process_chunk(
+            "stdout",
+            json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1"})
+            + "\n",
+        )
+
+        self.assertIn("session sess-1", rendered)
+        self.assertNotIn("mismatch", rendered)
+        self.assertIsNone(session.session_mismatch)
 
     def test_normalization_still_works_without_a_session(self) -> None:
         processor = harnesses._ClaudeStreamJsonOutputProcessor()
@@ -776,6 +1155,142 @@ class ClaudeAdapterTransportTests(TempDirTestCase):
                 prompt="do the work",
             )
         )
+
+    def audit_invocation(self, **overrides: Any) -> harnesses.HarnessInvocation:
+        # An audit turn takes read roots instead of a writable plan dir.
+        return self.invocation(
+            plan_dir=None,
+            access=harnesses.audit_read_only_access((self.tmp,)),
+            **overrides,
+        )
+
+    def test_a_fresh_turn_states_the_session_it_is_opening(self) -> None:
+        invocation = self.invocation()
+
+        argv = invocation.argv
+        self.assertIn("--session-id", argv)
+        assigned = argv[argv.index("--session-id") + 1]
+        # A real UUID, because the CLI rejects anything else.
+        self.assertEqual(assigned, str(uuid.UUID(assigned)))
+        self.assertEqual(assigned, invocation.assigned_conversation_id)
+
+    def test_two_turns_never_open_the_same_conversation(self) -> None:
+        self.assertNotEqual(
+            self.invocation().assigned_conversation_id,
+            self.invocation().assigned_conversation_id,
+        )
+
+    def test_a_resume_restores_exactly_the_conversation_asked_for(self) -> None:
+        invocation = self.invocation(resume_conversation_id="sess-7")
+
+        argv = invocation.argv
+        self.assertIn("--resume", argv)
+        self.assertEqual("sess-7", argv[argv.index("--resume") + 1])
+        self.assertEqual("sess-7", invocation.assigned_conversation_id)
+        self.assertNotIn("--session-id", argv)
+
+    def test_a_resumed_turn_is_never_forked_onto_a_new_conversation(self) -> None:
+        # ``--fork-session`` answers "continue conversation X" with a different
+        # one, which is the substitution this path exists to prevent.
+        self.assertNotIn("--fork-session", self.invocation().argv)
+        self.assertNotIn(
+            "--fork-session", self.invocation(resume_conversation_id="sess-7").argv
+        )
+
+    def test_an_audit_turn_names_no_conversation_at_all(self) -> None:
+        invocation = self.audit_invocation()
+
+        self.assertIn("--no-session-persistence", invocation.argv)
+        self.assertNotIn("--session-id", invocation.argv)
+        self.assertNotIn("--resume", invocation.argv)
+        self.assertIsNone(invocation.assigned_conversation_id)
+
+    def test_an_audit_turn_refuses_to_resume_a_conversation(self) -> None:
+        with self.assertRaises(harnesses.HarnessError) as raised:
+            self.audit_invocation(resume_conversation_id="sess-7")
+
+        self.assertIn("sess-7", str(raised.exception))
+
+    def test_the_session_reaches_the_transport_that_must_re_check_it(self) -> None:
+        invocation = self.invocation(resume_conversation_id="sess-7")
+
+        transport = self.adapter().open_transport(
+            process=_Process(_Stdin()),
+            invocation=invocation,
+            prompt="do the work",
+        )
+
+        self.assertEqual("sess-7", transport.session.session_id)
+
+    def test_the_conversation_is_recorded_before_the_prompt_is_written(self) -> None:
+        stdin = _Stdin()
+        invocation = self.invocation()
+        written_at_capture: list[list[dict[str, Any]]] = []
+        lifecycle = harnesses.TurnLifecycle(
+            conversation=harnesses.TurnConversation(
+                sink=lambda native_id: written_at_capture.append(stdin.messages())
+            )
+        )
+
+        self.adapter().open_transport(
+            process=_Process(stdin),
+            invocation=invocation,
+            prompt="do the work",
+            lifecycle=lifecycle,
+        )
+
+        # Nothing had been submitted yet, which is what makes the capture
+        # refusal below able to cost the turn nothing.
+        self.assertEqual([[]], written_at_capture)
+        self.assertEqual(
+            invocation.assigned_conversation_id, lifecycle.conversation.native_id
+        )
+
+    def test_a_turn_whose_conversation_cannot_be_recorded_submits_nothing(
+        self,
+    ) -> None:
+        stdin = _Stdin()
+
+        def refuse(native_id: str) -> None:
+            raise OSError("the ledger is unwritable")
+
+        lifecycle = harnesses.TurnLifecycle(
+            conversation=harnesses.TurnConversation(sink=refuse)
+        )
+
+        with self.assertRaises(harnesses.ConversationCaptureError):
+            self.adapter().open_transport(
+                process=_Process(stdin),
+                invocation=self.invocation(),
+                prompt="do the work",
+                lifecycle=lifecycle,
+            )
+
+        self.assertEqual([], stdin.messages())
+
+    def test_an_audit_turn_captures_nothing_and_still_runs(self) -> None:
+        stdin = _Stdin()
+        captured: list[str] = []
+        lifecycle = harnesses.TurnLifecycle(
+            conversation=harnesses.TurnConversation(sink=captured.append)
+        )
+
+        self.adapter().open_transport(
+            process=_Process(stdin),
+            invocation=self.audit_invocation(),
+            prompt="do the work",
+            lifecycle=lifecycle,
+        )
+
+        self.assertEqual([], captured)
+        self.assertEqual([claude_stream.user_message("do the work")], stdin.messages())
+
+    def test_claude_advertises_the_continuity_it_now_has(self) -> None:
+        adapter = self.adapter()
+
+        self.assertTrue(adapter.captures_conversations)
+        self.assertTrue(adapter.resumes_conversations)
+        self.assertTrue(harnesses.continues_conversations("claude"))
 
     def test_guidance_never_rides_the_next_prompt_for_claude(self) -> None:
         # Claude can be steered in-turn, so the ledger's verdict is the live

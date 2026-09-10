@@ -25,11 +25,28 @@ receipt confirms delivery but does not acknowledge consumption of the queued
 stdin message. Until one of the routes reports in, an attempt is
 ``awaiting-confirmation`` — deferred, still deliverable, and never a receipt.
 
+Control requests. The same stdin stream carries a second kind of message, and
+it is the CLI's own rather than ASL's invention: a ``control_request`` envelope
+naming a ``request_id``, answered by a ``control_response`` carrying that same
+identifier back. That is how ``interrupt`` is expressed — read off the raw
+protocol the ``claude-agent-sdk`` speaks rather than assumed from its
+high-level method — and the correlation is the whole point of it. An
+uncorrelated acknowledgement could only be attributed by arrival order, which is
+exactly how a delayed answer to one request comes to stand in for the next.
+
+Continuity. This conversation's identifier is *stated* rather than discovered.
+``--session-id`` assigns one and ``--resume`` restores exactly one, so the turn
+knows which conversation it runs on before its prompt is written and can make
+that fact durable while there is still no work to lose. ``--fork-session`` is
+never passed: it answers "continue conversation X" with a different one. The
+``system``/``init`` record echoes the session the CLI actually opened, and
+:meth:`ClaudeStreamSession.note_session_id` re-checks it against the stated one.
+
 Privacy. Guidance bodies live in memory and on the stdin pipe and in the
 turn-scoped spool, which is deleted with the turn. The CLI echoes user messages
 back on stdout; :class:`ClaudeStreamSession` matches those echoes but the
 output processor renders none of them, so no guidance body reaches a persisted
-artifact.
+artifact. Control requests and responses carry no user text at all.
 """
 
 from __future__ import annotations
@@ -42,6 +59,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -52,12 +71,18 @@ from .claude_guidance_hook import GUIDANCE_CONTEXT_HEADING, HOOK_EVENT
 TRANSPORT_STREAM_JSON = "stream-json"
 
 __all__ = [
+    "CONTROL_REQUEST",
+    "CONTROL_RESPONSE",
     "GUIDANCE_CONTEXT_HEADING",
     "HOOK_EVENT",
+    "INTERRUPT_TIMEOUT_SECONDS",
+    "SUBTYPE_INTERRUPT",
     "TRANSPORT_STREAM_JSON",
     "ClaudeGuidanceSpool",
     "ClaudeStreamSession",
+    "control_request",
     "hook_script_path",
+    "new_session_id",
     "normalized_echo_body",
     "remove_overlay",
     "user_message",
@@ -68,6 +93,30 @@ __all__ = [
 #: reads a handful of small files, so this is a wedged-filesystem bound rather
 #: than a working one.
 HOOK_TIMEOUT_SECONDS = 10
+
+#: The CLI's control-channel envelope types, as spoken on the same two pipes
+#: the conversation itself uses.
+CONTROL_REQUEST = "control_request"
+CONTROL_RESPONSE = "control_response"
+
+#: The one control subtype ASL sends. Others exist; none of them is something
+#: a supervised turn needs, and each one added is a message the CLI could
+#: answer while a turn is winding down.
+SUBTYPE_INTERRUPT = "interrupt"
+
+#: The response subtype that means the CLI took the request.
+SUBTYPE_SUCCESS = "success"
+
+#: How long a control request may take to be answered. Bounded well under any
+#: shutdown grace because every caller has already decided the turn is over:
+#: the request is how the CLI is *told* so, and a forced termination stands
+#: behind it either way.
+INTERRUPT_TIMEOUT_SECONDS = 5.0
+
+#: How often a bounded wait re-checks whether the CLI is still alive. A dead
+#: process can never answer, so noticing quickly is what keeps an interrupt
+#: sent at a corpse from costing the full timeout.
+_LIVENESS_POLL_SECONDS = 0.05
 
 #: Spool subdirectories. ``pending`` is what the hook may claim, ``claimed``
 #: holds what it took, and ``receipts`` is the evidence ASL reads back.
@@ -215,11 +264,37 @@ def write_settings_overlay(
 
 
 def user_message(text: str) -> dict[str, Any]:
-    """One stream-JSON user message, the only shape ASL ever writes to stdin."""
+    """One stream-JSON user message: the conversation half of ASL's stdin."""
     return {
         "type": "user",
         "message": {"role": "user", "content": [{"type": "text", "text": text}]},
     }
+
+
+def control_request(request_id: str, subtype: str) -> dict[str, Any]:
+    """One control request: the protocol half of ASL's stdin.
+
+    ``request_id`` is what makes the answer attributable. It is the caller's to
+    mint and the CLI's to echo back untouched, and nothing else in the envelope
+    identifies the request — so a response that does not carry it belongs to no
+    request this session is waiting on.
+    """
+    return {
+        "type": CONTROL_REQUEST,
+        "request_id": request_id,
+        "request": {"subtype": subtype},
+    }
+
+
+def new_session_id() -> str:
+    """Mint the conversation identifier a turn will be launched under.
+
+    ``--session-id`` requires a UUID, and assigning one is what lets a claude
+    turn persist its conversation *before* submitting work: the alternative is
+    reading the identifier out of the CLI's first record, which arrives after
+    the prompt has already gone.
+    """
+    return str(uuid.uuid4())
 
 
 def normalized_echo_body(text: str) -> str:
@@ -263,6 +338,24 @@ class _EchoExpectation:
         self.consumed = False
 
 
+class _PendingControl:
+    """One control request written to stdin, awaiting its correlated answer.
+
+    Resolved by the output processor's thread and waited on by whichever thread
+    sent the request, so the answer is published under the session's state lock
+    and read only after the event is set.
+    """
+
+    def __init__(self, request_id: str) -> None:
+        self.request_id = request_id
+        self.event = threading.Event()
+        self.acknowledged = False
+
+    def resolve(self, *, acknowledged: bool) -> None:
+        self.acknowledged = acknowledged
+        self.event.set()
+
+
 class ClaudeStreamSession:
     """One bidirectional stream-JSON conversation, scoped to one harness turn.
 
@@ -278,10 +371,14 @@ class ClaudeStreamSession:
         process: subprocess.Popen,
         prompt: str,
         spool: ClaudeGuidanceSpool | None = None,
+        session_id: str | None = None,
+        interrupt_timeout: float = INTERRUPT_TIMEOUT_SECONDS,
     ) -> None:
         self._process = process
         self._prompt = prompt
         self._spool = spool
+        self._session_id = session_id
+        self._interrupt_timeout = interrupt_timeout
 
         self._state_lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -292,6 +389,12 @@ class ClaudeStreamSession:
         self._messages_answered = 0
         self._stdin_closed = False
         self._prompt_error: str | None = None
+        self._session_mismatch: str | None = None
+
+        self._pending_control: dict[str, _PendingControl] = {}
+        self._control_seq = 0
+        self._interrupt_requested = False
+        self._turn_interrupted = False
 
     # -- state a caller reads ----------------------------------------------
 
@@ -310,6 +413,41 @@ class ClaudeStreamSession:
     def stdin_closed(self) -> bool:
         with self._state_lock:
             return self._stdin_closed
+
+    @property
+    def session_id(self) -> str | None:
+        """The conversation this turn was launched under, if it was told one."""
+        with self._state_lock:
+            return self._session_id
+
+    @property
+    def session_mismatch(self) -> str | None:
+        """Why the conversation this turn ran on is not the one it was given.
+
+        ``None`` on every ordinary turn, including one that stated no session at
+        all. A value here means the recorded identifier does not name the
+        conversation the work went into, so nothing may continue from it.
+        """
+        with self._state_lock:
+            return self._session_mismatch
+
+    @property
+    def interrupt_requested(self) -> bool:
+        """Whether an ``interrupt`` control request was written for this turn."""
+        with self._state_lock:
+            return self._interrupt_requested
+
+    @property
+    def turn_interrupted(self) -> bool:
+        """Whether the turn's terminal result was the one it was stopped at.
+
+        Kept separate from :attr:`interrupt_requested` because they answer
+        different questions: one says ASL asked, the other says the CLI
+        answered with the result of a turn that was cut short. Only the second
+        is a statement about what the turn produced.
+        """
+        with self._state_lock:
+            return self._turn_interrupted
 
     # -- the prompt ---------------------------------------------------------
 
@@ -348,18 +486,29 @@ class ClaudeStreamSession:
         # either be counted before the decision or observe the closed pipe.
         with self._write_lock:
             with self._state_lock:
-                echoed_through = max(
-                    (
-                        index + 1
-                        for index, expectation in enumerate(self._echo_expectations)
-                        if expectation.consumed
-                    ),
-                    default=0,
-                )
-                self._messages_answered = max(
-                    self._messages_answered + 1, echoed_through
-                )
-                idle = self._messages_answered >= self._messages_written
+                if self._interrupt_requested:
+                    # This result reports the turn the CLI was told to stop, so
+                    # it is drained rather than counted: it answers whatever it
+                    # answers, but crediting it against the messages still
+                    # queued would let an interrupted turn settle guidance the
+                    # model never ran, and would leave a later result looking
+                    # like the resumed turn's own. The conversation is over
+                    # either way, so stdin closes regardless of the queue.
+                    self._turn_interrupted = True
+                    idle = True
+                else:
+                    echoed_through = max(
+                        (
+                            index + 1
+                            for index, expectation in enumerate(self._echo_expectations)
+                            if expectation.consumed
+                        ),
+                        default=0,
+                    )
+                    self._messages_answered = max(
+                        self._messages_answered + 1, echoed_through
+                    )
+                    idle = self._messages_answered >= self._messages_written
             if idle:
                 self._close_stdin_locked()
 
@@ -381,16 +530,69 @@ class ClaudeStreamSession:
         if not body:
             return
         with self._state_lock:
+            interrupted = self._interrupt_requested
             for expectation in self._echo_expectations:
                 if expectation.consumed or expectation.body != body:
                     continue
+                # Consumed either way, so this echo can never be spent twice:
+                # the accounting is about which write it belongs to, and that
+                # does not change because the turn is ending.
                 expectation.consumed = True
-                if expectation.guidance_id is None:
+                if expectation.guidance_id is None or interrupted:
+                    # An echo the CLI emits while draining its stdin on the way
+                    # out of an interrupted turn says it read the message, not
+                    # that the model acted on it. Recording a delivery from it
+                    # would spend a guidance record on work that was stopped.
                     return
                 offer = self._offers.get(expectation.guidance_id)
                 if offer is not None and offer.confirmed_by is None:
                     offer.confirmed_by = "protocol-echo"
                 return
+
+    def note_session_id(self, reported: str) -> str | None:
+        """Re-check the session the CLI opened against the one it was given.
+
+        Returns a description of the disagreement, or ``None`` when there is
+        none — including when this turn stated no session at all, which is the
+        ordinary shape of an audit turn that persists none.
+
+        The turn is *not* stopped here. The prompt was written before the first
+        record arrived, so by the time this can be checked the model is already
+        changing the workspace, and abandoning it mid-edit to correct a
+        bookkeeping fact would cost more than the fact is worth. What the
+        mismatch does is disqualify the recorded identifier: the result reports
+        it, and nothing continues from a conversation the work did not go into.
+        """
+        with self._state_lock:
+            expected = self._session_id
+            if expected is None or not reported or reported == expected:
+                return None
+            if self._session_mismatch is None:
+                self._session_mismatch = (
+                    f"launched under session {expected} "
+                    f"but the CLI reported session {reported}"
+                )
+            return self._session_mismatch
+
+    def note_control_response(self, response: object) -> None:
+        """Resolve the control request this response names, if it names one.
+
+        Attribution is by ``request_id`` and by nothing else. A response
+        carrying an identifier this session is not waiting on — one already
+        given up on, one belonging to a request the CLI raised itself — resolves
+        nothing, because the alternative is letting arrival order decide, and
+        arrival order is what makes a late answer look like the next one.
+        """
+        if not isinstance(response, dict):
+            return
+        request_id = response.get("request_id")
+        if not isinstance(request_id, str):
+            return
+        with self._state_lock:
+            pending = self._pending_control.pop(request_id, None)
+        if pending is None:
+            return
+        pending.resolve(acknowledged=response.get("subtype") == SUBTYPE_SUCCESS)
 
     # -- steering -----------------------------------------------------------
 
@@ -414,9 +616,21 @@ class ClaudeStreamSession:
             confirmed_by = offer.confirmed_by
             stdin_closed = self._stdin_closed
             write_failed = offer.write_failed
+            interrupted = self._interrupt_requested
 
         if confirmed_by is not None:
             return guidance_delivery.DELIVERED
+
+        if interrupted:
+            # The turn is being stopped, so neither route can still deliver:
+            # a message written now would be echoed by a CLI draining its queue
+            # on the way out, and a hook armed now has no further tool call to
+            # inject into. A receipt already on disk is different -- the hook
+            # writes one only after handing the text to a call that then ran --
+            # so it still counts, and everything else waits for the next turn.
+            if self._receipt_confirms(offer):
+                return guidance_delivery.DELIVERED
+            return guidance_delivery.deferred(guidance_delivery.REASON_STALE_TURN)
 
         if first_attempt:
             self._arm_hook(request)
@@ -462,16 +676,12 @@ class ClaudeStreamSession:
         detail: str | None = None,
     ) -> guidance_delivery.GuidanceOutcome:
         """Report the evidence that exists right now, and nothing more."""
-        spool = self._spool
-        if spool is not None and spool.receipt(offer.guidance_id):
-            with self._state_lock:
-                if offer.confirmed_by is None:
-                    offer.confirmed_by = "pretooluse-hook"
+        if self._receipt_confirms(offer):
             return guidance_delivery.DELIVERED
         with self._state_lock:
             if offer.confirmed_by is not None:
                 return guidance_delivery.DELIVERED
-        if failed and (spool is None or not self._hook_still_armed(offer)):
+        if failed and not self._hook_still_armed(offer):
             # Neither route survives: the pipe is gone and the hook has nothing
             # left to claim. This attempt is over.
             return guidance_delivery.deferred(
@@ -480,6 +690,16 @@ class ClaudeStreamSession:
             )
         return guidance_delivery.awaiting_confirmation(detail=detail)
 
+    def _receipt_confirms(self, offer: _Offer) -> bool:
+        """Whether the hook has reported injecting this offer, recording it once."""
+        spool = self._spool
+        if spool is None or not spool.receipt(offer.guidance_id):
+            return False
+        with self._state_lock:
+            if offer.confirmed_by is None:
+                offer.confirmed_by = "pretooluse-hook"
+        return True
+
     def _hook_still_armed(self, offer: _Offer) -> bool:
         spool = self._spool
         if spool is None:
@@ -487,6 +707,71 @@ class ClaudeStreamSession:
         pending = spool.root / _PENDING / f"{offer.guidance_id}.json"
         claimed = spool.root / _CLAIMED / f"{offer.guidance_id}.json"
         return pending.exists() or claimed.exists()
+
+    # -- interruption -------------------------------------------------------
+
+    def interrupt(self) -> bool:
+        """Tell the CLI to stop the work this turn has in flight.
+
+        Reports whether the CLI *acknowledged* the request, which is neither a
+        promise that the work has stopped nor a substitute for the forced
+        termination standing behind every caller. What it buys is the
+        distinction: a turn told to stop ends as an interrupted one, while a
+        turn whose pipes were merely taken away ends as one that stopped
+        answering.
+
+        Sent at most once per turn. A second request would be a second
+        identifier to correlate for an outcome already decided, and the CLI's
+        answer to it could only arrive after the first turned this turn into an
+        interrupted one.
+
+        Never raises. Every caller reaches for this while tearing a turn down,
+        where an exception would only obscure why the turn ended.
+        """
+        with self._state_lock:
+            if self._interrupt_requested:
+                return False
+            if self._stdin_closed or self._messages_written == 0:
+                # Nothing was submitted, or the conversation is already over:
+                # either way there is no work in flight to stop, and the
+                # cancellation cost nothing to begin with.
+                return False
+            self._interrupt_requested = True
+            self._control_seq += 1
+            # ``req_<n>_<hex>`` is the shape the official SDK mints, and the
+            # CLI treats it as opaque; matching it keeps ASL's traffic
+            # indistinguishable from the traffic this control channel is
+            # exercised with upstream.
+            request_id = f"req_{self._control_seq}_{os.urandom(4).hex()}"
+            pending = _PendingControl(request_id)
+            self._pending_control[request_id] = pending
+
+        try:
+            self._write(control_request(request_id, SUBTYPE_INTERRUPT))
+        except OSError:
+            self._drop_pending(request_id)
+            return False
+        return self._await_control(pending)
+
+    def _await_control(self, pending: _PendingControl) -> bool:
+        """Wait out one control request, bounded by the clock and by liveness."""
+        deadline = time.monotonic() + self._interrupt_timeout
+        while not pending.event.wait(_LIVENESS_POLL_SECONDS):
+            if self._process.poll() is not None:
+                # The CLI is gone, which is the state the interrupt was asking
+                # for. It is still not an acknowledgement: nothing said the turn
+                # was stopped rather than killed.
+                self._drop_pending(pending.request_id)
+                return False
+            if time.monotonic() >= deadline:
+                self._drop_pending(pending.request_id)
+                return False
+        return pending.acknowledged
+
+    def _drop_pending(self, request_id: str) -> None:
+        """Stop waiting on a request, so a late answer correlates with nothing."""
+        with self._state_lock:
+            self._pending_control.pop(request_id, None)
 
     # -- transport primitives ----------------------------------------------
 
@@ -527,7 +812,12 @@ class ClaudeStreamSession:
                         self._echo_expectations.remove(expectation)
                 raise OSError(str(error) or type(error).__name__) from error
             with self._state_lock:
-                self._messages_written += 1
+                if echo_body is not None:
+                    # Only a conversation message is counted. A control request
+                    # is neither echoed back nor answered by a ``result``, so
+                    # counting one would leave the conversation permanently
+                    # short an answer and stdin permanently open.
+                    self._messages_written += 1
 
     def close_stdin(self) -> None:
         """End the conversation, which is how the CLI is asked to finish."""

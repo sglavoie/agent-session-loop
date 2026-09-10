@@ -1852,6 +1852,13 @@ class TurnLaunch:
     is only needed on the interrupt path, where no process ever reported one;
     building it eagerly would render a command line for every turn to describe
     the few that are interrupted.
+
+    What it renders there is a description of the turn rather than the command
+    the turn ran: the real invocation is built inside ``HarnessAdapter.run``,
+    which adds what only it knows. For claude that now includes the conversation
+    identifier, so a rebuilt argv names a fresh session the interrupted turn
+    never used. Read the conversation off ``HarnessResult.conversation_id``,
+    never off an argv rendered here.
     """
 
     harness: harnesses.HarnessName

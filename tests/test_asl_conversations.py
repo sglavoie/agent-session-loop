@@ -302,13 +302,13 @@ class CapabilityReportTests(ConversationTestBase):
             report.available_harnesses,
         )
 
-    def test_codex_is_the_harness_recovery_is_wired_for(self) -> None:
+    def test_the_wired_harnesses_are_named_rather_than_derived(self) -> None:
         """Stated flatly rather than derived: the derivation above proves the
-        report follows the adapters, and this pins which adapter that is, so
+        report follows the adapters, and this pins which adapters those are, so
         flipping a flag by accident fails here instead of silently offering an
         operator a recovery no transport performs."""
         report = conversations.capability_report()
-        self.assertEqual(("codex",), report.available_harnesses)
+        self.assertEqual(("codex", "claude"), report.available_harnesses)
 
     def test_report_round_trips(self) -> None:
         report = conversations.capability_report()

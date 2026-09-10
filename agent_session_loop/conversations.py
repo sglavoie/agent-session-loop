@@ -922,8 +922,8 @@ def capability_report() -> CapabilityReport:
     ran on and accepts one to resume, which is the same pair of flags
     ``HarnessAdapter.run`` enforces when it refuses a capture sink or a resume
     intent. One producer, so this report cannot promise recovery the turn
-    boundary would refuse to perform. ``codex`` is ``available`` today; the
-    rest are ``staged``.
+    boundary would refuse to perform. ``codex`` and ``claude`` are
+    ``available`` today; ``copilot`` is ``staged``.
     """
     return CapabilityReport(
         capabilities=tuple(

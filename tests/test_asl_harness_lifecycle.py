@@ -13,6 +13,7 @@ the machine running the tests.
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import tempfile
 import threading
@@ -287,6 +288,16 @@ def _raise(error: BaseException) -> Any:
 
 class _FakePipe(io.StringIO):
     """A stream that is at EOF at once, like a harness that printed nothing."""
+
+    def __init__(self, initial: str = "") -> None:
+        super().__init__(initial)
+        #: Kept beside the buffer so a test can still see what a turn wrote
+        #: after the pipe has been closed.
+        self.written: list[str] = []
+
+    def write(self, text: str) -> int:  # type: ignore[override]
+        self.written.append(text)
+        return super().write(text)
 
 
 class _FakeProcess:
@@ -768,13 +779,126 @@ class ConversationCaptureTurnTests(_TurnTestCase):
         self.assertEqual(0, result.returncode)
 
 
+class ClaudeContinuityTurnTests(_TurnTestCase):
+    """A whole claude turn, from the identifier on argv to the result."""
+
+    def adapter(self) -> harnesses.ClaudeAdapter:
+        return harnesses.ClaudeAdapter(executable="claude")
+
+    def init_record(self, session_id: str) -> str:
+        return (
+            json.dumps({"type": "system", "subtype": "init", "session_id": session_id})
+            + "\n"
+        )
+
+    def test_a_turn_records_the_conversation_it_stated_on_argv(self) -> None:
+        adapter = self.adapter()
+        process = _FakeProcess(running=False)
+        captured: list[str] = []
+        invocation = adapter.build_invocation(
+            cwd=self.tmp, plan_dir=self.tmp, prompt="do the work"
+        )
+        assigned = invocation.assigned_conversation_id
+        assert assigned is not None
+        process.stdout = _FakePipe(self.init_record(assigned))
+
+        result = self.run_turn(
+            adapter,
+            process,
+            invocation=invocation,
+            on_conversation=captured.append,
+        )
+
+        self.assertEqual([assigned], captured)
+        self.assertEqual(assigned, result.conversation_id)
+        self.assertIsNone(result.continuity_unavailable)
+
+    def test_a_turn_that_ran_elsewhere_reports_no_conversation(self) -> None:
+        adapter = self.adapter()
+        process = _FakeProcess(running=False)
+        invocation = adapter.build_invocation(
+            cwd=self.tmp, plan_dir=self.tmp, prompt="do the work"
+        )
+        assigned = invocation.assigned_conversation_id
+        assert assigned is not None
+        process.stdout = _FakePipe(self.init_record("some-other-session"))
+
+        result = self.run_turn(
+            adapter,
+            process,
+            invocation=invocation,
+            on_conversation=lambda native_id: None,
+        )
+
+        # The work ran, so the turn is not retracted -- but nothing may resume
+        # from an identifier the CLI declined to use.
+        self.assertIn("session mismatch", result.continuity_unavailable or "")
+        self.assertIn(assigned, result.continuity_unavailable or "")
+        self.assertIn("some-other-session", result.continuity_unavailable or "")
+        self.assertIsNone(result.conversation_id)
+        self.assertIn("claude session mismatch", result.stderr)
+
+    def test_a_turn_that_could_not_write_its_conversation_submits_nothing(
+        self,
+    ) -> None:
+        adapter = self.adapter()
+        process = _FakeProcess()
+
+        def explode(native_id: str) -> None:
+            raise OSError("ledger is read-only")
+
+        result = self.run_turn(adapter, process, on_conversation=explode)
+
+        self.assertEqual([], process.stdin.written)
+        self.assertIn("ledger is read-only", result.conversation_error or "")
+        self.assertIsNone(result.conversation_id)
+        self.assertTrue(process.killed)
+
+    def test_an_audit_turn_says_it_has_no_conversation_to_offer(self) -> None:
+        adapter = self.adapter()
+        process = _FakeProcess(running=False)
+        captured: list[str] = []
+
+        with mock.patch.object(harnesses.subprocess, "Popen", return_value=process):
+            result = adapter.run(
+                cwd=self.tmp,
+                plan_dir=None,
+                prompt="do the work",
+                last_message_path=self.tmp / "last.txt",
+                access=harnesses.audit_read_only_access((self.tmp,)),
+                on_conversation=captured.append,
+            )
+
+        self.assertEqual([], captured)
+        self.assertIn("persists no session", result.continuity_unavailable or "")
+        self.assertIn("persists no session", result.stderr)
+
+    def test_the_overlay_is_still_gone_when_the_turn_is_over(self) -> None:
+        adapter = self.adapter()
+        process = _FakeProcess(running=False)
+        overlays: list[Path] = []
+        original = adapter.open_transport
+
+        def watched(**kwargs: Any) -> Any:
+            overlay_dir = kwargs["invocation"].overlay_dir
+            if overlay_dir is not None:
+                overlays.append(overlay_dir)
+            return original(**kwargs)
+
+        with mock.patch.object(adapter, "open_transport", watched):
+            self.run_turn(adapter, process, on_conversation=lambda native_id: None)
+
+        self.assertEqual(1, len(overlays))
+        self.assertFalse(overlays[0].exists())
+
+
 class ShippedAdapterCapabilityTests(unittest.TestCase):
     """No shipped adapter claims continuity it has not been wired for."""
 
     #: The adapters whose transports actually capture and resume today. Named
     #: rather than derived, so wiring a harness is a deliberate edit here and
     #: not something a flipped class flag can do quietly.
-    WIRED = frozenset({"codex"})
+    WIRED = frozenset({"codex", "claude"})
 
     def test_only_wired_adapters_capture_or_resume(self) -> None:
         for name in harnesses.HARNESS_NAMES:

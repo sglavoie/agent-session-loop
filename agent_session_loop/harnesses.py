@@ -659,6 +659,13 @@ class HarnessInvocation:
     #: refuses the turn rather than quietly starting a fresh conversation, so
     #: this never silently degrades into "resumed nothing".
     resume_conversation_id: str | None = None
+    #: The native conversation this turn will actually run on, when its
+    #: transport states that on the command line instead of learning it from a
+    #: handshake. Distinct from ``resume_conversation_id``, which is a request:
+    #: this is the identity, whether freshly minted or restored, and it is
+    #: known before the process is spawned — which is what lets such a turn
+    #: persist its conversation before submitting any work.
+    assigned_conversation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -833,6 +840,14 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
                     self._assistant_text(record.get("message"))
                 )
             return []
+        if record_type == claude_stream.CONTROL_RESPONSE:
+            # Protocol bookkeeping rather than turn output: the session
+            # correlates it by ``request_id`` and nothing about it belongs in a
+            # turn log, where an operator reading arrival order would be
+            # guessing at the very attribution the identifier settles.
+            if self._session is not None:
+                self._session.note_control_response(record.get("response"))
+            return []
         if record_type == "result":
             self._final_result_seen = True
             if self._session is not None:
@@ -858,9 +873,19 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
                 self._note_observed_model(model)
                 parts.append(f"model {model}")
             session_id = record.get("session_id")
+            mismatch: str | None = None
             if session_id:
                 parts.append(f"session {session_id}")
-            return ["; ".join(str(part) for part in parts)]
+                if self._session is not None:
+                    mismatch = self._session.note_session_id(str(session_id))
+            rendered = ["; ".join(str(part) for part in parts)]
+            if mismatch is not None:
+                # Named on its own line rather than folded into the init line:
+                # this is the one thing in that record an operator has to act
+                # on, and it says the turn's recorded conversation is not the
+                # one the work is about to go into.
+                rendered.append(f"claude session mismatch: {mismatch}")
+            return rendered
         if subtype == "status":
             status = record.get("status") or "unknown"
             return [f"claude status: {status}"]
@@ -1039,14 +1064,14 @@ class HarnessAdapter:
     enforces_guard_pretool: bool = False
 
     #: Whether this adapter's transport reports the native conversation its
-    #: turn runs on. False on every shipped adapter: the seam exists, but no
-    #: protocol wiring reads an identifier out of it yet.
+    #: turn runs on. False until a protocol path actually produces an
+    #: identifier: the seam alone is not capability.
     captures_conversations: bool = False
 
     #: Whether this adapter can start a turn on a conversation it is handed.
-    #: False on every shipped adapter, and :meth:`run` refuses a resume intent
-    #: while it is false — an adapter that quietly started a fresh conversation
-    #: instead would leave the caller believing it had continued one.
+    #: :meth:`run` refuses a resume intent while this is false — an adapter that
+    #: quietly started a fresh conversation instead would leave the caller
+    #: believing it had continued one.
     resumes_conversations: bool = False
 
     def __init__(self, executable: str | None = None) -> None:
@@ -1060,6 +1085,28 @@ class HarnessAdapter:
     def resolve_executable(self) -> str | None:
         """Return the resolved executable path if it is on PATH."""
         return shutil.which(self.executable)
+
+    @staticmethod
+    def _with_stderr_note(result: HarnessResult, note: str) -> HarnessResult:
+        """Append one adapter-authored line to the turn's stderr.
+
+        The stderr artifact is written from ``result.stderr`` while
+        ``stream_io`` counts what the readers saw, and the two are required to
+        agree byte for byte. A note added here is stderr the turn really has,
+        so it is accounted for as stderr rather than smuggled in beside it.
+        """
+        text = f"{note}\n"
+        stream_io = dict(result.stream_io or {})
+        if stream_io:
+            stream_io["stderr_chars"] = int(stream_io.get("stderr_chars", 0)) + len(
+                text
+            )
+            stream_io["stderr_chunks"] = int(stream_io.get("stderr_chunks", 0)) + 1
+        return dataclasses.replace(
+            result,
+            stderr=result.stderr + text,
+            stream_io=stream_io or result.stream_io,
+        )
 
     def output_processor(self) -> _OutputProcessor:
         return _OutputProcessor()
@@ -2466,28 +2513,6 @@ class CodexAdapter(HarnessAdapter):
             returncode = 1
         return dataclasses.replace(result, returncode=returncode)
 
-    @staticmethod
-    def _with_stderr_note(result: HarnessResult, note: str) -> HarnessResult:
-        """Append one adapter-authored line to the turn's stderr.
-
-        The stderr artifact is written from ``result.stderr`` while
-        ``stream_io`` counts what the readers saw, and the two are required to
-        agree byte for byte. A note added here is stderr the turn really has,
-        so it is accounted for as stderr rather than smuggled in beside it.
-        """
-        text = f"{note}\n"
-        stream_io = dict(result.stream_io or {})
-        if stream_io:
-            stream_io["stderr_chars"] = int(stream_io.get("stderr_chars", 0)) + len(
-                text
-            )
-            stream_io["stderr_chunks"] = int(stream_io.get("stderr_chunks", 0)) + 1
-        return dataclasses.replace(
-            result,
-            stderr=result.stderr + text,
-            stream_io=stream_io or result.stream_io,
-        )
-
 
 class _ClaudeStreamTransport(HarnessTransport):
     """The adapter's handle on one live claude stream-JSON conversation."""
@@ -2502,7 +2527,16 @@ class _ClaudeStreamTransport(HarnessTransport):
     def guidance_transport(self) -> guidance_delivery.GuidanceTransport | None:
         return self.session.steer
 
+    def interrupt(self) -> bool:
+        return self.session.interrupt()
+
     def shutdown(self) -> None:
+        # No interrupt here, unlike the app-server transport. A claude turn is
+        # the process itself rather than a turn inside a server, and by the time
+        # the harness reaches its ``finally`` that process has been waited on
+        # and the stdout readers abandoned — so a control request sent from here
+        # could never be correlated and would have nothing left to stop. The
+        # execution window sends it, where a reader is still there to answer.
         self.session.shutdown()
 
 
@@ -2511,6 +2545,8 @@ class ClaudeAdapter(HarnessAdapter):
     skill_prefix = "/"
     enforces_audit_read_only = True
     enforces_guard_pretool = True
+    captures_conversations = True
+    resumes_conversations = True
 
     def output_processor(self) -> _OutputProcessor:
         return _ClaudeStreamJsonOutputProcessor()
@@ -2611,7 +2647,49 @@ class ClaudeAdapter(HarnessAdapter):
             env=env,
             resume_conversation_id=resume_conversation_id,
         )
-        return dataclasses.replace(invocation, transport=TRANSPORT_STREAM_JSON)
+        argv, assigned = self._with_session_controls(
+            invocation.argv,
+            access=access,
+            resume_conversation_id=resume_conversation_id,
+        )
+        return dataclasses.replace(
+            invocation,
+            argv=argv,
+            transport=TRANSPORT_STREAM_JSON,
+            assigned_conversation_id=assigned,
+        )
+
+    def _with_session_controls(
+        self,
+        argv: list[str],
+        *,
+        access: AccessProfile,
+        resume_conversation_id: str | None,
+    ) -> tuple[list[str], str | None]:
+        """Name this turn's conversation on argv, and say which one it is.
+
+        Two supported controls and a deliberate omission. ``--resume`` restores
+        exactly the conversation asked for; ``--session-id`` assigns one the CLI
+        would otherwise have minted itself, which is what makes the identifier
+        knowable before the prompt is written rather than only after the CLI's
+        first record arrives. ``--fork-session`` is never passed, because it
+        answers "continue conversation X" with a different one — the silent
+        substitution this whole path exists to prevent.
+
+        An audit turn gets neither: it runs with ``--no-session-persistence``,
+        so there is no conversation to name, assign, or come back to.
+        """
+        if access.is_audit:
+            if resume_conversation_id is not None:
+                raise HarnessError(
+                    "a claude audit turn cannot resume conversation "
+                    f"{resume_conversation_id}; it persists no session"
+                )
+            return list(argv), None
+        if resume_conversation_id is not None:
+            return [*argv, "--resume", resume_conversation_id], resume_conversation_id
+        assigned = claude_stream.new_session_id()
+        return [*argv, "--session-id", assigned], assigned
 
     def open_transport(
         self,
@@ -2626,11 +2704,20 @@ class ClaudeAdapter(HarnessAdapter):
         spool = None
         if invocation.overlay_dir is not None:
             spool = claude_stream.ClaudeGuidanceSpool(invocation.overlay_dir / "spool")
+        assigned = invocation.assigned_conversation_id
         session = claude_stream.ClaudeStreamSession(
             process=process,
             prompt=prompt,
             spool=spool,
+            session_id=assigned,
         )
+        if lifecycle is not None and assigned is not None:
+            # Before the prompt, which is the submission: the identifier was
+            # settled on argv, so unlike a handshake transport this turn has
+            # nothing to learn first and no reason to submit before persisting.
+            # A sink that raises comes out of here as a ``ConversationCapture
+            # Error`` and the turn is abandoned with nothing written.
+            lifecycle.capture_conversation(assigned)
         # The prompt is the submission here, so this is the checkpoint: past it
         # the CLI is working, and a cancellation has to interrupt rather than
         # decline.
@@ -2739,20 +2826,68 @@ class ClaudeAdapter(HarnessAdapter):
         finally:
             claude_stream.remove_overlay(overlay_dir)
 
+        transport = opened[0] if opened else None
+        session = (
+            transport.session if isinstance(transport, _ClaudeStreamTransport) else None
+        )
         # A prompt that never reached the CLI produces a turn with no output
         # and no explanation. Saying so on stderr is the difference between a
         # diagnosable failure and a mysteriously empty one.
-        transport = opened[0] if opened else None
-        if isinstance(transport, _ClaudeStreamTransport):
-            prompt_error = transport.session.prompt_error
-            if prompt_error:
-                return dataclasses.replace(
+        if session is not None and session.prompt_error:
+            result = self._with_stderr_note(
+                result,
+                f"claude prompt was not delivered: {session.prompt_error}",
+            )
+        return self._with_continuity_note(
+            result,
+            session=session,
+            invocation=invocation,
+            access=access,
+            on_conversation=on_conversation,
+        )
+
+    def _with_continuity_note(
+        self,
+        result: HarnessResult,
+        *,
+        session: claude_stream.ClaudeStreamSession | None,
+        invocation: HarnessInvocation,
+        access: AccessProfile,
+        on_conversation: ConversationCallback | None,
+    ) -> HarnessResult:
+        """Report a turn whose conversation is not the one it was promised.
+
+        Two ways that happens, and neither aborts the turn. The identifier is
+        settled on argv, so by the time the CLI contradicts it in ``system``/
+        ``init`` the prompt is long gone and the workspace is being edited —
+        killing the turn there would throw away real work to protest a label.
+        And an audit turn persists no session at all, so a caller that asked
+        for one is owed the word ``unavailable`` rather than silence.
+
+        A mismatch also drops ``conversation_id``. The turn ran somewhere, but
+        not demonstrably where it said it would, and an identifier a later run
+        would resume on is exactly the thing that must not be guessed.
+        """
+        if session is not None and session.session_mismatch is not None:
+            note = f"claude session mismatch: {session.session_mismatch}"
+            return self._with_stderr_note(
+                dataclasses.replace(
                     result,
-                    stderr=(
-                        f"{result.stderr}claude prompt was not delivered: "
-                        f"{prompt_error}\n"
-                    ),
-                )
+                    continuity_unavailable=note,
+                    conversation_id=None,
+                ),
+                note,
+            )
+        if (
+            on_conversation is not None
+            and access.is_audit
+            and invocation.assigned_conversation_id is None
+        ):
+            note = "claude audit turn persists no session, so it names none"
+            return self._with_stderr_note(
+                dataclasses.replace(result, continuity_unavailable=note),
+                note,
+            )
         return result
 
 
