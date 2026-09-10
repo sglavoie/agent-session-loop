@@ -27,11 +27,22 @@ except where noted:
 - ``session/request_permission``, a server-to-client *request*: see
   :class:`PermissionPolicy` for why it is answered explicitly and why it can
   never grant more than the launch argv already did.
+- ``session/load``, which restores one *named* session instead of creating a
+  fresh one, restating the same configuration ``session/new`` states. It is
+  gated on the ``loadSession`` capability ``initialize`` advertises: an agent
+  that does not offer it makes the turn fail rather than quietly start a new
+  conversation under an old conversation's name.
+- ``session/cancel``, a notification that stops the turn in flight. There is
+  nothing to answer it with; the acknowledgment is the pending
+  ``session/prompt`` coming back with ``stopReason: "cancelled"``.
 
-Two calls are deliberately absent. ``session/cancel`` and ``session/load`` are
-what turn a copilot turn into an interruptible, resumable conversation, and
-neither is wired here: an adapter that could not be interrupted before is not
-made to look interruptible by this transport.
+Replay. ``session/load`` streams the whole prior conversation back as
+``session/update`` notifications *before* it answers, and none of it is this
+turn. Everything that arrives while the load is in flight is counted and
+rendered as nothing: it is not the turn's log, not the turn's final message,
+not new activity by the resumed worker, and not an acknowledgment of anything
+this turn asked for. Only the ``session/prompt`` response can complete a turn,
+and replay cannot produce one.
 
 Threading. Two threads touch a session and each has one job:
 
@@ -74,6 +85,12 @@ PROTOCOL_VERSION = 1
 #: Client identity sent with ``initialize``.
 CLIENT_NAME = "agent-session-loop"
 CLIENT_TITLE = "ASL"
+
+#: The agent capability that decides whether ``session/load`` may be called at
+#: all. Read from ``initialize``'s own answer rather than assumed from the
+#: version, because it is the agent -- not the protocol -- that either kept the
+#: session on disk or did not.
+AGENT_CAPABILITY_LOAD_SESSION = "loadSession"
 
 #: How long a handshake request may take before the turn is declared unusable.
 #: Generous, because ``session/new`` boots the agent's configured MCP servers.
@@ -130,6 +147,11 @@ _METHOD_NOT_FOUND = -32601
 #: to be told not to. Raising from it abandons the turn.
 SubmissionGate = Callable[[], None]
 
+#: What a session calls with the identifier of the session it will run in,
+#: between learning it and submitting any work. Raising from it abandons the
+#: turn: a conversation nothing recorded is one no later run could continue.
+ConversationSink = Callable[[str], None]
+
 
 class AcpError(Exception):
     """The ACP conversation cannot continue.
@@ -147,6 +169,16 @@ class _SubmissionRefused(Exception):
     Deliberately *not* an :class:`AcpError`. The agent is healthy and is simply
     being let go without work; recording a protocol error here would restate a
     cancellation as a harness that broke.
+    """
+
+
+class _ConversationNotRecorded(Exception):
+    """The session identifier could not be persisted, so nothing was sent.
+
+    Also not an :class:`AcpError`, and for the same reason: the agent answered
+    everything it was asked. What failed is on this side of the pipe, and a turn
+    submitted anyway would run its work into a conversation no later run could
+    find again.
     """
 
 
@@ -250,8 +282,15 @@ class CopilotAcpSession:
 
     Constructed around a spawned process, driven by :meth:`start`, fed by the
     harness reader, and torn down by :meth:`shutdown`. The turn it runs is the
-    only turn it will ever run: one session is created, one prompt is sent, and
-    the session closes its own stdin as soon as that prompt answers.
+    only turn it will ever run: one session is created or restored, one prompt
+    is sent, and the session closes its own stdin as soon as that prompt
+    answers.
+
+    ``resume_conversation_id`` names the session to restore instead of creating
+    a fresh one. It is a requirement, not a preference: a resume that cannot be
+    performed fails the turn rather than falling back to a new conversation,
+    which is the silent substitution the whole continuity contract exists to
+    prevent.
     """
 
     def __init__(
@@ -264,6 +303,8 @@ class CopilotAcpSession:
         expected_model: str | None = None,
         expected_effort: str | None = None,
         before_submit: SubmissionGate | None = None,
+        on_conversation: ConversationSink | None = None,
+        resume_conversation_id: str | None = None,
         request_timeout: float = REQUEST_TIMEOUT_SECONDS,
         shutdown_grace: float = SHUTDOWN_GRACE_SECONDS,
     ) -> None:
@@ -274,6 +315,8 @@ class CopilotAcpSession:
         self._expected_model = expected_model
         self._expected_effort = expected_effort
         self._before_submit = before_submit
+        self._on_conversation = on_conversation
+        self._resume_conversation_id = resume_conversation_id
         self._request_timeout = request_timeout
         self._shutdown_grace = shutdown_grace
 
@@ -285,14 +328,21 @@ class CopilotAcpSession:
 
         self._session_id: str | None = None
         self._agent_info: str | None = None
+        self._loads_sessions = False
+        self._resumed = False
+        self._replaying = False
+        self._replayed_updates = 0
+        self._live_updates = 0
         self._observed_model: str | None = None
         self._observed_effort: str | None = None
         self._option_mismatches: list[str] = []
         self._message_parts: list[str] = []
         self._stop_reason: str | None = None
         self._prompt_submitted = False
+        self._cancel_requested = False
         self._protocol_error: str | None = None
         self._submission_refused: str | None = None
+        self._conversation_error: str | None = None
         self._permission_decisions: list[PermissionDecision] = []
         self._closed_reason: str | None = None
         self._stdin_closed = False
@@ -313,6 +363,41 @@ class CopilotAcpSession:
         """The agent's own name and version, as ``initialize`` reported them."""
         with self._state_lock:
             return self._agent_info
+
+    @property
+    def loads_sessions(self) -> bool:
+        """Whether ``initialize`` advertised the ``loadSession`` capability."""
+        with self._state_lock:
+            return self._loads_sessions
+
+    @property
+    def resumed(self) -> bool:
+        """Whether this turn runs on a session ``session/load`` restored."""
+        with self._state_lock:
+            return self._resumed
+
+    @property
+    def replayed_updates(self) -> int:
+        """How many transcript updates the restored session replayed.
+
+        History, counted rather than rendered. It says the load really did
+        return a conversation without letting any of that conversation be
+        mistaken for something this turn did.
+        """
+        with self._state_lock:
+            return self._replayed_updates
+
+    @property
+    def live_updates(self) -> int:
+        """How many updates arrived as this turn's own activity.
+
+        Everything the agent said after the session was open and the replay, if
+        there was one, had finished. Zero on a resumed turn means the worker was
+        handed the prompt and said nothing new -- which a replayed transcript
+        must never be allowed to disguise.
+        """
+        with self._state_lock:
+            return self._live_updates
 
     @property
     def observed_model(self) -> str | None:
@@ -366,6 +451,18 @@ class CopilotAcpSession:
         """Why the turn was refused before ``session/prompt``, if it was."""
         with self._state_lock:
             return self._submission_refused
+
+    @property
+    def conversation_error(self) -> str | None:
+        """Why the session identifier was not persisted, if it was not."""
+        with self._state_lock:
+            return self._conversation_error
+
+    @property
+    def cancel_requested(self) -> bool:
+        """Whether ``session/cancel`` was sent for this turn."""
+        with self._state_lock:
+            return self._cancel_requested
 
     @property
     def permission_decisions(self) -> tuple[PermissionDecision, ...]:
@@ -527,11 +624,33 @@ class CopilotAcpSession:
         session_id = params.get("sessionId")
         with self._state_lock:
             expected = self._session_id
+            replaying = self._replaying
         if expected is not None and session_id is not None and session_id != expected:
             # Another session on the same agent said something. This session
             # owns one turn and must not log a stranger's work as its own.
             return ""
+        if replaying:
+            return self._note_replayed()
+        with self._state_lock:
+            self._live_updates += 1
         return self._render_update(update)
+
+    def _note_replayed(self) -> str:
+        """Count one replayed transcript update and render nothing for it.
+
+        ``session/load`` streams the restored conversation back before it
+        answers, and every part of treating that as this turn would be a lie.
+        Rendering it would reprint earlier turns into this turn's log -- prompt
+        echoes included, which is the one thing this transport exists to keep
+        out. Appending it would hand the caller an old answer as this turn's
+        final message. Counting it as activity would let a transcript stand in
+        for a worker that has not yet done, said, or acknowledged anything.
+        Completion is unreachable from here by construction: only the
+        ``session/prompt`` response carries a stop reason.
+        """
+        with self._state_lock:
+            self._replayed_updates += 1
+        return ""
 
     def _render_update(self, update: Mapping[str, Any]) -> str:
         kind = update.get("sessionUpdate")
@@ -595,8 +714,11 @@ class CopilotAcpSession:
         try:
             self._handshake()
             self._submit()
+        except _ConversationNotRecorded as error:
+            self._abandon_before_submission(conversation_error=str(error))
+            return
         except _SubmissionRefused as error:
-            self._abandon_before_submission(str(error))
+            self._abandon_before_submission(submission_refused=str(error))
             return
         except AcpError as error:
             self._note_protocol_error(str(error))
@@ -629,13 +751,114 @@ class CopilotAcpSession:
             },
         )
         self._adopt_initialize(response)
-        self._adopt_session(self._request("session/new", self._session_params()))
+        self._open_session()
+        # Between the session and the turn, which is the only ordering that
+        # makes continuity survive a crash: after this returns the identifier is
+        # durable, and before it returns there is no work to be lost.
+        self._capture_conversation(self._require_session_id())
+
+    def _open_session(self) -> None:
+        """Create a fresh session, or restore exactly the one asked for."""
+        resume = self._resume_conversation_id
+        if resume is None:
+            self._adopt_session(self._request("session/new", self._session_params()))
+            return
+        self._load_session(resume)
+
+    def _load_session(self, session_id: str) -> None:
+        """Restore one named session, or fail the turn saying why it could not.
+
+        Four refusals, and every one of them happens before anything is
+        submitted, because the alternative to each is a turn that ran somewhere
+        other than where it was told to:
+
+        - the agent never advertised ``loadSession``, so there is no restore to
+          attempt and a ``session/new`` here would be a fresh conversation
+          wearing an old conversation's name;
+        - the load failed, which includes the ordinary case of a session the
+          agent no longer has;
+        - the answer named a different session than the one requested;
+        - the replay could not be read, so what came back cannot be claimed to
+          be the conversation that was asked for.
+
+        The session is named *before* the request goes out, because the replay
+        arrives while it is still in flight and the notification filter has to
+        know which session owns it.
+        """
+        if not self.loads_sessions:
+            raise AcpError(
+                f"copilot did not advertise the {AGENT_CAPABILITY_LOAD_SESSION} "
+                f"capability, so conversation {session_id} cannot be continued"
+            )
+        params = self._session_params()
+        params["sessionId"] = session_id
+        with self._state_lock:
+            self._session_id = session_id
+            self._replaying = True
+        try:
+            try:
+                response = self._request("session/load", params)
+            except AcpError as error:
+                raise AcpError(
+                    f"could not restore conversation {session_id}: {error}"
+                ) from error
+            finally:
+                with self._state_lock:
+                    self._replaying = False
+            self._adopt_loaded_session(session_id, response)
+        except AcpError:
+            # No refused restore leaves a session id behind, whichever of the
+            # four refusals it was. The turn is over either way, and an
+            # identifier still sitting here would say this turn had a session
+            # it was in fact denied.
+            with self._state_lock:
+                self._session_id = None
+            raise
+
+    def _adopt_loaded_session(self, session_id: str, response: Any) -> None:
+        """Accept a restored session, or refuse one that is not the one asked for."""
+        # ``session/load`` answers with ``null`` in the base protocol and with a
+        # result object where the agent has something to restate; both are a
+        # successful restore, and only a *contradictory* one is not.
+        if response is None:
+            response = {}
+        if not isinstance(response, Mapping):
+            raise AcpError("session/load returned no result")
+        returned = response.get("sessionId")
+        if isinstance(returned, str) and returned and returned != session_id:
+            raise AcpError(
+                f"session/load returned session {returned!r}, expected {session_id!r}"
+            )
+        replay_error = self.protocol_error
+        if replay_error is not None:
+            detail = (
+                f"conversation {session_id} was not restored, "
+                f"its replayed transcript could not be read: {replay_error}"
+            )
+            # Overwritten rather than noted, which is the one place this class
+            # replaces a recorded error instead of keeping the first. The
+            # replay failure is already recorded and is what the turn's log
+            # would otherwise say -- a framing complaint, with nothing to
+            # connect it to the restore it actually killed.
+            with self._state_lock:
+                self._protocol_error = detail
+            raise AcpError(detail)
+        with self._state_lock:
+            self._session_id = session_id
+            self._resumed = True
+        self._adopt_config_options(response.get("configOptions"))
 
     def _session_params(self) -> dict[str, Any]:
-        # Model, effort, tool filters and repository grants are all launch
-        # flags on this agent rather than session parameters, so there is
-        # nothing to restate here: ``cwd`` names where the session runs and
-        # ``mcpServers`` is the empty list that adds none.
+        # The session's whole configuration, and the reason ``session/load``
+        # sends it too: a restored session is configured by this call rather
+        # than by whatever the session was configured with when it was last
+        # open, so restoring one without restating it would run the turn under
+        # a stale working directory and a stale server list.
+        #
+        # Model, effort, tool filters and repository grants are not here
+        # because they are launch flags on this agent rather than session
+        # parameters: ``cwd`` names where the session runs and ``mcpServers``
+        # is the empty list that adds none.
         return {"cwd": self._cwd, "mcpServers": []}
 
     def _adopt_initialize(self, response: Any) -> None:
@@ -651,14 +874,25 @@ class CopilotAcpSession:
                 f"agent negotiated acp protocol version {version!r}, "
                 f"expected {PROTOCOL_VERSION}"
             )
+        capabilities = response.get("agentCapabilities")
+        # ``is True`` rather than truthiness: a capability advertised in any
+        # other shape is one this client cannot claim was advertised, and the
+        # cost of guessing wrong is a resume that silently becomes a fresh
+        # conversation.
+        loads_sessions = (
+            isinstance(capabilities, Mapping)
+            and capabilities.get(AGENT_CAPABILITY_LOAD_SESSION) is True
+        )
         info = response.get("agentInfo")
+        label = ""
         if isinstance(info, Mapping):
             name = _text_or_empty(info.get("name"))
             agent_version = _text_or_empty(info.get("version"))
             label = " ".join(part for part in (name, agent_version) if part)
+        with self._state_lock:
+            self._loads_sessions = loads_sessions
             if label:
-                with self._state_lock:
-                    self._agent_info = label
+                self._agent_info = label
 
     def _adopt_session(self, response: Any) -> None:
         if not isinstance(response, Mapping):
@@ -729,6 +963,18 @@ class CopilotAcpSession:
         with self._state_lock:
             self._stop_reason = stop_reason
 
+    def _capture_conversation(self, session_id: str) -> None:
+        """Hand the session identifier to the caller, or abandon the turn."""
+        sink = self._on_conversation
+        if sink is None:
+            return
+        try:
+            sink(session_id)
+        except Exception as error:  # noqa: BLE001 - any failure is a refusal
+            raise _ConversationNotRecorded(
+                str(error) or type(error).__name__
+            ) from error
+
     def _gate_submission(self) -> None:
         """Ask the caller whether this turn may still be submitted."""
         gate = self._before_submit
@@ -739,14 +985,22 @@ class CopilotAcpSession:
         except Exception as error:  # noqa: BLE001 - any failure is a refusal
             raise _SubmissionRefused(str(error) or type(error).__name__) from error
 
-    def _abandon_before_submission(self, reason: str) -> None:
+    def _abandon_before_submission(
+        self,
+        *,
+        conversation_error: str | None = None,
+        submission_refused: str | None = None,
+    ) -> None:
         """End a healthy conversation that was told not to submit its turn.
 
         No protocol error is recorded, because none happened: the agent is
         working and is simply being let go without a prompt.
         """
         with self._state_lock:
-            self._submission_refused = reason
+            if conversation_error is not None:
+                self._conversation_error = conversation_error
+            if submission_refused is not None:
+                self._submission_refused = submission_refused
         self._turn_finished.set()
         self._close_stdin()
 
@@ -756,6 +1010,48 @@ class CopilotAcpSession:
         if session_id is None:
             raise AcpError("no acp session has been created")
         return session_id
+
+    # -- interruption ------------------------------------------------------
+
+    def cancel(self) -> bool:
+        """Tell the agent to stop the turn this session submitted.
+
+        A notification rather than a request, which is the protocol's own
+        shape: there is nothing to answer, and the acknowledgment is the pending
+        ``session/prompt`` coming back with ``cancelled`` instead of
+        ``end_turn``. It reports whether the cancellation was *sent*, not
+        whether the turn has stopped -- the caller is already on its way to a
+        forced termination, and the point of asking first is that the
+        conversation records the turn as cancelled rather than as one that
+        stopped answering, which is what a later turn resuming it reads.
+
+        Named with the session, like every other call here, so it can only ever
+        stop this session's turn. Never raises: every caller reaches for this
+        while tearing a turn down, where an exception would only obscure why
+        the turn ended.
+        """
+        with self._state_lock:
+            session_id = self._session_id
+            submitted = self._prompt_submitted
+            stopped = self._stop_reason is not None
+        if session_id is None or not submitted:
+            # Nothing was submitted, so there is no turn to cancel: a
+            # cancellation here already cost nothing.
+            return False
+        if stopped or self._turn_finished.is_set():
+            return False
+        if self._process.poll() is not None:
+            return False
+        with self._state_lock:
+            self._cancel_requested = True
+        try:
+            self._notify("session/cancel", {"sessionId": session_id})
+        except AcpError:
+            # Not a protocol error: the turn is ending regardless, and
+            # recording one here would restate a cancelled turn as a failed
+            # one. What was requested is reported by ``cancel_requested``.
+            return False
+        return True
 
     # -- transport primitives ----------------------------------------------
 
@@ -801,6 +1097,12 @@ class CopilotAcpSession:
         if pending.error is not None:
             raise AcpError(f"{method} failed: {pending.error}")
         return pending.result
+
+    def _notify(self, method: str, params: Mapping[str, Any] | None) -> None:
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            payload["params"] = dict(params)
+        self._write(payload)
 
     def _write(self, payload: Mapping[str, Any]) -> None:
         stdin = self._process.stdin

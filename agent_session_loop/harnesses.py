@@ -2997,11 +2997,16 @@ class _CopilotAcpTransport(HarnessTransport):
     def guidance_transport(self) -> guidance_delivery.GuidanceTransport | None:
         return _decline_active_steer
 
+    def interrupt(self) -> bool:
+        return self.session.cancel()
+
     def shutdown(self) -> None:
-        # No interrupt here: ``session/cancel`` is not wired on this transport,
-        # so the turn is ended the way every copilot turn has always been ended
-        # — the process is gone by the time the harness reaches its ``finally``,
-        # and this only releases the conversation that was talking to it.
+        # No cancel here, like the claude transport and unlike the app-server.
+        # By the time the harness reaches its ``finally`` the process has been
+        # waited on and the stdout readers abandoned, so a cancellation sent
+        # from here would have nothing left to stop and no reader to observe
+        # the ``cancelled`` stop reason it exists to produce. The execution
+        # window sends it, where both are still true.
         self.session.shutdown()
 
 
@@ -3010,6 +3015,8 @@ class CopilotAdapter(HarnessAdapter):
     skill_prefix = "/"
     enforces_audit_read_only = True
     delivers_guidance_next_turn = True
+    captures_conversations = True
+    resumes_conversations = True
 
     def build_argv(
         self,
@@ -3114,6 +3121,16 @@ class CopilotAdapter(HarnessAdapter):
             resume_conversation_id=resume_conversation_id,
         )
         if access.is_audit:
+            if resume_conversation_id is not None:
+                # The audit profile keeps the one-shot form, which holds no
+                # conversation at all. Refusing here rather than in
+                # ``open_transport`` is what stops the adapter's now-true
+                # ``resumes_conversations`` from letting an audit turn through
+                # to a transport that would ignore the request and run fresh.
+                raise HarnessError(
+                    "a copilot audit turn cannot resume conversation "
+                    f"{resume_conversation_id}; it runs one-shot and holds none"
+                )
             return invocation
         return dataclasses.replace(invocation, transport=TRANSPORT_ACP)
 
@@ -3126,6 +3143,15 @@ class CopilotAdapter(HarnessAdapter):
         lifecycle: TurnLifecycle | None = None,
     ) -> HarnessTransport | None:
         if invocation.transport != TRANSPORT_ACP:
+            if invocation.resume_conversation_id is not None:
+                # ``build_invocation`` already refuses this, so reaching it means
+                # a caller assembled the invocation itself. Refusing again is
+                # cheaper than the alternative, which is a turn that ran fresh
+                # while its caller believed it had continued something.
+                raise HarnessError(
+                    "a copilot one-shot turn cannot resume conversation "
+                    f"{invocation.resume_conversation_id}"
+                )
             # The audit turn submits nothing here: its prompt already went out
             # on argv, so there is no checkpoint to offer and a cancellation is
             # handled by the execution window like any other one-shot turn.
@@ -3145,6 +3171,17 @@ class CopilotAdapter(HarnessAdapter):
             ),
             expected_model=invocation.model,
             expected_effort=invocation.effort,
+            # Intent, carried through unchanged. The session either restores
+            # exactly this conversation or fails the turn; there is no path
+            # from here to a fresh one.
+            resume_conversation_id=invocation.resume_conversation_id,
+            # Runs on the driver thread between the session and the prompt, so
+            # the identifier is durable before any work is submitted. Like the
+            # gate below it cannot raise out of here, so the session records
+            # the failure and ``run`` restates it as the abandonment it is.
+            on_conversation=(
+                None if lifecycle is None else lifecycle.capture_conversation
+            ),
             # Runs on the session's driver thread, immediately before
             # ``session/prompt``. Its failure cannot be raised out of here --
             # the handshake is already backgrounded by then -- so the session
@@ -3225,6 +3262,16 @@ class CopilotAdapter(HarnessAdapter):
             on_conversation=on_conversation,
         )
         if not opened:
+            if on_conversation is not None and access.is_audit:
+                # The audit turn never opened a conversation, so nothing
+                # captured one. A caller that asked which conversation the turn
+                # ran on is owed the word "unavailable" rather than a silent
+                # ``None`` that reads like a transport that simply failed.
+                note = "copilot audit turn runs one-shot, so it names no conversation"
+                return self._with_stderr_note(
+                    dataclasses.replace(result, continuity_unavailable=note),
+                    note,
+                )
             return result
         return self._acp_result(result, opened[0])
 
@@ -3241,7 +3288,30 @@ class CopilotAdapter(HarnessAdapter):
         ``end_turn`` is one: ``refusal``, ``cancelled`` and either of the two
         budget exhaustions all describe a turn that stopped short of the work it
         was given.
+
+        Two outcomes are settled before that, because in both of them nothing
+        was submitted at all and the agent's clean exit describes a turn that
+        never started rather than one that succeeded.
         """
+        conversation_error = session.conversation_error
+        if conversation_error is not None:
+            # The session was refused the moment its identifier could not be
+            # persisted, before ``session/prompt``. Running the work anyway
+            # would spend the turn into a conversation nothing could find again,
+            # so the turn is reported abandoned and names no conversation --
+            # which is the whole reason it refused to run.
+            return self._with_stderr_note(
+                dataclasses.replace(
+                    result,
+                    returncode=_CONVERSATION_ABANDON_RETURNCODE,
+                    conversation_error=conversation_error,
+                    conversation_id=None,
+                    timed_out=False,
+                    aborted=False,
+                    interrupted=False,
+                ),
+                f"{self.name} turn abandoned: {conversation_error}",
+            )
         cancelled = session.cancelled_before_submission
         if cancelled is not None:
             # The same code and the same window the base run reports for a
@@ -3285,11 +3355,28 @@ class CopilotAdapter(HarnessAdapter):
         error = session.protocol_error
         if error is not None:
             notes.append(f"copilot acp: {error}")
+        if session.resumed:
+            # Both counts, because only their difference says what happened: a
+            # replayed transcript proves the conversation came back, and new
+            # activity is the only evidence the resumed worker did anything
+            # with it. A turn that replayed a hundred updates and produced none
+            # of its own must not read like a turn that worked.
+            notes.append(
+                f"copilot acp resumed conversation {session.session_id}: "
+                f"{session.replayed_updates} transcript updates replayed, "
+                f"{session.live_updates} new"
+            )
         stop_reason = session.stop_reason
         if stop_reason is not None and stop_reason != copilot_acp.STOP_REASON_END_TURN:
             notes.append(f"copilot acp stopped early: {stop_reason}")
         if stop_reason is None and session.prompt_submitted:
             notes.append("copilot acp turn ended without a stop reason")
+        if session.cancel_requested:
+            # Said whatever the turn ended as. The cancellation is issued
+            # alongside the forced kill, so the process usually dies before the
+            # prompt can answer ``cancelled`` -- and a turn's log that recorded
+            # only the kill would not say the conversation had been told.
+            notes.append("copilot acp cancelled the turn in flight")
         for mismatch in session.option_mismatches:
             notes.append(f"copilot acp launch control mismatch: {mismatch}")
         rejected = [

@@ -7,10 +7,10 @@ the happy path is chosen by ``FAKE_ACP_MODE`` so a test names the failure it
 wants instead of racing for it.
 
 What crossed the wire is recorded to ``FAKE_ACP_RECORD`` -- the launch argv, the
-negotiated client capabilities, the session parameters, the prompt, and every
-permission answer -- which is how the tests assert that the access restrictions
-really travelled the protocol and that the prompt never came back out in the
-turn's log.
+negotiated client capabilities, the session parameters, the restore parameters,
+the prompt, every permission answer, and every cancellation -- which is how the
+tests assert that the access restrictions really travelled the protocol and that
+the prompt never came back out in the turn's log.
 """
 
 from __future__ import annotations
@@ -29,15 +29,21 @@ RECORD_PATH = os.environ.get("FAKE_ACP_RECORD")
 #: Emitting both is the point -- the turn's log must contain neither.
 SESSION_ID = "acp-session-1"
 
+#: What ``session/load`` says it restored. Named so a test can prove the client
+#: refused a restore that came back as a different conversation.
+OTHER_SESSION_ID = "acp-session-somewhere-else"
+
 record: dict[str, Any] = {
     "argv": sys.argv[1:],
     "client_capabilities": None,
     "client_info": None,
     "protocol_version": None,
     "session_params": None,
+    "load_params": None,
     "prompt": None,
     "permissions": [],
     "unadvertised": [],
+    "cancelled": [],
 }
 
 
@@ -191,6 +197,59 @@ def _prompt_block() -> dict[str, Any]:
     return {"type": "text", "text": record["prompt"] or ""}
 
 
+#: The two texts a replayed transcript carries. Distinct from anything this
+#: turn produces, so a test can assert neither reached the log.
+REPLAYED_PROMPT = "the prompt of the turn that came before"
+REPLAYED_ANSWER = "what the earlier turn answered\n"
+
+
+def _replay() -> None:
+    """Stream the restored conversation back, the way ``session/load`` does.
+
+    Sent before the load is answered and shaped like a real transcript: an
+    earlier prompt echo, an earlier tool call, and an earlier answer. Every one
+    of them is something the turn's log must not gain and the turn's final
+    message must not become.
+    """
+    _update({"sessionUpdate": "user_message_chunk", "content": _replayed_prompt()})
+    _update(
+        {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "old-tool-1",
+            "title": "an earlier command",
+            "kind": "execute",
+            "status": "completed",
+        }
+    )
+    _update(
+        {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": REPLAYED_ANSWER},
+        }
+    )
+
+
+def _replayed_prompt() -> dict[str, Any]:
+    return {"type": "text", "text": REPLAYED_PROMPT}
+
+
+def _wait_for_cancel() -> None:
+    """Read messages until the client cancels the turn, and record it.
+
+    A mode rather than a timer: the fake holds the turn open until the
+    cancellation actually arrives, so the test asserts on an ordering instead of
+    racing one.
+    """
+    while True:
+        message = _read_message()
+        if message is None:
+            return
+        if message.get("method") == "session/cancel":
+            record["cancelled"].append(message.get("params"))
+            _save()
+            return
+
+
 def main() -> int:
     # Recorded before anything is read, so a turn that never speaks ACP -- the
     # audit profile's one-shot form -- still says what it was launched with.
@@ -217,6 +276,11 @@ def main() -> int:
         method = message.get("method")
         params = message.get("params") or {}
         if "id" not in message:
+            # A notification. ``session/cancel`` is the only one this client
+            # sends, and it is answered by the pending prompt rather than here.
+            if method == "session/cancel":
+                record["cancelled"].append(params)
+                _save()
             continue
         request_id = message["id"]
 
@@ -235,13 +299,18 @@ def main() -> int:
                 )
                 return 3
             version = 99 if MODE == "future-protocol" else 1
+            capabilities: dict[str, Any] = {"loadSession": True}
+            if MODE == "no-load-capability":
+                # The build that kept no session on disk. It says so here, which
+                # is the only place the client can find out.
+                capabilities = {"loadSession": False}
             _send(
                 {
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "result": {
                         "protocolVersion": version,
-                        "agentCapabilities": {"loadSession": True},
+                        "agentCapabilities": capabilities,
                         "agentInfo": {"name": "FakeCopilot", "version": "0.0.1"},
                     },
                 }
@@ -259,6 +328,27 @@ def main() -> int:
                     },
                 }
             )
+        elif method == "session/load":
+            record["load_params"] = params
+            _save()
+            if MODE == "load-missing":
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32602, "message": "no such session"},
+                    }
+                )
+                continue
+            # The transcript comes back *before* the answer, which is the
+            # ordering the client has to survive: it is already filtering
+            # notifications for this session by the time the load returns.
+            _replay()
+            result: dict[str, Any] = {"configOptions": _config_options()}
+            if MODE == "load-drift":
+                # Restored something, but not what was asked for.
+                result["sessionId"] = OTHER_SESSION_ID
+            _send({"jsonrpc": "2.0", "id": request_id, "result": result})
         elif method == "session/prompt":
             record["prompt"] = _text_of(params.get("prompt"))
             _save()
@@ -267,6 +357,9 @@ def main() -> int:
                 # downstream may report it as a clean run.
                 return 9
             stop_reason = _run_turn()
+            if MODE == "cancel":
+                _wait_for_cancel()
+                stop_reason = "cancelled"
             _send(
                 {
                     "jsonrpc": "2.0",

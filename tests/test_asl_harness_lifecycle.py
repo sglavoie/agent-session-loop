@@ -898,7 +898,7 @@ class ShippedAdapterCapabilityTests(unittest.TestCase):
     #: The adapters whose transports actually capture and resume today. Named
     #: rather than derived, so wiring a harness is a deliberate edit here and
     #: not something a flipped class flag can do quietly.
-    WIRED = frozenset({"codex", "claude"})
+    WIRED = frozenset({"codex", "claude", "copilot"})
 
     def test_only_wired_adapters_capture_or_resume(self) -> None:
         for name in harnesses.HARNESS_NAMES:

@@ -234,6 +234,7 @@ INTEGRATION_MODULES = (
     "tests.test_asl_harness_integration",
     "tests.test_asl_codex_app_server",
     "tests.test_asl_copilot_acp",
+    "tests.test_asl_copilot_resume",
     "tests.test_asl_workbench_server",
     "tests.test_asl_review_lifecycle",
     "tests.test_asl_workbench_static",

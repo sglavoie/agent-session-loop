@@ -308,7 +308,7 @@ class CapabilityReportTests(ConversationTestBase):
         flipping a flag by accident fails here instead of silently offering an
         operator a recovery no transport performs."""
         report = conversations.capability_report()
-        self.assertEqual(("codex", "claude"), report.available_harnesses)
+        self.assertEqual(("codex", "claude", "copilot"), report.available_harnesses)
 
     def test_report_round_trips(self) -> None:
         report = conversations.capability_report()

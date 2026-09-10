@@ -4732,10 +4732,45 @@ payload could only be a weaker guess at the same rule.
 An audit turn keeps the one-shot form exactly as it was. Its restrictions are
 its command line — a fixed `--available-tools` set, denied tool families, no
 built-in MCPs, no remote, no temp directory — and nothing about observing a
-repository needs a conversation, so it does not get one. Both transports decline
-a mid-turn steer with `unsupported-active-steer` rather than ignoring it, and
-neither wires `session/cancel` or `session/load`: a copilot turn is stopped the
-way it always was, and `copilot` remains `staged` for conversation continuity.
+repository needs a conversation, so it does not get one. It refuses a resume
+outright, both when its invocation is built and again at the transport, and a
+caller that asks it which conversation it ran on is told that it names none
+rather than handed a silent `None`. Both transports decline a mid-turn steer
+with `unsupported-active-steer` rather than ignoring it; that behavior is
+unchanged.
+
+The ACP session carries the conversation. Its identifier is whatever
+`session/new` returned or whatever `session/load` restored, and it is captured
+between the session and the prompt — after there is a session to name and before
+there is work to lose — so a sink that fails abandons the turn rather than
+spending it into a conversation nothing could find again. Resuming calls
+`session/load` and never `session/new`: a fresh session standing in for a failed
+restore would be a new conversation wearing an old conversation's name. Four
+things refuse the restore before the prompt is sent — an agent that never
+advertised `loadSession` in its `initialize` answer, a load that failed, an
+answer naming a different session than the one requested, and a replayed
+transcript that could not be read — and the restore restates this turn's working
+directory and empty MCP server list rather than inheriting whatever the session
+was last opened with.
+
+The replay itself has no analogue in the other two transports. `session/load`
+streams the entire prior conversation back as `session/update` notifications
+*before* it answers, and none of it belongs to this turn: it is not the turn's
+log, not the turn's final message, not new activity by the resumed worker, and
+not an acknowledgment. Replayed updates render nothing and are counted apart
+from live ones, which is what keeps a replayed prompt echo out of a persisted
+artifact and what lets the turn's stderr say how much transcript came back and
+how much the worker actually did. A replay cannot finish a turn: only the
+`session/prompt` response carries a stop reason.
+
+Stopping a turn is said to the conversation as well as to the process.
+`session/cancel` is a notification rather than a request — the protocol's
+acknowledgment is the pending `session/prompt` returning `cancelled` — and it is
+sent once, naming the session, beside the wait loop's forced kill. Nothing is
+sent from shutdown, following claude's stream-JSON transport rather than the
+codex app-server, because by then the process is reaped and the readers
+abandoned. A cancellation that cannot be written reports that it was not sent
+instead of recording a protocol error, since the turn is ending regardless.
 
 There is no fallback from ACP to the one-shot form. It is the same binary with
 the same flags reading its prompt from a pipe, so a conversation that fails after
@@ -5206,12 +5241,12 @@ Conversation-continuity capability is reported per harness as `available`,
 once. The state is derived from the harness adapters rather than declared
 beside them: a harness is `available` exactly when its adapter both reports the
 conversation a turn ran on and accepts one to resume, which is the same pair of
-flags a turn checks when it refuses a capture sink or a resume intent. `codex`
-and `claude` are `available`; `copilot` remains `staged`, because the reference,
-intent, report, durable ledger, and the turn-lifecycle seam described below
-exist for it but its adapter neither captures a native identifier nor resumes
-against one, and an operator action backed by incomplete recovery must not be
-offered.
+flags a turn checks when it refuses a capture sink or a resume intent. `codex`,
+`claude`, and `copilot` are all `available` today. `staged` is the state for a
+harness the reference, intent, report, durable ledger, and turn-lifecycle seam
+already exist for but whose adapter neither captures a native identifier nor
+resumes against one, because an operator action backed by incomplete recovery
+must not be offered.
 
 The turn boundary is where a native identifier is settled, so the seam that
 carries it is part of a harness turn rather than part of the ledger. A transport
