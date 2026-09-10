@@ -105,6 +105,12 @@ PROCESS_SWEEP_EVENT = "process_sweep"
 # pause or failure reason, so the turn keeps the status its own exit code
 # earned, and a closure that recurs every launch is recorded instead of silent.
 HARNESS_DEGRADED_EVENT = "harness_degraded"
+# Appended once per turn, before the harness starts, stating which conversation
+# the turn was decided to run on and why. Recorded even when the answer is
+# "open a new one", because the interesting question months later is which turns
+# did *not* continue what came before -- and a decision only recorded when it
+# went wrong leaves no baseline to read that against.
+CONVERSATION_CONTINUATION_EVENT = "conversation_continuation"
 STATE_FILE_NAME = "state.json"
 EVENTS_FILE_NAME = "events.jsonl"
 RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED = "stop-after-current-requested"
@@ -260,6 +266,13 @@ PAUSE_REASON_PLAN_ARTIFACT_TAMPERED = "plan-artifact-tampered"
 # append-only history, so a resumed run reaches the same verdict.
 PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE = "required-checks-incomplete"
 PAUSE_REASON_REVIEW_NOT_CLEAR = "review-not-clear"
+# The durable conversation bound to this plan session cannot be resumed: the
+# ledger holds no confirmed conversation for it, the recorded binding no longer
+# matches this run's workspace/access profile, or the record is unreadable.
+# Continuity is exact-or-refusal, so the run stops instead of silently opening a
+# second conversation. Clearing it is an operator decision — relaunch with the
+# one-use ``--fresh-conversation`` authorization — never an automatic retry.
+PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED = "conversation-recovery-required"
 
 # The subset of harness-failure categories that a supervisor may safely retry
 # by relaunching the same session. Quota, authentication, invalid-model, and
@@ -301,6 +314,7 @@ PAUSE_REASONS: tuple[str, ...] = (
     PAUSE_REASON_PLAN_ARTIFACT_TAMPERED,
     PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE,
     PAUSE_REASON_REVIEW_NOT_CLEAR,
+    PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
     PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     PAUSE_REASON_QUOTA_EXHAUSTED,
     PAUSE_REASON_AUTH_FAILED,

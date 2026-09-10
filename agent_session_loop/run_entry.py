@@ -144,9 +144,21 @@ class LockedRun(Protocol):
 # Derived from ``RUN_FLAG_SPEC`` so new ordinary run flags join the overlay
 # automatically. Exclusions are flags that are positional, helper-owned, or
 # persisted under a different key (``state_dir_override``) / canonical alias.
+#
+# ``fresh_conversation`` is excluded for a stronger reason than the others, and
+# the exclusion is load-bearing rather than tidy: it is a one-use authorization
+# to discard an agent's accumulated conversation, granted for the one turn that
+# needs it. An overlaid flag is replayed on every later ``--resume``, so leaving
+# it in would turn a single deliberate "start over" into a standing licence to
+# start over — silently, on runs the operator never re-authorized. Its
+# counterpart at the other replay surface is
+# ``asl_autopilot._CHILD_RUN_ARG_SKIP_DESTS``; both have to hold for the
+# authorization to stay single-use, and ``run_payloads._run_config_payload``
+# completes the containment by persisting no key for it at all.
 _RESUME_OVERLAY_EXCLUDED_DESTS = frozenset(
     {
         "dry_run",
+        "fresh_conversation",
         "json",
         "max_review_fix_plans",
         "plan_dir",

@@ -81,6 +81,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import (
+    conversation_resume,
     events,
     handoff_guards,
     mailbox,
@@ -98,6 +99,7 @@ from . import (
     run_persistence,
     run_prompts,
     run_selection,
+    state,
     task_packet,
     turn_execution,
     verification,
@@ -337,6 +339,76 @@ def prepare_review_session(
         ),
         paused=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Which conversation this turn runs on
+# ---------------------------------------------------------------------------
+
+
+def prepare_turn_continuation(
+    ctx: RunContext,
+    *,
+    snapshot: plans.PlanSnapshot,
+    args: argparse.Namespace,
+    cwd: Path,
+    harness: str,
+    session_id: str,
+    session_details: dict[str, Any],
+    session_scope: plans.SessionScope | None,
+    workspace: workspaces.ResolvedWorkspace | None,
+    authorization: conversation_resume.FreshConversationAuthorization,
+) -> conversation_resume.TurnContinuation:
+    """Decide this turn's conversation, record the decision, and pause if refused.
+
+    Placed here rather than in the run loop for the same reason
+    :func:`prepare_turn_prompt` is: it is a decision made from the plan and the
+    run's durable state, before anything is launched, and the loop's job is to
+    honour ``paused`` rather than to re-derive when a turn may start.
+
+    The binding is rebuilt from *this* run's workspace, access profile and
+    writable aliases every turn — never carried forward — because the whole
+    point of the check is to notice when one of them stopped matching what the
+    conversation was recorded under.
+    """
+    plan_state = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
+    binding = conversation_resume.turn_binding(
+        plan_dir=snapshot.plan_dir,
+        session_id=session_id,
+        harness=harness,
+        cwd=cwd,
+        workspace=workspace,
+        # The *writable* aliases only. A session whose advisory read set
+        # widened is still doing the same work in the same places; one whose
+        # write set changed is not, and continuing an agent that believes it
+        # may still write somewhere it no longer may is the failure this field
+        # exists to catch.
+        scope_aliases=() if session_scope is None else tuple(session_scope.writes),
+    )
+    continuation = conversation_resume.plan_turn_continuation(
+        plan_state, binding=binding, authorization=authorization
+    )
+    ctx.persistence.append_event(
+        ctx.event_path,
+        events.CONVERSATION_CONTINUATION_EVENT,
+        {
+            "run_id": ctx.run_id,
+            **plans.session_identity_payload(session_id),
+            **continuation.describe(),
+        },
+    )
+    if not continuation.paused:
+        return continuation
+    ctx.record_final_snapshot(snapshot)
+    ctx.pause(
+        reason=conversation_resume.RECOVERY_PAUSE_REASON,
+        message=conversation_resume.recovery_message(continuation),
+        details={
+            **session_details,
+            "conversation_recovery": continuation.describe(),
+        },
+    )
+    return continuation
 
 
 # ---------------------------------------------------------------------------

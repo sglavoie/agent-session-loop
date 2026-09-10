@@ -2520,6 +2520,12 @@ GENERIC_RECOVERY_PAUSE_REASONS: tuple[str, ...] = (
     # unreadable, so the repair is to the evidence capture — a readable
     # worktree, a working git probe — not to anything an operator can say.
     "guard-protected-path-unavailable",
+    # The durable conversation bound to the pending session cannot be resumed
+    # exactly (Session 7). The operator inspects the recorded binding and either
+    # repairs it or relaunches with the one-use `--fresh-conversation`
+    # authorization; the workbench deliberately offers no button for the latter,
+    # since discarding an agent's accumulated context is not a one-click action.
+    "conversation-recovery-required",
 )
 
 

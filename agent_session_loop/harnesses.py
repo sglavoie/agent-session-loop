@@ -1354,6 +1354,7 @@ class HarnessAdapter:
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
         on_conversation: ConversationCallback | None = None,
+        resume_conversation_id: str | None = None,
     ) -> HarnessResult:
         if invocation is None:
             invocation = self.build_invocation(
@@ -1371,6 +1372,23 @@ class HarnessAdapter:
                 # by the caller so the argv that runs is the argv the guards
                 # were compiled into.
                 env=env,
+                resume_conversation_id=resume_conversation_id,
+            )
+        elif (
+            resume_conversation_id is not None
+            and resume_conversation_id != invocation.resume_conversation_id
+        ):
+            # A prebuilt invocation is the argv that will actually run, so it
+            # wins — but it would win silently. A caller that named one
+            # conversation while handing over an invocation naming another (or
+            # none) would be told it continued something it did not, which is
+            # the substitution this whole path exists to prevent. Saying
+            # nothing is still allowed: a caller that passes only an invocation
+            # asked for nothing, so the invocation contradicts nothing.
+            raise HarnessError(
+                f"{self.name} was asked to resume {resume_conversation_id} but "
+                "the invocation it was given resumes "
+                f"{invocation.resume_conversation_id or 'no conversation'}"
             )
         # Both refusals are the same rule read from both ends: a caller must
         # not be told a conversation was captured or continued by an adapter
@@ -2296,6 +2314,7 @@ class CodexAdapter(HarnessAdapter):
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
         on_conversation: ConversationCallback | None = None,
+        resume_conversation_id: str | None = None,
     ) -> HarnessResult:
         """Run the turn on the app-server, falling back only before it starts.
 
@@ -2334,6 +2353,7 @@ class CodexAdapter(HarnessAdapter):
                     invocation=invocation,
                     on_transport=observer,
                     on_conversation=on_conversation,
+                    resume_conversation_id=invocation.resume_conversation_id,
                 )
             )
 
@@ -2347,6 +2367,7 @@ class CodexAdapter(HarnessAdapter):
                 model=model,
                 effort=effort,
                 access=access,
+                resume_conversation_id=resume_conversation_id,
             )
 
         # Captured rather than stored on ``self``: one adapter instance serves
@@ -2381,6 +2402,7 @@ class CodexAdapter(HarnessAdapter):
             invocation=invocation,
             on_transport=capture,
             on_conversation=on_conversation,
+            resume_conversation_id=invocation.resume_conversation_id,
         )
         if not opened:
             window.release()
@@ -2440,6 +2462,7 @@ class CodexAdapter(HarnessAdapter):
                 invocation=legacy,
                 on_transport=observer,
                 on_conversation=on_conversation,
+                resume_conversation_id=legacy.resume_conversation_id,
             )
         )
         return self._with_stderr_note(
@@ -2764,6 +2787,7 @@ class ClaudeAdapter(HarnessAdapter):
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
         on_conversation: ConversationCallback | None = None,
+        resume_conversation_id: str | None = None,
     ) -> HarnessResult:
         """Run the turn, arming its guidance hook for the turn's lifetime only.
 
@@ -2783,6 +2807,7 @@ class ClaudeAdapter(HarnessAdapter):
                 model=model,
                 effort=effort,
                 access=access,
+                resume_conversation_id=resume_conversation_id,
             )
         overlay_dir: Path | None = None
         if invocation.transport == TRANSPORT_STREAM_JSON and not access.is_audit:
@@ -2834,6 +2859,7 @@ class ClaudeAdapter(HarnessAdapter):
                 invocation=invocation,
                 on_transport=capture,
                 on_conversation=on_conversation,
+                resume_conversation_id=invocation.resume_conversation_id,
             )
         finally:
             claude_stream.remove_overlay(overlay_dir)
@@ -3222,6 +3248,7 @@ class CopilotAdapter(HarnessAdapter):
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
         on_conversation: ConversationCallback | None = None,
+        resume_conversation_id: str | None = None,
     ) -> HarnessResult:
         """Run the turn, then report what the protocol said rather than argv.
 
@@ -3260,6 +3287,11 @@ class CopilotAdapter(HarnessAdapter):
             invocation=invocation,
             on_transport=capture,
             on_conversation=on_conversation,
+            resume_conversation_id=(
+                resume_conversation_id
+                if invocation is None
+                else invocation.resume_conversation_id
+            ),
         )
         if not opened:
             if on_conversation is not None and access.is_audit:
@@ -3444,8 +3476,17 @@ def run_harness(
     live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
     env: Mapping[str, str] | None = None,
     on_conversation: ConversationCallback | None = None,
+    resume_conversation_id: str | None = None,
 ) -> HarnessResult:
-    """Run one harness turn through the selected adapter."""
+    """Run one harness turn through the selected adapter.
+
+    ``resume_conversation_id`` is the request half of continuity: the adapter
+    builds its invocation to continue exactly that native conversation, or
+    raises when it cannot. ``on_conversation`` is the capture half, called with
+    the identifier the turn actually runs on before any work is submitted. They
+    are independent -- a first turn captures without resuming -- and neither
+    ever falls back to a different conversation.
+    """
     return get_adapter(name).run(
         cwd=cwd,
         plan_dir=plan_dir,
@@ -3464,6 +3505,7 @@ def run_harness(
         live_delivery=live_delivery,
         env=env,
         on_conversation=on_conversation,
+        resume_conversation_id=resume_conversation_id,
     )
 
 

@@ -1885,6 +1885,16 @@ class TurnLaunch:
     #: earliest point at which guidance carried in that prompt can honestly be
     #: called delivered, and the latest at which it is still this turn's news.
     on_prompt_accepted: Callable[[], None] | None = None
+    #: The native conversation this turn continues, or ``None`` to let the
+    #: harness open one. Exact-or-refusal: an adapter that cannot restore this
+    #: identifier fails the turn rather than running a fresh conversation, so a
+    #: caller is never told it continued something it did not.
+    resume_conversation_id: str | None = None
+    #: Called with the identifier the turn actually runs on, on the harness's
+    #: own driver thread and before any work is submitted. The durable write
+    #: belongs here, ahead of the turn, so a crash mid-turn still leaves the
+    #: conversation findable. Never called by an adapter that cannot report one.
+    on_conversation: harnesses.ConversationCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -1981,6 +1991,8 @@ class TurnExecutor:
                 abort=launch.abort,
                 live_delivery=launch.live_delivery,
                 env=launch.env,
+                on_conversation=launch.on_conversation,
+                resume_conversation_id=launch.resume_conversation_id,
             )
         except KeyboardInterrupt:
             result = harnesses.HarnessResult(

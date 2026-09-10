@@ -345,6 +345,21 @@ class ResumeOverlayTests(unittest.TestCase):
         # `run_payloads._run_config_payload` has to seed every overlay dest.
         self.assertEqual(default, args.note)
 
+    def test_resume_never_rehydrates_the_fresh_conversation_authorization(
+        self,
+    ) -> None:
+        # `--fresh-conversation` authorizes discarding one agent's accumulated
+        # context, once. A resume that restored it from persisted state would
+        # make every later resume of that run start over silently, so the dest
+        # is excluded from the overlay and the payload writes no key for it --
+        # this pins the behaviour even against a state file that carries one.
+        fixture = _EntryFixture(self, ("pending",))
+        fixture.write_state_payload({"run_config": {"fresh_conversation": True}})
+        tokens = fixture.tokens("--resume")
+        args = run_entry._apply_resume_config(_parse(tokens), tokens[1:])
+        self.assertFalse(args.fresh_conversation)
+        self.assertNotIn("fresh_conversation", run_entry._RESUME_OVERLAY_DESTS)
+
     def test_the_deprecated_cap_alias_marks_the_canonical_dest_explicit(self) -> None:
         explicit = run_entry._explicit_resume_dests(
             ["run", "plan-dir", "--max-review-fix-plans", "9"]

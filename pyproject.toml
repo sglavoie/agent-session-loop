@@ -117,6 +117,7 @@ module = [
     "agent_session_loop.control_cli",
     "agent_session_loop.control_queue",
     "agent_session_loop.control_signal",
+    "agent_session_loop.conversation_resume",
     "agent_session_loop.conversations",
     "agent_session_loop.copilot_acp",
     "agent_session_loop.diagnostics_export",

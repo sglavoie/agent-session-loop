@@ -386,9 +386,17 @@ def _build_run_parser() -> _RunArgumentParser:
     return parser
 
 
+# Dests the reconstructed child ``asl run`` argv never carries. Most are
+# helper-owned or supplied separately; ``fresh_conversation`` is here because it
+# is a one-use operator authorization to discard a saved conversation. The
+# helper relaunches the same session on every recoverable pause, so forwarding
+# it would re-authorize a fresh start on each retry — turning one deliberate
+# decision into a standing one. Its counterpart at the other replay surface is
+# ``run_entry._RESUME_OVERLAY_EXCLUDED_DESTS``.
 _CHILD_RUN_ARG_SKIP_DESTS = frozenset(
     {
         "dry_run",
+        "fresh_conversation",
         "json",
         "max_review_fix_plans",
         "plan_dir",

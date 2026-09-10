@@ -5305,6 +5305,59 @@ imports nothing that imports the state module, taking a plan *state directory*
 rather than a plan directory, which is what keeps migration's dependency
 one-way.
 
+#### What a turn decides, and the one-use fresh start
+
+The ledger answers what may be continued; the run decides what this turn does
+about it, once, before the turn starts. That decision has exactly three
+outcomes and no fourth: continue the saved conversation by naming its native
+identifier to the adapter; open one, because this session has never had one;
+or stop with `conversation-recovery-required`. Whichever it is, the turn
+appends a `conversation_continuation` event before the harness starts — recorded
+even when the answer is "open a new one", because the interesting question
+months later is which turns did *not* continue what came before, and a decision
+only recorded when it went wrong leaves no baseline to read that against.
+
+`absent` and `resumable` are the two selection states that proceed; the other
+four stop. A session's first turn needs no authorization, since nothing is being
+discarded. Everything else does, and the authorization is `--fresh-conversation`:
+one fresh harness conversation, for the first turn that needs it, with retained
+files and outstanding feedback kept and the agent's accumulated context not. The
+turn that spends it retires the conversation it supersedes with reason
+`superseded`, so the ledger says why the old one stopped being used.
+
+The flag is one-use in four places, and all four are needed because each covers
+a replay the others do not: an in-run counter, so a later turn, the next
+session, or a generated repair child reads an exhausted authorization; the
+`asl run --resume` overlay, which rehydrates flags from persisted state and
+excludes this dest; the supervisor's child-argv builder, which relaunches the
+same session on every recoverable pause and skips this dest; and
+`run_config`, which persists no key for it at all, so there is nothing on disk
+for a fourth surface to find. `conversation-recovery-required` is classified
+environment-blocked rather than recoverable for the same reason: a supervisor
+retry that "recovered" it would be a retry that started over without anyone
+deciding to.
+
+What is bound is what would invalidate the work: the workspace root and registry
+digest, the access profile, and the writable repository scope aliases. What is
+not bound is what an operator legitimately changes between attempts — model,
+effort, timeout, and spark routing — none of which makes an agent's accumulated
+context wrong. A plan with no repository registry is bound by a digest
+synthesized from its canonical root, which is an identity rather than a
+registry: it proves the run's root is the root the conversation was recorded
+under, so a run pointed at a different `--cwd` reads as `incompatible` and stops.
+
+After the turn, the conversation is confirmed only if the turn actually
+submitted work — a turn abandoned at the capture seam, or cancelled in the
+`unstarted` or `handshake` stage, leaves it unconfirmed, because resuming into
+nothing is indistinguishable from resuming into a conversation whose work was
+lost. A turn that was interrupted, aborted, timed out, cancelled after work
+began, or exited non-zero is still confirmed and still resumable; it records an
+attempt (run ID, turn, and `interrupted` or `failed`) so the next turn knows
+what it is picking up. Those post-turn writes report their failures rather than
+raising: the turn has already run, and a bookkeeping error must not be what
+loses it. A lost confirmation fails closed — the next attempt reads
+`unconfirmed` and asks the operator.
+
 Durable mailbox, event, and state-ledger writes issue `fcntl(F_FULLFSYNC)` on
 Darwin so completed records cross the device cache. Filesystems that reject
 that device barrier as unsupported fall back to `fsync`; other platforms use
@@ -6249,6 +6302,19 @@ Common pause reasons:
   clear nor convict the turn. Fail-closed for the same reason as
   `workspace-write-guard-unavailable`: repair the evidence rather than dropping
   the guard. Also an inspect-and-repair pause.
+- `conversation-recovery-required`: the durable conversation bound to this plan
+  session exists but cannot be continued — the ledger holds no confirmed
+  conversation for it, the recorded binding no longer matches this run's
+  workspace or access profile, the conversation was retired, or the ledger
+  itself is unreadable. Continuity is exact-or-refusal, so the run stops rather
+  than opening a second conversation for a session that already has one. The
+  pause carries a `conversation_recovery` block with the disposition, the
+  selection state, the session and harness, and the named mismatched binding
+  fields. Repair by re-running with the workspace and harness the conversation
+  was recorded under, or by authorizing one fresh start with
+  `--fresh-conversation`; there is no mailbox reply that resolves it and no
+  automatic retry that clears it, because discarding an agent's accumulated
+  context is an operator decision.
 - `review-mutated-worktree`: the review harness changed repo content outside
   the plan directory. The pre/post fingerprint covers the working tree's
   `HEAD`, tracked diff, the separate `--cached` (index) diff — so staging a
@@ -6502,7 +6568,8 @@ failures that carry no question context (`quota-exhausted`, `auth-failed`,
 precondition (`commit-preflight`, `commit-failed`,
 `repository-registry-required`, `workspace-repository-contention`,
 `not-loop-ready`, `required-checks-incomplete`, `review-not-clear`,
-`guard-protected-path-changed`, `guard-protected-path-unavailable`); and the
+`guard-protected-path-changed`, `guard-protected-path-unavailable`,
+`conversation-recovery-required`); and the
 verdicts a post-turn guard reached along with the turn outcomes nobody asked a
 question about (`workspace-write-scope-violation`,
 `workspace-write-guard-unavailable`, `review-guard-unavailable`,

@@ -70,6 +70,7 @@ from . import (
     clock,
     commit_groups,
     commit_settlement,
+    conversation_resume,
     durability,
     events,
     guards,
@@ -1382,6 +1383,15 @@ def run_locked(
     )
     pending_exception_guard: dict[str, Any] | None = None
 
+    # Built once per run, deliberately. `--fresh-conversation` authorizes one
+    # fresh start, and a run may take many turns across many sessions; a value
+    # rebuilt per turn would re-grant the same permission on every one of them.
+    # Nothing persists it, so a later `asl run --resume` or a supervisor
+    # relaunch starts from an ungranted authorization however this run ends.
+    fresh_conversation = conversation_resume.FreshConversationAuthorization(
+        bool(getattr(args, "fresh_conversation", False))
+    )
+
     def disarm_exception_guard() -> None:
         """Retire the crash-path copy of the write guard for this turn.
 
@@ -1664,6 +1674,23 @@ def run_locked(
             )
             if turn_prompt.paused:
                 break
+            continuation = turn_preparation.prepare_turn_continuation(
+                ctx,
+                snapshot=before,
+                args=args,
+                cwd=cwd,
+                harness=turn_harness,
+                session_id=session_id,
+                session_details=session_details,
+                session_scope=session_scope,
+                workspace=workspace,
+                authorization=fresh_conversation,
+            )
+            if continuation.paused:
+                break
+            conversation_capture = continuation.capture(
+                state.plan_state_dir(before.plan_dir, args.state_dir)
+            )
             prompt = turn_prompt.prompt
             reply_source_meta = turn_prompt.reply_source
             resolution_source_meta = turn_prompt.resolution_source
@@ -1885,6 +1912,8 @@ def run_locked(
                         model=requested_model,
                         effort=requested_effort,
                     ),
+                    resume_conversation_id=continuation.resume_conversation_id,
+                    on_conversation=conversation_capture,
                 ),
                 live_turn=live_turn,
                 active_turn=active_turn,
@@ -1898,6 +1927,31 @@ def run_locked(
             live_turn_payload = execution.live_turn
             with run_control_lock:
                 ctx.run_control_context = None
+            if conversation_capture is not None:
+                # Ahead of every post-turn guard, because confirmation is what
+                # makes the conversation resumable and every branch below can
+                # end the run. A guard that refuses the turn still leaves work
+                # in the conversation the next attempt has to continue.
+                outcome_record = conversation_resume.record_turn_outcome(
+                    state.plan_state_dir(before.plan_dir, args.state_dir),
+                    capture=conversation_capture,
+                    result=result,
+                    run_id=ctx.run_id,
+                    turn=turn_index,
+                )
+                if outcome_record.error is not None:
+                    ctx.persistence.append_event(
+                        ctx.event_path,
+                        events.CONVERSATION_CONTINUATION_EVENT,
+                        {
+                            "run_id": ctx.run_id,
+                            **plans.session_identity_payload(session_id),
+                            "disposition": continuation.disposition,
+                            "conversation": outcome_record.conversation,
+                            "confirmed": outcome_record.confirmed,
+                            "detail": outcome_record.error,
+                        },
+                    )
             plan_artifacts_written_by_runner: tuple[str, ...] = ()
             if is_review_session:
                 # Stamped from the turn's own completion rather than from the

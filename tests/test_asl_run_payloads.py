@@ -380,6 +380,16 @@ class ResumeConfigContractTests(unittest.TestCase):
         extra = sorted(set(config) - {flag.dest for flag in run_flags.RUN_FLAG_SPEC})
         self.assertEqual(["repair_commit_mode", "state_dir_override"], extra)
 
+    def test_the_one_use_fresh_conversation_authorization_is_not_persisted(
+        self,
+    ) -> None:
+        # The containment above says every *overlay* dest needs a key here.
+        # `fresh_conversation` is excluded from the overlay precisely so it has
+        # no key: nothing on disk may re-authorize discarding an agent's
+        # accumulated context, however the run is later resumed or relaunched.
+        config = self._config("--fresh-conversation")
+        self.assertNotIn("fresh_conversation", config)
+
     def test_the_resolved_values_are_snapshotted_not_the_raw_flags(self) -> None:
         # The point of the block is the *resolved* run: a resume that re-derived
         # these from defaults would lose the allowlist and the bypass decision.

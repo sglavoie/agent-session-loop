@@ -348,6 +348,20 @@ RUN_FLAG_SPEC: tuple[RunFlag, ...] = (
         ),
     ),
     RunFlag(
+        dest="fresh_conversation",
+        option_strings=("--fresh-conversation",),
+        action="store_true",
+        cli_default=False,
+        help=(
+            "Authorize exactly one fresh harness conversation when the saved "
+            "one cannot be resumed; files and outstanding feedback are "
+            "retained and the turn opens with recovery context. The "
+            "authorization is consumed by the first turn that needs it and is "
+            "never persisted, rehydrated by --resume, or replayed by a "
+            "supervisor retry"
+        ),
+    ),
+    RunFlag(
         dest="reply",
         option_strings=("--reply",),
         mutex_group="reply",

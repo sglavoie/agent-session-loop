@@ -1250,6 +1250,31 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
         ),
         fix_category="env-state",
     ),
+    "conversation-recovery-required": RepairHint(
+        category="conversation-recovery-required",
+        check_id="runtime.conversation-recovery-required",
+        severity_hint="red",
+        message=(
+            "The pending session's saved harness conversation cannot be "
+            "resumed exactly, so the run refused to open a second one behind "
+            "your back. `details.conversation_recovery` names the selection "
+            "state and, when the binding is what changed, each field that no "
+            "longer matches. Where the mismatch is accidental — a different "
+            "`--cwd`, a re-derived repository registry, a different harness — "
+            "re-run with the original values and the saved conversation is "
+            "picked up unchanged. Where the conversation is genuinely gone or "
+            "the change is intended, re-run with `--fresh-conversation` to "
+            "authorize one fresh start: files and outstanding feedback are "
+            "retained and the new turn opens with recovery context, but the "
+            "agent's accumulated reasoning is lost. That authorization is "
+            "one-use and is never persisted or replayed."
+        ),
+        question_template=(
+            "Runner paused: the saved conversation cannot be resumed "
+            "({message}). Should I compare the recorded binding?"
+        ),
+        fix_category="env-state",
+    ),
 }
 
 

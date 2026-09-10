@@ -81,6 +81,13 @@ USER_REQUIRED_HARNESS_FAILURE_REASONS: tuple[str, ...] = (
 #   compares against is missing or unreadable. The repair is to the evidence
 #   capture — a readable worktree, a working git probe — not to anything an
 #   operator can say.
+# - ``conversation-recovery-required``: the durable conversation bound to the
+#   pending session cannot be resumed exactly. What clears it is a relaunch
+#   carrying the one-use ``--fresh-conversation`` authorization (or a repaired
+#   binding), which is a decision about losing an agent's accumulated context —
+#   deliberately an operator's to make, never a supervisor's. Classifying it
+#   ``reply`` would both open a mailbox wait nothing answers and let the
+#   recoverable-retry path replay a fresh start.
 ENVIRONMENT_BLOCKED_PAUSE_REASONS: tuple[str, ...] = (
     "commit-preflight",
     "commit-failed",
@@ -91,6 +98,7 @@ ENVIRONMENT_BLOCKED_PAUSE_REASONS: tuple[str, ...] = (
     events.PAUSE_REASON_REVIEW_NOT_CLEAR,
     events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED,
     events.PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE,
+    events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
 )
 
 # Verdicts a post-turn guard reached, and turn outcomes nobody asked a question

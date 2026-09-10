@@ -88,7 +88,9 @@ from typing import Any, Literal, Protocol
 from . import (
     clock,
     commit_settlement,
+    conversation_resume,
     durability,
+    events,
     guards,
     handoff_correction,
     handoff_guards,
@@ -104,6 +106,7 @@ from . import (
     run_reporting,
     run_selection,
     session_verification,
+    state,
     turn_execution,
     verification,
 )
@@ -661,6 +664,29 @@ def settle_turn(
         )
         return TurnSettlement(ACTION_STOP, snapshot, None)
 
+    # A completed session has no turn left to continue, so its conversation
+    # stops being resumable here. Leaving it live would let a later attempt at
+    # the same session id -- a re-run, a reopened repair group -- continue work
+    # that already finished and already committed. Retirement is an append, so
+    # the history stays readable; it is deliberately *not* raised on failure,
+    # because the session is complete on disk and a ledger write must not undo
+    # that. A retirement that did not land is caught on the next attempt, which
+    # reads the conversation as still live and stops for recovery.
+    retired, retire_error = conversation_resume.retire_session_conversations(
+        state.plan_state_dir(after.plan_dir, args.state_dir), session_id=session_id
+    )
+    if retired or retire_error is not None:
+        ctx.persistence.append_event(
+            ctx.event_path,
+            events.CONVERSATION_CONTINUATION_EVENT,
+            {
+                "run_id": ctx.run_id,
+                **plans.session_identity_payload(session_id),
+                "disposition": conversation_resume.CONTINUATION_RETIRED,
+                "retired": list(retired),
+                "detail": retire_error or "session completed",
+            },
+        )
     with ctx.persistence.lock:
         ctx.payload["completed_sessions"].append(plans.session_compat_value(session_id))
         ctx.payload.setdefault("completed_session_ids", []).append(session_id)
