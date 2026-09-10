@@ -28,6 +28,7 @@ from . import (
     agent_mux_projection,
     artifacts,
     config,
+    conversations,
     events,
     harnesses,
     pause_policy,
@@ -2551,6 +2552,9 @@ class MigrationReport:
     schema_upgraded: bool = False
     projection_written: bool = False
     schema_note: str | None = None
+    conversation_records: int = 0
+    conversation_records_rewritten: int = 0
+    conversation_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2570,6 +2574,9 @@ class MigrationReport:
             "schema_upgraded": self.schema_upgraded,
             "projection_written": self.projection_written,
             "schema_note": self.schema_note,
+            "conversation_records": self.conversation_records,
+            "conversation_records_rewritten": self.conversation_records_rewritten,
+            "conversation_note": self.conversation_note,
         }
 
 
@@ -2789,6 +2796,25 @@ def upgrade_plan_state_schema(
     )
 
 
+def _conversation_note(report: conversations.RelocationReport) -> str | None:
+    """Describe what relocation did to the conversation ledger, if anything."""
+    parts: list[str] = []
+    if report.records:
+        parts.append(
+            f"{report.rewritten} of {report.records} conversation reference(s) "
+            f"{'were' if report.applied else 'would be'} repointed at the new "
+            "plan directory"
+        )
+    if report.rejected:
+        parts.append(
+            f"{report.rejected} unreadable ledger line(s) were preserved "
+            "unchanged; conversations cannot be resumed until they are resolved"
+        )
+    if not parts:
+        return None
+    return "; ".join(parts) + "."
+
+
 def migrate_plan_state(
     plan_dir: str | Path,
     *,
@@ -2915,6 +2941,29 @@ def migrate_plan_state(
             },
         )
 
+    # The same identity check for the conversation ledger, which is plan-owned
+    # operational state sitting beside state.json rather than inside it. A ledger
+    # naming some other plan is not this plan's, and relocating it would attach
+    # another plan's conversations — and their resumable native ids — to the
+    # target. Unreadable lines cannot be attributed to any plan, so they are
+    # reported rather than treated as foreign: refusing on them would strand the
+    # whole state directory over one truncated append.
+    foreign_plan_dirs = tuple(
+        recorded
+        for recorded in conversations.recorded_plan_dirs(old_state_dir)
+        if recorded != str(old_plan_dir)
+    )
+    if foreign_plan_dirs:
+        raise MigrationError(
+            "conversation-plan-mismatch",
+            "source conversation ledger records plan directories "
+            f"{', '.join(foreign_plan_dirs)}, not the requested {old_plan_dir}",
+            {
+                "recorded_plan_dirs": list(foreign_plan_dirs),
+                "from_plan_dir": str(old_plan_dir),
+            },
+        )
+
     # Confirm the source content belongs to the target plan (final snapshot
     # preferred, initial snapshot as the legacy fallback).
     recorded_hash = _recorded_content_hash(state_obj)
@@ -2959,6 +3008,19 @@ def migrate_plan_state(
     )
 
     if not apply:
+        try:
+            preview_conversations = conversations.relocate_records(
+                old_state_dir,
+                from_plan_dir=old_plan_dir,
+                to_plan_dir=new_plan_dir,
+                apply=False,
+            )
+        except conversations.ConversationError as error:
+            raise MigrationError(
+                "conversation-ledger-error",
+                f"source conversation ledger could not be read: {error}",
+                {"from_state_dir": str(old_state_dir)},
+            ) from error
         note: str | None = None
         upgraded_preview = False
         projection_preview = False
@@ -3004,10 +3066,34 @@ def migrate_plan_state(
             schema_upgraded=upgraded_preview,
             projection_written=projection_preview,
             schema_note=note,
+            conversation_records=preview_conversations.records,
+            conversation_records_rewritten=preview_conversations.rewritten,
+            conversation_note=_conversation_note(preview_conversations),
         )
 
     new_state_dir.parent.mkdir(parents=True, exist_ok=True)
     os.rename(old_state_dir, new_state_dir)
+
+    # Repoint the conversation ledger after the rename, so the rewrite lands in
+    # the directory the plan will actually read from. The ledger moved with the
+    # directory; only the absolute plan paths inside its records are stale.
+    # Doing it before the rename would be worse on failure: a rewritten ledger
+    # left in the old directory names the *new* plan, which the identity gate
+    # above would then read as foreign and refuse on the operator's retry.
+    try:
+        relocated_conversations = conversations.relocate_records(
+            new_state_dir,
+            from_plan_dir=old_plan_dir,
+            to_plan_dir=new_plan_dir,
+            apply=True,
+        )
+    except conversations.ConversationError as error:
+        raise MigrationError(
+            "conversation-ledger-error",
+            "state directory was relocated but its conversation ledger could "
+            f"not be repointed: {error}",
+            {"state_dir": str(new_state_dir), "relocated": True},
+        ) from error
 
     new_state_path = new_state_dir / events.STATE_FILE_NAME
     new_events_path = new_state_dir / events.EVENTS_FILE_NAME
@@ -3072,6 +3158,14 @@ def migrate_plan_state(
         migrated_details["projection_generation"] = migrated[
             agent_mux_projection.PROJECTION_KEY
         ]["projection_generation"]
+    if relocated_conversations.records or relocated_conversations.rejected:
+        migrated_details["conversation_records"] = relocated_conversations.records
+        migrated_details["conversation_records_rewritten"] = (
+            relocated_conversations.rewritten
+        )
+        migrated_details["conversation_records_unreadable"] = (
+            relocated_conversations.rejected
+        )
     events.append_event(
         new_events_path,
         events.Event(STATE_MIGRATED_EVENT, migrated_details),
@@ -3091,6 +3185,9 @@ def migrate_plan_state(
         schema_upgraded=schema_upgraded,
         projection_written=projection_written,
         schema_note=schema_note,
+        conversation_records=relocated_conversations.records,
+        conversation_records_rewritten=relocated_conversations.rewritten,
+        conversation_note=_conversation_note(relocated_conversations),
     )
 
 
@@ -3110,6 +3207,8 @@ def _print_migration_report(report: MigrationReport) -> None:
         print(f"Rewritten fields: {', '.join(report.rewritten_fields)}")
     if report.schema_note:
         print(f"Schema: {report.schema_note}")
+    if report.conversation_note:
+        print(f"Conversations: {report.conversation_note}")
     if report.unmigrated_artifacts_note:
         print(report.unmigrated_artifacts_note)
     if not report.applied:

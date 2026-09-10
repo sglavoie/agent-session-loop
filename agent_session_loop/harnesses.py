@@ -36,6 +36,7 @@ StreamName = Literal["stdout", "stderr"]
 StreamCallback = Callable[[StreamName, str], None]
 
 AccessProfileName = Literal["worker", "audit-read-only"]
+ACCESS_PROFILE_NAMES: tuple[AccessProfileName, ...] = ("worker", "audit-read-only")
 
 #: Claude tools that read or search without mutating anything.
 CLAUDE_AUDIT_TOOLS = "Read,Glob,Grep"

@@ -3643,13 +3643,24 @@ confirming the recorded `plan_dir` no longer exists — each carrying the exact
 skipped whenever the plan already has its own `state.json` (the common case).
 `migrate-state` renames the state directory to the new path hash and rewrites
 the absolute `plan_dir`/`state_dir`/`state_path`/`events_path`/`lock_path`
-fields inside `state.json`, then appends a `state_migrated` event. Historical
-per-turn `result.json` paths are left untouched and reported as an
-`unmigrated_artifacts_note`. It refuses (in both dry-run and apply, leaving both
-state directories untouched) when the source plan directory still exists on disk
-(`source-plan-exists` — its state is not orphaned, so migrating would steal a
-live plan's state), the source holds an active lock, or the destination state
-directory already exists. The default is a dry-run; pass `--apply` to perform the
+fields inside `state.json`, then appends a `state_migrated` event. It also
+repoints the plan-owned conversation ledger, which lives beside `state.json`
+rather than inside it: every readable record naming the old plan directory is
+rewritten to the new one through a single atomic durable replace, line order is
+preserved, and unreadable lines are copied back byte-for-byte rather than
+repaired. The report and the `state_migrated` event carry
+`conversation_records`, `conversation_records_rewritten`, and a
+`conversation_note`. Historical per-turn `result.json` paths are left untouched
+and reported as an `unmigrated_artifacts_note`. It refuses (in both dry-run and
+apply, leaving both state directories untouched) when the source plan directory
+still exists on disk (`source-plan-exists` — its state is not orphaned, so
+migrating would steal a live plan's state), the source holds an active lock, the
+destination state directory already exists, or the source conversation ledger
+records some other plan directory (`conversation-plan-mismatch` — relocating it
+would attach another plan's resumable conversations to the target). Unreadable
+ledger *lines* are reported rather than refused, since one truncated append must
+not strand the whole state directory; a ledger file that cannot be read at all
+is `conversation-ledger-error`. The default is a dry-run; pass `--apply` to perform the
 rename and rewrite, and `--json` for the machine payload. A relocation also
 brings the record it is already rewriting forward to the current state schema
 version in the same write; a record that cannot carry a projection, or one whose
@@ -4954,6 +4965,10 @@ The remaining runtime files live under a plan's hash directory:
   90 seconds.
 - `mailbox-supervision-<supervision-id>.json`: optional resumable supervision
   cursor, one per supervising launch, pruned after seven days.
+- `conversations.jsonl`: optional 4 MiB-capped conversation ledger; physical
+  lines are durable sequences and the file is never truncated.
+- `conversations.lock`: the exclusive-append lock for that ledger; writers never
+  lock the data file itself.
 - `runs/<run_id>/`: immutable artifacts for one runner invocation.
 - `runs/<run_id>/turn-0001-session-<id>/stdout.log`: stdout from the harness
   turn.
@@ -5001,6 +5016,79 @@ than inside any plan's directory, because the inbox spans the whole corpus:
   data file itself.
 - `assurance-index.json`: a disposable cache, rebuilt whenever it is missing,
   stale, malformed, or of an unknown version.
+
+### Conversation continuity
+
+A turn cancelled mid-flight has to be *continued*, not restarted, and the only
+thing that can continue it is the harness's own conversation. That native
+identifier is a durable fact about the plan rather than a detail of the run that
+learned it, so it is stored in `conversations.jsonl` beside `state.json` and
+never inside it: the next run replaces `state.json` wholesale, which would
+destroy the very reference that exists to survive that restart.
+
+Storage is append-only. Opening, confirming, and retiring a conversation are
+three records, each appended under an exclusive `flock` on the sidecar
+`conversations.lock` and flushed through the platform durability barrier before
+the lock is released. A short write is rolled back to the file's previous size,
+and an append that finds an unterminated tail from an interrupted write
+terminates it rather than cutting it back, so a crash stays visible as a
+rejected line instead of being silently healed. Sequences are positional and
+one-based, so a malformed or truncated line keeps its place in history. Records
+carry identifiers, bindings, and timestamps only; prompts, transcripts, and
+feedback text never reach this ledger.
+
+A stored reference names the plan directory, the plan session, the harness, the
+workspace root and registry digest, the access profile, the repository scope
+aliases, and up to 32 prior attempts (run ID, turn, and outcome — so a resumed
+worker can be told which operations were interrupted). Lookup is keyed by
+`(session_id, harness)` and nothing else; every other bound field is *checked*
+against the stored record rather than used to widen the search. There is
+deliberately no "latest conversation" lookup anywhere in the interface.
+
+Selection therefore has exactly one state that permits continuation and five
+that do not:
+
+- `resumable`: the newest record for the key is a confirmation and every bound
+  field matches.
+- `absent`: no conversation was ever recorded for that key — the ordinary shape
+  of a plan whose state predates the feature, which reads as an empty ledger
+  rather than an error.
+- `unconfirmed`: the native ID was persisted before work was submitted (which is
+  the required order) and the harness never accepted work on it, so the
+  conversation may hold nothing.
+- `incompatible`: the record exists but is bound to a different plan directory,
+  workspace, registry digest, access profile, or repository scope; the differing
+  fields are named.
+- `retired`: the conversation was retired and may never be selected again.
+  Completing a plan session retires every conversation bound to it, so a later,
+  unrelated attempt at the same session ID cannot continue finished work.
+- `corrupt`: at least one physical line could not be read. An unreadable line
+  cannot be attributed to a key, so it may be the retirement or supersession of
+  the conversation being asked about; nothing may be selected while one exists.
+  Skipping it and answering from an older record is exactly the silent selection
+  of a stale conversation this ledger exists to prevent.
+
+Every non-`resumable` state requires user input. The way out is an explicit,
+one-use operator authorization carried on a continuation intent, and that intent
+has no serialization at all — the value that carries the fresh-conversation
+override is one this code cannot write down, so nothing can rehydrate it into a
+later run.
+
+Conversation-continuity capability is reported per harness as `available`,
+`staged`, or `unsupported`, and a report always names every harness exactly
+once. Every harness is currently `staged`: the reference, intent, report, and
+durable ledger exist, but nothing captures a native identifier or resumes
+against one yet, and an operator action backed by incomplete recovery must not
+be offered.
+
+The invariants later work must preserve: a reference is written before the work
+that uses it is submitted and confirmed only once the harness has accepted work
+on it; `(session_id, harness)` selects at most one live conversation per plan;
+every non-`resumable` state requires user input; retirement is an append and a
+retired conversation is never selected again; and the conversation module
+imports nothing that imports the state module, taking a plan *state directory*
+rather than a plan directory, which is what keeps migration's dependency
+one-way.
 
 Durable mailbox, event, and state-ledger writes issue `fcntl(F_FULLFSYNC)` on
 Darwin so completed records cross the device cache. Filesystems that reject

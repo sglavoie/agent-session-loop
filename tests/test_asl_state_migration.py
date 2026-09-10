@@ -14,7 +14,15 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from agent_session_loop import agent_mux_projection, cli, events, plans, state
+from agent_session_loop import (
+    agent_mux_projection,
+    cli,
+    conversations,
+    events,
+    plans,
+    state,
+    workspaces,
+)
 from tests.support import read_jsonl, write_plan
 
 
@@ -795,6 +803,189 @@ class MigrateStateCliTests(StateMigrationTestBase):
         self.assertEqual(1, code)
         self.assertFalse(payload["ok"])
         self.assertEqual("active-lock", payload["reason"])
+
+
+class ConversationRelocationTests(StateMigrationTestBase):
+    """The conversation ledger moves with the state directory it lives in.
+
+    Conversation references are plan-owned operational state stored beside
+    ``state.json`` rather than inside it, so relocating a stranded state
+    directory has to repoint them too -- and has to refuse a ledger that belongs
+    to some other plan.
+    """
+
+    def _seed_conversation(
+        self, *, plan_dir: Path | None = None, session_id: str = "1"
+    ) -> conversations.ConversationReference:
+        self.old_state_dir.mkdir(parents=True, exist_ok=True)
+        reference = conversations.ConversationReference(
+            binding=conversations.ConversationBinding(
+                plan_dir=str(self.old_plan if plan_dir is None else plan_dir),
+                session_id=session_id,
+                harness="claude",
+                workspace=workspaces.WorkspaceBinding(
+                    workspace_root=str(plans.canonicalize_path(self.tmp_path)),
+                    registry_digest="a" * 64,
+                ),
+                access_profile="worker",
+            ),
+            native_id="conv-1",
+        )
+        conversations.open_conversation(self.old_state_dir, reference)
+        conversations.confirm_conversation(self.old_state_dir, reference)
+        return reference
+
+    def _binding_for(self, plan_dir: Path) -> conversations.ConversationBinding:
+        return conversations.ConversationBinding(
+            plan_dir=str(plan_dir),
+            session_id="1",
+            harness="claude",
+            workspace=workspaces.WorkspaceBinding(
+                workspace_root=str(plans.canonicalize_path(self.tmp_path)),
+                registry_digest="a" * 64,
+            ),
+            access_profile="worker",
+        )
+
+    def test_dry_run_reports_the_relocation_without_writing(self) -> None:
+        self._write_orphan_state()
+        self._seed_conversation()
+        ledger_path = conversations.conversation_ledger_path(self.old_state_dir)
+        before = ledger_path.read_bytes()
+        report = state.migrate_plan_state(
+            self.new_plan,
+            from_plan_dir=self.old_plan,
+            state_dir=self.state_dir,
+            apply=False,
+        )
+        self.assertEqual(2, report.conversation_records)
+        self.assertEqual(2, report.conversation_records_rewritten)
+        self.assertIsNotNone(report.conversation_note)
+        self.assertEqual(before, ledger_path.read_bytes())
+
+    def test_apply_repoints_the_ledger_and_keeps_it_resumable(self) -> None:
+        self._write_orphan_state()
+        self._seed_conversation()
+        report = state.migrate_plan_state(
+            self.new_plan,
+            from_plan_dir=self.old_plan,
+            state_dir=self.state_dir,
+            apply=True,
+        )
+        self.assertEqual(2, report.conversation_records_rewritten)
+        self.assertFalse(
+            conversations.conversation_ledger_path(self.old_state_dir).exists()
+        )
+        self.assertEqual(
+            (str(self.new_plan),),
+            conversations.recorded_plan_dirs(self.new_state_dir),
+        )
+        selection = conversations.select_conversation(
+            self.new_state_dir, self._binding_for(self.new_plan)
+        )
+        self.assertTrue(selection.resumable)
+        self.assertEqual("conv-1", selection.reference.native_id)
+
+    def test_migrated_event_records_the_conversation_counts(self) -> None:
+        self._write_orphan_state()
+        self._seed_conversation()
+        state.migrate_plan_state(
+            self.new_plan,
+            from_plan_dir=self.old_plan,
+            state_dir=self.state_dir,
+            apply=True,
+        )
+        records = read_jsonl(self.new_state_dir / events.EVENTS_FILE_NAME)
+        migrated = [
+            record
+            for record in records
+            if record.get("name") == state.STATE_MIGRATED_EVENT
+        ]
+        self.assertEqual(1, len(migrated))
+        self.assertEqual(2, migrated[0]["payload"]["conversation_records"])
+        self.assertEqual(2, migrated[0]["payload"]["conversation_records_rewritten"])
+
+    def test_a_foreign_ledger_refuses_the_migration(self) -> None:
+        self._write_orphan_state()
+        stranger = plans.canonicalize_path(self.tmp_path / "plans" / "stranger")
+        self._seed_conversation(plan_dir=stranger)
+        with self.assertRaises(state.MigrationError) as caught:
+            state.migrate_plan_state(
+                self.new_plan,
+                from_plan_dir=self.old_plan,
+                state_dir=self.state_dir,
+                apply=False,
+            )
+        self.assertEqual("conversation-plan-mismatch", caught.exception.reason)
+        # Refused before anything moved, exactly like the other identity gates.
+        self.assertTrue(self.old_state_dir.is_dir())
+        self.assertFalse(self.new_state_dir.exists())
+
+    def test_unreadable_lines_are_reported_not_refused(self) -> None:
+        self._write_orphan_state()
+        self._seed_conversation()
+        ledger_path = conversations.conversation_ledger_path(self.old_state_dir)
+        with ledger_path.open("ab") as handle:
+            handle.write(b"{not json}\n")
+        report = state.migrate_plan_state(
+            self.new_plan,
+            from_plan_dir=self.old_plan,
+            state_dir=self.state_dir,
+            apply=True,
+        )
+        # One truncated append must not strand the whole state directory.
+        self.assertTrue(report.applied)
+        self.assertIn("unreadable", report.conversation_note)
+        self.assertIn(
+            "{not json}",
+            conversations.conversation_ledger_path(self.new_state_dir).read_text(
+                encoding="utf-8"
+            ),
+        )
+
+    def test_an_unreadable_ledger_file_refuses_before_the_rename(self) -> None:
+        self._write_orphan_state()
+        self._seed_conversation()
+        ledger_path = conversations.conversation_ledger_path(self.old_state_dir)
+        ledger_path.chmod(0o000)
+        self.addCleanup(ledger_path.chmod, 0o600)
+        if os.access(ledger_path, os.R_OK):
+            self.skipTest("running as a user that ignores file permissions")
+        with self.assertRaises(state.MigrationError) as caught:
+            state.migrate_plan_state(
+                self.new_plan,
+                from_plan_dir=self.old_plan,
+                state_dir=self.state_dir,
+                apply=False,
+            )
+        self.assertEqual("conversation-ledger-error", caught.exception.reason)
+        self.assertTrue(self.old_state_dir.is_dir())
+        self.assertFalse(self.new_state_dir.exists())
+
+    def test_a_plan_with_no_ledger_migrates_unchanged(self) -> None:
+        self._write_orphan_state()
+        report = state.migrate_plan_state(
+            self.new_plan,
+            from_plan_dir=self.old_plan,
+            state_dir=self.state_dir,
+            apply=True,
+        )
+        self.assertTrue(report.applied)
+        self.assertEqual(0, report.conversation_records)
+        self.assertIsNone(report.conversation_note)
+
+    def test_report_dict_carries_the_conversation_fields(self) -> None:
+        self._write_orphan_state()
+        self._seed_conversation()
+        payload = state.migrate_plan_state(
+            self.new_plan,
+            from_plan_dir=self.old_plan,
+            state_dir=self.state_dir,
+            apply=False,
+        ).to_dict()
+        self.assertEqual(2, payload["conversation_records"])
+        self.assertEqual(2, payload["conversation_records_rewritten"])
+        self.assertIn("conversation_note", payload)
 
 
 if __name__ == "__main__":
