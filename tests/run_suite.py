@@ -101,6 +101,7 @@ FAST_MODULES = (
     "tests.test_asl_turn_finalization",
     "tests.test_asl_turn_commit",
     "tests.test_asl_commit_groups",
+    "tests.test_asl_continuation_guards",
     "tests.test_asl_core",
     "tests.test_asl_qna",
     "tests.test_asl_prompts",

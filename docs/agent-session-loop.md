@@ -1536,6 +1536,39 @@ have under a message describing one turn. Review sessions are excluded, matching
 the accepted path; a repair child is included even with no commit mode, because
 it owns the commit its parent's mode never reached it with.
 
+That evidence is cumulative across the attempts of one session, because a
+session that pauses recoverably is relaunched inside the same run and resumes
+the same conversation, so its attempts are one piece of work rather than
+several. Each turn's write guard captures a fresh before-image, so attempt two's
+own record names only what attempt two touched; before the first consumer reads
+it, the turn's `workspace_write_guard` record is merged with the previous
+attempt's for the same session and rewritten in place, in the same turn
+`result.json` the guard already wrote. Path deltas accumulate — the union, each
+repository's `head_before` from the earliest attempt that observed it and its
+`head_after` from the latest, ref transitions composed rather than concatenated
+— while every state field is the current attempt's alone: violations,
+unavailable repositories, the scope aliases, and the registered repository list
+are what this attempt found, never what an earlier one did. A merge can only
+carry work forward, never upgrade a verdict: it happens only when both records
+passed with no violations and no unavailable repository, so a failing attempt
+neither inherits an earlier attempt's clean record nor lends its own paths to
+one. The same merged record is what the protected-path guard adjudicates and
+what a per-session commit stages, so all three consumers see the same session,
+not the same turn. Nothing verification-related crosses an attempt: a check that
+passed against attempt one's tree is not proof for files attempt two changed,
+and the baseline fingerprint already refuses a dirty tree.
+
+The ledger behind that merge is scoped to the run and is never rehydrated from
+`state.json`. A new run re-reads the tree it finds — a previous run's retained
+bytes are dirt the startup commit gate and the dirty-target sweep already see —
+and a path list restored from a prior run would name files nothing in this run
+has observed. It is mirrored into the run payload as `session_attempts` for
+audit, and retired when the session completes. Interruption gains nothing from
+any of it: `interrupted` is not a recoverable pause reason, so an interrupted
+session's retained work is never settled by a commit, and the repair and review
+budgets are derived from the events the run actually recorded, so an attempt
+that never reached verification consumes neither.
+
 The deterministic message survives the process that rendered it, because a
 settlement can fail like any other commit and be recovered by a later run. The
 group records the exact text it commits in `verbatim_message`, outside the

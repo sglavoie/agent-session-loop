@@ -39,6 +39,7 @@ from typing import Any
 from unittest import mock
 
 from agent_session_loop import (
+    continuation_guards,
     events,
     handoff_guards,
     harnesses,
@@ -112,6 +113,7 @@ class FakeRunContext:
         self.persistence = RecordingPersistence()
         self.plan_cache = plans.PlanSnapshotCache()
         self.guard_controller = mock.Mock()
+        self.session_attempts = continuation_guards.SessionAttempts()
         self.pauses: list[dict[str, Any]] = []
 
     def pause(

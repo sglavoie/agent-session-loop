@@ -88,6 +88,7 @@ from typing import Any, Literal, Protocol
 from . import (
     clock,
     commit_settlement,
+    continuation_guards,
     conversation_resume,
     durability,
     events,
@@ -157,6 +158,9 @@ class RunContext(Protocol):
 
     @property
     def plan_cache(self) -> plans.PlanSnapshotCache: ...
+
+    @property
+    def session_attempts(self) -> continuation_guards.SessionAttempts: ...
 
     @property
     def verification_context(self) -> verification.VerificationContext: ...
@@ -687,7 +691,15 @@ def settle_turn(
                 "detail": retire_error or "session completed",
             },
         )
+    # The session's accumulated write evidence retires beside its conversation
+    # and for the same reason: the work it describes is committed and published,
+    # so a later attempt at this id must be scoped by what it can observe rather
+    # than inherit a path list from turns that are already settled.
     with ctx.persistence.lock:
+        ctx.session_attempts.retire(session_id)
+        ctx.payload[continuation_guards.SESSION_ATTEMPTS_PAYLOAD_KEY] = (
+            ctx.session_attempts.to_payload()
+        )
         ctx.payload["completed_sessions"].append(plans.session_compat_value(session_id))
         ctx.payload.setdefault("completed_session_ids", []).append(session_id)
         if is_review_session:

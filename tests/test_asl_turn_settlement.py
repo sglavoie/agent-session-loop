@@ -43,6 +43,7 @@ from unittest import mock
 
 from agent_session_loop import (
     commit_settlement,
+    continuation_guards,
     events,
     handoff_guards,
     plans,
@@ -137,6 +138,7 @@ class FakeRunContext:
         self.progress = object()
         self.guard_controller = object()
         self.plan_cache = plans.PlanSnapshotCache()
+        self.session_attempts = continuation_guards.SessionAttempts()
         self.verification_context = argparse.Namespace(workspace=None)
         self.commit_generation = object()
         self.control_payload: dict[str, Any] = {}

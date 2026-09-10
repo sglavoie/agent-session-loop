@@ -113,6 +113,7 @@ module = [
     "agent_session_loop.commit_message",
     "agent_session_loop.commit_settlement",
     "agent_session_loop.config",
+    "agent_session_loop.continuation_guards",
     "agent_session_loop.contracts",
     "agent_session_loop.control_cli",
     "agent_session_loop.control_queue",

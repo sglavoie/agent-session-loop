@@ -70,6 +70,7 @@ from . import (
     clock,
     commit_groups,
     commit_settlement,
+    continuation_guards,
     conversation_resume,
     durability,
     events,
@@ -157,6 +158,13 @@ class RunContext:
     plan_cache: plans.PlanSnapshotCache
     verification_context: verification.VerificationContext
     commit_generation: run_commit._CommitGeneration
+    #: What each session's earlier attempts in *this* run were seen to change.
+    #: Bound at run start rather than per session because the loop re-attempts
+    #: a session across several passes and the ledger has to outlive each of
+    #: them; it is keyed by session id and retired when a session completes.
+    session_attempts: continuation_guards.SessionAttempts = dataclasses.field(
+        default_factory=continuation_guards.SessionAttempts
+    )
     #: Read off the payload once the readiness gate has passed, because the
     #: gate is what settles which control block the rest of the run answers to.
     control_payload: dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -2083,6 +2091,25 @@ def run_locked(
                 is_repair_session=is_repair_session,
             )
             terminating_disposition = postflight.terminating_disposition
+            # The same site, for the same reason: an attempt only joins the
+            # session's accumulated evidence once every post-turn write guard
+            # has cleared it. A refused turn left the loop above, so its paths
+            # can never be carried into a later attempt's commit scope -- the
+            # control flow guarantees it rather than a list of reasons the merge
+            # would have to keep in step with. The record is the guard's own
+            # evidence as it now stands, which is already cumulative, so the
+            # next attempt merges against one record instead of a history.
+            ctx.session_attempts.record(
+                session_id=session_id,
+                turn_index=turn_index,
+                disposition=terminating_disposition,
+                guard=turn_payload.get("workspace_write_guard"),
+            )
+            with ctx.persistence.lock:
+                ctx.payload[continuation_guards.SESSION_ATTEMPTS_PAYLOAD_KEY] = (
+                    ctx.session_attempts.to_payload()
+                )
+            ctx.persistence.write_state(ctx.payload)
 
             if terminating_disposition == "interrupted":
                 turn_dispositions.pause_interrupted_run(

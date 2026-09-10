@@ -6,7 +6,7 @@ loop's first result branch -- the last point at which a turn's work can still be
 refused, reverted, or amended before a pause, a stop, or another turn adopts it
 as the new baseline.
 
-Five guards in one fixed order, which is the whole of what this module owns:
+Five guards in one fixed order, which is the spine of what this module owns:
 
 * **The workspace write guard** (or the **legacy implementation write guard**,
   for a run with no registered workspace) asks whether the session stayed inside
@@ -23,9 +23,18 @@ Five guards in one fixed order, which is the whole of what this module owns:
   already ended the turn it runs in adjudicate-only mode, so the packets it
   convicts are still named beside the pause that ended the turn.
 
-Durable records this boundary writes: exactly one of its own, the turn's result
-artifact rewritten with the per-repository review bases a passing workspace
-review turn projects. Every other write here belongs to the guard that makes it
+Between the first guard and the second question sits the one step here that is
+not a guard: a session the loop re-attempts inside one run spans several turns,
+and ``continuation_guards`` accumulates the earlier attempts' changes into the
+write guard's record before anything downstream reads it. It is placed here
+rather than in any consumer because there are three of them -- the
+protected-path guard below, the per-session commit and the paused-work
+settlement -- and they all read the same record.
+
+Durable records this boundary writes: two of its own, both the turn's result
+artifact rewritten -- once with the per-repository review bases a passing
+workspace review turn projects, and once with that cumulative write-guard
+record. Every other write here belongs to the guard that makes it
 -- each of the five appends its own event and amends the run payload through the
 run's persistence seam -- and every refusal is recorded by ``run_termination``
 through ``ctx.pause``.
@@ -81,6 +90,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import (
+    continuation_guards,
     durability,
     events,
     guards,
@@ -131,6 +141,9 @@ class RunContext(Protocol):
 
     @property
     def guard_controller(self) -> guards.GuardController: ...
+
+    @property
+    def session_attempts(self) -> continuation_guards.SessionAttempts: ...
 
     def pause(
         self,
@@ -320,6 +333,26 @@ def enforce_post_turn_guards(
         )
     ):
         finalization_paused = True
+
+    # Between the write guard that produced the record and the first consumer
+    # that reads it. A session the loop re-attempts inside one run continues the
+    # earlier attempt's conversation, so its work spans several turns, while this
+    # record describes one; accumulating the earlier attempts' changes into it
+    # here is what makes the protected-path step below, the per-session commit
+    # and the paused-work settlement all see the session's whole delta rather
+    # than its last turn's. A finalization that paused keeps its own refusal
+    # record untouched: that record is a verdict about one turn, not a statement
+    # about what the session wrote, and blurring the two would put paths an
+    # operator is not being asked about beside the reason they must act on.
+    if not finalization_paused:
+        cumulative = continuation_guards.merge_session_write_evidence(
+            ctx.session_attempts.latest(session_id),
+            turn_payload.get("workspace_write_guard"),
+        )
+        if cumulative is not None:
+            with ctx.persistence.lock:
+                turn_payload["workspace_write_guard"] = cumulative
+                durability.write_json_file(paths["result"], turn_payload)
 
     # After the general write guard and before every result branch, for the same
     # reason the write guard sits there: a retryable pause would otherwise
