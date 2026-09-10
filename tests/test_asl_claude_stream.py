@@ -1303,6 +1303,11 @@ class CopilotSteerRefusalTests(unittest.TestCase):
     """Copilot answers a steer, and the answer is next turn."""
 
     def transport(self) -> harnesses.HarnessTransport:
+        """The one-shot transport, which is the audit profile's.
+
+        The worker profile's ACP transport gives the same answers, proved
+        against a live conversation in ``tests/test_asl_copilot_acp.py``.
+        """
         adapter = harnesses.CopilotAdapter(executable="copilot")
         transport = adapter.open_transport(
             process=SimpleNamespace(stdin=None),
@@ -1327,15 +1332,29 @@ class CopilotSteerRefusalTests(unittest.TestCase):
         # Not retriable: the answer will not change inside this turn.
         self.assertFalse(outcome.retriable_in_turn)
 
-    def test_a_copilot_turn_stays_a_one_shot_process(self) -> None:
+    def test_a_copilot_worker_turn_speaks_acp_and_still_refuses_a_steer(self) -> None:
         invocation = harnesses.CopilotAdapter(executable="copilot").build_invocation(
             cwd=Path("/tmp"), plan_dir=Path("/tmp/plan"), prompt="do the work"
         )
 
-        # Still exec: no stdin pipe is opened, so nothing can cancel or restart
-        # the turn through one.
+        # A worker turn now has a stdin pipe, but it carries the handshake and
+        # one prompt: ``session/cancel`` is not wired, so there is still no
+        # channel a steer could travel on and the refusal above stands.
+        self.assertEqual(harnesses.TRANSPORT_ACP, invocation.transport)
+        self.assertNotIn("do the work", invocation.argv)
+
+    def test_an_audit_turn_stays_a_one_shot_process(self) -> None:
+        invocation = harnesses.CopilotAdapter(executable="copilot").build_invocation(
+            cwd=Path("/tmp"),
+            plan_dir=None,
+            prompt="read the evidence",
+            access=harnesses.audit_read_only_access([Path("/tmp/evidence")]),
+        )
+
+        # The audit profile did not move: its prompt is on argv, no stdin pipe
+        # is opened, and nothing can cancel or restart the turn through one.
         self.assertEqual(harnesses.TRANSPORT_EXEC, invocation.transport)
-        self.assertIn("do the work", invocation.argv)
+        self.assertIn("read the evidence", invocation.argv)
 
     def test_declining_leaves_the_guidance_for_the_next_turns_prompt(self) -> None:
         self.assertTrue(harnesses.delivers_guidance_next_turn("copilot"))

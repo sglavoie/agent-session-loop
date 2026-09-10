@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import dataclasses
 import errno
 import io
 import json
@@ -168,11 +169,22 @@ class _PythonScriptCopilotAdapter(harnesses.CopilotAdapter):
     scripts are executed directly.  Making the trusted Python interpreter the
     executable preserves the adapter arguments and process-group behavior
     without asking Gatekeeper to assess each disposable script.
+
+    The turns below run on the plain exec transport rather than copilot's ACP
+    one.  What they exercise is the machinery every transport sits on -- reader
+    joins, stream accounting, process-group sweeps, the abort window -- and the
+    scripts they drive are a few lines of ``print`` that could not answer a
+    handshake.  The conversation itself has its own suite in
+    tests/test_asl_copilot_acp.py.
     """
 
     def __init__(self, script: Path) -> None:
         super().__init__(executable=sys.executable)
         self.script = script
+
+    def build_invocation(self, **kwargs: Any) -> harnesses.HarnessInvocation:
+        invocation = super().build_invocation(**kwargs)
+        return dataclasses.replace(invocation, transport=harnesses.TRANSPORT_EXEC)
 
     def build_argv(
         self,
@@ -1916,12 +1928,14 @@ class FakeHarnessIntegrationTests(unittest.TestCase):
         codex_prompt = turns[0]["argv"][-1]
         self.assertTrue(codex_prompt.startswith(task_packet.TASK_PACKET_HEADING_PREFIX))
         self.assertNotIn("session-run", codex_prompt)
-        self.assertIn("-p", turns[1]["argv"])
-        copilot_prompt = turns[1]["argv"][turns[1]["argv"].index("-p") + 1]
-        self.assertTrue(
-            copilot_prompt.startswith(task_packet.TASK_PACKET_HEADING_PREFIX)
-        )
-        self.assertNotIn("session-run", copilot_prompt)
+        # The copilot turn submits its prompt over ACP, so a process listing is
+        # precisely where the packet must not appear. What the packet says is
+        # asserted on the codex turn above: an autonomous prompt is
+        # harness-neutral, so both turns were handed the same text.
+        self.assertIn("--acp", turns[1]["argv"])
+        self.assertNotIn("-p", turns[1]["argv"])
+        for value in turns[1]["argv"]:
+            self.assertNotIn(task_packet.TASK_PACKET_HEADING_PREFIX, value)
 
         control_events = [
             record["payload"]
@@ -9098,9 +9112,11 @@ class AuditAccessProfileTests(unittest.TestCase):
 
     def test_worker_argv_grants_exactly_the_access_it_always_did(self) -> None:
         # Claude's argv gained ``--input-format stream-json`` and lost its
-        # prompt when the turn became a conversation, so this is no longer a
-        # byte-for-byte identity test for that harness. Every access-bearing
-        # token is unchanged, which is what the assertion is actually for.
+        # prompt when the turn became a conversation, and copilot's gained
+        # ``--acp`` and lost its prompt for the same reason, so this is no
+        # longer a byte-for-byte identity test for either harness. Every
+        # access-bearing token is unchanged, which is what the assertion is
+        # actually for.
         expected = {
             "claude": [
                 "claude",
@@ -9125,8 +9141,7 @@ class AuditAccessProfileTests(unittest.TestCase):
                 "/plan",
                 "--no-ask-user",
                 "--silent",
-                "-p",
-                "prompt",
+                "--acp",
             ],
         }
 

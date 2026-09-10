@@ -836,12 +836,15 @@ class HarnessDocsRegressionTests(unittest.TestCase):
         import re as _re
 
         docs = self._read("docs/agent-session-loop.md")
+        # A worker turn carries its prompt over ACP rather than on argv, so the
+        # documented command lines end at `--acp`. What the flag pair means is
+        # unchanged: it is still the whole difference between the two modes.
         unsafe_copilot_argv = (
             "copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools "
-            "--allow-all-paths --no-ask-user --silent -p <prompt>"
+            "--allow-all-paths --no-ask-user --silent --acp"
         )
         safe_copilot_argv = (
-            "copilot -C <cwd> --add-dir <plan-dir> --no-ask-user --silent -p <prompt>"
+            "copilot -C <cwd> --add-dir <plan-dir> --no-ask-user --silent --acp"
         )
         exact_expectation = (
             "For Copilot, `--no-unsafe-bypass` does not re-enable "

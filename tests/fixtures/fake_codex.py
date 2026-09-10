@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -10,6 +11,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+#: The protocol's own channel, kept before any turn redirects ``sys.stdout``.
+_REAL_STDOUT = sys.stdout
+
+#: Prompts delivered over ACP's ``session/prompt``. The one-shot form states
+#: the prompt on argv, so the readers below look in both places rather than
+#: making every branch care which transport ran the turn.
+_ACP_PROMPTS: list[str] = []
 
 STATUS_PENDING = "- **Status**: pending"
 STATUS_COMPLETE = "- **Status**: complete"
@@ -64,12 +73,16 @@ def _pending_sessions(plan_dir: Path) -> list[Path]:
     ]
 
 
+def _prompt_values() -> list[str]:
+    return [*sys.argv[1:], *_ACP_PROMPTS]
+
+
 def _prompt_contains_reply_context() -> bool:
-    return any("## ASL reply context" in value for value in sys.argv[1:])
+    return any("## ASL reply context" in value for value in _prompt_values())
 
 
 def _prompt_contains_resolution_context() -> bool:
-    return any("## ASL resolution context" in value for value in sys.argv[1:])
+    return any("## ASL resolution context" in value for value in _prompt_values())
 
 
 def _session_label(path: Path) -> str:
@@ -492,14 +505,18 @@ def _write_last_message(text: str) -> None:
 
 def _validation_prompt() -> str | None:
     return next(
-        (value for value in sys.argv[1:] if value.startswith(VALIDATION_PACKET_PREFIX)),
+        (
+            value
+            for value in _prompt_values()
+            if value.startswith(VALIDATION_PACKET_PREFIX)
+        ),
         None,
     )
 
 
 def _commit_prompt() -> str | None:
     return next(
-        (value for value in sys.argv[1:] if value.startswith(COMMIT_PROMPT_PREFIX)),
+        (value for value in _prompt_values() if value.startswith(COMMIT_PROMPT_PREFIX)),
         None,
     )
 
@@ -748,6 +765,135 @@ def _wait_for_stream_continue(session_label: str) -> bool:
     return False
 
 
+class _AcpStdout:
+    """A stdout that publishes each write as an ACP ``agent_message_chunk``.
+
+    The turn body prints its progress and its ``Runner status`` line to stdout
+    and every suite reads them back from there. Over ACP that stream belongs to
+    the protocol, so the body's writes are forwarded as session updates, which
+    the adapter reassembles into the same text in the same order. Forwarding
+    per write rather than buffering matters: the streaming modes below expect
+    their first line to reach the runner while the turn is still running.
+    """
+
+    encoding = "utf-8"
+
+    def __init__(self, session_id: str) -> None:
+        self._session_id = session_id
+
+    def write(self, text: str) -> int:
+        if text:
+            _acp_send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": self._session_id,
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": text},
+                        },
+                    },
+                }
+            )
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+
+def _acp_send(payload: dict[str, object]) -> None:
+    # Always the real stdout: the body's stdout is redirected while a turn runs.
+    _REAL_STDOUT.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    _REAL_STDOUT.flush()
+
+
+def _acp_result(request_id: object, result: dict[str, object]) -> None:
+    _acp_send({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+def _acp_config_options() -> list[dict[str, object]]:
+    """Echo the launch controls the way an ACP agent reports its own settings."""
+    options: list[dict[str, object]] = []
+    for option_id, flag in (("model", "--model"), ("reasoning_effort", "--effort")):
+        value = _arg_value(flag)
+        if value is not None:
+            options.append({"id": option_id, "currentValue": value})
+    return options
+
+
+def _acp_prompt_text(params: dict[str, object]) -> str:
+    blocks = params.get("prompt")
+    if not isinstance(blocks, list):
+        return ""
+    return "".join(
+        str(block.get("text", "")) for block in blocks if isinstance(block, dict)
+    )
+
+
+def _run_acp() -> int:
+    """Speak enough ACP to carry one copilot worker turn.
+
+    The app-server branch in ``main`` declines because codex keeps a one-shot
+    fallback to decline *into*; copilot has none, so refusing here would take
+    every fake-harness suite that drives copilot off the road. The handshake is
+    answered, the ordinary turn body runs with its stdout forwarded as agent
+    message chunks, and its exit code is restated as a stop reason: only a turn
+    that finished its work gets ``end_turn``, because the adapter reads the
+    protocol's verdict and an ACP agent's own exit code says nothing.
+    """
+    session_id = "fake-copilot-acp-session"
+    exit_code = 0
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            return exit_code
+        stripped = line.strip()
+        if not stripped:
+            continue
+        message = json.loads(stripped)
+        method = message.get("method")
+        request_id = message.get("id")
+        params = message.get("params")
+        params = params if isinstance(params, dict) else {}
+        if method == "initialize":
+            _acp_result(
+                request_id,
+                {
+                    "protocolVersion": 1,
+                    "agentInfo": {"name": "fake-copilot", "version": "0.0.0"},
+                    "agentCapabilities": {},
+                },
+            )
+        elif method == "session/new":
+            _acp_result(
+                request_id,
+                {"sessionId": session_id, "configOptions": _acp_config_options()},
+            )
+        elif method == "session/prompt":
+            _ACP_PROMPTS.append(_acp_prompt_text(params))
+            with contextlib.redirect_stdout(_AcpStdout(session_id)):
+                exit_code = _run_turn()
+            _acp_result(
+                request_id,
+                {"stopReason": "end_turn" if exit_code == 0 else "refusal"},
+            )
+        elif request_id is not None:
+            _acp_send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32601,
+                        "message": f"fake copilot does not implement {method}",
+                    },
+                }
+            )
+
+
 def main() -> int:
     if sys.argv[1:2] == ["app-server"]:
         # This fixture speaks the one-shot `codex exec` command line, not the
@@ -760,6 +906,12 @@ def main() -> int:
         print("fake codex does not implement app-server", file=sys.stderr)
         return 2
 
+    if "--acp" in sys.argv:
+        return _run_acp()
+    return _run_turn()
+
+
+def _run_turn() -> int:
     validation_prompt = _validation_prompt()
     if validation_prompt is not None:
         validation_plan_dir = _validation_plan_dir(validation_prompt)

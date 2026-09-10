@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 from agent_session_loop import (
     claude_stream,
+    copilot_acp,
     harnesses,
     mailbox,
     mailbox_rendering,
@@ -1315,6 +1316,20 @@ class HarnessInvocationPromptOverrideTests(unittest.TestCase):
         self.assertEqual("user", record["type"])
         return record["message"]["content"][0]["text"]
 
+    def _copilot_acp_prompt(self, prompt: str) -> str:
+        """Return the prompt text a copilot session puts on ``session/prompt``."""
+        process = SimpleNamespace(stdin=io.StringIO())
+        session = copilot_acp.CopilotAcpSession(
+            process=process,  # type: ignore[arg-type]
+            prompt=prompt,
+            cwd="/tmp/repo",
+            permissions=copilot_acp.PermissionPolicy.for_turn(
+                is_audit=False, unsafe_bypass=False
+            ),
+        )
+        blocks = session.prompt_params("acp-session-1")["prompt"]
+        return "".join(str(block["text"]) for block in blocks)
+
     def _assert_prompt_free(
         self, invocation: harnesses.HarnessInvocation, prompt: str
     ) -> None:
@@ -1429,7 +1444,19 @@ class HarnessInvocationPromptOverrideTests(unittest.TestCase):
                             self._claude_stdin_prompt(override_prompt),
                         )
                         continue
-                    self.assertIn(override_prompt, invocation.argv)
+                    # Copilot's worker turn speaks ACP, so the prompt is the
+                    # ``session/prompt`` payload rather than a trailing argv
+                    # word -- and argv must not repeat it, since the launch
+                    # line is what gets logged.
+                    self.assertEqual(
+                        harnesses.TRANSPORT_ACP,
+                        invocation.transport,
+                    )
+                    self.assertNotIn(override_prompt, invocation.argv)
+                    self.assertEqual(
+                        override_prompt,
+                        self._copilot_acp_prompt(override_prompt),
+                    )
 
 
 class SessionRunSkillReplyCompatibilityTests(unittest.TestCase):

@@ -206,10 +206,11 @@ class CommandAndConfigTests(unittest.TestCase):
             str(plan_dir),
             copilot_safe[copilot_safe.index("--add-dir") + 1],
         )
-        self.assertEqual(
-            "/session-run /tmp/plan/",
-            copilot_safe[copilot_safe.index("-p") + 1],
-        )
+        # The worker form ends at ``--acp``: the prompt travels the protocol,
+        # so argv neither ends with it nor carries the one-shot ``-p``.
+        self.assertEqual("--acp", copilot_safe[-1])
+        self.assertNotIn("-p", copilot_safe)
+        self.assertNotIn("/session-run /tmp/plan/", copilot_safe)
 
         copilot_unsafe = harnesses.CopilotAdapter(executable="copilot").build_argv(
             cwd=cwd,
@@ -249,12 +250,15 @@ class CommandAndConfigTests(unittest.TestCase):
             model="gpt-5",
             effort="low",
         )
-        prompt_index = copilot.index("-p")
+        # ``--acp`` closes the worker form, so the flags that configure the
+        # session still have to precede it -- and the prompt is not on argv at
+        # all any more, since the protocol carries it.
+        acp_index = copilot.index("--acp")
         self.assertEqual("gpt-5", copilot[copilot.index("--model") + 1])
         self.assertEqual("low", copilot[copilot.index("--effort") + 1])
-        self.assertLess(copilot.index("--model"), prompt_index)
-        self.assertLess(copilot.index("--effort"), prompt_index)
-        self.assertEqual("/session-run /tmp/plan/", copilot[prompt_index + 1])
+        self.assertLess(copilot.index("--model"), acp_index)
+        self.assertLess(copilot.index("--effort"), acp_index)
+        self.assertNotIn("/session-run /tmp/plan/", copilot)
 
     def test_claude_stream_json_output_is_rendered_and_preserves_last_message(
         self,

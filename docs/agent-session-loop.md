@@ -4687,11 +4687,60 @@ configuration is never read, written, or modified. Audit turns get no overlay:
 an audit observes, and a hook that injected operator guidance into one would
 make it something else.
 
-Copilot:
+Copilot, whose two access profiles use two different transports:
 
 ```text
-copilot -C <cwd> --add-dir <plan-dir> [--allow-all-tools --allow-all-paths] --no-ask-user --silent [--model <model>] [--effort <effort>] -p <prompt>
+copilot -C <cwd> --add-dir <plan-dir> [--allow-all-tools --allow-all-paths] --no-ask-user --silent [--model <model>] [--effort <effort>] --acp
+copilot -C <cwd> --add-dir <read-root>... --available-tools=<audit tools> --deny-tool=<denied>... --disable-builtin-mcps --no-custom-instructions --no-remote --no-remote-export --disallow-temp-dir --no-ask-user --silent [--model <model>] [--effort <effort>] -p <prompt>
 ```
+
+A worker turn runs over the Agent Client Protocol: `--acp` puts the same binary,
+with the same flags, into a newline-delimited JSON-RPC conversation on stdin and
+stdout instead of a one-shot `-p`. Everything that decides what the turn may do
+is still on that command line — the repository grant, the bypass flags, the
+compiled `--deny-tool` rules, the model, and the effort are all configured at
+server launch rather than through the protocol — so moving the transport changes
+nothing about the turn's access. What it changes is what the turn can be *told*
+afterwards. The prompt travels as a `session/prompt` payload instead of an argv
+word, so it never reaches a process listing or a crash report; the assistant
+message arrives as streamed `agent_message_chunk` updates and becomes the turn's
+last message directly, rather than being scraped back out of stdout; and the
+turn ends with a stated `stopReason`, which is what lets a refused or truncated
+turn be reported as one instead of as whatever exit code the agent happened to
+leave behind.
+
+The conversation is deliberately narrow. `initialize` advertises *no* filesystem
+and *no* terminal capability, so the agent cannot ask ASL to read a file, write
+one, or run a command on its behalf — the only access it has is the access its
+launch argv granted. Any other client-side method it asks for is answered with
+JSON-RPC "method not found" and logged as a refused unadvertised request.
+
+`session/request_permission` is answered explicitly, and never blankly. The
+responder restates the grant the launch argv already made and can never exceed
+it: a turn launched with `--allow-all-tools --allow-all-paths` answers
+`allow_once`, and a turn launched without them answers `reject_once`, because
+`--no-ask-user` means there is no operator at this turn and approving on their
+behalf would invent an authorization nobody gave. The two standing options,
+`allow_always` and `reject_always`, are never selected — a single answer must not
+stand for calls nobody has seen yet — and a request that offers only those is
+declined with the protocol's own `cancelled` outcome. Every rejected or
+cancelled request is reported on the turn's stderr. Guard rules are not
+re-derived here: they are shell-command rules the agent applies to its own tool
+calls before it would ever ask, and matching them again against a permission
+payload could only be a weaker guess at the same rule.
+
+An audit turn keeps the one-shot form exactly as it was. Its restrictions are
+its command line — a fixed `--available-tools` set, denied tool families, no
+built-in MCPs, no remote, no temp directory — and nothing about observing a
+repository needs a conversation, so it does not get one. Both transports decline
+a mid-turn steer with `unsupported-active-steer` rather than ignoring it, and
+neither wires `session/cancel` or `session/load`: a copilot turn is stopped the
+way it always was, and `copilot` remains `staged` for conversation continuity.
+
+There is no fallback from ACP to the one-shot form. It is the same binary with
+the same flags reading its prompt from a pipe, so a conversation that fails after
+`session/prompt` has already spent the turn, and re-running it would execute the
+same work twice.
 
 Harness prompts use the expected skill prefix:
 
@@ -4703,7 +4752,9 @@ $session-run <plan-dir>/ --runner-managed
 Codex writes a last-message file with `-o`. Claude streams JSONL in print mode;
 the adapter renders that stream as concise `claude ...` stdout log lines for
 live tailing and keeps the final `result` text as the last message. Copilot does
-not use a last-message file, so its last-message capture falls back to stdout.
+not use a last-message file: a worker turn reassembles its last message from the
+ACP `agent_message_chunk` updates, and an audit turn's capture falls back to
+stdout.
 ASL's `--harness-model` is forwarded only to turns using the implementation
 harness declared by `--harness`. `--review-harness-model` is forwarded only to
 generated review turns and requires `--review-harness`; it never affects
@@ -4721,7 +4772,13 @@ checks the selected harness/model pairing without adding a review role.
 names the model it actually ran, in the `system`/`init` record and again in each
 `message_start`, and the adapter carries the first such name through to the turn
 payload and `state.json` as `observed_model` with `observed_model_source:
-harness_reported`. The requested and observed values sit side by side rather than
+harness_reported`. A copilot worker turn names one the same way, from the `model`
+config option `session/new` echoes back — the only place a flag applied at server
+launch can be confirmed rather than assumed. A model or effort echo that
+disagrees with what was asked for is reported on the turn's stderr as a launch
+control mismatch and nothing more: neither control changes what the turn is
+allowed to do, so unlike an access profile it is surfaced rather than enforced.
+The requested and observed values sit side by side rather than
 overwriting each other, so an alias or a server-side substitution is visible
 instead of silently reported as the request. Harnesses that name no model leave
 both fields `null`. `observed_model_source` is observed, never selected, so it
@@ -4790,7 +4847,7 @@ harness. For Codex, Claude, and Copilot this means:
 ```text
 codex app-server  (thread/start sandbox: danger-full-access)
 claude --print --verbose --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode bypassPermissions <prompt>
-copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-ask-user --silent -p <prompt>
+copilot -C <cwd> --add-dir <plan-dir> --allow-all-tools --allow-all-paths --no-ask-user --silent --acp  (session/prompt carries <prompt>)
 ```
 
 `--unsafe-bypass` is accepted as an explicit form of the default. Pass
@@ -4800,10 +4857,10 @@ where supported by that harness:
 ```text
 codex app-server  (thread/start sandbox: workspace-write, writable root <plan-dir>)
 claude --print --verbose --output-format stream-json --include-partial-messages --add-dir <plan-dir> --permission-mode dontAsk <prompt>
-copilot -C <cwd> --add-dir <plan-dir> --no-ask-user --silent -p <prompt>
+copilot -C <cwd> --add-dir <plan-dir> --no-ask-user --silent --acp  (session/prompt carries <prompt>)
 ```
 
-For Copilot, `--no-unsafe-bypass` does not re-enable interactive approval prompts; it keeps `--no-ask-user --silent` and only removes `--allow-all-tools --allow-all-paths`.
+For Copilot, `--no-unsafe-bypass` does not re-enable interactive approval prompts; it keeps `--no-ask-user --silent` and only removes `--allow-all-tools --allow-all-paths`. Over ACP it also decides the one thing the permission responder may answer: with the bypass flags a `session/request_permission` is answered `allow_once`, and without them it is answered `reject_once`.
 Because bypass mode is the default, run only trusted plans against trusted
 repositories, or pass `--no-unsafe-bypass` when the harness should stay in its
 normal workspace sandbox.
