@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agent_session_loop import conversations, plans, workspaces
+from agent_session_loop import conversations, harnesses, plans, workspaces
 
 DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
@@ -286,12 +286,29 @@ class CapabilityReportTests(ConversationTestBase):
             [capability.harness for capability in report.capabilities],
         )
 
-    def test_nothing_is_available_while_recovery_is_incomplete(self) -> None:
+    def test_each_state_follows_the_adapter_that_produces_it(self) -> None:
+        """The report is derived, so it may never disagree with the adapters."""
         report = conversations.capability_report()
-        self.assertEqual((), report.available_harnesses)
         for capability in report.capabilities:
-            self.assertEqual("staged", capability.state)
+            wired = harnesses.continues_conversations(capability.harness)
+            self.assertEqual("available" if wired else "staged", capability.state)
             self.assertTrue(capability.detail)
+        self.assertEqual(
+            tuple(
+                name
+                for name in conversations.HARNESS_NAMES
+                if harnesses.continues_conversations(name)
+            ),
+            report.available_harnesses,
+        )
+
+    def test_codex_is_the_harness_recovery_is_wired_for(self) -> None:
+        """Stated flatly rather than derived: the derivation above proves the
+        report follows the adapters, and this pins which adapter that is, so
+        flipping a flag by accident fails here instead of silently offering an
+        operator a recovery no transport performs."""
+        report = conversations.capability_report()
+        self.assertEqual(("codex",), report.available_harnesses)
 
     def test_report_round_trips(self) -> None:
         report = conversations.capability_report()

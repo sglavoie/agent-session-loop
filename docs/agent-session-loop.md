@@ -4586,9 +4586,31 @@ appear in a process listing. `thread/start` echoes the sandbox it actually
 applied, and the client refuses to send the turn if that echo is not the profile
 that was asked for.
 
+A turn that continues a conversation sends `thread/resume` instead, carrying the
+same plan plus the exact `threadId` it was handed — there is no "resume the
+latest" call anywhere in the client. A restored thread carries the settings of
+the thread it restores, so its echo is re-checked further: a returned thread id
+that is not the one asked for, a sandbox wider than the requested profile, or a
+`cwd` or `approvalPolicy` that disagrees with this call is refused before any
+turn is sent. The model is reported through `observed_model` rather than
+refused, because the server canonicalizes model names. Whichever call opened the
+thread, its identifier is persisted before `turn/start` is sent, and the turn is
+abandoned unsubmitted if that write fails.
+
+`turn/interrupt` stops the turn this session started, naming its exact thread and
+turn. It is sent immediately before the wait loop's forced kill and again from
+the transport's shutdown while a turn is still live, so the conversation records
+an `interrupted` turn rather than one that stopped answering. An interrupted turn
+is not a failed turn: only `status: failed` becomes a protocol error, and a
+refused or unanswered interrupt is not recorded as one either, since the turn is
+ending regardless.
+
 The one-shot form is still built, and is used only when the app-server
 conversation fails *before* the turn is accepted and before any work is
-emitted — the one state in which running the turn again cannot run it twice:
+emitted — the one state in which running the turn again cannot run it twice.
+A turn that asked to resume has no such window at all, because `codex exec`
+starts a fresh session and falling back would answer "continue this
+conversation" with one that continues nothing:
 
 ```text
 codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sandbox [--model <model>] [-c model_reasoning_effort="<effort>"] -o <last-message-file> <prompt>
@@ -4598,6 +4620,14 @@ codex exec -C <cwd> --add-dir <plan-dir> --dangerously-bypass-approvals-and-sand
 which of the two ran: `app-server` or `exec`. Under `app-server` the invocation
 also carries a prompt-free `turn_plan`, which `--dry-run` prints below argv so
 an operator can still read the access profile off a planned turn.
+
+`codex exec` submits its prompt on argv, so it has no handshake in which to learn
+a conversation first. It reads the session id out of its own output instead,
+which is continuity observed after the fact: the work is already submitted, so a
+capture that fails there cannot retract anything and the turn reports
+`continuity_unavailable` rather than being abandoned. A result says the same
+thing when the output named no session id at all, and only when a caller asked —
+an ordinary one-shot turn is not missing something it was never meant to have.
 
 Claude runs over bidirectional stream JSON, so its prompt is not on argv either:
 
@@ -5079,26 +5109,38 @@ Conversation-continuity capability is reported per harness as `available`,
 once. The state is derived from the harness adapters rather than declared
 beside them: a harness is `available` exactly when its adapter both reports the
 conversation a turn ran on and accepts one to resume, which is the same pair of
-flags a turn checks when it refuses a capture sink or a resume intent. Every
-harness is currently `staged`: the reference, intent, report, durable ledger,
-and the turn-lifecycle seam described below exist, but no adapter captures a
-native identifier or resumes against one yet, and an operator action backed by
-incomplete recovery must not be offered.
+flags a turn checks when it refuses a capture sink or a resume intent. `codex`
+is `available`; `claude` and `copilot` remain `staged`, because the reference,
+intent, report, durable ledger, and the turn-lifecycle seam described below
+exist for them but their adapters neither capture a native identifier nor resume
+against one, and an operator action backed by incomplete recovery must not be
+offered.
 
-The turn boundary is where a native identifier would be learned, so the seam
-that would carry it is part of a harness turn rather than part of the ledger. A
-transport reports the conversation its handshake learned, the sink persists it,
-and the transport submits work only if that call returned — a conversation
-recorded after submission is one a crash in between could lose while the work
-went ahead. The same identifier named twice is recorded once; a different
-identifier is refused, because one turn runs on one conversation. A capture
-that fails to persist abandons the turn with nothing submitted and reports the
-persistence error, rather than running work into a conversation nothing could
-find again. The seam is turn-scoped like the live-guidance endpoint: closing it
-waits out a capture already in flight and refuses every capture afterwards, so
-a late protocol callback cannot record against a turn that is already over. A
-resume intent travels the other way on the invocation, and a turn refuses one
+The turn boundary is where a native identifier is learned, so the seam that
+carries it is part of a harness turn rather than part of the ledger. A transport
+reports the conversation its handshake learned, the sink persists it, and the
+transport submits work only if that call returned — a conversation recorded
+after submission is one a crash in between could lose while the work went ahead.
+The same identifier named twice is recorded once; a different identifier is
+refused, because one turn runs on one conversation. A capture that fails to
+persist abandons the turn with nothing submitted and reports the persistence
+error, rather than running work into a conversation nothing could find again.
+The seam is turn-scoped like the live-guidance endpoint: closing it waits out a
+capture already in flight and refuses every capture afterwards, so a late
+protocol callback cannot record against a turn that is already over.
+Immediately after the capture the transport asks the lifecycle whether the turn
+may still be submitted, which is what puts a cancellation arriving in that
+window in the `handshake` stage below: it costs the spawn, not the turn.
+
+A resume intent travels the other way on the invocation, and a turn refuses one
 its adapter cannot honor instead of quietly starting a fresh conversation.
+Where an adapter has a protocol transport and a one-shot fallback, the refusal
+runs both ways: a resumed turn has no fallback window, and the one-shot
+invocation cannot even be built for a resume. A transport whose prompt is on
+argv has no handshake to capture in and can only read its identifier out of the
+turn's own output afterwards; because that work cannot be un-submitted, a
+capture failure there reports `continuity_unavailable` on the result rather than
+abandoning a turn that already ran.
 
 Cancelling a turn is two observations rather than one. Requesting the
 cancellation records it and returns immediately, taking no lock a guidance
@@ -5114,6 +5156,12 @@ A request inside its grace period is not yet due and stops nothing, so a turn
 that finishes inside its grace was never aborted. A request that arrives after
 the turn is over is completed on the spot and staged `shutdown` rather than
 leaving its caller waiting for a kill that will never be issued.
+
+In the `execution` window a transport that has a live protocol channel is asked
+to interrupt its turn first, so the conversation records it as interrupted
+rather than as one that stopped answering. That request is issued alongside the
+kill rather than before it, and never waited on: the deadline is enforced by
+terminating the process regardless of what the protocol call is doing.
 
 The invariants later work must preserve: a reference is written before the work
 that uses it is submitted and confirmed only once the harness has accepted work

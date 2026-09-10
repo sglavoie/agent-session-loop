@@ -899,9 +899,9 @@ class CapabilityReport:
 
 
 #: Why a harness is staged rather than available. The contracts, the durable
-#: store, and the turn-lifecycle seam exist; no adapter reports or resumes a
-#: native conversation through that seam yet, and an operator action backed by
-#: incomplete recovery must not be offered.
+#: store, and the turn-lifecycle seam exist; *this* adapter does not report or
+#: resume a native conversation through that seam yet, and an operator action
+#: backed by incomplete recovery must not be offered for it.
 STAGED_CAPABILITY_DETAIL = (
     "conversation contracts, durable storage, and the turn lifecycle seam are "
     "in place; this harness does not capture or resume a native conversation yet"
@@ -922,7 +922,8 @@ def capability_report() -> CapabilityReport:
     ran on and accepts one to resume, which is the same pair of flags
     ``HarnessAdapter.run`` enforces when it refuses a capture sink or a resume
     intent. One producer, so this report cannot promise recovery the turn
-    boundary would refuse to perform. Every harness is ``staged`` today.
+    boundary would refuse to perform. ``codex`` is ``available`` today; the
+    rest are ``staged``.
     """
     return CapabilityReport(
         capabilities=tuple(

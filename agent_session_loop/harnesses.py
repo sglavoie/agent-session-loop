@@ -9,6 +9,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -414,9 +415,21 @@ class TurnConversation:
 
     def __init__(self, sink: ConversationCallback | None = None) -> None:
         self._sink = sink
+        self._requested = sink is not None
         self._lock = threading.Lock()
         self._native_id: str | None = None
         self._closed = False
+
+    @property
+    def requested(self) -> bool:
+        """Whether this turn's caller asked to be told the conversation at all.
+
+        Fixed at construction rather than read off the sink, which :meth:`close`
+        drops: a turn that ended still has to be able to say whether continuity
+        was ever wanted, because "none was captured" only means something was
+        lost when someone was waiting to hear it.
+        """
+        return self._requested
 
     @property
     def native_id(self) -> str | None:
@@ -514,9 +527,26 @@ class TurnLifecycle:
         if abort is not None and abort.is_due():
             raise TurnCancelled(abort.reason or "cancellation requested")
 
+    @property
+    def wants_conversation(self) -> bool:
+        """Whether this turn's caller asked which conversation it runs on."""
+        return self.conversation.requested
+
     def capture_conversation(self, native_id: str) -> None:
         """Record the turn's native conversation; raises if it was not stored."""
         self.conversation.capture(native_id)
+
+    def refuse_submission(self) -> None:
+        """Stop a handshake here, naming this window rather than a later one.
+
+        The two calls are one act: a transport whose handshake runs on its own
+        thread would otherwise have its cancellation named by the wait loop,
+        which can only see ``execution`` -- the window that means work was
+        interrupted, and precisely what stopping here avoided.
+        """
+        if self.cancel_due:
+            self.note_cancelled(CANCEL_STAGE_HANDSHAKE)
+        self.check_not_cancelled()
 
     def begin(self) -> None:
         """Bind the lifecycle to a turn that is about to start."""
@@ -649,9 +679,16 @@ class HarnessResult:
     stream_io: dict[str, int | float] | None = None
     transport: str = TRANSPORT_EXEC
     #: The native conversation this turn actually ran on, when its transport
-    #: reported one. ``None`` for every exec-transport turn and for any turn
-    #: that stopped before its handshake named a conversation.
+    #: reported one, or ``None`` for a turn that never named one — because its
+    #: transport cannot report one, because it stopped before its handshake got
+    #: there, or because its output never stated it.
     conversation_id: str | None = None
+    #: Why this turn has no conversation to continue, when one was asked for
+    #: and none could be had. Set only where the work ran anyway: a legacy
+    #: one-shot turn submits its prompt on argv, so continuity can only be
+    #: observed after the fact and its absence cannot retract the turn. A turn
+    #: that could have refused instead reports ``conversation_error``.
+    continuity_unavailable: str | None = None
     #: Which window a cancellation was acted on in, or ``None`` when the turn
     #: was not cancelled. Distinguishes the cancellations that cost nothing
     #: (``unstarted``, ``handshake``) from the ones that had to interrupt work
@@ -921,9 +958,10 @@ class HarnessTransport:
     after the process exists and released once it is gone, and it is the only
     thing in the turn that may write to that process's stdin.
 
-    The three methods are what the generic turn loop needs to know about a
+    The four methods are what the generic turn loop needs to know about a
     conversation it otherwise ignores: how to read the process's output, how
-    (or whether) to inject guidance into it, and how to let go at the end.
+    (or whether) to inject guidance into it, how to stop the work in flight,
+    and how to let go at the end.
     """
 
     def output_processor(self) -> _OutputProcessor:
@@ -934,8 +972,44 @@ class HarnessTransport:
         """The live-delivery channel, or ``None`` when there is none."""
         return None
 
+    def interrupt(self) -> bool:
+        """Tell this turn's conversation to stop the work it has in flight.
+
+        ``False`` -- the base answer -- means the transport has no native
+        interruption at all, which is the honest report for a one-shot harness:
+        stopping it *is* the process kill and nothing else. A transport that
+        returns ``True`` has told its harness to stop; it has not waited for it
+        to have stopped, which is what the forced termination behind this call
+        is for.
+        """
+        return False
+
     def shutdown(self) -> None:
         """Release the conversation. Called once, on every path out of a turn."""
+
+
+def _request_native_interrupt(transport: HarnessTransport | None) -> None:
+    """Tell a protocol harness its turn was interrupted, without waiting for it.
+
+    Issued on the way to the forced kill, never instead of it. The termination
+    contract is that the deadline fires independently of any blocked protocol
+    call, so this runs on a daemon thread the kill does not join: at worst the
+    interrupt is still in flight when the process group dies under it, which is
+    the same outcome as not sending one.
+
+    It exists because a killed pipe says nothing. An app-server that records
+    its own thread state ends the turn as *interrupted* when told so, and as a
+    turn that simply stopped answering when it is only killed -- and a later
+    turn resuming that conversation reads the difference.
+    """
+    if transport is None:
+        return
+
+    def send() -> None:
+        with contextlib.suppress(Exception):
+            transport.interrupt()
+
+    threading.Thread(target=send, name="harness-interrupt", daemon=True).start()
 
 
 class HarnessAdapter:
@@ -1490,6 +1564,7 @@ class HarnessAdapter:
                         # Work was already submitted, so this is the expensive
                         # window: the kill below is what stops it.
                         lifecycle.note_cancelled(CANCEL_STAGE_EXECUTION)
+                        _request_native_interrupt(transport)
                     prior_snapshot = _snapshot_descendants(
                         process.pid, _sweep_process_table()
                     )
@@ -1728,14 +1803,159 @@ class _CodexAppServerTransport(HarnessTransport):
     def guidance_transport(self) -> guidance_delivery.GuidanceTransport | None:
         return self.session.steer
 
+    def interrupt(self) -> bool:
+        return self.session.interrupt()
+
     def shutdown(self) -> None:
         self.session.shutdown()
+
+
+#: The session identifier ``codex exec`` states in its own header. Anchored on
+#: the UUID shape the app-server uses for the same value, so the only thing
+#: this can match is a conversation id -- and a header spelled any other way
+#: reports unavailable continuity instead of capturing a guess.
+_CODEX_EXEC_SESSION_ID = re.compile(
+    r"session[ _-]?id[^\n]{0,24}?"
+    r"(?P<session_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+
+
+class _CodexExecOutputProcessor(_OutputProcessor):
+    """Read the legacy transport's one continuity fact out of its own output.
+
+    ``codex exec`` takes its prompt on argv, so the work is submitted the
+    moment the process is spawned and there is no handshake in which to learn a
+    conversation first. The session it ran on is stated in its header instead,
+    which is continuity observed *after* the fact -- the opposite of the
+    ordering the app-server transport keeps, and the reason a capture failure
+    here cannot retract anything.
+
+    Everything else is the plain processor's behaviour: the text is passed
+    through untouched, because this reads the output rather than rendering it.
+    """
+
+    def __init__(self, lifecycle: TurnLifecycle | None) -> None:
+        self._lifecycle = lifecycle
+        self.native_id: str | None = None
+        self.capture_error: str | None = None
+
+    def process_chunk(self, stream_name: StreamName, text: str) -> str:
+        if self.native_id is None and self.capture_error is None:
+            self._observe(text)
+        return text
+
+    def _observe(self, text: str) -> None:
+        """Capture the first session id the turn names, and only the first.
+
+        The header is one line and the readers deliver whole lines, so a match
+        is either in this chunk or in none. A second id would be a different
+        conversation for the same turn, which the capture seam refuses anyway;
+        stopping at the first keeps that refusal from being reached at all.
+        """
+        match = _CODEX_EXEC_SESSION_ID.search(text)
+        if match is None:
+            return
+        native_id = match.group("session_id")
+        lifecycle = self._lifecycle
+        if lifecycle is not None:
+            try:
+                lifecycle.capture_conversation(native_id)
+            except ConversationCaptureError as error:
+                # Raising would surface as a stream-callback failure and lose
+                # the turn, which already ran. Reported as continuity that
+                # could not be had instead -- the honest outcome for work that
+                # cannot be un-submitted.
+                self.capture_error = str(error)
+                return
+        self.native_id = native_id
+
+
+class _CodexExecTransport(HarnessTransport):
+    """The legacy one-shot turn's continuity observer.
+
+    It holds no conversation -- ``codex exec`` has none to hold -- and exists
+    only so the turn's own output still yields the session it ran on. There is
+    no live channel and nothing to interrupt beyond the process itself, so
+    guidance defers and interruption declines exactly as they did when this
+    transport was ``None``.
+    """
+
+    def __init__(self, lifecycle: TurnLifecycle | None) -> None:
+        self._processor = _CodexExecOutputProcessor(lifecycle)
+        self._wanted = lifecycle is not None and lifecycle.wants_conversation
+
+    def output_processor(self) -> _OutputProcessor:
+        return self._processor
+
+    @property
+    def continuity_note(self) -> str | None:
+        """Why this turn has no conversation to continue, if it has none.
+
+        ``None`` when one was captured, and also when nobody asked: an ordinary
+        one-shot turn is not missing something it was never meant to have. The
+        identifier is still read out of the output either way, so a result
+        reports the session it ran on whether or not a sink wanted it.
+        """
+        if not self._wanted:
+            return None
+        if self._processor.capture_error is not None:
+            return self._processor.capture_error
+        if self._processor.native_id is not None:
+            return None
+        return "codex exec output named no session id"
+
+
+class _ExecContinuityObserver:
+    """Keep hold of a legacy turn's transport so its result can report it.
+
+    ``open_transport`` builds the transport and ``run`` returns the result, and
+    nothing in between hands one to the other -- so this rides along as the
+    ``on_transport`` hook, passing every call through to the caller's own hook
+    and keeping the one transport it recognizes.
+    """
+
+    def __init__(
+        self,
+        downstream: Callable[[HarnessTransport | None], None] | None,
+    ) -> None:
+        self._downstream = downstream
+        self.transport: _CodexExecTransport | None = None
+
+    def __call__(self, transport: HarnessTransport | None) -> None:
+        if isinstance(transport, _CodexExecTransport):
+            self.transport = transport
+        if self._downstream is not None:
+            self._downstream(transport)
+
+    def apply(self, result: HarnessResult) -> HarnessResult:
+        """Report what continuity the turn's output did or did not name.
+
+        The identifier itself is already on the result: it was captured through
+        the lifecycle, which is what fills ``conversation_id``. Only its
+        *absence* needs stating, because a caller that asked to continue this
+        conversation later would otherwise read "none" as "not yet looked".
+        """
+        transport = self.transport
+        if transport is None:
+            return result
+        note = transport.continuity_note
+        if note is None:
+            return result
+        return dataclasses.replace(result, continuity_unavailable=note)
 
 
 class CodexAdapter(HarnessAdapter):
     name = "codex"
     skill_prefix = "$"
     enforces_audit_read_only = True
+    #: Both halves of continuity, on both transports. The app-server captures
+    #: its thread id between ``thread/resume``/``thread/start`` and
+    #: ``turn/start`` and can restore exactly the thread it is handed; the
+    #: legacy transport captures the session id its own output names, and
+    #: refuses a resume outright rather than starting a fresh session under one.
+    captures_conversations = True
+    resumes_conversations = True
 
     def build_argv(
         self,
@@ -1929,6 +2149,15 @@ class CodexAdapter(HarnessAdapter):
         resume_conversation_id: str | None = None,
     ) -> HarnessInvocation:
         self.check_access(access, plan_dir=plan_dir, unsafe_bypass=unsafe_bypass)
+        if resume_conversation_id is not None:
+            # `codex exec` has no resume: it starts a new session every time.
+            # Building this invocation anyway would produce a turn that claims
+            # to continue a conversation and silently starts a fresh one, which
+            # is the exact substitution the app-server path refuses to make.
+            raise HarnessError(
+                "codex exec cannot resume conversation "
+                f"{resume_conversation_id}; it starts a fresh session"
+            )
         return HarnessInvocation(
             name=self.name,
             argv=self.build_exec_argv(
@@ -1945,7 +2174,6 @@ class CodexAdapter(HarnessAdapter):
             last_message_path=last_message_path,
             model=model,
             effort=effort,
-            resume_conversation_id=resume_conversation_id,
             transport=TRANSPORT_EXEC,
         )
 
@@ -1958,13 +2186,26 @@ class CodexAdapter(HarnessAdapter):
         lifecycle: TurnLifecycle | None = None,
     ) -> HarnessTransport | None:
         if invocation.transport != TRANSPORT_APP_SERVER:
-            return None
+            # The legacy transport holds no conversation, but its own output
+            # names the session it ran on, and that is the only place a turn
+            # whose prompt was argv can learn its continuity from.
+            return _CodexExecTransport(lifecycle)
         if invocation.turn_plan is None:
             raise HarnessError("codex app-server turns require a turn plan")
         session = codex_app_server.CodexAppServerSession(
             process=process,
             plan=invocation.turn_plan,
             prompt=prompt,
+            resume_conversation_id=invocation.resume_conversation_id,
+            # Both hooks run on the session's driver thread, between the thread
+            # call and `turn/start`. Their failures cannot be raised out of
+            # here -- the handshake is already backgrounded by then -- so the
+            # session records them and `run` below restates them as the
+            # abandoned and cancelled results they are.
+            on_conversation=None
+            if lifecycle is None
+            else lifecycle.capture_conversation,
+            before_submit=None if lifecycle is None else lifecycle.refuse_submission,
         )
         # The last checkpoint before the thread and the turn are created. A
         # cancellation seen here costs an app-server spawn; the same
@@ -2004,31 +2245,37 @@ class CodexAdapter(HarnessAdapter):
         was accepted *and* before the app-server emitted anything the turn did,
         which is the only state in which re-running the prompt cannot execute
         it twice. Once the turn is accepted, a protocol failure is reported as
-        a failed turn -- never retried.
+        a failed turn -- never retried. A turn asked to *resume* a conversation
+        has no fallback window at all: the legacy transport starts a fresh
+        session, so falling back would answer "continue this conversation" with
+        one that continues nothing.
         """
         if invocation is not None and invocation.transport == TRANSPORT_EXEC:
             # An explicitly legacy invocation (a fallback re-entry, or a caller
             # that built one deliberately) is run as-is.
-            return super().run(
-                cwd=cwd,
-                plan_dir=plan_dir,
-                prompt=prompt,
-                unsafe_bypass=unsafe_bypass,
-                last_message_path=last_message_path,
-                timeout=timeout,
-                stream_callback=stream_callback,
-                model=model,
-                effort=effort,
-                on_spawn=on_spawn,
-                on_final_result=on_final_result,
-                on_observed_model=on_observed_model,
-                access=access,
-                abort=abort,
-                live_delivery=live_delivery,
-                env=env,
-                invocation=invocation,
-                on_transport=on_transport,
-                on_conversation=on_conversation,
+            observer = _ExecContinuityObserver(on_transport)
+            return observer.apply(
+                super().run(
+                    cwd=cwd,
+                    plan_dir=plan_dir,
+                    prompt=prompt,
+                    unsafe_bypass=unsafe_bypass,
+                    last_message_path=last_message_path,
+                    timeout=timeout,
+                    stream_callback=stream_callback,
+                    model=model,
+                    effort=effort,
+                    on_spawn=on_spawn,
+                    on_final_result=on_final_result,
+                    on_observed_model=on_observed_model,
+                    access=access,
+                    abort=abort,
+                    live_delivery=live_delivery,
+                    env=env,
+                    invocation=invocation,
+                    on_transport=observer,
+                    on_conversation=on_conversation,
+                )
             )
 
         if invocation is None:
@@ -2081,6 +2328,14 @@ class CodexAdapter(HarnessAdapter):
             return result
         session = opened[0]
 
+        abandoned = self._abandoned_result(result, session)
+        if abandoned is not None:
+            # Nothing was submitted, so there is nothing to stream and nothing
+            # to fall back to: this turn was stopped on purpose, before it
+            # became a turn at all.
+            window.discard()
+            return abandoned
+
         if result.timed_out or result.aborted or result.interrupted:
             # The turn was stopped rather than failed. Re-running it would
             # spend the same wall clock again, and the operator asked for it to
@@ -2104,30 +2359,81 @@ class CodexAdapter(HarnessAdapter):
             effort=effort,
             access=access,
         )
-        fallback_result = super().run(
-            cwd=cwd,
-            plan_dir=plan_dir,
-            prompt=prompt,
-            unsafe_bypass=unsafe_bypass,
-            last_message_path=last_message_path,
-            timeout=timeout,
-            stream_callback=stream_callback,
-            model=model,
-            effort=effort,
-            on_spawn=on_spawn,
-            on_final_result=on_final_result,
-            on_observed_model=on_observed_model,
-            access=access,
-            abort=abort,
-            live_delivery=live_delivery,
-            env=env,
-            invocation=legacy,
-            on_transport=on_transport,
-            on_conversation=on_conversation,
+        observer = _ExecContinuityObserver(on_transport)
+        fallback_result = observer.apply(
+            super().run(
+                cwd=cwd,
+                plan_dir=plan_dir,
+                prompt=prompt,
+                unsafe_bypass=unsafe_bypass,
+                last_message_path=last_message_path,
+                timeout=timeout,
+                stream_callback=stream_callback,
+                model=model,
+                effort=effort,
+                on_spawn=on_spawn,
+                on_final_result=on_final_result,
+                on_observed_model=on_observed_model,
+                access=access,
+                abort=abort,
+                live_delivery=live_delivery,
+                env=env,
+                invocation=legacy,
+                on_transport=observer,
+                on_conversation=on_conversation,
+            )
         )
         return self._with_stderr_note(
             fallback_result,
             f"codex app-server unavailable, ran codex exec instead: {fallback}",
+        )
+
+    def _abandoned_result(
+        self,
+        result: HarnessResult,
+        session: codex_app_server.CodexAppServerSession,
+    ) -> HarnessResult | None:
+        """Restate a turn the session refused to submit, or ``None``.
+
+        Both refusals happen on the session's driver thread, after ``run`` has
+        stopped being able to raise, so the process exits normally and the base
+        result reads like an ordinary short turn. That result cannot stand: a
+        conversation that was never recorded, or a turn cancelled a moment
+        before ``turn/start``, must not be reported as work that ran.
+
+        The base run's exit code is deliberately overwritten rather than
+        consulted. Closing stdin with nothing submitted races the wait loop, so
+        the app-server may well have exited cleanly first -- and a clean exit
+        from a turn that never started is the one thing it must not be read as.
+        """
+        conversation_error = session.conversation_error
+        if conversation_error is not None:
+            return self._with_stderr_note(
+                dataclasses.replace(
+                    result,
+                    returncode=_CONVERSATION_ABANDON_RETURNCODE,
+                    conversation_error=conversation_error,
+                    # No conversation was recorded, so the turn has none to
+                    # report -- the whole reason it refused to run.
+                    conversation_id=None,
+                    timed_out=False,
+                    aborted=False,
+                    interrupted=False,
+                ),
+                f"{self.name} turn abandoned: {conversation_error}",
+            )
+        if session.cancelled_before_submission is None:
+            return None
+        return dataclasses.replace(
+            result,
+            # The same code and the same window the base run reports for a
+            # handshake cancellation it *could* raise out of, because it is the
+            # same event: a turn stopped before it submitted anything.
+            returncode=137,
+            aborted=True,
+            timed_out=False,
+            interrupted=False,
+            cancel_stage=CANCEL_STAGE_HANDSHAKE,
         )
 
     def _app_server_result(

@@ -771,13 +771,29 @@ class ConversationCaptureTurnTests(_TurnTestCase):
 class ShippedAdapterCapabilityTests(unittest.TestCase):
     """No shipped adapter claims continuity it has not been wired for."""
 
-    def test_no_adapter_captures_or_resumes_yet(self) -> None:
+    #: The adapters whose transports actually capture and resume today. Named
+    #: rather than derived, so wiring a harness is a deliberate edit here and
+    #: not something a flipped class flag can do quietly.
+    WIRED = frozenset({"codex"})
+
+    def test_only_wired_adapters_capture_or_resume(self) -> None:
         for name in harnesses.HARNESS_NAMES:
             with self.subTest(harness=name):
                 adapter = harnesses.get_adapter(name)
-                self.assertFalse(adapter.captures_conversations)
-                self.assertFalse(adapter.resumes_conversations)
-                self.assertFalse(harnesses.continues_conversations(name))
+                wired = name in self.WIRED
+                self.assertEqual(wired, adapter.captures_conversations)
+                self.assertEqual(wired, adapter.resumes_conversations)
+                self.assertEqual(wired, harnesses.continues_conversations(name))
+
+    def test_both_halves_are_wired_together(self) -> None:
+        """Capture without resume records what nothing can use; resume without
+        capture continues a conversation the run never wrote down."""
+        for name in harnesses.HARNESS_NAMES:
+            with self.subTest(harness=name):
+                adapter = harnesses.get_adapter(name)
+                self.assertEqual(
+                    adapter.captures_conversations, adapter.resumes_conversations
+                )
 
     def test_an_unknown_harness_does_not_continue_conversations(self) -> None:
         self.assertFalse(harnesses.continues_conversations("nonesuch"))

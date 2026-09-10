@@ -59,7 +59,14 @@ def guidance_request(text: str = GUIDANCE_BODY) -> guidance_delivery.GuidanceReq
 
 def worker_plan(**overrides: Any) -> codex_app_server.TurnPlan:
     fields: dict[str, Any] = {
-        "thread_params": {"cwd": "/work", "sandbox": "workspace-write"},
+        "thread_params": {
+            "cwd": "/work",
+            "sandbox": "workspace-write",
+            # The real plan always states this, and a resumed thread is checked
+            # against it: an approval policy that came back from the restored
+            # thread rather than from this call is a different turn.
+            "approvalPolicy": "never",
+        },
         "turn_params": {"effort": "high"},
         "expected_sandbox": codex_app_server.SANDBOX_WORKSPACE_WRITE,
     }
@@ -142,42 +149,62 @@ class _FakeProcess:
 def scripted_responder(
     *,
     applied_sandbox: str | None = None,
+    applied_settings: dict[str, Any] | None = None,
+    applied_model: str = "fake-model-1",
     thread_error: dict[str, Any] | None = None,
+    resume_error: dict[str, Any] | None = None,
+    restored_thread_id: str | None = None,
     answer_steer: bool = True,
     steer_error: dict[str, Any] | None = None,
+    answer_interrupt: bool = True,
+    interrupt_error: dict[str, Any] | None = None,
 ):
-    """The happy-path server, with one seam per failure a test wants."""
+    """The happy-path server, with one seam per failure a test wants.
+
+    ``thread/start`` and ``thread/resume`` answer in the same shape, so both go
+    through one builder: what a test varies is the echo, which is the only
+    thing a restoring client has to go on.
+    """
+
+    def thread_result(params: dict[str, Any], thread_id: str) -> dict[str, Any]:
+        sandbox = (
+            applied_sandbox
+            or {
+                "read-only": "readOnly",
+                "workspace-write": "workspaceWrite",
+                "danger-full-access": "dangerFullAccess",
+            }[params["sandbox"]]
+        )
+        result: dict[str, Any] = {
+            "thread": {"id": thread_id},
+            "sandbox": {"type": sandbox},
+            "model": applied_model,
+            "cwd": params.get("cwd"),
+            "approvalPolicy": params.get("approvalPolicy"),
+        }
+        result.update(applied_settings or {})
+        return result
 
     def respond(process: _FakeProcess, message: dict[str, Any]) -> list[str]:
         method = message.get("method")
         if "id" not in message:
             return []
         request_id = message["id"]
+        params = message.get("params") or {}
         if method == "initialize":
             return [_line({"id": request_id, "result": {"userAgent": "fake"}})]
         if method == "thread/start":
             if thread_error is not None:
                 return [_line({"id": request_id, "error": thread_error})]
-            params = message.get("params") or {}
-            sandbox = (
-                applied_sandbox
-                or {
-                    "read-only": "readOnly",
-                    "workspace-write": "workspaceWrite",
-                    "danger-full-access": "dangerFullAccess",
-                }[params["sandbox"]]
-            )
             return [
-                _line(
-                    {
-                        "id": request_id,
-                        "result": {
-                            "thread": {"id": "thread-1"},
-                            "sandbox": {"type": sandbox},
-                            "model": "fake-model-1",
-                        },
-                    }
-                )
+                _line({"id": request_id, "result": thread_result(params, "thread-1")})
+            ]
+        if method == "thread/resume":
+            if resume_error is not None:
+                return [_line({"id": request_id, "error": resume_error})]
+            restored = restored_thread_id or str(params.get("threadId"))
+            return [
+                _line({"id": request_id, "result": thread_result(params, restored)})
             ]
         if method == "turn/start":
             return [_line({"id": request_id, "result": {"turn": {"id": "turn-1"}}})]
@@ -187,6 +214,12 @@ def scripted_responder(
             if steer_error is not None:
                 return [_line({"id": request_id, "error": steer_error})]
             return [_line({"id": request_id, "result": {"turnId": "turn-1"}})]
+        if method == "turn/interrupt":
+            if not answer_interrupt:
+                return []
+            if interrupt_error is not None:
+                return [_line({"id": request_id, "error": interrupt_error})]
+            return [_line({"id": request_id, "result": {}})]
         return []
 
     return respond
@@ -216,12 +249,50 @@ def start_session(
     )
     process.session = session
     session.start()
+    wait_until(
+        lambda: session.turn_accepted or session.protocol_error is not None,
+        "the handshake neither completed nor failed",
+    )
+    return session
+
+
+def start_refused_session(
+    process: _FakeProcess,
+    **kwargs: Any,
+) -> codex_app_server.CodexAppServerSession:
+    """Start a session that is expected to stop before it submits anything.
+
+    A refusal is neither acceptance nor a protocol error -- that is the point
+    of it -- so it needs its own waiter rather than :func:`start_session`'s.
+    """
+    session = codex_app_server.CodexAppServerSession(
+        process=process,  # type: ignore[arg-type]
+        plan=kwargs.pop("plan", None) or worker_plan(),
+        prompt=kwargs.pop("prompt", PROMPT),
+        **kwargs,
+    )
+    process.session = session
+    session.start()
+    wait_until(
+        lambda: (
+            session.conversation_error is not None
+            or session.cancelled_before_submission is not None
+            or session.turn_accepted
+            or session.protocol_error is not None
+        ),
+        "the handshake neither refused nor completed",
+    )
+    return session
+
+
+def wait_until(predicate: Any, message: str) -> None:
+    """Poll ``predicate`` up to :data:`WAIT_SECONDS`, or fail saying why."""
     deadline = time.monotonic() + WAIT_SECONDS
     while time.monotonic() < deadline:
-        if session.turn_accepted or session.protocol_error is not None:
-            return session
+        if predicate():
+            return
         time.sleep(0.01)
-    raise AssertionError("the handshake neither completed nor failed")
+    raise AssertionError(message)
 
 
 class HandshakeTests(unittest.TestCase):
@@ -650,6 +721,317 @@ class FallbackBoundaryTests(unittest.TestCase):
         self.assertIsNone(session.fallback_reason)
 
 
+class ResumeTests(unittest.TestCase):
+    """Restoring a conversation is exact, re-checked, and never approximated."""
+
+    def resume(self, process: _FakeProcess, **kwargs: Any) -> Any:
+        return start_session(process, resume_conversation_id="thread-77", **kwargs)
+
+    def test_a_resume_targets_the_named_thread_and_starts_none(self) -> None:
+        process = _FakeProcess(scripted_responder())
+
+        session = self.resume(process)
+
+        self.assertEqual(
+            ["initialize", "initialized", "thread/resume", "turn/start"],
+            process.methods(),
+        )
+        resume_params = process.requests[2]["params"]
+        self.assertEqual("thread-77", resume_params["threadId"])
+        # The plan still travels: a restored thread is told what this turn is
+        # allowed to do rather than inheriting whatever it last ran under.
+        self.assertEqual("workspace-write", resume_params["sandbox"])
+        self.assertEqual("/work", resume_params["cwd"])
+        self.assertEqual("thread-77", process.requests[3]["params"]["threadId"])
+        self.assertEqual("thread-77", session.thread_id)
+        self.assertTrue(session.turn_accepted)
+
+    def test_a_thread_nobody_asked_for_is_refused(self) -> None:
+        process = _FakeProcess(scripted_responder(restored_thread_id="thread-other"))
+
+        session = self.resume(process)
+
+        self.assertNotIn("turn/start", process.methods())
+        self.assertIn("thread-other", str(session.protocol_error))
+        self.assertIn("thread-77", str(session.protocol_error))
+
+    def test_a_restored_thread_that_runs_elsewhere_is_refused(self) -> None:
+        process = _FakeProcess(
+            scripted_responder(applied_settings={"cwd": "/somewhere/else"})
+        )
+
+        session = self.resume(process)
+
+        self.assertNotIn("turn/start", process.methods())
+        self.assertIn("cwd", str(session.protocol_error))
+        self.assertIn("/somewhere/else", str(session.protocol_error))
+
+    def test_a_restored_approval_policy_that_drifted_is_refused(self) -> None:
+        process = _FakeProcess(
+            scripted_responder(applied_settings={"approvalPolicy": "on-request"})
+        )
+
+        session = self.resume(process)
+
+        self.assertNotIn("turn/start", process.methods())
+        self.assertIn("approvalPolicy", str(session.protocol_error))
+
+    def test_a_restored_sandbox_that_widened_is_refused(self) -> None:
+        process = _FakeProcess(scripted_responder(applied_sandbox="dangerFullAccess"))
+
+        session = self.resume(process)
+
+        self.assertNotIn("turn/start", process.methods())
+        self.assertIn("applied sandbox", str(session.protocol_error))
+
+    def test_a_fresh_thread_is_not_held_to_the_resume_checks(self) -> None:
+        """A ``thread/start`` echo cannot disagree about what it was told, so
+        the extra checks would only ever fire on a server that answers with
+        fields the client never sent."""
+        process = _FakeProcess(scripted_responder(applied_settings={"cwd": None}))
+
+        session = start_session(process)
+
+        self.assertTrue(session.turn_accepted)
+
+    def test_a_canonicalised_model_is_reported_rather_than_refused(self) -> None:
+        process = _FakeProcess(scripted_responder(applied_model="gpt-5.1-codex-max"))
+
+        session = self.resume(process)
+
+        self.assertTrue(session.turn_accepted)
+        self.assertEqual("gpt-5.1-codex-max", session.observed_model)
+
+    def test_a_failed_resume_never_licenses_a_fresh_conversation(self) -> None:
+        process = _FakeProcess(
+            scripted_responder(
+                resume_error={"code": -32602, "message": "no such thread"}
+            )
+        )
+
+        session = self.resume(process)
+
+        self.assertNotIn("turn/start", process.methods())
+        self.assertIn("no such thread", str(session.protocol_error))
+        # The legacy transport starts a fresh session, so running it here would
+        # answer "continue thread-77" with a turn that continues nothing.
+        self.assertIsNone(session.fallback_reason)
+
+    def test_no_fallback_survives_a_resume_even_before_the_thread_call(self) -> None:
+        process = _FakeProcess(
+            scripted_responder(thread_error={"code": -1, "message": "boom"})
+        )
+
+        fresh = start_session(
+            _FakeProcess(
+                scripted_responder(thread_error={"code": -1, "message": "boom"})
+            )
+        )
+        resumed = start_session(process, resume_conversation_id="thread-77")
+
+        # Same failure window, opposite verdicts: only the fresh start may be
+        # re-run, because only it has nothing to lose by starting over.
+        self.assertIsNotNone(fresh.fallback_reason)
+        self.assertIsNone(resumed.fallback_reason)
+
+
+class ConversationCaptureTests(unittest.TestCase):
+    """The identifier is durable before the work exists, or there is no work."""
+
+    def test_the_conversation_is_captured_before_the_turn_is_submitted(self) -> None:
+        process = _FakeProcess(scripted_responder())
+        seen: list[tuple[str, list[str]]] = []
+
+        session = start_session(
+            process,
+            on_conversation=lambda native_id: seen.append(
+                (native_id, process.methods())
+            ),
+        )
+
+        self.assertEqual(1, len(seen))
+        native_id, methods_at_capture = seen[0]
+        self.assertEqual("thread-1", native_id)
+        # The proof of ordering: no turn had been sent when the sink ran.
+        self.assertNotIn("turn/start", methods_at_capture)
+        self.assertTrue(session.turn_accepted)
+        self.assertEqual("thread-1", session.thread_id)
+
+    def test_a_resumed_conversation_is_captured_as_the_thread_it_restored(
+        self,
+    ) -> None:
+        process = _FakeProcess(scripted_responder())
+        captured: list[str] = []
+
+        start_session(
+            process,
+            resume_conversation_id="thread-77",
+            on_conversation=captured.append,
+        )
+
+        self.assertEqual(["thread-77"], captured)
+
+    def test_a_capture_that_fails_submits_nothing(self) -> None:
+        process = _FakeProcess(scripted_responder())
+
+        def refuse(native_id: str) -> None:
+            raise RuntimeError(f"the ledger is unwritable for {native_id}")
+
+        session = start_refused_session(process, on_conversation=refuse)
+
+        self.assertNotIn("turn/start", process.methods())
+        self.assertIn("the ledger is unwritable", str(session.conversation_error))
+        # Not a protocol failure, so it neither becomes one nor licenses a
+        # legacy re-run of the work it just withheld.
+        self.assertIsNone(session.protocol_error)
+        self.assertIsNone(session.fallback_reason)
+        self.assertTrue(process.stdin.closed)
+
+    def test_a_gate_that_refuses_submits_nothing(self) -> None:
+        process = _FakeProcess(scripted_responder())
+
+        def refuse() -> None:
+            raise RuntimeError("the turn was cancelled")
+
+        session = start_refused_session(process, before_submit=refuse)
+
+        self.assertNotIn("turn/start", process.methods())
+        self.assertEqual("the turn was cancelled", session.cancelled_before_submission)
+        self.assertIsNone(session.protocol_error)
+        self.assertIsNone(session.fallback_reason)
+
+    def test_the_gate_runs_after_the_conversation_is_recorded(self) -> None:
+        """Ordered so a cancellation cannot cost the record of a thread that
+        the app-server has already created."""
+        process = _FakeProcess(scripted_responder())
+        order: list[str] = []
+
+        start_session(
+            process,
+            on_conversation=lambda native_id: order.append("capture"),
+            before_submit=lambda: order.append("gate"),
+        )
+
+        self.assertEqual(["capture", "gate"], order)
+
+
+class InterruptTests(unittest.TestCase):
+    """Stopping a turn is a thing said to the conversation, not just a kill."""
+
+    def test_an_interrupt_names_the_thread_and_the_turn(self) -> None:
+        process = _FakeProcess(scripted_responder())
+        session = start_session(process)
+
+        self.assertTrue(session.interrupt())
+
+        self.assertEqual("turn/interrupt", process.methods()[-1])
+        params = process.requests[-1]["params"]
+        self.assertEqual("thread-1", params["threadId"])
+        self.assertEqual("turn-1", params["turnId"])
+        self.assertTrue(session.interrupt_requested)
+
+    def test_an_interrupt_before_a_turn_exists_sends_nothing(self) -> None:
+        process = _FakeProcess(scripted_responder())
+        session = codex_app_server.CodexAppServerSession(
+            process=process,  # type: ignore[arg-type]
+            plan=worker_plan(),
+            prompt=PROMPT,
+        )
+
+        self.assertFalse(session.interrupt())
+
+        self.assertEqual([], process.methods())
+        self.assertFalse(session.interrupt_requested)
+
+    def test_an_interrupt_after_the_turn_is_over_sends_nothing(self) -> None:
+        process = _FakeProcess(scripted_responder())
+        session = start_session(process)
+        session.feed(
+            notification("turn/completed", turn={"id": "turn-1", "status": "completed"})
+        )
+
+        self.assertFalse(session.interrupt())
+
+        self.assertNotIn("turn/interrupt", process.methods())
+
+    def test_a_refused_interrupt_is_not_a_protocol_error(self) -> None:
+        process = _FakeProcess(
+            scripted_responder(
+                interrupt_error={"code": -32600, "message": "no such turn"}
+            )
+        )
+        session = start_session(process)
+
+        self.assertFalse(session.interrupt())
+
+        # The turn is ending regardless. Recording an error here would restate
+        # a cancelled turn as one the harness failed to carry out.
+        self.assertIsNone(session.protocol_error)
+        self.assertTrue(session.interrupt_requested)
+
+    def test_an_interrupt_that_is_never_answered_is_bounded(self) -> None:
+        process = _FakeProcess(scripted_responder(answer_interrupt=False))
+        session = start_session(process, interrupt_timeout=0.2)
+
+        started = time.monotonic()
+        self.assertFalse(session.interrupt())
+
+        self.assertLess(time.monotonic() - started, WAIT_SECONDS)
+        self.assertIsNone(session.protocol_error)
+
+    def test_an_interrupted_turn_is_not_a_failed_turn(self) -> None:
+        process = _FakeProcess(scripted_responder())
+        session = start_session(process)
+
+        session.feed(
+            notification(
+                "turn/completed", turn={"id": "turn-1", "status": "interrupted"}
+            )
+        )
+
+        self.assertTrue(session.turn_interrupted)
+        self.assertEqual(codex_app_server.TURN_STATUS_INTERRUPTED, session.turn_status)
+        self.assertIsNone(session.protocol_error)
+
+    def test_a_failed_turn_still_reports_why_it_failed(self) -> None:
+        process = _FakeProcess(scripted_responder())
+        session = start_session(process)
+
+        session.feed(
+            notification(
+                "turn/completed",
+                turn={
+                    "id": "turn-1",
+                    "status": "failed",
+                    "error": {"message": "the model gave up"},
+                },
+            )
+        )
+
+        self.assertFalse(session.turn_interrupted)
+        self.assertEqual("the model gave up", session.protocol_error)
+
+    def test_shutdown_interrupts_a_turn_that_is_still_running(self) -> None:
+        process = _FakeProcess(scripted_responder())
+        session = start_session(process)
+
+        session.shutdown()
+
+        self.assertIn("turn/interrupt", process.methods())
+        self.assertTrue(process.stdin.closed)
+
+    def test_shutdown_after_a_finished_turn_interrupts_nothing(self) -> None:
+        process = _FakeProcess(scripted_responder())
+        session = start_session(process)
+        session.feed(
+            notification("turn/completed", turn={"id": "turn-1", "status": "completed"})
+        )
+
+        session.shutdown()
+
+        self.assertNotIn("turn/interrupt", process.methods())
+
+
 class TurnPlanTests(unittest.TestCase):
     """The plan is what argv used to be, minus everything private."""
 
@@ -794,6 +1176,108 @@ class AdapterTransportTests(unittest.TestCase):
         self.assertIsNone(self._recorded()["prompt"])
         self.assertEqual(harnesses.TRANSPORT_EXEC, result.transport)
         self.assertIn("applied sandbox", result.stderr)
+
+    def _resume_invocation(
+        self, adapter: harnesses.CodexAdapter, native_id: str
+    ) -> Any:
+        return adapter.build_invocation(
+            cwd=self.tmp,
+            plan_dir=self.plan_dir,
+            prompt=PROMPT,
+            last_message_path=self.last_message,
+            resume_conversation_id=native_id,
+        )
+
+    def test_a_resumed_turn_restores_exactly_the_thread_it_was_handed(self) -> None:
+        adapter = self._adapter()
+        captured: list[str] = []
+
+        result = self._run(
+            adapter,
+            invocation=self._resume_invocation(adapter, "thread-77"),
+            on_conversation=captured.append,
+        )
+
+        recorded = self._recorded()
+        self.assertIsNone(recorded["thread_params"])
+        self.assertEqual("thread-77", recorded["resume_params"]["threadId"])
+        self.assertEqual("workspace-write", recorded["resume_params"]["sandbox"])
+        self.assertEqual(["thread-77"], captured)
+        self.assertEqual("thread-77", result.conversation_id)
+        self.assertIsNone(result.continuity_unavailable)
+        self.assertEqual(0, result.returncode)
+
+    def test_a_fresh_turn_captures_the_thread_the_app_server_started(self) -> None:
+        captured: list[str] = []
+
+        result = self._run(self._adapter(), on_conversation=captured.append)
+
+        self.assertEqual(["thread-1"], captured)
+        self.assertEqual("thread-1", result.conversation_id)
+
+    def test_a_resume_the_app_server_refuses_never_reruns_on_codex_exec(self) -> None:
+        adapter = self._adapter("resume-unknown")
+
+        result = self._run(
+            adapter, invocation=self._resume_invocation(adapter, "thread-77")
+        )
+
+        # One launch: the fixture logs every spawn, so a second line here would
+        # be `codex exec` answering "continue thread-77" with a fresh session.
+        self.assertEqual(
+            ["app-server"], self.launch_log.read_text(encoding="utf-8").split()
+        )
+        self.assertIsNone(self._recorded()["prompt"])
+        self.assertEqual(harnesses.TRANSPORT_APP_SERVER, result.transport)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("no such thread", result.stderr)
+
+    def test_a_widened_sandbox_on_a_resume_is_refused_without_a_fallback(self) -> None:
+        adapter = self._adapter("widen-sandbox")
+
+        result = self._run(
+            adapter, invocation=self._resume_invocation(adapter, "thread-77")
+        )
+
+        # The same failure that falls back on a fresh start (above) does not
+        # fall back here, because the turn asked to continue something.
+        self.assertEqual(
+            ["app-server"], self.launch_log.read_text(encoding="utf-8").split()
+        )
+        self.assertEqual(harnesses.TRANSPORT_APP_SERVER, result.transport)
+        self.assertIn("applied sandbox", result.stderr)
+
+    def test_a_conversation_that_cannot_be_recorded_abandons_the_turn(self) -> None:
+        def refuse(native_id: str) -> None:
+            raise RuntimeError(f"no room for {native_id}")
+
+        result = self._run(self._adapter(), on_conversation=refuse)
+
+        self.assertIsNone(self._recorded()["prompt"])
+        self.assertIsNone(result.conversation_id)
+        self.assertIn("no room for thread-1", str(result.conversation_error))
+        self.assertNotEqual(0, result.returncode)
+        self.assertFalse(result.aborted)
+        self.assertIn("turn abandoned", result.stderr)
+        assert result.stream_io is not None
+        self.assertEqual(len(result.stderr), result.stream_io["stderr_chars"])
+
+    def test_an_abort_before_submission_ends_the_turn_at_the_handshake(self) -> None:
+        adapter = self._adapter()
+        abort = harnesses.AbortSignal()
+
+        result = self._run(
+            adapter,
+            abort=abort,
+            on_conversation=lambda native_id: abort.arm("the operator stopped it"),
+        )
+
+        self.assertIsNone(self._recorded()["prompt"])
+        self.assertTrue(result.aborted)
+        self.assertEqual(harnesses.CANCEL_STAGE_HANDSHAKE, result.cancel_stage)
+        # The thread existed and was recorded before the cancellation landed,
+        # so the turn that never ran still knows where it would have run.
+        self.assertEqual("thread-1", result.conversation_id)
 
     def test_guidance_reaches_the_running_turn_and_stays_out_of_the_log(self) -> None:
         adapter = self._adapter("await-steer")
@@ -946,6 +1430,96 @@ class AdapterFallbackTests(unittest.TestCase):
         )
 
         self.assertEqual(legacy, result.argv)
+
+
+class LegacyContinuityTests(unittest.TestCase):
+    """What continuity a ``codex exec`` turn can and cannot honestly report."""
+
+    SESSION_ID = "0199b0ce-2f5e-7c2a-9f11-4a1d0f0c8b31"
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.plan_dir = self.tmp / "plan"
+        self.plan_dir.mkdir()
+        self.last_message = self.tmp / "last-message.txt"
+        sweep = mock.patch.object(harnesses, "sweep_enabled", return_value=False)
+        sweep.start()
+        self.addCleanup(sweep.stop)
+        self.adapter = harnesses.CodexAdapter(
+            executable=str(install_fake_codex(self.tmp))
+        )
+
+    def _say(self, text: str) -> None:
+        env = mock.patch.dict("os.environ", {"FAKE_CODEX_STDERR_TEXT": text})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _run(self, **kwargs: Any) -> Any:
+        return self.adapter.run(
+            cwd=self.tmp,
+            plan_dir=self.plan_dir,
+            prompt=PROMPT,
+            last_message_path=self.last_message,
+            timeout=WAIT_SECONDS,
+            **kwargs,
+        )
+
+    def test_a_legacy_turn_reports_the_session_its_output_names(self) -> None:
+        self._say(f"session id: {self.SESSION_ID}\n")
+        captured: list[str] = []
+
+        result = self._run(on_conversation=captured.append)
+
+        self.assertEqual(harnesses.TRANSPORT_EXEC, result.transport)
+        self.assertEqual([self.SESSION_ID], captured)
+        self.assertEqual(self.SESSION_ID, result.conversation_id)
+        self.assertIsNone(result.continuity_unavailable)
+
+    def test_a_legacy_turn_that_names_nothing_says_so(self) -> None:
+        result = self._run(on_conversation=lambda native_id: None)
+
+        self.assertIsNone(result.conversation_id)
+        # Stated rather than left empty: a caller that wanted to continue this
+        # turn would otherwise read "no id" as "nobody has looked yet".
+        self.assertEqual(
+            "codex exec output named no session id", result.continuity_unavailable
+        )
+
+    def test_a_turn_nobody_asked_about_is_missing_nothing(self) -> None:
+        result = self._run()
+
+        self.assertIsNone(result.continuity_unavailable)
+        self.assertEqual(0, result.returncode)
+
+    def test_a_capture_that_fails_after_the_fact_does_not_lose_the_turn(self) -> None:
+        self._say(f"session id: {self.SESSION_ID}\n")
+
+        def refuse(native_id: str) -> None:
+            raise RuntimeError("the ledger is unwritable")
+
+        result = self._run(on_conversation=refuse)
+
+        # `codex exec` submits its prompt on argv, so the work is already done
+        # by the time its output names a session: there is nothing to retract,
+        # and the only honest outcome is a turn without continuity.
+        self.assertEqual(0, result.returncode)
+        self.assertIn("Runner status: complete", result.last_message)
+        self.assertIsNone(result.conversation_id)
+        self.assertIn("the ledger is unwritable", str(result.continuity_unavailable))
+
+    def test_a_legacy_invocation_cannot_be_built_for_a_resume(self) -> None:
+        with self.assertRaises(harnesses.HarnessError) as caught:
+            self.adapter.build_exec_invocation(
+                cwd=self.tmp,
+                plan_dir=self.plan_dir,
+                prompt=PROMPT,
+                last_message_path=self.last_message,
+                resume_conversation_id="thread-77",
+            )
+
+        self.assertIn("fresh session", str(caught.exception))
 
 
 if __name__ == "__main__":

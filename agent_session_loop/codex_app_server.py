@@ -16,11 +16,25 @@ The protocol surface this module uses, all of it verified against
 - ``thread/start``, whose response echoes the *effective* sandbox policy,
   model, and reasoning effort. That echo is checked, not trusted: an audit
   turn that did not get a read-only sandbox never gets to send a turn.
+- ``thread/resume``, which restores one named thread and answers in the same
+  shape. Its echo is checked harder than ``thread/start``'s, because a
+  restored thread carries settings from the thread it restores rather than
+  from the call that asked for it.
 - ``turn/start``, whose response carries the accepted ``turnId``. Acceptance
   is the point of no return for the fallback in :mod:`.harnesses`.
 - Streamed notifications (``turn/started``, ``item/*``, ``error``) until the
   terminal ``turn/completed``.
 - ``turn/steer`` with a required ``expectedTurnId`` precondition.
+- ``turn/interrupt``, which names the thread and the turn it stops. It is how
+  a cancelled turn is recorded as *interrupted* by the side that owns the
+  conversation, rather than as a turn that stopped answering.
+
+Continuity. The thread identifier is learned from ``thread/start`` or
+``thread/resume`` and handed to ``on_conversation`` *between* that call and
+``turn/start``, which is the only window in which it can be made durable before
+any work exists to be lost. A sink that raises, or a ``before_submit`` gate that
+refuses, ends the conversation with nothing submitted -- and neither is a
+protocol failure, so neither licenses the fallback in :mod:`.harnesses`.
 
 Threading. Three threads touch a session and each has one job:
 
@@ -47,7 +61,7 @@ import json
 import subprocess
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -71,6 +85,12 @@ REQUEST_TIMEOUT_SECONDS = 120.0
 #: handshake: the caller is a poll tick holding the live-delivery endpoint
 #: lock, so a slow steer delays closing the endpoint at end of turn.
 STEER_TIMEOUT_SECONDS = 10.0
+
+#: How long ``turn/interrupt`` may take. Bounded well under the shutdown grace
+#: because every caller has already decided the turn is over: the interrupt is
+#: how the conversation is *told* so, and a forced termination stands behind it
+#: either way.
+INTERRUPT_TIMEOUT_SECONDS = 5.0
 
 #: How long the app-server gets to exit on its own after its stdin is closed
 #: at end of turn. It exits in milliseconds in practice; this only bounds what
@@ -96,6 +116,22 @@ SANDBOX_DANGER_FULL_ACCESS = "dangerFullAccess"
 #: e.g. a `/review` or a manual `/compact` turn.
 ACTIVE_TURN_NOT_STEERABLE = "activeTurnNotSteerable"
 
+#: Requested thread settings re-checked against a ``thread/resume`` echo. Only
+#: the ones whose disagreement changes what the turn is allowed to do: a
+#: restored thread that runs somewhere else, or under a different approval
+#: policy, is not the turn that was asked for. ``model`` is deliberately absent
+#: -- the server canonicalizes it, so it is reported through ``observed_model``
+#: rather than enforced.
+_RESTORED_SETTINGS = ("cwd", "approvalPolicy")
+
+#: What a session calls with the native thread identifier it just learned,
+#: before it submits anything. Raising from it abandons the turn.
+ConversationSink = Callable[[str], None]
+
+#: What a session calls immediately before submitting work, as its last chance
+#: to be told not to. Raising from it abandons the turn.
+SubmissionGate = Callable[[], None]
+
 
 class AppServerError(Exception):
     """The app-server conversation cannot continue.
@@ -104,6 +140,25 @@ class AppServerError(Exception):
     that never answered) and for a protocol failure (an error response, an
     unparseable or contradictory message). One exception type, because every
     caller does the same thing with both: stop driving the turn and record why.
+    """
+
+
+class _ConversationNotRecorded(Exception):
+    """The thread identifier could not be made durable, so nothing was sent.
+
+    Deliberately *not* an :class:`AppServerError`. The app-server did nothing
+    wrong here, and re-running the turn on the legacy transport would spend the
+    very work this refusal exists to withhold -- so this must never become a
+    ``protocol_error`` and must never open the fallback window.
+    """
+
+
+class _SubmissionRefused(Exception):
+    """The turn was cancelled before ``turn/start``, so nothing was sent.
+
+    Not an :class:`AppServerError` either, and for the same reason: the
+    conversation is healthy, and re-running the turn would defeat the
+    cancellation that stopped it.
     """
 
 
@@ -175,8 +230,13 @@ class CodexAppServerSession:
 
     Constructed around a spawned process, driven by :meth:`start`, fed by the
     harness reader, and torn down by :meth:`shutdown`. The turn it runs is the
-    only turn it will ever run: the thread is started, one turn is sent, and
-    the session closes its own stdin as soon as that turn completes.
+    only turn it will ever run: the thread is started or resumed, one turn is
+    sent, and the session closes its own stdin as soon as that turn completes.
+
+    ``resume_conversation_id`` names the thread to restore instead of starting
+    a fresh one. It is a requirement, not a preference: a resume that cannot be
+    honoured fails the turn, because the caller asking for it has state in that
+    conversation and a fresh thread would silently discard it.
     """
 
     def __init__(
@@ -185,16 +245,24 @@ class CodexAppServerSession:
         process: subprocess.Popen,
         plan: TurnPlan,
         prompt: str,
+        resume_conversation_id: str | None = None,
+        on_conversation: ConversationSink | None = None,
+        before_submit: SubmissionGate | None = None,
         request_timeout: float = REQUEST_TIMEOUT_SECONDS,
         steer_timeout: float = STEER_TIMEOUT_SECONDS,
         shutdown_grace: float = SHUTDOWN_GRACE_SECONDS,
+        interrupt_timeout: float = INTERRUPT_TIMEOUT_SECONDS,
     ) -> None:
         self._process = process
         self._plan = plan
         self._prompt = prompt
+        self._resume_conversation_id = resume_conversation_id
+        self._on_conversation = on_conversation
+        self._before_submit = before_submit
         self._request_timeout = request_timeout
         self._steer_timeout = steer_timeout
         self._shutdown_grace = shutdown_grace
+        self._interrupt_timeout = interrupt_timeout
 
         self._state_lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -211,6 +279,9 @@ class CodexAppServerSession:
         self._work_observed = False
         self._turn_accepted = False
         self._protocol_error: str | None = None
+        self._conversation_error: str | None = None
+        self._submission_refused: str | None = None
+        self._interrupt_requested = False
         self._closed_reason: str | None = None
         self._stdin_closed = False
 
@@ -232,9 +303,44 @@ class CodexAppServerSession:
             return self._final_message
 
     @property
+    def thread_id(self) -> str | None:
+        """The native conversation this turn runs on, once one is known."""
+        with self._state_lock:
+            return self._thread_id
+
+    @property
     def turn_status(self) -> str | None:
         with self._state_lock:
             return self._turn_status
+
+    @property
+    def turn_interrupted(self) -> bool:
+        """Whether the turn ended because it was interrupted rather than failed.
+
+        The app-server reports the two as different terminal statuses, and this
+        keeps them different: an interrupted turn did the work it did and was
+        stopped, while a failed turn is one the harness could not carry out.
+        """
+        with self._state_lock:
+            return self._turn_status == TURN_STATUS_INTERRUPTED
+
+    @property
+    def interrupt_requested(self) -> bool:
+        """Whether ``turn/interrupt`` was sent for this turn."""
+        with self._state_lock:
+            return self._interrupt_requested
+
+    @property
+    def conversation_error(self) -> str | None:
+        """Why the conversation could not be recorded, if that is why nothing ran."""
+        with self._state_lock:
+            return self._conversation_error
+
+    @property
+    def cancelled_before_submission(self) -> str | None:
+        """Why the turn was refused before ``turn/start``, if it was."""
+        with self._state_lock:
+            return self._submission_refused
 
     @property
     def turn_accepted(self) -> bool:
@@ -261,9 +367,18 @@ class CodexAppServerSession:
         the conversation failed *before* ``turn/start`` was accepted and
         before the app-server emitted any work. Replaying a turn after either
         of those would execute it twice.
+
+        A resumption request forecloses it outright. The legacy transport
+        starts a fresh conversation, so falling back would answer "continue
+        thread X" with a turn that continues nothing -- the silent fresh start
+        this transport exists to prevent. The same holds for the two refusals
+        that stop a healthy conversation on purpose: neither is a protocol
+        error, and re-running either one would defeat what it refused.
         """
         with self._state_lock:
             if self._turn_accepted or self._work_observed:
+                return None
+            if self._resume_conversation_id is not None:
                 return None
             return self._protocol_error
 
@@ -406,6 +521,9 @@ class CodexAppServerSession:
             detail = str(error.get("message", ""))
         with self._state_lock:
             self._turn_status = status
+            # Only `failed` is an error. An interrupted turn ran the work it
+            # ran and was stopped on purpose, and recording that as a protocol
+            # error would restate a cancellation as a harness that broke.
             if status == TURN_STATUS_FAILED and self._protocol_error is None:
                 self._protocol_error = detail or "turn failed"
         self._turn_finished.set()
@@ -448,6 +566,12 @@ class CodexAppServerSession:
     def _drive(self) -> None:
         try:
             self._handshake()
+        except _ConversationNotRecorded as error:
+            self._abandon_before_submission(conversation_error=str(error))
+            return
+        except _SubmissionRefused as error:
+            self._abandon_before_submission(submission_refused=str(error))
+            return
         except AppServerError as error:
             self._note_protocol_error(str(error))
             self._turn_finished.set()
@@ -468,20 +592,51 @@ class CodexAppServerSession:
             },
         )
         self._notify("initialized", None)
-        thread = self._request("thread/start", dict(self._plan.thread_params))
-        self._adopt_thread(thread)
+        self._open_thread()
+        # Between the thread and the turn, which is the only ordering that
+        # makes continuity survive a crash: after this returns the identifier
+        # is durable, and before it returns there is no work to be lost.
+        self._capture_conversation(self._require_thread_id())
+        # The last checkpoint. Everything above is recoverable; the request
+        # below is the one that spends the turn.
+        self._gate_submission()
         turn_params = dict(self._plan.turn_params)
         turn_params["threadId"] = self._require_thread_id()
         turn_params["input"] = [{"type": "text", "text": self._prompt}]
         turn = self._request("turn/start", turn_params)
         self._adopt_turn(turn)
 
-    def _adopt_thread(self, response: Any) -> None:
+    def _open_thread(self) -> None:
+        """Start a fresh thread, or restore exactly the one that was asked for.
+
+        The two calls answer in the same shape, so they share an adoption path;
+        what differs is how much of the answer has to be re-checked, and that a
+        resume names the thread it expects back.
+        """
+        params = dict(self._plan.thread_params)
+        resume = self._resume_conversation_id
+        if resume is None:
+            self._adopt_thread(self._request("thread/start", params), resumed=False)
+            return
+        params["threadId"] = resume
+        self._adopt_thread(self._request("thread/resume", params), resumed=True)
+
+    def _adopt_thread(self, response: Any, *, resumed: bool) -> None:
+        method = "thread/resume" if resumed else "thread/start"
         if not isinstance(response, Mapping):
-            raise AppServerError("thread/start returned no result")
+            raise AppServerError(f"{method} returned no result")
         thread = response.get("thread")
         if not isinstance(thread, Mapping) or not isinstance(thread.get("id"), str):
-            raise AppServerError("thread/start returned no thread id")
+            raise AppServerError(f"{method} returned no thread id")
+        thread_id = str(thread["id"])
+        if resumed and thread_id != self._resume_conversation_id:
+            # "Resume the latest" is the failure mode this whole path exists to
+            # avoid, and an id that came back different is exactly that -- a
+            # conversation nobody asked to continue, about to be handed a turn.
+            raise AppServerError(
+                f"thread/resume returned thread {thread_id!r}, "
+                f"expected {self._resume_conversation_id!r}"
+            )
         sandbox = response.get("sandbox")
         actual = sandbox.get("type") if isinstance(sandbox, Mapping) else None
         if actual != self._plan.expected_sandbox:
@@ -491,14 +646,77 @@ class CodexAppServerSession:
             # legacy transport -- which states the profile in argv -- can
             # still run this turn.
             raise AppServerError(
-                "thread/start applied sandbox "
+                f"{method} applied sandbox "
                 f"{actual!r}, expected {self._plan.expected_sandbox!r}"
             )
+        if resumed:
+            self._require_restored_settings(response)
         model = response.get("model")
         with self._state_lock:
-            self._thread_id = str(thread["id"])
+            self._thread_id = thread_id
             if isinstance(model, str) and model:
                 self._observed_model = model
+
+    def _require_restored_settings(self, response: Mapping[str, Any]) -> None:
+        """Refuse a restored thread whose settings are not the ones requested.
+
+        A fresh thread applies what ``thread/start`` asked for, so its echo can
+        only disagree about the sandbox the server derived. A restored one
+        carries the settings of the thread it restores, and only the echo says
+        which of the two won -- so every requested setting that changes what
+        the turn may do is re-checked here rather than assumed.
+        """
+        for key in _RESTORED_SETTINGS:
+            if key not in self._plan.thread_params:
+                continue
+            requested = self._plan.thread_params[key]
+            applied = response.get(key)
+            if applied != requested:
+                raise AppServerError(
+                    f"thread/resume applied {key} {applied!r}, expected {requested!r}"
+                )
+
+    def _capture_conversation(self, thread_id: str) -> None:
+        """Hand the thread identifier to the caller, or abandon the turn."""
+        sink = self._on_conversation
+        if sink is None:
+            return
+        try:
+            sink(thread_id)
+        except Exception as error:  # noqa: BLE001 - any failure is a refusal
+            raise _ConversationNotRecorded(
+                str(error) or type(error).__name__
+            ) from error
+
+    def _gate_submission(self) -> None:
+        """Ask the caller whether this turn may still be submitted."""
+        gate = self._before_submit
+        if gate is None:
+            return
+        try:
+            gate()
+        except Exception as error:  # noqa: BLE001 - any failure is a refusal
+            raise _SubmissionRefused(str(error) or type(error).__name__) from error
+
+    def _abandon_before_submission(
+        self,
+        *,
+        conversation_error: str | None = None,
+        submission_refused: str | None = None,
+    ) -> None:
+        """End a healthy conversation that was told not to submit its turn.
+
+        No protocol error is recorded, because none happened: the app-server is
+        working and is simply being let go without a turn. That distinction is
+        what keeps this out of the fallback window.
+        """
+        with self._state_lock:
+            if conversation_error is not None:
+                self._conversation_error = conversation_error
+            if submission_refused is not None:
+                self._submission_refused = submission_refused
+        self._turn_finished.set()
+        self._close_stdin()
 
     def _adopt_turn(self, response: Any) -> None:
         turn = response.get("turn") if isinstance(response, Mapping) else None
@@ -552,6 +770,48 @@ class CodexAppServerSession:
                 detail=_redacted_steer_detail(str(error), turn_id=turn_id),
             )
         return guidance_delivery.DELIVERED
+
+    # -- interruption ------------------------------------------------------
+
+    def interrupt(self) -> bool:
+        """Tell the app-server to stop the turn this session started.
+
+        Names the exact thread and turn, like every other call here, so it can
+        only ever stop the turn this session is running. It reports whether the
+        app-server accepted the interrupt, not whether the turn has stopped:
+        the caller is already on its way to a forced termination and the point
+        of asking first is that the conversation records the turn as
+        *interrupted* rather than as one that stopped answering.
+
+        Never raises. Every caller reaches for this while tearing a turn down,
+        where an exception would only obscure why the turn ended.
+        """
+        with self._state_lock:
+            thread_id = self._thread_id
+            turn_id = self._turn_id
+            finished = self._turn_status is not None
+        if thread_id is None or turn_id is None:
+            # Nothing was submitted, so there is no turn to interrupt: a
+            # cancellation here already cost nothing.
+            return False
+        if finished or self._turn_finished.is_set():
+            return False
+        if self._process.poll() is not None:
+            return False
+        with self._state_lock:
+            self._interrupt_requested = True
+        try:
+            self._request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+                timeout=self._interrupt_timeout,
+            )
+        except AppServerError:
+            # Not a protocol error: the turn is ending regardless, and
+            # recording one here would restate a cancelled turn as a failed
+            # one. What was requested is reported by ``interrupt_requested``.
+            return False
+        return True
 
     # -- transport primitives ----------------------------------------------
 
@@ -666,7 +926,13 @@ class CodexAppServerSession:
         not wait on anything unbounded: the driver is joined with a bound, and
         a driver that outlives it is a daemon thread whose only remaining act
         would be closing an already-closed pipe.
+
+        A turn still running at this point is one the harness stopped waiting
+        for, so it is interrupted before the pipe is taken away -- bounded by
+        the interrupt timeout, and skipped outright (in the usual case) when
+        the turn has a terminal status or the process is already gone.
         """
+        self.interrupt()
         self._turn_finished.set()
         self._fail_pending("app-server session is closed")
         self._close_stdin()
