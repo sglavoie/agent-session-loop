@@ -66,11 +66,22 @@ from typing import Any, Literal
 
 from . import control_signal, intervention, plans, redirect_store, state
 
+#: The urgent window, and the single number both halves of it are derived from.
+#: It bounds what a producer waits for an answer *and* what the runner's own
+#: escalation waits before it force-stops the worker
+#: (:data:`agent_session_loop.redirect_control.ESCALATION_WINDOW_SECONDS`),
+#: because those are two halves of one promise: a correction reaches a stopped
+#: worker within this long, or its author is told it did not. Maintained
+#: separately the two could drift into a window where the producer gives up
+#: before the runner escalates, which would report "uncertain" for corrections
+#: that were about to land.
+URGENT_WINDOW_SECONDS = 2.0
+
 #: The longest a producer waits for the runner's answer. Short on purpose: the
 #: urgent wakeup reaches a live runner in milliseconds, so a wait that has not
 #: resolved by now is not slow, it is unanswered — and telling an operator
 #: "uncertain, here is the id" quickly beats telling them "accepted" slowly.
-ACCEPTANCE_WAIT_SECONDS = 2.0
+ACCEPTANCE_WAIT_SECONDS = URGENT_WINDOW_SECONDS
 ACCEPTANCE_POLL_INTERVAL_SECONDS = 0.05
 MAX_ACCEPTANCE_WAIT_SECONDS = 30.0
 

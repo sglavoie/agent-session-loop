@@ -3089,6 +3089,76 @@ ordered most-specific-first: a correction admitted against a lock that went
 stale or foreign in between would have no reachable reader, and its author
 would have been told it was on its way.
 
+Acceptance is a promise that the turn stops, and keeping it is the urgent
+controller's job. The turn's own wait loop already has a cooperative route —
+it notices the armed abort signal, names the cancellation window, kills the
+group and sweeps the descendants — and every part of that route can be blocked
+by the failure a redirect is usually sent about. It runs only once the
+transport is open, so a handshake wedged inside `open_transport` never reaches
+it, and it samples the process table before it kills, on the `5.0`-second bound
+the post-turn sweep uses, which is longer than the whole escalation window. So
+escalation is a separate path with its own thread, its own leaf lock and its
+own monotonic clock, and four properties.
+
+*Armed before acceptance is reported.* Arming is cheap and externally
+unobservable — a deadline and a background sample, no signal, no protocol call,
+no journal record — so it runs *before* the acceptance append rather than after
+it, and there is no window in which a producer has been told its correction
+landed while nothing is counting down. It is revocable for exactly as long as
+that stays true: a store refusal stands the watchdog down and the turn keeps
+running. Once the acceptance record exists nothing may take it back. The
+deadline is `2.0` seconds from arming, derived from the same constant the
+producer's own bounded wait is derived from, because the two are halves of one
+promise and two constants could drift into a window where the producer gives up
+before the runner escalates. A delay in the append therefore eats into that
+window rather than extending it, and an acceptance that becomes durable after
+the watchdog has already given up waiting for it escalates immediately instead
+of not at all. A second correction against a turn already escalating rides the
+deadline already running; it does not get a fresh two seconds.
+
+*Native cancellation initiated immediately.* The moment acceptance is durable
+the harness is asked to stop over its own protocol and the abort signal is
+armed with the escalation's remaining grace, so the cooperative path aims at
+the same deadline. Both are fire-and-forget: the protocol call goes to a daemon
+thread nothing joins, because `interrupt` on a wedged transport is precisely
+the call that can block forever.
+
+*Force-stopped at the deadline regardless.* The watchdog reads a monotonic
+clock, holds no lock but its own, and calls one `killpg` on the process group
+the run stated it owns at spawn time. Between the deadline passing and that
+signal there is no `ps`, no journal read, no transport call and no lock shared
+with guidance delivery or any protocol request — so the escalation cannot queue
+behind them. Ownership is stated rather than looked up, since a controller that
+resolved a pgid at the deadline would be reading the process table on the one
+path that must not read it. Two refusals guard the aim: a pgid of 1 or less,
+and a pgid equal to the runner's own group.
+
+*Reported, because killing is not stopping.* A descendant that left the process
+group survives a group kill, and a signalled process stays visible until its
+parent reaps it. Evidence is therefore collected on a background thread at
+arming time, while the worker is still alive — the only moment an escapee is
+reachable by a descendant walk — on a `1.0`-second bound rather than the
+post-turn sweep's five. Identity-checked cleanup and confirmation both run
+*after* the kill: each escapee's pid is re-authenticated against the start time
+the evidence recorded before it is signalled, and only a match is, because the
+most likely moment for a pid to be handed to someone else is right after the
+process wearing it was killed. A reused pid and a pid whose identity cannot be
+read at all are both reported rather than signalled; an unverified survivor
+blocks continuation, which is strictly better than killing a stranger.
+
+Continuation is gated on that report rather than on the kill having been
+issued. A successor may start only when the evidence was actually collected,
+the group answers signal 0 with "no such process", no tracked descendant is
+still running under its recorded identity, nothing answered with a permission
+error, *and* the turn's owner has reported the worker reaped. The last
+condition is separate on purpose: a caller that has not waited on its child has
+not finished with it, and an unreaped group leader keeps its process group
+answering signal 0 — so "killed" and "collected" are different claims and only
+both together license a second worker on one conversation. `ASL_PROCESS_SWEEP_DISABLED`
+withholds the evidence and therefore the proof, which reports as incomplete and
+blocks; it does not stop the run's own worker group from being killed, because
+that group is this run's to stop and was never what the opt-out was about.
+
 All four subcommands accept `--wait` and `--timeout SECONDS`, which turn the
 fire-and-forget append into a receipt. Without `--wait`, nothing changes: the
 command is appended, a best-effort wakeup is sent, and the handler returns 0

@@ -87,6 +87,7 @@ FAST_MODULES = (
     "tests.test_asl_readiness_gate",
     "tests.test_asl_redirect_store",
     "tests.test_asl_redirect_admission",
+    "tests.test_asl_redirect_control",
     "tests.test_asl_review_cycle",
     "tests.test_asl_review_delta",
     "tests.test_asl_guidance_delivery",
