@@ -498,19 +498,81 @@ class TurnConversation:
             self._sink = None
 
 
+#: What a turn calls once its prompt has actually reached the worker. Unlike
+#: :data:`ConversationCallback`, an exception from this one *is* suppressed:
+#: by the time it fires the words are already in flight, so there is nothing
+#: left for a failure here to stop.
+SubmissionCallback = Callable[[], None]
+
+
+class TurnSubmission:
+    """One turn's prompt-submission seam.
+
+    Spawning a process is not submitting a prompt. A one-shot turn carries its
+    prompt on argv, so for it the two coincide; a protocol turn spawns, then
+    handshakes, and only then sends the prompt -- and everything in between can
+    refuse, be cancelled, or fail. Whoever is holding the operator's words needs
+    to know which of the two happened, because words consumed by a worker that
+    never received them are words the operator silently lost.
+
+    Turn-scoped and locked exactly like :class:`TurnConversation`: the lock is
+    held across the sink call, so :meth:`close` cannot return while a
+    notification is still running and none can start after it returns. A
+    straggling protocol thread therefore cannot report a submission for a turn
+    that is already over.
+    """
+
+    def __init__(self, sink: SubmissionCallback | None = None) -> None:
+        self._sink = sink
+        self._lock = threading.Lock()
+        self._submitted = False
+        self._closed = False
+
+    @property
+    def submitted(self) -> bool:
+        """Whether this turn's prompt reached the worker."""
+        with self._lock:
+            return self._submitted
+
+    def note_submitted(self) -> None:
+        """Report that the prompt is the worker's now, at most once.
+
+        The sink's failure is swallowed rather than raised: the prompt has
+        already gone out, and a caller told "that did not happen" would withdraw
+        words a worker is reading. Idempotent because the fact is about the
+        prompt, not about the attempt that carried it.
+        """
+        with self._lock:
+            if self._closed or self._submitted:
+                return
+            self._submitted = True
+            sink = self._sink
+            if sink is not None:
+                with contextlib.suppress(Exception):
+                    sink()
+
+    def close(self) -> None:
+        """Close the seam, waiting out a notification already in flight."""
+        with self._lock:
+            self._closed = True
+            self._sink = None
+
+
 @dataclass(frozen=True)
 class TurnLifecycle:
     """What a transport may say and ask about the turn it is opening.
 
     Handed to :meth:`HarnessAdapter.open_transport` so a protocol conversation
-    has somewhere to report its native identifier and somewhere to look before
-    it submits. Both halves are turn-scoped and both are closed by the boundary
-    that owns the process, which is what keeps a late protocol callback from
-    reviving a turn that has already ended.
+    has somewhere to report its native identifier, somewhere to look before it
+    submits, and somewhere to say that it did. All three halves are turn-scoped
+    and all three are closed by the boundary that owns the process, which is
+    what keeps a late protocol callback from reviving a turn that has already
+    ended.
     """
 
     conversation: TurnConversation
     abort: AbortSignal | None = None
+    submission: TurnSubmission = field(default_factory=TurnSubmission)
 
     @property
     def cancel_due(self) -> bool:
@@ -547,6 +609,22 @@ class TurnLifecycle:
         """Record the turn's native conversation; raises if it was not stored."""
         self.conversation.capture(native_id)
 
+    @property
+    def prompt_submitted(self) -> bool:
+        """Whether this turn's prompt was actually handed to the worker."""
+        return self.submission.submitted
+
+    def note_prompt_submitted(self) -> None:
+        """Report that the prompt has been submitted, and is now the worker's.
+
+        Called at each transport's own submission point -- the spawn for a turn
+        whose prompt is argv, the accepted ``turn/start`` or the written
+        ``session/prompt`` for one that speaks a protocol. Never before: every
+        checkpoint above it exists so a turn can still be declined, and a
+        decline after this one would be withdrawing work already in flight.
+        """
+        self.submission.note_submitted()
+
     def refuse_submission(self) -> None:
         """Stop a handshake here, naming this window rather than a later one.
 
@@ -573,11 +651,12 @@ class TurnLifecycle:
         """End the turn: no further capture, and any request is complete.
 
         Ordered so completion is the last thing that happens. The conversation
-        seam closes first, so nothing can still be recorded for this turn, and
-        the cancellation is reported complete only once there is nothing left of
-        the turn at all.
+        and submission seams close first, so nothing can still be recorded for
+        this turn, and the cancellation is reported complete only once there is
+        nothing left of the turn at all.
         """
         self.conversation.close()
+        self.submission.close()
         if self.abort is not None:
             self.abort.release()
 
@@ -1361,6 +1440,7 @@ class HarnessAdapter:
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
         on_conversation: ConversationCallback | None = None,
+        on_prompt_submitted: SubmissionCallback | None = None,
         resume_conversation_id: str | None = None,
     ) -> HarnessResult:
         if invocation is None:
@@ -1418,6 +1498,7 @@ class HarnessAdapter:
         lifecycle = TurnLifecycle(
             conversation=TurnConversation(on_conversation),
             abort=abort,
+            submission=TurnSubmission(on_prompt_submitted),
         )
         lifecycle.begin()
         if lifecycle.cancel_due:
@@ -1467,6 +1548,15 @@ class HarnessAdapter:
         if on_spawn is not None:
             with contextlib.suppress(Exception):
                 on_spawn(process.pid)
+
+        if invocation.transport == TRANSPORT_EXEC:
+            # The one transport for which the spawn *is* the submission: the
+            # prompt is on the argv this process was started with, so by the
+            # time there is a pid the worker already has the words. Every other
+            # transport still has a handshake to get through -- and a handshake
+            # that can refuse -- so each reports its own submission from the
+            # point where its prompt actually goes out.
+            lifecycle.note_prompt_submitted()
 
         # The conversation and the live-delivery endpoint are both opened here,
         # inside the boundary that owns the process, and both are closed in the
@@ -2290,6 +2380,11 @@ class CodexAdapter(HarnessAdapter):
             if lifecycle is None
             else lifecycle.capture_conversation,
             before_submit=None if lifecycle is None else lifecycle.refuse_submission,
+            # The third of the same set, on the far side of the submission: it
+            # fires once `turn/start` has been accepted, which is where a codex
+            # turn stops being one this process could still decline. A restore
+            # the server refuses never reaches it.
+            on_submitted=None if lifecycle is None else lifecycle.note_prompt_submitted,
         )
         # The last checkpoint before the thread and the turn are created. A
         # cancellation seen here costs an app-server spawn; the same
@@ -2321,6 +2416,7 @@ class CodexAdapter(HarnessAdapter):
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
         on_conversation: ConversationCallback | None = None,
+        on_prompt_submitted: SubmissionCallback | None = None,
         resume_conversation_id: str | None = None,
     ) -> HarnessResult:
         """Run the turn on the app-server, falling back only before it starts.
@@ -2360,6 +2456,7 @@ class CodexAdapter(HarnessAdapter):
                     invocation=invocation,
                     on_transport=observer,
                     on_conversation=on_conversation,
+                    on_prompt_submitted=on_prompt_submitted,
                     resume_conversation_id=invocation.resume_conversation_id,
                 )
             )
@@ -2409,6 +2506,7 @@ class CodexAdapter(HarnessAdapter):
             invocation=invocation,
             on_transport=capture,
             on_conversation=on_conversation,
+            on_prompt_submitted=on_prompt_submitted,
             resume_conversation_id=invocation.resume_conversation_id,
         )
         if not opened:
@@ -2469,6 +2567,7 @@ class CodexAdapter(HarnessAdapter):
                 invocation=legacy,
                 on_transport=observer,
                 on_conversation=on_conversation,
+                on_prompt_submitted=on_prompt_submitted,
                 resume_conversation_id=legacy.resume_conversation_id,
             )
         )
@@ -2787,7 +2886,12 @@ class ClaudeAdapter(HarnessAdapter):
         # do from its first byte. A write failure here is not raised: the
         # process exists and has to be collected like any other failed turn,
         # with ``prompt_error`` explaining the empty output.
-        session.send_prompt()
+        if session.send_prompt() and lifecycle is not None:
+            # Only on the write that succeeded. A prompt the pipe refused is one
+            # the CLI never saw, and the turn that follows it is a spawned
+            # process sitting on a closed stdin -- not a worker holding the
+            # operator's words.
+            lifecycle.note_prompt_submitted()
         return _ClaudeStreamTransport(session)
 
     def run(
@@ -2812,6 +2916,7 @@ class ClaudeAdapter(HarnessAdapter):
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
         on_conversation: ConversationCallback | None = None,
+        on_prompt_submitted: SubmissionCallback | None = None,
         resume_conversation_id: str | None = None,
     ) -> HarnessResult:
         """Run the turn, arming its guidance hook for the turn's lifetime only.
@@ -2884,6 +2989,7 @@ class ClaudeAdapter(HarnessAdapter):
                 invocation=invocation,
                 on_transport=capture,
                 on_conversation=on_conversation,
+                on_prompt_submitted=on_prompt_submitted,
                 resume_conversation_id=invocation.resume_conversation_id,
             )
         finally:
@@ -3287,6 +3393,12 @@ class CopilotAdapter(HarnessAdapter):
             # be seen ``unstarted`` or ``execution``; this is the missing
             # ``handshake`` window.
             before_submit=None if lifecycle is None else lifecycle.refuse_submission,
+            # Runs on the driver thread the instant ``session/prompt`` is
+            # written, which is the only moment a copilot turn can honestly be
+            # called submitted: the request itself does not answer until the
+            # turn is over, and every refusal above it -- a declined
+            # ``session/load`` most of all -- leaves the prompt unsent.
+            on_submitted=None if lifecycle is None else lifecycle.note_prompt_submitted,
         )
         # The last checkpoint before the session is created. A cancellation seen
         # here costs a copilot spawn; the same cancellation a moment later costs
@@ -3318,6 +3430,7 @@ class CopilotAdapter(HarnessAdapter):
         on_transport: Callable[[HarnessTransport | None], None] | None = None,
         env: Mapping[str, str] | None = None,
         on_conversation: ConversationCallback | None = None,
+        on_prompt_submitted: SubmissionCallback | None = None,
         resume_conversation_id: str | None = None,
     ) -> HarnessResult:
         """Run the turn, then report what the protocol said rather than argv.
@@ -3357,6 +3470,7 @@ class CopilotAdapter(HarnessAdapter):
             invocation=invocation,
             on_transport=capture,
             on_conversation=on_conversation,
+            on_prompt_submitted=on_prompt_submitted,
             resume_conversation_id=(
                 resume_conversation_id
                 if invocation is None
@@ -3549,6 +3663,7 @@ def run_harness(
     live_delivery: guidance_delivery.LiveDeliveryEndpoint | None = None,
     env: Mapping[str, str] | None = None,
     on_conversation: ConversationCallback | None = None,
+    on_prompt_submitted: SubmissionCallback | None = None,
     resume_conversation_id: str | None = None,
 ) -> HarnessResult:
     """Run one harness turn through the selected adapter.
@@ -3559,6 +3674,14 @@ def run_harness(
     the identifier the turn actually runs on before any work is submitted. They
     are independent -- a first turn captures without resuming -- and neither
     ever falls back to a different conversation.
+
+    ``on_prompt_submitted`` is called at most once, from the point where this
+    turn's prompt actually went out: the spawn for a turn that carries it on
+    argv, the accepted ``turn/start`` or the written ``session/prompt`` for one
+    that speaks a protocol. A turn that spawned and then refused -- a restore
+    the provider declined, a cancellation caught mid-handshake -- never calls
+    it, which is what lets a caller tell a delivered prompt from a started
+    process.
     """
     return get_adapter(name).run(
         cwd=cwd,
@@ -3578,6 +3701,7 @@ def run_harness(
         live_delivery=live_delivery,
         env=env,
         on_conversation=on_conversation,
+        on_prompt_submitted=on_prompt_submitted,
         resume_conversation_id=resume_conversation_id,
     )
 

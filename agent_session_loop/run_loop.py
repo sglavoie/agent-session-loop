@@ -1072,13 +1072,16 @@ def _deliver_carried_corrections(
     turn_index: int,
     harness: str,
 ) -> None:
-    """Record that a worker was spawned holding this attempt's carry.
+    """Record that a worker was handed this attempt's carry.
 
-    Hung off the same spawn callback the guidance ledger uses, for the same
-    reason: the process exists and it was started with this prompt, which is the
-    earliest moment anything can honestly be called delivery. From here the
-    correction is the running worker's, and recovery treats an unreceipted one
-    as an open question rather than something to hand out again.
+    Hung off the harness's submission callback, which is the earliest moment
+    anything can honestly be called delivery: the prompt has left this process
+    for the worker. A spawn is not that moment -- a protocol harness spawns,
+    handshakes, and can still be refused with the prompt unsent -- and reading
+    one as the other is what leaves an operator's words spent on a turn that
+    never received them. From here the correction is the worker's, and recovery
+    treats an unreceipted one as an open question rather than something to hand
+    out again.
     """
     _annotate_carried_corrections(
         ctx,
@@ -1093,35 +1096,98 @@ def _deliver_carried_corrections(
     )
 
 
-def _record_prompt_submission(
-    ctx: RunContext,
-    *,
-    plan_dir: Path,
-    state_dir_arg: str | Path | None,
-    carried: redirect_ack.CarriedCorrections | None,
-    session_id: str,
-    turn_index: int,
-    harness: str,
-    record_guidance_delivery: Callable[[], None] | None,
-) -> None:
-    """The spawn callback: a process now exists holding this prompt.
+class _TurnDelivery:
+    """One attempt's carry, from the launch boundary to the turn's outcome.
 
-    Both ledgers hanging off it record the same fact for the same reason. Up to
-    here the run had only undertaken to deliver these words; from here a worker
-    was started with them, and that is what makes withdrawing them a duplicate
-    rather than a rescue.
+    An attempt that carried corrections ends in exactly one of two states, and
+    only the harness knows which: the prompt reached a worker, or it did not.
+    Both are recorded here because they are the same decision read from opposite
+    ends -- ``delivered`` makes taking the words back a duplicate, ``released``
+    makes handing them out again a rescue -- and an attempt that recorded
+    neither would leave the operator's words bound to a turn that is over.
+
+    Settled exactly once, under a lock, because the two ends are reached from
+    different threads: a protocol harness submits on its own driver thread while
+    the run loop is waiting on the turn it will later settle.
+
+    Bound per attempt rather than closed over, like the guidance delivery
+    alongside it: a closure would read the loop variables as the *next* attempt
+    left them.
     """
-    if record_guidance_delivery is not None:
-        record_guidance_delivery()
-    _deliver_carried_corrections(
-        ctx,
-        plan_dir=plan_dir,
-        state_dir_arg=state_dir_arg,
-        carried=carried,
-        session_id=session_id,
-        turn_index=turn_index,
-        harness=harness,
-    )
+
+    def __init__(
+        self,
+        ctx: RunContext,
+        *,
+        plan_dir: Path,
+        state_dir_arg: str | Path | None,
+        carried: redirect_ack.CarriedCorrections | None,
+        session_id: str,
+        turn_index: int,
+        harness: str,
+    ) -> None:
+        self._ctx = ctx
+        self._plan_dir = plan_dir
+        self._state_dir_arg = state_dir_arg
+        self._carried = carried
+        self._session_id = session_id
+        self._turn_index = turn_index
+        self._harness = harness
+        self._lock = threading.Lock()
+        self._settled = False
+
+    def note_prompt_submitted(self) -> None:
+        """The harness's submission callback: a worker now holds this prompt.
+
+        Up to here the run had only undertaken to deliver these words; from here
+        they went out. Exceptions are the harness seam's to swallow -- this is
+        bookkeeping about a turn that is already running.
+        """
+        if not self._claim():
+            return
+        _deliver_carried_corrections(
+            self._ctx,
+            plan_dir=self._plan_dir,
+            state_dir_arg=self._state_dir_arg,
+            carried=self._carried,
+            session_id=self._session_id,
+            turn_index=self._turn_index,
+            harness=self._harness,
+        )
+
+    def settle_unsubmitted(self) -> None:
+        """Hand the carry back if the turn ended without submitting its prompt.
+
+        The launch-side counterpart of the prelaunch releases: a turn that
+        spawned and then refused -- a native restore the provider declined, a
+        cancellation caught mid-handshake, a prompt the harness could not write
+        -- leaves the correction bound to an attempt that never delivered it.
+        Without this the journal would go on claiming those words were the dead
+        worker's, and the authorized fresh continuation that follows would
+        arrive empty-handed.
+
+        Called on every path out of the turn, including the ones that submitted:
+        the settle guard is what makes it a no-op there rather than a withdrawal
+        of work already done.
+        """
+        if not self._claim():
+            return
+        _release_carried_corrections(
+            self._ctx,
+            plan_dir=self._plan_dir,
+            state_dir_arg=self._state_dir_arg,
+            carried=self._carried,
+            session_id=self._session_id,
+            turn_index=self._turn_index,
+            harness=self._harness,
+        )
+
+    def _claim(self) -> bool:
+        with self._lock:
+            if self._settled:
+                return False
+            self._settled = True
+            return True
 
 
 def run_locked(
@@ -2415,11 +2481,11 @@ def run_locked(
                 else None
             )
 
-            # Bound rather than closed over, like the guidance delivery it
-            # wraps: this is one iteration's callback and a closure would read
-            # the loop variables as the *next* iteration left them.
-            on_prompt_accepted = functools.partial(
-                _record_prompt_submission,
+            # The launch side of the coalescing boundary, and this attempt's
+            # alone: it settles the carry as delivered when the harness reports
+            # the prompt submitted, and hands it back below if the turn ended
+            # without ever getting that far.
+            turn_delivery = _TurnDelivery(
                 ctx,
                 plan_dir=before.plan_dir,
                 state_dir_arg=args.state_dir,
@@ -2427,7 +2493,6 @@ def run_locked(
                 session_id=session_id,
                 turn_index=turn_index,
                 harness=turn_harness,
-                record_guidance_delivery=record_guidance_delivery,
             )
 
             # Started before the launch, not after it: a correction submitted
@@ -2449,7 +2514,13 @@ def run_locked(
                     abort=abort_signal,
                     live_delivery=delivery_endpoint,
                     stream_callback=stream_callback,
-                    on_prompt_accepted=on_prompt_accepted,
+                    on_prompt_submitted=turn_delivery.note_prompt_submitted,
+                    # The guidance ledger stays on the spawn it has always been
+                    # recorded at. It answers a different question than the
+                    # redirect journal -- which pending guidance this turn's
+                    # prompt was built from -- and nothing reads it back as
+                    # proof that a worker received anything.
+                    on_spawned=record_guidance_delivery,
                     build_invocation=functools.partial(
                         run_prompts.build_harness_invocation,
                         turn_harness,
@@ -2474,6 +2545,11 @@ def run_locked(
             )
             result = execution.result
             live_turn_payload = execution.live_turn
+            # Immediately on the way out of the turn, ahead of every guard that
+            # can end the run: a turn that never submitted its prompt is holding
+            # words that belong back in the journal, and the pause it is about
+            # to take is exactly when the operator would look for them.
+            turn_delivery.settle_unsubmitted()
             with run_control_lock:
                 ctx.run_control_context = None
             if conversation_capture is not None:

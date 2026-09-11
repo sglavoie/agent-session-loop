@@ -48,6 +48,8 @@ from agent_session_loop import (
     events,
     handoff_guards,
     harnesses,
+    redirect_ack,
+    redirect_recovery,
     redirect_store,
     state,
     turn_execution,
@@ -61,9 +63,11 @@ from tests.test_asl_copilot_acp import FAKE_ACP_FIXTURE
 from tests.test_asl_copilot_acp import SESSION_ID as ACP_SESSION_ID
 from tests.test_asl_harness_lifecycle import _FakePipe, _FakeProcess, _TurnTestCase
 from tests.test_asl_redirect_continuation import (
+    FEEDBACK,
     SESSION_ID,
     WORKER_PID,
     _RedirectedRun,
+    target,
 )
 
 #: The native conversation the adapter-level refusals ask for.
@@ -140,6 +144,8 @@ class CodexRestoreRefusalTests(unittest.TestCase):
         )
         env.start()
         self.addCleanup(env.stop)
+        self.spawned: list[int] = []
+        self.submitted: list[int] = []
 
     def _run(self, mode: str, *, resume: str | None = THREAD_ID) -> Any:
         os.environ["FAKE_APP_SERVER_MODE"] = mode
@@ -160,6 +166,10 @@ class CodexRestoreRefusalTests(unittest.TestCase):
             prompt=PROMPT,
             last_message_path=self.last_message,
             timeout=WAIT_SECONDS,
+            on_spawn=self.spawned.append,
+            # Recorded against the spawns so far, so a submission reported from
+            # the wrong side of the handshake cannot look like this one.
+            on_prompt_submitted=lambda: self.submitted.append(len(self.spawned)),
             **options,
         )
 
@@ -198,6 +208,23 @@ class CodexRestoreRefusalTests(unittest.TestCase):
         self.assertEqual(0, result.returncode)
         self.assertIsNone(result.conversation_restore_refused)
 
+    def test_a_refused_resume_never_submits_the_prompt_it_was_holding(self) -> None:
+        self._run("resume-unknown")
+
+        # ``thread/resume`` is answered before ``turn/start``, so this process
+        # was spawned, told the server which thread it wanted, and refused --
+        # all before anything could read the prompt. Whatever that prompt was
+        # carrying is still the run's to account for.
+        self.assertEqual(1, len(self.spawned))
+        self.assertEqual([], self.submitted)
+
+    def test_an_accepted_turn_reports_the_prompt_it_handed_over(self) -> None:
+        self._run("success", resume=None)
+
+        # The far side of the same handshake: a turn the server answered with,
+        # which is the only point at which the words have gone out.
+        self.assertEqual([1], self.submitted)
+
 
 class CopilotRestoreRefusalTests(unittest.TestCase):
     """A real ACP agent answering ``session/load`` with an error."""
@@ -215,6 +242,8 @@ class CopilotRestoreRefusalTests(unittest.TestCase):
         env = mock.patch.dict("os.environ", {"FAKE_ACP_RECORD": str(self.record)})
         env.start()
         self.addCleanup(env.stop)
+        self.spawned: list[int] = []
+        self.submitted: list[int] = []
 
     def _run(self, mode: str) -> Any:
         os.environ["FAKE_ACP_MODE"] = mode
@@ -226,6 +255,8 @@ class CopilotRestoreRefusalTests(unittest.TestCase):
             prompt=PROMPT,
             timeout=WAIT_SECONDS,
             unsafe_bypass=True,
+            on_spawn=self.spawned.append,
+            on_prompt_submitted=lambda: self.submitted.append(len(self.spawned)),
             invocation=adapter.build_invocation(
                 cwd=self.tmp,
                 plan_dir=self.plan_dir,
@@ -258,6 +289,27 @@ class CopilotRestoreRefusalTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIsNone(result.conversation_restore_refused)
 
+    def test_a_refused_load_never_submits_the_prompt_it_was_holding(self) -> None:
+        self._run("load-missing")
+
+        # ``session/load`` is answered before ``session/prompt``: an agent that
+        # says it no longer has the session is one that never read the words.
+        self.assertEqual(1, len(self.spawned))
+        self.assertEqual([], self.submitted)
+
+    def test_a_loaded_session_reports_the_prompt_it_handed_over(self) -> None:
+        result = self._run("success")
+
+        self.assertEqual(0, result.returncode)
+        self.assertEqual([1], self.submitted)
+
+
+class _BrokenPipe(_FakePipe):
+    """A stdin whose reader is gone, like a CLI that exited at startup."""
+
+    def write(self, text: str) -> int:  # type: ignore[override]
+        raise BrokenPipeError(32, "Broken pipe")
+
 
 class ClaudeRestoreRefusalTests(_TurnTestCase):
     """A claude turn whose ``--resume`` the CLI would not honour.
@@ -275,12 +327,16 @@ class ClaudeRestoreRefusalTests(_TurnTestCase):
         stdout: str = "",
         returncode: int = 1,
         resume: str = THREAD_ID,
+        stdin: _FakePipe | None = None,
+        **hooks: Any,
     ) -> Any:
         adapter = harnesses.ClaudeAdapter(executable="claude")
         process = _FakeProcess(running=False)
         process.returncode = returncode
         process.stdout = _FakePipe(stdout)
         process.stderr = _FakePipe(stderr)
+        if stdin is not None:
+            process.stdin = stdin
         invocation = adapter.build_invocation(
             cwd=self.tmp,
             plan_dir=self.tmp,
@@ -292,6 +348,7 @@ class ClaudeRestoreRefusalTests(_TurnTestCase):
             process,
             invocation=invocation,
             on_conversation=lambda native_id: None,
+            **hooks,
         )
 
     def _init_record(self, session_id: str) -> str:
@@ -343,6 +400,36 @@ class ClaudeRestoreRefusalTests(_TurnTestCase):
         )
 
         self.assertIsNone(result.conversation_restore_refused)
+
+    def test_a_cli_that_exited_before_the_write_submitted_nothing(self) -> None:
+        """Claude's refusal has no handshake, so the pipe is what reports it.
+
+        The CLI rejects the identifier and exits at startup, which leaves the
+        run writing the prompt into a pipe with no reader. Nothing read the
+        words, and the turn says so rather than counting the spawn.
+        """
+        submitted: list[str] = []
+
+        result = self._resume(
+            stderr=f"Error: No conversation found with session ID: {THREAD_ID}\n",
+            stdin=_BrokenPipe(),
+            on_prompt_submitted=lambda: submitted.append("submitted"),
+        )
+
+        self.assertIsNotNone(result.conversation_restore_refused)
+        self.assertEqual([], submitted)
+
+    def test_a_prompt_that_reached_the_stream_is_submitted(self) -> None:
+        submitted: list[str] = []
+
+        self._resume(
+            stdout=self._init_record(THREAD_ID),
+            stderr="",
+            returncode=0,
+            on_prompt_submitted=lambda: submitted.append("submitted"),
+        )
+
+        self.assertEqual(["submitted"], submitted)
 
 
 class RefusedRestoreDispositionTests(unittest.TestCase):
@@ -561,6 +648,7 @@ class RefusedRestoreRunTests(_RedirectedRun):
     def setUp(self) -> None:
         super().setUp()
         self.resumed: list[str | None] = []
+        self.prompts: list[str] = []
         self.refused = False
         self.refusal = refused_codex_resume(
             self.tmp / "app-server", conversation=RUN_CONVERSATION_ID
@@ -568,6 +656,7 @@ class RefusedRestoreRunTests(_RedirectedRun):
 
     def _fake_worker(self, name: str, **kwargs: Any) -> harnesses.HarnessResult:
         self.resumed.append(kwargs.get("resume_conversation_id"))
+        self.prompts.append(str(kwargs.get("prompt") or ""))
         if not self.harness_calls:
             # The fixture's first turn: it opens the conversation, is corrected
             # mid-turn, and leaves a successor to resume.
@@ -581,23 +670,42 @@ class RefusedRestoreRunTests(_RedirectedRun):
         return dataclasses.replace(self.refusal, name=name)
 
     def _spawned(self, **kwargs: Any) -> None:
-        """Report the spawn, which is what records a carry as delivered.
+        """Report the spawn, and nothing beyond it.
 
-        A refused restore happens in the provider's handshake, after the process
-        holding the prompt exists -- so the correction it was carrying has
-        reached a worker, and the run's account of it has to say so.
+        A spawn is as far as a refused restore ever gets. The app-server process
+        exists and this run is still holding the prompt: ``thread/resume`` is
+        answered before ``turn/start``, so nothing was submitted and no worker
+        ever read the correction the prompt was carrying.
         """
         on_spawn = kwargs.get("on_spawn")
         if on_spawn is not None:
             on_spawn(WORKER_PID)
 
+    def _submitted(self, **kwargs: Any) -> None:
+        """Report a spawn whose handshake went through and whose prompt went out.
+
+        The pair of hooks is the distinction this fixture exists to exercise: a
+        worker that reached here holds the operator's words, and one that
+        stopped at :meth:`_spawned` does not.
+        """
+        self._spawned(**kwargs)
+        on_prompt_submitted = kwargs.get("on_prompt_submitted")
+        if on_prompt_submitted is not None:
+            on_prompt_submitted()
+
     def _recovered_turn(self, name: str, **kwargs: Any) -> harnesses.HarnessResult:
         """The authorized relaunch: a new conversation, and the work done in it."""
         self.harness_calls.append(name)
-        self._spawned(**kwargs)
+        self._submitted(**kwargs)
         on_conversation = kwargs.get("on_conversation")
         if on_conversation is not None:
             on_conversation("conv-2")
+        # The stale token is the refused attempt's: a receipt for the turn that
+        # asked for the dead conversation. It is the one a worker would forge or
+        # a crashed successor would leave behind, and it stays refused.
+        self._receipt_from_prompt(
+            str(kwargs.get("prompt") or ""), harness=name, stale=target(2)
+        )
         (self.repo_root / "worked.txt").write_text("done\n", encoding="utf-8")
         self._complete_session()
         kwargs["abort"].release()
@@ -682,22 +790,37 @@ class RefusedRestoreRunTests(_RedirectedRun):
             conversation_resume.RESTORE_REFUSED_RETIREMENT_REASON, selection.detail
         )
 
-    def test_a_correction_the_refused_worker_already_held_is_not_handed_back(
-        self,
-    ) -> None:
-        self._pause()
-
+    def _request(self) -> redirect_store.RedirectRequest:
         request = redirect_store.read_journal(
             self.plan_dir, state_dir=self.state_dir
         ).request("op-1")
         assert request is not None
-        # Unlike the pauses that happen *before* a launch, this one happens in
-        # the provider's handshake -- the process holding the operator's words
-        # already existed. Handing them back would offer a second worker a
-        # correction a first one was given.
-        self.assertTrue(request.reached_a_worker)
-        self.assertTrue(request.delivered)
-        self.assertFalse(request.released)
+        return request
+
+    def test_a_correction_the_refused_worker_never_received_is_handed_back(
+        self,
+    ) -> None:
+        self._pause()
+
+        request = self._request()
+        # The refusal happens in the provider's handshake: a process existed,
+        # but it was never given the turn, so the operator's words are still
+        # this run's to account for. Calling that delivery -- which a spawn
+        # would -- is what left the next launch with nothing to hand over.
+        self.assertFalse(request.delivered)
+        self.assertFalse(request.reached_a_worker)
+        self.assertTrue(request.released)
+
+    def test_the_release_is_recorded_where_the_next_run_reads_it(self) -> None:
+        self._pause()
+
+        released = [
+            record
+            for record in self.events_named(events.REDIRECT_CONTINUATION_EVENT)
+            if record.get("outcome") == "released"
+        ]
+        self.assertEqual(1, len(released))
+        self.assertEqual(["op-1"], released[0]["operation_ids"])
 
     def test_the_next_ordinary_launch_never_reaches_the_harness(self) -> None:
         self._pause()
@@ -712,17 +835,81 @@ class RefusedRestoreRunTests(_RedirectedRun):
         self.assertEqual(["codex", "codex"], self.harness_calls)
         self.assertEqual("conversation-recovery-required", payload["reason"])
 
-    def test_an_authorized_launch_starts_over_and_finishes_the_session(self) -> None:
+    def test_the_outstanding_correction_is_offered_to_the_next_run(self) -> None:
         self._pause()
 
-        payload = self.run_loop_once(
-            run_id=self.RECOVERY_RUN_ID, fresh_conversation=True, prepare_plan=False
+        # What the relaunch sees before it launches anything. Uncertain is where
+        # a correction goes to die: nothing may be handed to a second attempt
+        # once the journal says a first one was given it, and a spawn counted as
+        # delivery is what used to put it there.
+        report = redirect_recovery.reconcile_startup(
+            self.plan_dir,
+            run_id=self.RECOVERY_RUN_ID,
+            pending_session_ids=(SESSION_ID,),
+            state_dir=self.state_dir,
         )
+        self.assertEqual(("op-1",), report.recoverable_for(SESSION_ID))
+        self.assertEqual((), report.uncertain_for(SESSION_ID))
+
+    def test_an_authorized_launch_starts_over_and_finishes_the_session(self) -> None:
+        payload = self._recover_after_pause()
 
         # The recovering turn asked for nothing: fresh, not "the latest".
         self.assertEqual([None, RUN_CONVERSATION_ID, None], self.resumed)
         self.assertFalse(payload["paused"])
         self.assertEqual("complete", self._session_status())
+
+    def test_the_fresh_conversation_is_handed_the_correction_it_lost(self) -> None:
+        self._recover_after_pause()
+
+        # The point of the whole story. The conversation is gone and cannot be
+        # recovered; the operator's words were never spoken to anything, so they
+        # are still owed, and this is the turn that owes them.
+        self.assertEqual(["codex", "codex", "codex"], self.harness_calls)
+        self.assertIn(FEEDBACK, self.prompts[2])
+        request = self._request()
+        self.assertTrue(request.delivered)
+        self.assertTrue(request.recovered)
+        self.assertEqual(
+            f"{self.RECOVERY_RUN_ID}/{SESSION_ID}/1",
+            redirect_ack.attempt_token(request.continuation),
+        )
+
+    def test_the_recovering_attempt_acknowledges_on_its_own_attempt(self) -> None:
+        self._recover_after_pause()
+
+        assert self.receipt is not None
+        self.assertEqual("op-1", self.receipt.operation_id)
+        self.assertEqual(f"{self.RECOVERY_RUN_ID}/{SESSION_ID}/1", self.receipt.attempt)
+        self.assertFalse(self.receipt.repeated)
+        self.assertTrue(self._request().acknowledged)
+
+    def test_a_receipt_naming_the_refused_attempt_is_still_refused(self) -> None:
+        self._recover_after_pause()
+
+        # Handing the words to a later attempt does not make the refused one a
+        # carrier. The surface will not verify a token against a live attempt it
+        # does not name, and the journal will not take a receipt from an attempt
+        # it never recorded as the carrier -- the refusal that survives a forged
+        # live attempt.
+        assert self.stale_refusal is not None
+        self.assertEqual(redirect_ack.ERROR_ATTEMPT_MISMATCH, self.stale_refusal.reason)
+        with self.assertRaises(redirect_store.RedirectStoreError) as raised:
+            redirect_store.acknowledge_request(
+                self.plan_dir,
+                "op-1",
+                attempt=target(2),
+                state_dir=self.state_dir,
+            )
+        self.assertEqual(
+            redirect_store.ERROR_CONTINUATION_MISMATCH, raised.exception.reason
+        )
+
+    def _recover_after_pause(self) -> dict[str, Any]:
+        self._pause()
+        return self.run_loop_once(
+            run_id=self.RECOVERY_RUN_ID, fresh_conversation=True, prepare_plan=False
+        )
 
 
 if __name__ == "__main__":

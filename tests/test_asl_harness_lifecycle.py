@@ -12,6 +12,7 @@ the machine running the tests.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import subprocess
@@ -229,6 +230,68 @@ class TurnConversationTests(unittest.TestCase):
         self.assertTrue(conversation.closed)
 
 
+class TurnSubmissionTests(unittest.TestCase):
+    """The record of whether a worker was ever handed the turn's prompt.
+
+    Everything downstream of it is an accounting decision about words the
+    operator entrusted to the run, so the two facts it has to keep apart are
+    "said once" and "never said" -- and, unlike a capture, a report that
+    arrives is not something a failing sink may retract.
+    """
+
+    def test_a_submitted_prompt_reaches_the_sink(self) -> None:
+        recorded: list[str] = []
+        submission = harnesses.TurnSubmission(lambda: recorded.append("submitted"))
+
+        submission.note_submitted()
+
+        self.assertEqual(["submitted"], recorded)
+        self.assertTrue(submission.submitted)
+
+    def test_a_turn_that_never_submitted_says_so(self) -> None:
+        submission = harnesses.TurnSubmission(lambda: None)
+
+        submission.close()
+
+        self.assertFalse(submission.submitted)
+
+    def test_the_same_submission_reported_twice_is_recorded_once(self) -> None:
+        recorded: list[str] = []
+        submission = harnesses.TurnSubmission(lambda: recorded.append("submitted"))
+
+        submission.note_submitted()
+        submission.note_submitted()
+
+        self.assertEqual(["submitted"], recorded)
+
+    def test_a_sink_failure_does_not_unsay_the_submission(self) -> None:
+        """The words are already with the worker; bookkeeping cannot recall them.
+
+        The opposite of :class:`TurnConversation`, where a sink that fails means
+        nothing was persisted and so nothing was captured. Here the sink is told
+        about something that already happened out on the wire.
+        """
+
+        def explode() -> None:
+            raise OSError("journal is read-only")
+
+        submission = harnesses.TurnSubmission(explode)
+
+        submission.note_submitted()
+
+        self.assertTrue(submission.submitted)
+
+    def test_a_late_report_cannot_reach_a_closed_turn(self) -> None:
+        recorded: list[str] = []
+        submission = harnesses.TurnSubmission(lambda: recorded.append("submitted"))
+        submission.close()
+
+        submission.note_submitted()
+
+        self.assertEqual([], recorded)
+        self.assertFalse(submission.submitted)
+
+
 class TurnLifecycleTests(unittest.TestCase):
     def test_a_pending_cancellation_stops_the_next_checkpoint(self) -> None:
         signal = harnesses.AbortSignal()
@@ -369,6 +432,12 @@ class _LifecycleAdapter(harnesses.HarnessAdapter):
     Its ``open_transport`` is the shape a wired protocol adapter has: learn the
     conversation, report it, check for a cancellation, then submit. What the
     test varies is which of those steps fails.
+
+    ``transport`` is what decides where this adapter's prompt goes out. Left at
+    the default the turn is a one-shot whose prompt was on the argv; named as a
+    protocol transport, the handshake above stands between the spawn and the
+    submission, and the submission is reported from the far side of it the way
+    a real protocol adapter reports its own.
     """
 
     name = "codex"
@@ -382,6 +451,7 @@ class _LifecycleAdapter(harnesses.HarnessAdapter):
         resumes: bool = False,
         before_submit: Any = None,
         transport_shutdown: Any = None,
+        transport: str = harnesses.TRANSPORT_EXEC,
     ) -> None:
         super().__init__(executable="fake-harness")
         self.captures_conversations = captures
@@ -392,9 +462,15 @@ class _LifecycleAdapter(harnesses.HarnessAdapter):
         self.resumed: list[str | None] = []
         self._before_submit = before_submit
         self._transport_shutdown = transport_shutdown
+        self._transport = transport
 
     def build_argv(self, **kwargs: Any) -> list[str]:
         return [self.executable]
+
+    def build_invocation(self, **kwargs: Any) -> harnesses.HarnessInvocation:
+        return dataclasses.replace(
+            super().build_invocation(**kwargs), transport=self._transport
+        )
 
     def open_transport(
         self,
@@ -413,6 +489,8 @@ class _LifecycleAdapter(harnesses.HarnessAdapter):
             self._before_submit()
         lifecycle.check_not_cancelled()
         self.submitted.append(prompt)
+        if self._transport != harnesses.TRANSPORT_EXEC:
+            lifecycle.note_prompt_submitted()
         return _FakeTransport(self.output_processor(), self._transport_shutdown)
 
 
@@ -599,6 +677,109 @@ class CancellationWindowTests(_TurnTestCase):
         with self.assertRaises(harnesses.ConversationCaptureError):
             lifecycle.capture_conversation("thread-77")
         self.assertEqual(["thread-77"], recorded)
+
+
+class PromptSubmissionBoundaryTests(_TurnTestCase):
+    """Spawning a worker and handing it the prompt are two separate moments.
+
+    They coincide for a one-shot turn, whose prompt was on the argv the process
+    was started with. For every protocol transport a handshake stands between
+    them, and a handshake can end in a live process that was never told
+    anything -- cancelled, or refused by the provider. A caller that reads the
+    spawn as the submission would record those turns as having received words
+    nothing ever read, which is why the turn reports the two separately.
+    """
+
+    def _hooks(self) -> tuple[list[int], list[int]]:
+        """Spawns and submissions, each recording how far the other had got."""
+        spawned: list[int] = []
+        submitted: list[int] = []
+        self.spawned, self.submitted = spawned, submitted
+        return spawned, submitted
+
+    def _run(self, adapter: _LifecycleAdapter, process: _FakeProcess, **kwargs: Any):
+        spawned, submitted = self._hooks()
+        return self.run_turn(
+            adapter,
+            process,
+            on_spawn=spawned.append,
+            on_prompt_submitted=lambda: submitted.append(len(spawned)),
+            **kwargs,
+        )
+
+    def test_a_prompt_on_the_argv_is_submitted_at_spawn(self) -> None:
+        adapter = _LifecycleAdapter()
+        process = _FakeProcess(running=False)
+
+        result = self._run(adapter, process)
+
+        # One-shot: there is no handshake that could refuse, so the pid is the
+        # whole proof. Reported after the spawn and not instead of it, because
+        # a caller that acts on the submission may need the worker's identity.
+        self.assertEqual([process.pid], self.spawned)
+        self.assertEqual([1], self.submitted)
+        self.assertEqual(0, result.returncode)
+
+    def test_a_protocol_turn_reports_submission_from_its_handshake(self) -> None:
+        seen_mid_handshake: list[int] = []
+        adapter = _LifecycleAdapter(
+            transport=harnesses.TRANSPORT_APP_SERVER,
+            before_submit=lambda: seen_mid_handshake.append(len(self.submitted)),
+        )
+        process = _FakeProcess(running=False)
+
+        result = self._run(adapter, process)
+
+        # Spawned, into a handshake that had not yet submitted anything.
+        self.assertEqual([process.pid], self.spawned)
+        self.assertEqual([0], seen_mid_handshake)
+        self.assertEqual([1], self.submitted)
+        self.assertEqual(["do the work"], adapter.submitted)
+        self.assertEqual(0, result.returncode)
+
+    def test_a_cancellation_between_spawn_and_submission_hands_over_nothing(
+        self,
+    ) -> None:
+        signal = harnesses.AbortSignal()
+        adapter = _LifecycleAdapter(
+            transport=harnesses.TRANSPORT_APP_SERVER,
+            before_submit=lambda: signal.arm("operator stopped the run"),
+        )
+        process = _FakeProcess()
+
+        result = self._run(adapter, process, abort=signal)
+
+        # A process existed and was killed, and nothing was ever submitted to
+        # it. Both are true at once, and only the second one is about the words.
+        self.assertEqual([process.pid], self.spawned)
+        self.assertEqual([], self.submitted)
+        self.assertEqual([], adapter.submitted)
+        self.assertEqual(harnesses.CANCEL_STAGE_HANDSHAKE, result.cancel_stage)
+        self.assertTrue(process.killed)
+
+    def test_a_handshake_the_provider_refused_hands_over_nothing(self) -> None:
+        adapter = _LifecycleAdapter(
+            transport=harnesses.TRANSPORT_APP_SERVER,
+            before_submit=_raise(RuntimeError("app-server refused the thread")),
+        )
+        process = _FakeProcess()
+
+        with self.assertRaises(RuntimeError):
+            self._run(adapter, process)
+
+        self.assertEqual([process.pid], self.spawned)
+        self.assertEqual([], self.submitted)
+
+    def test_a_report_that_arrives_after_the_turn_is_ignored(self) -> None:
+        adapter = _LifecycleAdapter(transport=harnesses.TRANSPORT_APP_SERVER)
+        process = _FakeProcess(running=False)
+
+        self._run(adapter, process)
+        adapter.lifecycles[0].note_prompt_submitted()
+
+        # The turn is over and its carry has already been settled against what
+        # the turn reported. A straggling transport thread may not reopen that.
+        self.assertEqual([1], self.submitted)
 
 
 class CancellationIndependenceTests(_TurnTestCase):
@@ -843,16 +1024,42 @@ class ClaudeContinuityTurnTests(_TurnTestCase):
     ) -> None:
         adapter = self.adapter()
         process = _FakeProcess()
+        submitted: list[str] = []
 
         def explode(native_id: str) -> None:
             raise OSError("ledger is read-only")
 
-        result = self.run_turn(adapter, process, on_conversation=explode)
+        result = self.run_turn(
+            adapter,
+            process,
+            on_conversation=explode,
+            on_prompt_submitted=lambda: submitted.append("submitted"),
+        )
 
         self.assertEqual([], process.stdin.written)
+        # The pipe is what the prompt travels down, so nothing written is
+        # nothing submitted -- and the turn says so rather than leaving the
+        # spawn to be read as delivery.
+        self.assertEqual([], submitted)
         self.assertIn("ledger is read-only", result.conversation_error or "")
         self.assertIsNone(result.conversation_id)
         self.assertTrue(process.killed)
+
+    def test_a_prompt_written_to_the_stream_is_a_submission(self) -> None:
+        adapter = self.adapter()
+        process = _FakeProcess(running=False)
+        submitted: list[str] = []
+
+        result = self.run_turn(
+            adapter,
+            process,
+            on_conversation=lambda native_id: None,
+            on_prompt_submitted=lambda: submitted.append("submitted"),
+        )
+
+        self.assertIn("do the work", "".join(process.stdin.written))
+        self.assertEqual(["submitted"], submitted)
+        self.assertEqual(0, result.returncode)
 
     def test_an_audit_turn_says_it_has_no_conversation_to_offer(self) -> None:
         adapter = self.adapter()

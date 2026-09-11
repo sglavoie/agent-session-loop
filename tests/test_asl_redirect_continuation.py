@@ -1285,6 +1285,8 @@ class _RedirectedRun(unittest.TestCase):
         self.commits_before_resume: int | None = None
         self.status_at_resume: str | None = None
         self.submitted: redirect_store.RedirectRequest | None = None
+        self.receipt: redirect_ack.Acknowledgment | None = None
+        self.stale_refusal: redirect_ack.RedirectAckError | None = None
 
     # -- the fakes -----------------------------------------------------------
 
@@ -1367,6 +1369,14 @@ class _RedirectedRun(unittest.TestCase):
         on_conversation = kwargs.get("on_conversation")
         if on_conversation is not None:
             on_conversation("conv-1")
+        # The prompt goes out: this worker resumes what it was asked to resume
+        # and is handed the turn. A real adapter reports this from the far side
+        # of its handshake, which is why it is a separate hook from the spawn
+        # above -- see the refused-restore worker in
+        # ``test_asl_native_restore_recovery`` for one that never reaches it.
+        on_prompt_submitted = kwargs.get("on_prompt_submitted")
+        if on_prompt_submitted is not None:
+            on_prompt_submitted()
         if len(self.harness_calls) == 1:
             # What the urgent endpoint's reader thread does when a producer's
             # correction lands: append it, then wake the turn. Admission itself
@@ -1416,6 +1426,48 @@ class _RedirectedRun(unittest.TestCase):
             stdout="codex completed\n",
             stderr="",
             conversation_id="conv-1",
+        )
+
+    def _receipt_from_prompt(
+        self, prompt: str, *, harness: str, stale: redirect_store.RedirectTarget
+    ) -> None:
+        """Acknowledge as a real worker does: from the words it was handed.
+
+        The prompt carries both halves of the receipt's identity, so parsing it
+        is what proves the worker could acknowledge at all -- an attempt token
+        the test supplied would prove only that the journal accepts one.
+
+        ``stale`` is the attempt some earlier launch would have acknowledged
+        from. Every recovery case has one, and it is tried first here so that
+        each of them shows the same thing: the journal takes the receipt from
+        the attempt that actually holds the words, and from no other.
+        """
+        match = re.search(r"--redirect-id (\S+) --attempt (\S+)", prompt)
+        assert match is not None, prompt
+        operation_id, token = match.group(1), match.group(2)
+        run_id, session_id, turn_index = token.split("/")
+        live = redirect_store.RedirectTarget(
+            run_id=run_id,
+            session_id=session_id,
+            turn_index=int(turn_index),
+            harness=harness,
+        )
+        try:
+            redirect_ack.acknowledge_correction(
+                self.plan_dir,
+                operation_id,
+                token=redirect_ack.attempt_token(stale),
+                live_attempt=live,
+                state_dir=self.state_dir,
+            )
+        except redirect_ack.RedirectAckError as error:
+            self.stale_refusal = error
+        self.receipt = redirect_ack.acknowledge_correction(
+            self.plan_dir,
+            operation_id,
+            token=token,
+            live_attempt=live,
+            state_dir=self.state_dir,
         )
 
     def _fake_commit(self, **kwargs: Any) -> dict[str, Any]:
@@ -1552,8 +1604,9 @@ class RedirectedRunTests(_RedirectedRun):
         # the attempt that will deliver it happens while that attempt's prompt
         # is being assembled — after the predecessor is settled, before the
         # resumed turn is planned. `delivered` is last because it is the one
-        # fact none of the others establish: a worker was actually spawned
-        # holding the words.
+        # fact none of the others establish: a worker was actually handed the
+        # prompt. Not spawned holding it — a spawned worker can still be refused
+        # the turn it asked for, and then it read nothing.
         self.assertEqual(
             [
                 turn_dispositions.REDIRECT_OUTCOME_CONTINUED,
@@ -1633,6 +1686,80 @@ class RedirectedRunTests(_RedirectedRun):
         )
 
 
+class SubmittedCorrectionTests(_RedirectedRun):
+    """A correction that did go out, to a worker whose turn then failed.
+
+    The mirror image of the recovery cases, and the reason they may not be
+    written as "hand it back whenever the turn ends badly". These words were
+    read. Handing them to a second worker would repeat an instruction that has
+    already had its effect, which is why a submitted correction stays spent no
+    matter what becomes of the turn that carried it.
+    """
+
+    def _fake_worker(self, name: str, **kwargs: Any) -> harnesses.HarnessResult:
+        if not self.harness_calls:
+            return super()._fake_worker(name, **kwargs)
+        self.harness_calls.append(name)
+        on_spawn = kwargs.get("on_spawn")
+        if on_spawn is not None:
+            on_spawn(WORKER_PID)
+        on_conversation = kwargs.get("on_conversation")
+        if on_conversation is not None:
+            on_conversation("conv-1")
+        on_prompt_submitted = kwargs.get("on_prompt_submitted")
+        if on_prompt_submitted is not None:
+            on_prompt_submitted()
+        kwargs["abort"].release()
+        # Handed the turn, and then lost: the worker read the correction and
+        # died with the work unfinished.
+        return harnesses.HarnessResult(
+            name=name,
+            argv=[name],
+            returncode=1,
+            stdout="",
+            stderr="the worker died mid-turn\n",
+            conversation_id="conv-1",
+        )
+
+    def _request(self) -> redirect_store.RedirectRequest:
+        request = redirect_store.read_journal(
+            self.plan_dir, state_dir=self.state_dir
+        ).request("op-1")
+        assert request is not None
+        return request
+
+    def test_a_failed_turn_does_not_hand_back_what_it_was_given(self) -> None:
+        self.run_loop_once(expect_exit_code=1)
+
+        request = self._request()
+        self.assertTrue(request.delivered)
+        self.assertTrue(request.reached_a_worker)
+        self.assertFalse(request.released)
+        self.assertEqual(
+            [],
+            [
+                record
+                for record in self.events_named(events.REDIRECT_CONTINUATION_EVENT)
+                if record["outcome"] == "released"
+            ],
+        )
+
+    def test_the_next_run_is_not_offered_the_words_again(self) -> None:
+        self.run_loop_once(expect_exit_code=1)
+
+        # Uncertain, and uncertain is terminal: nothing replays a correction a
+        # worker may have acted on. Automatic recovery is for the words that
+        # provably reached no one.
+        report = redirect_recovery.reconcile_startup(
+            self.plan_dir,
+            run_id="run-redirect-2",
+            pending_session_ids=(SESSION_ID,),
+            state_dir=self.state_dir,
+        )
+        self.assertEqual((), report.recoverable_for(SESSION_ID))
+        self.assertEqual(("op-1",), report.uncertain_for(SESSION_ID))
+
+
 class PrelaunchPauseRecoveryTests(_RedirectedRun):
     """The gap between assembling a prompt and spawning the worker that holds it.
 
@@ -1650,8 +1777,6 @@ class PrelaunchPauseRecoveryTests(_RedirectedRun):
     def setUp(self) -> None:
         super().setUp()
         self.prompts: list[str] = []
-        self.receipt: redirect_ack.Acknowledgment | None = None
-        self.stale_refusal: redirect_ack.RedirectAckError | None = None
 
     def _fake_worker(self, name: str, **kwargs: Any) -> harnesses.HarnessResult:
         """The shared worker, with the first turn's conversation left unconfirmed.
@@ -1668,46 +1793,11 @@ class PrelaunchPauseRecoveryTests(_RedirectedRun):
             return dataclasses.replace(
                 result, cancel_stage=harnesses.CANCEL_STAGE_HANDSHAKE
             )
-        self._receipt_from_prompt(prompt, harness=name)
+        # The stale token is the receipt the paused run's successor would have
+        # written if it had ever started: it names an attempt that no longer
+        # exists, and is refused for the same reason a stale worker's would be.
+        self._receipt_from_prompt(prompt, harness=name, stale=target(2))
         return result
-
-    def _receipt_from_prompt(self, prompt: str, *, harness: str) -> None:
-        """Acknowledge as a real worker does: from the words it was handed.
-
-        The prompt carries both halves of the receipt's identity, so parsing it
-        is what proves the worker could acknowledge at all -- an attempt token
-        the test supplied would prove only that the journal accepts one.
-        """
-        match = re.search(r"--redirect-id (\S+) --attempt (\S+)", prompt)
-        assert match is not None, prompt
-        operation_id, token = match.group(1), match.group(2)
-        run_id, session_id, turn_index = token.split("/")
-        live = redirect_store.RedirectTarget(
-            run_id=run_id,
-            session_id=session_id,
-            turn_index=int(turn_index),
-            harness=harness,
-        )
-        # The receipt the paused run's successor would have written if it had
-        # ever started. It names an attempt that no longer exists, and it is
-        # refused here for the same reason a stale worker's would be.
-        try:
-            redirect_ack.acknowledge_correction(
-                self.plan_dir,
-                operation_id,
-                token=redirect_ack.attempt_token(target(2)),
-                live_attempt=live,
-                state_dir=self.state_dir,
-            )
-        except redirect_ack.RedirectAckError as error:
-            self.stale_refusal = error
-        self.receipt = redirect_ack.acknowledge_correction(
-            self.plan_dir,
-            operation_id,
-            token=token,
-            live_attempt=live,
-            state_dir=self.state_dir,
-        )
 
     def _request(self) -> redirect_store.RedirectRequest:
         request = redirect_store.read_journal(

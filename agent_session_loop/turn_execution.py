@@ -1887,17 +1887,27 @@ class TurnLaunch:
     #: this process's. It carries the run's guard-bin ``PATH`` prefix, which is
     #: what makes a command guard reach the harness and its descendants.
     env: Mapping[str, str] | None = None
-    #: Called once the harness process exists, which for a harness that takes
-    #: its prompt up front is the moment the prompt was accepted. It is the
-    #: earliest point at which guidance carried in that prompt can honestly be
-    #: called delivered, and the latest at which it is still this turn's news.
-    on_prompt_accepted: Callable[[], None] | None = None
-    #: Called with the harness process's pid the moment it exists, ahead of
-    #: ``on_prompt_accepted``. It is how a turn-scoped controller learns which
-    #: process it is permitted to stop, and it has to be stated at spawn rather
-    #: than looked up later: a pid discovered at a deadline names whatever holds
-    #: that number by then. Failures propagate -- a controller that could not be
-    #: bound would leave an accepted correction with nothing to interrupt.
+    #: Called once this turn's prompt has actually been handed to the worker,
+    #: which is where the words stop being something the run undertook to
+    #: deliver and start being something a worker holds. For a harness that
+    #: takes its prompt on argv that is the spawn; for one that speaks a
+    #: protocol it is the accepted turn, on the far side of a handshake that can
+    #: refuse. A turn that spawned and then refused never calls it, which is
+    #: what keeps a correction the worker never saw recoverable.
+    on_prompt_submitted: harnesses.SubmissionCallback | None = None
+    #: Called once the harness process exists, whatever its transport does next.
+    #: It is for bookkeeping about the prompt this turn was *built* from, which
+    #: is settled before the spawn and unaffected by what the handshake decides.
+    #: Anything that records words as having reached a worker belongs on
+    #: ``on_prompt_submitted`` instead.
+    on_spawned: Callable[[], None] | None = None
+    #: Called with the harness process's pid the moment it exists, which is
+    #: earlier than ``on_prompt_submitted`` and deliberately so. It is how a
+    #: turn-scoped controller learns which process it is permitted to stop, and
+    #: it has to be stated at spawn rather than looked up later: a pid
+    #: discovered at a deadline names whatever holds that number by then.
+    #: Failures propagate -- a controller that could not be bound would leave an
+    #: accepted correction with nothing to interrupt.
     on_worker: Callable[[int], None] | None = None
     #: The native conversation this turn continues, or ``None`` to let the
     #: harness open one. Exact-or-refusal: an adapter that cannot restore this
@@ -1982,12 +1992,12 @@ class TurnExecutor:
             live_turn.note_harness_pid(pid)
             if launch.on_worker is not None:
                 launch.on_worker(pid)
-            if launch.on_prompt_accepted is not None:
-                # Suppressed rather than propagated: recording a delivery is
-                # bookkeeping about a turn that has already started, and a
-                # ledger failure must not become a spawn failure.
+            if launch.on_spawned is not None:
+                # Suppressed rather than propagated: recording what the prompt
+                # was built from is bookkeeping about a turn that has already
+                # started, and a ledger failure must not become a spawn failure.
                 with contextlib.suppress(Exception):
-                    launch.on_prompt_accepted()
+                    launch.on_spawned()
 
         try:
             result = harnesses.run_harness(
@@ -2008,6 +2018,13 @@ class TurnExecutor:
                 live_delivery=launch.live_delivery,
                 env=launch.env,
                 on_conversation=launch.on_conversation,
+                # Handed to the harness rather than fired from ``on_spawn``:
+                # only the adapter knows where its prompt actually goes out, and
+                # for a protocol transport that is past a handshake the provider
+                # can still refuse. The harness's own seam swallows a failure
+                # here, so a ledger that cannot be written never becomes a turn
+                # that did not run.
+                on_prompt_submitted=launch.on_prompt_submitted,
                 resume_conversation_id=launch.resume_conversation_id,
             )
         except KeyboardInterrupt:

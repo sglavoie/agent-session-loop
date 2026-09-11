@@ -3077,9 +3077,9 @@ and a request's state is a reduction over those records rather than a field
 anything rewrites, so no line is edited in place and the file is never
 truncated. Four are annotations — `continued`, `delivered`, `released`,
 `acknowledged` — which say which continuation attempt bound an accepted
-correction into its prompt, whether that attempt's worker was actually launched
-holding it, whether a carry that never launched was given back, and that a
-worker receipted it. An annotation changes no state, so `submitted` remains the
+correction into its prompt, whether that attempt actually submitted that prompt
+to a worker, whether a carry whose prompt never went out was given back, and
+that a worker receipted it. An annotation changes no state, so `submitted` remains the
 only non-terminal one and a carried, receipted correction is still settled
 exactly once. All four are charged against the settlement reserve rather than
 the submission tier: refusing one would leave an accepted correction with no
@@ -3088,11 +3088,16 @@ can be checked against.
 
 Three of those annotations exist because planned delivery and actual delivery
 are different facts, and a correction can be lost in the gap between them.
-Everything from finalizing a prompt to spawning the process that holds it can
+Everything from finalizing a prompt to putting it in front of a worker can
 still refuse — the prompt build, the conversation selection, an authorized
-pause — and a journal that recorded only the carry would say the words had been
-given to an attempt that never ran. `continued` is therefore the undertaking and
-`delivered` the launch, and `released` is the undo an attempt owes the operator
+pause, and then the transport's own handshake, where a provider can decline to
+restore the conversation a live process has just asked for — and a journal that
+recorded only the carry would say the words had been given to an attempt that
+never spoke them. `continued` is therefore the undertaking and `delivered` the
+submission: the prompt on the argv of a one-shot turn, the answered
+`turn/start`, the accepted `session/prompt`, the stream-JSON message that was
+written — never the spawn, which proves only that a process exists. `released`
+is the undo an attempt owes the operator
 when it gives up in between: it clears the carry, so the request is accepted and
 uncarried again and the next attempt that names it may take it. The asymmetry is
 what makes releasing safe to call from any unwind path — a correction that
@@ -3393,12 +3398,14 @@ acknowledgment whose marker disagrees with the delivery it claims is rejected on
 replay like any other mismatch. An operator's ordering survives the crash the
 same way it survives an interruption, by journal sequence.
 
-The one outcome recovery refuses to decide is a *launched* delivery without a
-receipt. The journal records that a worker was started holding the words;
-whether a model read them is the question the acknowledgment protocol exists
-because nothing cheaper answers. That is the whole reason the launch is written
-down apart from the carry: without it this uncertainty would swallow every crash
-in the window before the spawn too, and those corrections are recoverable.
+The one outcome recovery refuses to decide is a *submitted* delivery without a
+receipt. The journal records that the words went out to a worker; whether a
+model read them is the question the acknowledgment protocol exists because
+nothing cheaper answers. That is the whole reason the submission is written down
+apart from the carry: without it this uncertainty would swallow every crash in
+the window before the prompt was handed over too — including the worker a
+provider refuses the moment it asks to restore its conversation, which is
+spawned and then told nothing — and those corrections are recoverable.
 Re-handing the correction would tell a worker its first correction is new;
 dropping it would discard one that may never have been read. So it is reported
 as `uncertain` and nothing acts on it automatically — and there is no flag that

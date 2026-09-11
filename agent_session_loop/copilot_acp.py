@@ -152,6 +152,12 @@ SubmissionGate = Callable[[], None]
 #: turn: a conversation nothing recorded is one no later run could continue.
 ConversationSink = Callable[[str], None]
 
+#: What a session calls once ``session/prompt`` has actually been written to the
+#: agent, which is the first moment the prompt is demonstrably the worker's
+#: rather than this process's. Unlike the two above it cannot refuse anything --
+#: the request is already on the wire -- so a failure is swallowed.
+SubmissionSink = Callable[[], None]
+
 
 class AcpError(Exception):
     """The ACP conversation cannot continue.
@@ -330,6 +336,7 @@ class CopilotAcpSession:
         expected_effort: str | None = None,
         before_submit: SubmissionGate | None = None,
         on_conversation: ConversationSink | None = None,
+        on_submitted: SubmissionSink | None = None,
         resume_conversation_id: str | None = None,
         request_timeout: float = REQUEST_TIMEOUT_SECONDS,
         shutdown_grace: float = SHUTDOWN_GRACE_SECONDS,
@@ -342,6 +349,7 @@ class CopilotAcpSession:
         self._expected_effort = expected_effort
         self._before_submit = before_submit
         self._on_conversation = on_conversation
+        self._on_submitted = on_submitted
         self._resume_conversation_id = resume_conversation_id
         self._request_timeout = request_timeout
         self._shutdown_grace = shutdown_grace
@@ -1007,6 +1015,13 @@ class CopilotAcpSession:
             "session/prompt",
             self.prompt_params(session_id),
             timeout=_NO_DEADLINE,
+            # Reported when the request is written, not when it answers: this
+            # one answers only when the whole turn is over, and a caller still
+            # holding the operator's words needs to know they went out the
+            # moment they did. Everything above this call can still refuse --
+            # a ``session/load`` the agent declines most of all -- so nothing
+            # above it may be read as delivery.
+            on_sent=self._note_submitted,
         )
         self._adopt_stop_reason(response)
 
@@ -1040,6 +1055,19 @@ class CopilotAcpSession:
             gate()
         except Exception as error:  # noqa: BLE001 - any failure is a refusal
             raise _SubmissionRefused(str(error) or type(error).__name__) from error
+
+    def _note_submitted(self) -> None:
+        """Tell the caller the prompt is the worker's now.
+
+        Never raises: the request is already on the wire, so there is nothing
+        left to abandon, and an exception here would be caught by :meth:`_drive`
+        as a protocol failure the agent never had.
+        """
+        sink = self._on_submitted
+        if sink is None:
+            return
+        with contextlib.suppress(Exception):
+            sink()
 
     def _abandon_before_submission(
         self,
@@ -1117,7 +1145,15 @@ class CopilotAcpSession:
         params: Mapping[str, Any] | None,
         *,
         timeout: float | None = None,
+        on_sent: Callable[[], None] | None = None,
     ) -> Any:
+        """Send one request and wait for its answer.
+
+        ``on_sent`` runs between the write and the wait, for the one caller that
+        cannot wait for the answer to learn what happened: ``session/prompt``
+        returns only when the turn is over, so "the prompt went out" and "the
+        turn finished" would otherwise be the same event.
+        """
         pending = _Pending()
         with self._state_lock:
             if self._closed_reason is not None:
@@ -1138,6 +1174,8 @@ class CopilotAcpSession:
             with self._state_lock:
                 self._pending.pop(request_id, None)
             raise
+        if on_sent is not None:
+            on_sent()
         deadline = time.monotonic() + (
             self._request_timeout if timeout is None else timeout
         )

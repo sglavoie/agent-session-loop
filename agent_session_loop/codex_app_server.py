@@ -132,6 +132,12 @@ ConversationSink = Callable[[str], None]
 #: to be told not to. Raising from it abandons the turn.
 SubmissionGate = Callable[[], None]
 
+#: What a session calls once the app-server has accepted ``turn/start``, which
+#: is the first moment the prompt is demonstrably the worker's rather than this
+#: process's. Unlike the two above it cannot refuse anything -- the turn is
+#: already running -- so a failure is swallowed by the caller's own seam.
+SubmissionSink = Callable[[], None]
+
 
 class AppServerError(Exception):
     """The app-server conversation cannot continue.
@@ -275,6 +281,7 @@ class CodexAppServerSession:
         resume_conversation_id: str | None = None,
         on_conversation: ConversationSink | None = None,
         before_submit: SubmissionGate | None = None,
+        on_submitted: SubmissionSink | None = None,
         request_timeout: float = REQUEST_TIMEOUT_SECONDS,
         steer_timeout: float = STEER_TIMEOUT_SECONDS,
         shutdown_grace: float = SHUTDOWN_GRACE_SECONDS,
@@ -286,6 +293,7 @@ class CodexAppServerSession:
         self._resume_conversation_id = resume_conversation_id
         self._on_conversation = on_conversation
         self._before_submit = before_submit
+        self._on_submitted = on_submitted
         self._request_timeout = request_timeout
         self._steer_timeout = steer_timeout
         self._shutdown_grace = shutdown_grace
@@ -656,6 +664,12 @@ class CodexAppServerSession:
         turn_params["input"] = [{"type": "text", "text": self._prompt}]
         turn = self._request("turn/start", turn_params)
         self._adopt_turn(turn)
+        # Reported only once the server has answered with a turn. Everything
+        # above this line is a conversation that can still be declined -- a
+        # refused ``thread/resume`` most of all -- and a caller told the prompt
+        # was submitted there would have consumed words this process is still
+        # holding.
+        self._note_submitted()
 
     def _open_thread(self) -> None:
         """Start a fresh thread, or restore exactly the one that was asked for.
@@ -756,6 +770,20 @@ class CodexAppServerSession:
             gate()
         except Exception as error:  # noqa: BLE001 - any failure is a refusal
             raise _SubmissionRefused(str(error) or type(error).__name__) from error
+
+    def _note_submitted(self) -> None:
+        """Tell the caller the prompt is the worker's now.
+
+        Never raises: this runs on the driver thread, after the turn has been
+        accepted, where there is nothing left to abandon and an exception would
+        only be swallowed by :meth:`_drive` as a protocol error the app-server
+        never made.
+        """
+        sink = self._on_submitted
+        if sink is None:
+            return
+        with contextlib.suppress(Exception):
+            sink()
 
     def _abandon_before_submission(
         self,
