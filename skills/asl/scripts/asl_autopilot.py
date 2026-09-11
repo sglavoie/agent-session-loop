@@ -74,6 +74,9 @@ from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     plans as _plans,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    redirect_cli as _redirect_cli,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     retry_hints as _retry_hints,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
@@ -315,6 +318,30 @@ TRANSPORT_RETRY_DELAYS_SECONDS = _pause_policy.TRANSPORT_RETRY_DELAYS_SECONDS
 USER_ACTION_REPLY = _pause_policy.USER_ACTION_REPLY
 classify_pause = _pause_policy.classify_pause
 
+# Pauses whose answer is a decision this helper is structurally unable to make.
+# `conversation-recovery-required` asks whether to discard an agent's saved
+# reasoning; `redirect-successor-blocked` asks about a worker process that may
+# still be alive beside the plan. Neither is in
+# `pause_policy.RECOVERABLE_PAUSE_REASONS`, so the supervision loop already
+# stops on both through the ordinary `requires_user` path and this set adds no
+# control flow whatsoever. What it adds is the `recovery` block below: which of
+# the two decisions the operator is being handed, which command reads the
+# evidence for it, and — for the conversation case — the exact one-use relaunch
+# that authorizes a fresh start. Without it a supervising agent has only a
+# pause message to infer all three from, and the inference it would most
+# naturally make is "relaunch and see", which is the one move that must never
+# be made here.
+RECOVERY_DECISION_PAUSE_REASONS: tuple[str, ...] = (
+    _events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
+    _events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
+)
+
+# Which decision a recovery pause hands over. `fresh-conversation` is answered
+# by an operator authorizing one fresh start; `predecessor-not-stopped` is
+# answered by the machine, not by anyone's words.
+RECOVERY_DECISION_FRESH_CONVERSATION = "fresh-conversation"
+RECOVERY_DECISION_PREDECESSOR_ALIVE = "predecessor-not-stopped"
+
 # Default automatic repair/rereview cycle cap, mirroring
 # ``agent_session_loop.run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES``. The runner owns
 # the repair cycles (Session 18): after a findings review it materializes
@@ -393,6 +420,14 @@ def _build_run_parser() -> _RunArgumentParser:
 # it would re-authorize a fresh start on each retry — turning one deliberate
 # decision into a standing one. Its counterpart at the other replay surface is
 # ``run_entry._RESUME_OVERLAY_EXCLUDED_DESTS``.
+#
+# This is the second of two layers, and it is deliberately not the only one:
+# ``parse_command`` refuses a supervised command carrying
+# ``--fresh-conversation`` outright, so no namespace reaching here should have
+# it set. Dropping it here would otherwise be a *silent* discard of an explicit
+# operator authorization, which is the failure mode the refusal exists to
+# prevent; keeping the dest listed means a future caller that builds a
+# namespace without going through ``parse_command`` still cannot replay it.
 _CHILD_RUN_ARG_SKIP_DESTS = frozenset(
     {
         "dry_run",
@@ -560,6 +595,22 @@ def parse_command(command: str) -> dict:
         return _parse_error(
             "unsupported-mode",
             "--reply/--reply-stdin are owned by the helper; do not pass them",
+        )
+    if getattr(namespace, "fresh_conversation", False):
+        # One-use authorizations and a process that relaunches the same session
+        # on every recoverable pause do not mix. Refusing here rather than
+        # quietly dropping the flag is the point: a helper that accepted the
+        # command and then stripped the authorization would either replay a
+        # fresh start on each retry, or discard an operator's explicit decision
+        # without saying so. The decision stays with the person who made it,
+        # exactly as `asl control recover-conversation` prints it rather than
+        # performing it.
+        return _parse_error(
+            "unsupported-mode",
+            "--fresh-conversation is a one-use authorization to discard a "
+            "saved conversation and cannot be supervised; run it yourself "
+            "(`asl run PLAN_DIR --resume --fresh-conversation`), then "
+            "supervise the plan",
         )
 
     # Mirror ASL's own numeric/harness validation so the helper fails fast with
@@ -2914,6 +2965,7 @@ def _run_result(
     hang: dict | None = None,
     quota_wait: dict | None = None,
     stop_kind: str | None = None,
+    recovery: dict | None = None,
 ) -> dict:
     """Build a stable ``stage: run`` supervision result payload."""
     result: dict = {"ok": ok, "stage": RUN_STAGE, "reason": reason, "chunks": chunks}
@@ -2935,6 +2987,8 @@ def _run_result(
         result["retries"] = retries
     if quota_wait is not None:
         result["quota_wait"] = quota_wait
+    if recovery is not None:
+        result["recovery"] = recovery
     if outbox is not None:
         result["outbox"] = outbox
     # Runner JSON is the freshest projection after a chunk; status is the
@@ -2963,6 +3017,15 @@ def _transport_retry_delay(attempt: int) -> float:
     return schedule[min(attempt, len(schedule)) - 1]
 
 
+def _pause_details(run_payload: dict) -> dict:
+    """The pause's own details block, under either key the runner writes it to."""
+    for key in ("pause_details", "details"):
+        details = run_payload.get(key)
+        if isinstance(details, dict):
+            return details
+    return {}
+
+
 def _pause_classification(run_payload: dict) -> dict | None:
     """Extract the runner's ``failure_classification`` from a paused payload.
 
@@ -2973,13 +3036,91 @@ def _pause_classification(run_payload: dict) -> dict | None:
     record the classification and any reset (``retry_at``) information, else
     ``None``.
     """
-    for key in ("pause_details", "details"):
-        details = run_payload.get(key)
-        if isinstance(details, dict):
-            classification = details.get("failure_classification")
-            if isinstance(classification, dict):
-                return classification
-    return None
+    classification = _pause_details(run_payload).get("failure_classification")
+    return classification if isinstance(classification, dict) else None
+
+
+def _recovery_payload(
+    parsed: dict, run_payload: dict, pause_reason: str
+) -> dict | None:
+    """Name the decision a recovery pause hands to the operator, or ``None``.
+
+    Built only for :data:`RECOVERY_DECISION_PAUSE_REASONS`, and derived
+    entirely from the pause the runner already wrote plus the supervised
+    command's own plan/state paths — it reads no file, opens no journal, and
+    settles nothing, so attaching it cannot change what it describes.
+
+    ``auto_resume`` is always ``False`` and is stated rather than implied. The
+    supervision loop's behaviour here is a consequence of the pause being
+    non-recoverable, which is a fact about ``pause_policy``; a supervising
+    agent reading this result should not have to re-derive that to know it must
+    not relaunch. ``authorization_command`` is rendered by
+    :func:`agent_session_loop.redirect_cli.fresh_conversation_command`, the
+    single renderer of that relaunch, so the helper and
+    ``asl control recover-conversation`` cannot print two different commands.
+    """
+    if pause_reason not in RECOVERY_DECISION_PAUSE_REASONS:
+        return None
+    plan_dir = parsed.get("plan_dir")
+    if not isinstance(plan_dir, str) or not plan_dir:
+        return None
+    state_dir = parsed.get("state_dir")
+    state_dir = state_dir if isinstance(state_dir, str) and state_dir else None
+    details = _pause_details(run_payload)
+    payload: dict = {
+        "reason": pause_reason,
+        "auto_resume": False,
+        "authorized_by": "operator",
+    }
+    if pause_reason == _events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED:
+        recovery = details.get("conversation_recovery")
+        recovery = recovery if isinstance(recovery, dict) else {}
+        payload["decision"] = RECOVERY_DECISION_FRESH_CONVERSATION
+        payload["inspect_command"] = shlex.join(
+            [
+                "asl",
+                "control",
+                "recover-conversation",
+                plan_dir,
+                *_state_dir_args(state_dir),
+                "--json",
+            ]
+        )
+        payload["authorization_command"] = _redirect_cli.fresh_conversation_command(
+            plan_dir, state_dir
+        )
+        payload["selection_state"] = recovery.get("selection_state")
+        mismatched = recovery.get("mismatched_fields")
+        payload["mismatched_fields"] = (
+            [field for field in mismatched if isinstance(field, str)]
+            if isinstance(mismatched, list)
+            else []
+        )
+        return payload
+    blocked = details.get("redirect_continuation")
+    blocked = blocked if isinstance(blocked, dict) else {}
+    payload["decision"] = RECOVERY_DECISION_PREDECESSOR_ALIVE
+    payload["inspect_command"] = shlex.join(
+        [
+            "asl",
+            "control",
+            "redirect-status",
+            plan_dir,
+            *_state_dir_args(state_dir),
+            "--json",
+        ]
+    )
+    # No authorization exists for this one: a predecessor that cannot be shown
+    # stopped is a fact about the machine, and no text an operator sends makes a
+    # second worker safe to start beside it.
+    payload["authorization_command"] = None
+    payload["blocked_reason"] = blocked.get("reason")
+    return payload
+
+
+def _state_dir_args(state_dir: str | None) -> list[str]:
+    """``--state-dir`` for a command only when the supervised run carries one."""
+    return [] if state_dir is None else ["--state-dir", state_dir]
 
 
 def _effective_pause_policy(run_payload: dict, pause_reason: str) -> dict:
@@ -3010,15 +3151,11 @@ def _verification_repair_exhausted(run_payload: dict) -> bool:
     honored. The supervisor stops relaunching on either verdict, while a
     changed failure (flags clear) stays eligible for another bounded retry.
     """
-    for key in ("pause_details", "details"):
-        details = run_payload.get(key)
-        if not isinstance(details, dict):
-            continue
-        if details.get("verification_repair_exhausted"):
-            return True
-        if details.get("review_verdict_repair_exhausted"):
-            return True
-    return False
+    details = _pause_details(run_payload)
+    return bool(
+        details.get("verification_repair_exhausted")
+        or details.get("review_verdict_repair_exhausted")
+    )
 
 
 # Shapes a provider's reset hint actually takes once
@@ -3365,6 +3502,15 @@ def supervise_run(
     ``retries`` records the attempted delay (``delayed_seconds``), the runner's
     failure ``classification``, and whether the recoverable budget was
     ``exhausted``.
+
+    A ``user_required`` stop on one of the two recovery pauses
+    (:data:`RECOVERY_DECISION_PAUSE_REASONS`) additionally carries a
+    ``recovery`` block naming the decision being handed over, the command that
+    reads its evidence, the one-use relaunch that authorizes it (or ``None``
+    when no authorization exists), and an explicit ``auto_resume: false``. See
+    :func:`_recovery_payload`: the block is derived, never acted on — this
+    helper does not discard a saved conversation and does not start a worker
+    beside a predecessor it cannot show stopped.
 
     When ``reply_text`` is supplied the first self-started chunk resumes the
     paused run via ``asl run --reply-stdin`` (reply streamed on stdin); later
@@ -3834,6 +3980,7 @@ def supervise_run(
                         "classification": classification,
                     },
                     quota_wait=quota_wait,
+                    recovery=_recovery_payload(parsed, run_payload, pause_reason),
                 )
 
             used = retry_counts.get(retry_key, 0)

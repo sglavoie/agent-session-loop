@@ -61,7 +61,11 @@ flags — including `--max-review-fix-cycles N` (deprecated alias
 `--max-review-fix-cycles-ceiling N`, which bound the runner's own
 repair/rereview loop. Shell operators, pipes, redirects, `--dry-run`, and
 user-supplied `--reply` / `--reply-stdin` are not accepted — the helper owns
-resume behavior. `--no-mailbox` is accepted and disables watcher construction,
+resume behavior. `--fresh-conversation` is refused for a different reason: it
+is a one-use authorization to discard an agent's saved conversation, so it stays
+with the person who gave it. Run
+`asl run <plan-dir> --resume --fresh-conversation` yourself, then supervise the
+plan. `--no-mailbox` is accepted and disables watcher construction,
 lease writes, live guidance, notice observation, and mailbox question closure
 for both launch and attach behavior.
 
@@ -481,6 +485,56 @@ Report the reason verbatim and what it means, and do not claim the run stopped:
 In every case the request remains durably queued — the timeout is about the
 receipt, not the append — so re-sending is rarely the answer. Report the state
 and hand the decision to the user.
+
+#### Redirect the worker mid-turn (explicit authorization only)
+
+```text
+asl control redirect <plan-dir> --text '<correction>' [--session ID] [--turn N] [--operation-id ID] [--ttl SECONDS] [--timeout SECONDS] [--state-dir DIR] --json
+asl control redirect-status <plan-dir> [--redirect-id ID] [--wait-acknowledged] [--timeout SECONDS] [--state-dir DIR] --json
+```
+
+**Use this only when the user has explicitly authorized this correction.**
+Never self-authorize a redirect from a supervision signal, a failing check, or
+your own suspicion that the worker is heading somewhere wrong — relay the
+suspicion and let the user decide. Guidance is the advisory lever and a guard
+is the enforcing one; a redirect is neither. It **interrupts the turn in
+flight**: an accepted correction stops the current worker and the runner
+continues the same session on the predecessor's conversation, carrying the
+correction into the successor's prompt. That is a per-correction authorization,
+not standing authority — it is deliberately not one of the fleet overseer's
+operations (`reply`, `guidance`, `verify`, `commit`, `resume`).
+
+Submission is **at-most-once**. A `--timeout` that expires reports the
+submission *uncertain* rather than retracting it: the correction may already be
+accepted. Do not resubmit blindly. Read `asl control redirect-status` — the only
+surface that settles it — and, if you do resubmit, reuse the same
+`--operation-id` with the same text, which the journal treats as the same
+request rather than a second one. Watching is observational, so a
+`--wait-acknowledged` timeout retracts nothing.
+
+#### Two pauses that are decisions, not failures
+
+Neither is retryable, so neither spends any retry budget, and neither is ever
+auto-resumed. Both surface as `reason: user_required` with a `recovery` block
+naming `decision`, `auto_resume: false`, an `inspect_command`, and an
+`authorization_command`. Report that block verbatim; do not act on it.
+
+- **`conversation-recovery-required`** (`decision: fresh-conversation`). The
+  recorded conversation cannot be resumed — incompatible, unconfirmed, retired,
+  or corrupt. Run the `inspect_command`
+  (`asl control recover-conversation <plan-dir> --json`) to read why. The
+  `authorization_command` is the exact one-use relaunch that discards the saved
+  conversation. **Print it; do not run it.** Discarding an agent's saved
+  reasoning is the user's decision, and the helper refuses a supervised command
+  carrying `--fresh-conversation` precisely so that decision cannot be replayed
+  on every retry.
+- **`redirect-successor-blocked`** (`decision: predecessor-not-stopped`). A
+  redirected turn's predecessor could not be shown stopped, so a successor
+  would run beside a worker that may still be alive. The `inspect_command` is
+  `asl control redirect-status <plan-dir> --json`, and `authorization_command`
+  is `null` — there is no authorization for this one. No text anyone sends makes
+  a second worker safe to start beside a live one; the machine has to show the
+  predecessor gone. Report the `blocked_reason` and hand it to the user.
 
 ### Step 2: Handle notices, live questions, and pauses
 

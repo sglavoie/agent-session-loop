@@ -30,13 +30,17 @@ SUPERVISION_ID = "SUPERVISION_ID"
 
 QUESTION_ID = "QUESTION_ID"
 
+SESSION_ID = "SESSION_ID"
+
 PLACEHOLDERS: tuple[str, ...] = (
     PLAN_DIR,
     SUPERVISION_ID,
     QUESTION_ID,
+    SESSION_ID,
     "NEW_SUPERVISION_ID",
     "REPLY_TEXT",
     "GUIDANCE_TEXT",
+    "REDIRECT_TEXT",
     "RESULT_PATH",
 )
 
@@ -62,7 +66,19 @@ LEAF_HELP: tuple[str, ...] = (
     "asl inbox resolve --help",
     "asl inbox guidance --help",
     "asl control abort --help",
+    "asl control redirect --help",
+    "asl control redirect-status --help",
+    "asl control recover-conversation --help",
     "asl bridge serve --help",
+)
+
+#: The one operation in this guide a supervising agent may not decide to use.
+#: Named here rather than only in prose so the JSON reader sees the same gate
+#: the text reader does.
+REDIRECT_AUTHORIZATION = (
+    "urgent intervention: use only when the user has explicitly authorized this "
+    "correction. Never self-authorize from a supervision signal, a failing "
+    "check, or a suspicion that the worker is wrong."
 )
 
 
@@ -184,6 +200,48 @@ def _operations_payload() -> list[dict[str, str]]:
                 f"asl control guard add {PLAN_DIR} --deny-command 'CMD ARG ...' "
                 "--protect-path ALIAS:PATH --reason TEXT --wait --json"
             ),
+        },
+        {
+            "name": "redirect",
+            "description": (
+                f"{REDIRECT_AUTHORIZATION} Unlike guidance, this interrupts the "
+                "turn in flight: an accepted correction stops the worker and "
+                "the runner continues the session on the predecessor's "
+                "conversation. Submission is at-most-once -- a timeout reports "
+                "the submission uncertain rather than retracting it, and "
+                "resubmitting the same --operation-id with the same text is "
+                "the same request, never a second one."
+            ),
+            "command": (
+                f"asl control redirect {PLAN_DIR} --text REDIRECT_TEXT "
+                f"--session {SESSION_ID} --json"
+            ),
+        },
+        {
+            "name": "redirect-status",
+            "description": (
+                "Read what the redirect journal actually records: whether a "
+                "correction was delivered, and whether the worker receipted "
+                "it. The only way to settle an uncertain submission; watching "
+                "is observational, so a timeout retracts nothing."
+            ),
+            "command": (
+                f"asl control redirect-status {PLAN_DIR} --wait-acknowledged --json"
+            ),
+        },
+        {
+            "name": "recover-conversation",
+            "description": (
+                "Read why a run paused conversation-recovery-required and "
+                "print the one-use relaunch that authorizes a fresh "
+                "conversation. A read only: discarding an agent's saved "
+                "reasoning is the user's decision, so run the printed "
+                "asl run ... --fresh-conversation yourself only when the user "
+                "says to. Supervision never resumes this pause on its own, and "
+                "the autopilot helper refuses a command carrying "
+                "--fresh-conversation outright."
+            ),
+            "command": f"asl control recover-conversation {PLAN_DIR} --json",
         },
         {
             "name": "status",

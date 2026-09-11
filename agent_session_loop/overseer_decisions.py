@@ -342,7 +342,14 @@ Operation = Literal["reply", "guidance", "verify", "commit", "resume"]
 #: The operational scope an overseer can be authorized for: answering a
 #: question, sending guidance, running verification, committing a checkpoint,
 #: and resuming a run. Repairing the application a run is working on is not
-#: here, and no decision can put it here.
+#: here, and no decision can put it here. Neither is urgent redirect
+#: (``asl control redirect``), for the same reason read the other way round:
+#: every operation above either answers a question the run asked or acts
+#: between turns, while a redirect interrupts the turn in flight and replaces
+#: what the worker was told. That is an intervention a user authorizes for one
+#: correction, not a standing authority a fleet is granted -- so it is
+#: documented for an explicitly authorized supervisor in ``supervisor_guide``
+#: and deliberately absent from this tuple.
 OPERATIONS: tuple[Operation, ...] = (
     "reply",
     "guidance",

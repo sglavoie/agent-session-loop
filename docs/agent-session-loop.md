@@ -6899,7 +6899,9 @@ model and therefore carry equivalent commands; the JSON payload is `ok`,
 exact `asl run` command, the detached
 `<skill-dir>/scripts/asl-autopilot.py --command ... --supervision-id ... --json --detach`
 launch and its `--reply-stdin` resume, the `asl outbox supervise`,
-`asl inbox reply`, `asl inbox resolve`, `asl inbox guidance`, and `asl status`
+`asl inbox reply`, `asl inbox resolve`, `asl inbox guidance`,
+`asl control guard add`, `asl control redirect`, `asl control redirect-status`,
+`asl control recover-conversation`, and `asl status`
 operations, and reading the helper's verdict from the handshake's
 `result_path`. Skill prefixes come from the harness adapters themselves rather
 than a second table. `--harness auto` uses the existing invoking-harness
@@ -6953,9 +6955,9 @@ The helper is deterministic supervision only; all inferential reasoning stays
 with the harness agent driving the skill. It:
 
 - Parses the command itself and refuses shell operators, pipes, redirects,
-  `--dry-run`, and user-supplied `--reply` / `--reply-stdin`. It never runs the
-  command through a shell — argv is built directly, tilde paths are expanded,
-  and `--json` is guaranteed.
+  `--dry-run`, user-supplied `--reply` / `--reply-stdin`, and
+  `--fresh-conversation`. It never runs the command through a shell — argv is
+  built directly, tilde paths are expanded, and `--json` is guaranteed.
 - Leaves ASL authoritative for implementation, verification, session status,
   progress journals, and review session execution. The skill does not patch
   repository code directly.
@@ -6976,6 +6978,71 @@ with the harness agent driving the skill. It:
   renewal; it does not create a mailbox watcher thread. Full question bodies
   are retained only in the structured result's `outbox`, while stderr receives
   a bounded, single-line, JSON-escaped `QUESTION id=... preview=...` record.
+
+### Supervisor policy: retries, recovery, and urgent intervention
+
+Supervision retries what a machine can retry and hands back what it cannot.
+The split is `pause_policy`'s, not the helper's: `RECOVERABLE_PAUSE_REASONS`
+(`verify-failed`, `transport-failed`, `timeout`, `no-status-change`) are
+relaunched up to `DEFAULT_MAX_RETRIES` (2) times per `(session, reason)`, and
+only `transport-failed` backs off, on the fixed
+`TRANSPORT_RETRY_DELAYS_SECONDS` schedule of 5s then 30s. A redirect or
+conversation-recovery pause is not in that set, so it consumes no retry budget
+at all — a plan that hits one twice is in exactly the same position the second
+time as the first.
+
+Two pauses are recovery decisions rather than failures, and both stop with
+`user_required`:
+
+- **`conversation-recovery-required`.** The recorded conversation cannot be
+  resumed: `conversation_resume.PROCEEDING_SELECTION_STATES` is written as the
+  two states that may proceed (`resumable`, `absent`), so every other selection
+  state — including a state added later — lands in
+  `RECOVERY_REQUIRED_SELECTION_STATES` by default rather than falling through
+  to a fresh conversation nobody authorized.
+- **`redirect-successor-blocked`.** A redirected turn's predecessor could not
+  be shown stopped, so a successor would run beside a worker that may still be
+  alive.
+
+A `user_required` stop on either carries a `recovery` block in the structured
+result naming `decision` (`fresh-conversation` or `predecessor-not-stopped`),
+an explicit `auto_resume: false`, the `inspect_command` that reads the
+evidence (`asl control recover-conversation` or `asl control redirect-status`),
+and an `authorization_command`. The block is derived from the pause the runner
+already wrote plus the supervised command's own plan/state paths: it reads no
+file, opens no journal, and settles nothing, so producing it cannot change what
+it describes.
+
+`--fresh-conversation` is a one-use, never-persisted operator authorization,
+and it cannot be supervised. Two independent layers enforce that: the helper
+refuses a supervised command carrying it with `unsupported-mode` at parse time,
+and `_CHILD_RUN_ARG_SKIP_DESTS` drops the flag even from a namespace built
+without going through `parse_command`. The refusal is the point — a helper that
+accepted the command and then stripped the flag would either replay a fresh
+start on every retry or discard an explicit decision without saying so. So for
+`fresh-conversation` the `authorization_command` is the exact relaunch to run,
+rendered by `redirect_cli.fresh_conversation_command` (the single renderer, so
+the helper and `asl control recover-conversation` cannot disagree). For
+`predecessor-not-stopped` it is `null` and the absence is stated rather than
+left as a missing key: no text an operator sends makes a second worker safe to
+start beside a live one.
+
+Uncertain evidence stays uncertain everywhere. A correction recorded as
+delivered but never receipted comes back as `redirect_recovery.STATUS_UNCERTAIN`
+and is excluded from `recoverable_operation_ids`, so no later attempt carries
+it automatically; re-submitting is the operator's move, with its own words
+chosen knowing what happened. A stop stays stopped for the same reason:
+`stop-after-current` and `abort` end supervision cleanly with `stop_kind`
+rather than being relaunched into the work the operator just stopped.
+
+Urgent intervention (`asl control redirect`) is documented in
+`asl supervisor-guide` for a supervisor the user has **explicitly authorized**
+for that correction. Unlike guidance it interrupts the turn in flight, so it is
+never self-authorized from a supervision signal, a failing check, or a
+suspicion that the worker is wrong. It is deliberately not a fleet authority:
+`overseer_decisions.OPERATIONS` stays `reply`, `guidance`, `verify`, `commit`,
+`resume`, because every one of those either answers a question the run asked or
+acts between turns, while a redirect replaces what a worker was told mid-turn.
 
 ### Attach behavior
 
