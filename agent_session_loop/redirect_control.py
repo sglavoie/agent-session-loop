@@ -52,9 +52,14 @@ reachable by a descendant walk — and identity-checked cleanup and confirmation
 both run after the kill, so neither is on the deadline path.
 
 The gate is :meth:`UrgentController.require_successor_allowed`, and it refuses
-for an uncollected predecessor as readily as for a live one. Two workers on one
-conversation, one of them a process nobody is waiting on any more, is the
-failure this whole subsystem would otherwise introduce.
+for an uncollected predecessor as readily as for a live one, and for a report
+that never arrived as readily as for one that says no. Cleanup and confirmation
+run per pid against a real process table after the kill, so an escalation that
+is merely slow, one that is wedged, and one whose thread died all present the
+same way — as an acceptance with nothing published behind it — and none of them
+is evidence that anything stopped. Two workers on one conversation, one of them
+a process nobody is waiting on any more, is the failure this whole subsystem
+would otherwise introduce.
 """
 
 from __future__ import annotations
@@ -113,6 +118,15 @@ SKIP_ABANDONED = "acceptance-abandoned"
 SKIP_UNDECIDED = "acceptance-undecided"
 SKIP_TURN_ENDED = "turn-already-ended"
 SKIP_DISARMED = "disarmed"
+
+#: Why a successor was refused. The first two are read off a report that exists
+#: and says the predecessor is still around; the last two are the *absence* of a
+#: report, which is a refusal in its own right once an acceptance is durable --
+#: an escalation that has not published cannot have proved anything.
+BLOCK_UNCOLLECTED = "predecessor-uncollected"
+BLOCK_UNCONFIRMED = "termination-unconfirmed"
+BLOCK_UNREPORTED = "termination-unreported"
+BLOCK_FAILED = "termination-failed"
 
 
 class CancellableTurn(Protocol):
@@ -241,9 +255,9 @@ class TerminationReport:
         if self.complete:
             return None
         if not self.collected:
-            return "predecessor-uncollected"
+            return BLOCK_UNCOLLECTED
         reason = self.confirmation.get("incomplete_reason")
-        return str(reason) if reason else "termination-unconfirmed"
+        return str(reason) if reason else BLOCK_UNCONFIRMED
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -354,6 +368,15 @@ class UrgentController:
         self._deadline: float = 0.0
         self._skipped: str | None = None
         self._report: TerminationReport | None = None
+        # Set by ``confirm`` and never cleared: once an acceptance is in the
+        # journal this turn owes a successor proof that its worker stopped, and
+        # no later transition -- a rearming, a release, a failed escalation --
+        # takes that debt back. The successor gate reads it rather than the
+        # phase because the phase is about what the watchdog is doing now.
+        self._acceptance_durable = False
+        # What the escalation raised, if it raised. Separates "the report is
+        # not here yet" from "the run that would have written it is gone".
+        self._failure: str | None = None
 
         self._decided = threading.Event()
         # ``_wake`` ends the watchdog's wait early; ``_stand_down`` is the
@@ -411,6 +434,8 @@ class UrgentController:
                 "window_seconds": self._window,
                 "deadline": round(self._deadline, 3),
                 "skipped": self._skipped,
+                "acceptance_durable": self._acceptance_durable,
+                "failure": self._failure,
             }
         payload["termination"] = report.to_payload() if report is not None else None
         return payload
@@ -455,6 +480,7 @@ class UrgentController:
             deadline = self._deadline
             if rearming:
                 self._skipped = None
+                self._failure = None
                 # Bumped and cleared under one hold of the lock, which is what
                 # stops the stood-down watchdog publishing over this arming:
                 # it re-reads the epoch under the same lock before it sets
@@ -490,6 +516,7 @@ class UrgentController:
             if self._phase != PHASE_ARMED:
                 return
             self._phase = PHASE_CONFIRMED
+            self._acceptance_durable = True
             if operation_id is not None:
                 self._operation_id = operation_id
             reason = self._reason
@@ -639,16 +666,38 @@ class UrgentController:
     def require_successor_allowed(self) -> TerminationReport | None:
         """Raise unless no predecessor of this turn is still around.
 
-        Returns ``None`` when this controller never escalated, which is the
-        ordinary case: a turn that was never redirected leaves no predecessor
-        for the next one to collide with.
+        Returns ``None`` only when nothing was ever accepted against this turn,
+        which is the ordinary case: a turn that was never redirected leaves no
+        predecessor for the next one to collide with, and a controller that was
+        armed and then refused never interrupted anything either.
+
+        Once an acceptance is durable the absence of a report is a refusal, not
+        a pass. The report is published after the escalation has cleaned up
+        escaped descendants and confirmed them gone, and both of those run per
+        pid against a real process table, so "not here yet" is the shape a slow
+        cleanup takes as readily as a wedged one -- while a watchdog that died
+        on the way leaves exactly the same nothing behind. None of the three is
+        a proof that the worker stopped, so none of them may admit a successor:
+        the caller pauses and an operator looks, which is recoverable, where
+        two workers on one conversation is not.
+
+        This does not wait for the report. The turn's own teardown already
+        spent a bounded wait on it; a second one here would push the same
+        unbounded cleanup into the disposition that has to decide.
         """
         report = self.confirm_stopped()
         if report is None:
-            return None
+            with self._lock:
+                promised = self._acceptance_durable
+                failure = self._failure
+            if not promised:
+                return None
+            raise SuccessorBlockedError(
+                BLOCK_FAILED if failure is not None else BLOCK_UNREPORTED, None
+            )
         if not report.permits_continuation:
             raise SuccessorBlockedError(
-                report.blocking_reason or "termination-unconfirmed", report
+                report.blocking_reason or BLOCK_UNCONFIRMED, report
             )
         return report
 
@@ -719,9 +768,21 @@ class UrgentController:
         self._escalate_once(epoch)
 
     def _escalate_once(self, epoch: int) -> None:
-        """Run one escalation to completion, finished either way."""
+        """Run one escalation to completion, finished either way.
+
+        A raising escalation is recorded rather than only re-raised. It runs on
+        a daemon thread nobody joins, so the exception itself reaches only the
+        interpreter's excepthook, while the fact a caller needs -- that the
+        report is absent because the run producing it died -- would otherwise be
+        indistinguishable from a cleanup still in progress.
+        """
         try:
             self._escalate(epoch)
+        except BaseException as exc:
+            with self._lock:
+                if epoch == self._escalation_epoch:
+                    self._failure = f"{type(exc).__name__}: {exc}"
+            raise
         finally:
             self._mark_finished(epoch)
 

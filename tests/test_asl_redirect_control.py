@@ -83,10 +83,17 @@ class _Tools:
         evidence: dict | None = None,
         confirmation: dict | None = None,
         evidence_gate: threading.Event | None = None,
+        cleanup_gate: threading.Event | None = None,
+        cleanup_error: BaseException | None = None,
     ) -> None:
         self.order: list[str] = []
         self.force_stopped: list[int] = []
         self.confirm_calls: list[int] = []
+        # Set the moment the escaped-descendant cleanup begins, which is the
+        # last point before the report exists: a test that holds ``cleanup_gate``
+        # can wait on this and know the escalation is unfinished rather than
+        # merely slow to start.
+        self.cleanup_entered = threading.Event()
         self._lock = threading.Lock()
         self._evidence = (
             evidence
@@ -116,6 +123,8 @@ class _Tools:
             }
         )
         self._evidence_gate = evidence_gate
+        self._cleanup_gate = cleanup_gate
+        self._cleanup_error = cleanup_error
 
     def _note(self, name: str) -> None:
         with self._lock:
@@ -143,6 +152,11 @@ class _Tools:
 
     def terminate_escapees(self, evidence, **kwargs) -> dict:
         self._note("cleanup")
+        self.cleanup_entered.set()
+        if self._cleanup_gate is not None:
+            self._cleanup_gate.wait(PATIENCE)
+        if self._cleanup_error is not None:
+            raise self._cleanup_error
         return {
             "policy": "identity_checked_sigkill",
             "candidate_pids": [],
@@ -826,6 +840,14 @@ class TerminationReportTests(unittest.TestCase):
 
 
 class SuccessorGateTests(unittest.TestCase):
+    """What licenses a successor, and everything that does not.
+
+    The report is the licence. Three of these cases have no report at all, and
+    they are the ones that matter most: the report is published after
+    per-pid cleanup and confirmation, so an escalation that is slow, wedged or
+    dead all look alike from here -- like an acceptance with nothing behind it.
+    """
+
     def setUp(self) -> None:
         self.clock = _Clock()
 
@@ -903,6 +925,100 @@ class SuccessorGateTests(unittest.TestCase):
             controller.require_successor_allowed()
 
         self.assertEqual(process_tree.INCOMPLETE_SWEEP_OPT_OUT, caught.exception.reason)
+
+    def _cleanup_blocked(self, **tool_kwargs):
+        """A confirmed escalation held inside the escaped-descendant cleanup."""
+        tools = _Tools(**tool_kwargs)
+        cancellation = _FakeCancellation()
+        controller = _controller(
+            clock=self.clock, tools=tools, cancellation=cancellation
+        )
+        # LIFO: the join is registered first so it runs after the release.
+        self.addCleanup(controller.join, PATIENCE)
+        self.addCleanup(controller.release)
+        controller.arm(operation_id="op-1")
+        controller.confirm()
+        self.clock.advance(2.0)
+        self.assertTrue(tools.cleanup_entered.wait(PATIENCE), "cleanup never began")
+        return controller, tools, cancellation
+
+    def test_an_unfinished_escalation_refuses_the_successor(self) -> None:
+        """The kill landed, the cleanup is still running, nothing is proven.
+
+        This is the ordinary shape of the failure rather than an exotic one:
+        cleanup and confirmation probe every descendant pid against a real
+        process table, so a handful of them outlasting the teardown's bounded
+        wait needs nothing to have gone wrong at all.
+        """
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        controller, tools, _ = self._cleanup_blocked(cleanup_gate=gate)
+
+        with self.assertRaises(redirect_control.SuccessorBlockedError) as caught:
+            controller.require_successor_allowed()
+
+        self.assertEqual(redirect_control.BLOCK_UNREPORTED, caught.exception.reason)
+        self.assertIsNone(caught.exception.report)
+        self.assertIsNone(caught.exception.to_payload()["report"])
+        self.assertIsNone(controller.termination)
+        self.assertEqual([4242], tools.force_stopped)
+        self.assertTrue(controller.to_payload()["acceptance_durable"])
+
+    def test_the_successor_is_admitted_once_the_held_cleanup_finishes(self) -> None:
+        """The same escalation, allowed to finish: a complete report admits."""
+        gate = threading.Event()
+        controller, _, cancellation = self._cleanup_blocked(cleanup_gate=gate)
+        with self.assertRaises(redirect_control.SuccessorBlockedError):
+            controller.require_successor_allowed()
+
+        gate.set()
+        cancellation.collect()
+
+        self.assertTrue(controller.wait_escalated(PATIENCE))
+        report = controller.require_successor_allowed()
+        self.assertIsNotNone(report)
+        self.assertTrue(report.permits_continuation)
+        self.assertIsNone(report.blocking_reason)
+
+    def test_an_escalation_that_died_refuses_the_successor(self) -> None:
+        """A watchdog that raised leaves the same nothing a wedged one does.
+
+        It runs on a daemon thread nobody joins, so the exception reaches only
+        the interpreter's excepthook -- silenced here because the traceback is
+        the expected outcome, not a failure to read.
+        """
+        with mock.patch.object(threading, "excepthook"):
+            controller, _, _ = self._cleanup_blocked(
+                cleanup_error=RuntimeError("the process table went away")
+            )
+
+            self.assertTrue(controller.wait_escalated(PATIENCE))
+            with self.assertRaises(redirect_control.SuccessorBlockedError) as caught:
+                controller.require_successor_allowed()
+
+        self.assertEqual(redirect_control.BLOCK_FAILED, caught.exception.reason)
+        self.assertIsNone(controller.termination)
+        self.assertIn("the process table went away", controller.to_payload()["failure"])
+
+    def test_a_refused_acceptance_leaves_the_successor_gate_alone(self) -> None:
+        """Nothing durable was promised, so there is no predecessor to prove.
+
+        The complement of the three cases above, and the reason they are keyed
+        on the acceptance rather than on the arming: an arming the store refused
+        never interrupted anything, and a turn that ran to its own end owes its
+        successor no report.
+        """
+        tools = _Tools()
+        controller = _controller(clock=self.clock, tools=tools)
+        self.addCleanup(controller.release)
+        controller.arm(operation_id="op-1")
+        controller.abandon()
+        self.clock.advance(2.0)
+
+        self.assertTrue(controller.wait_escalated(PATIENCE))
+        self.assertIsNone(controller.require_successor_allowed())
+        self.assertEqual([], tools.force_stopped)
+        self.assertIsNone(controller.termination)
 
 
 # A worker that puts a grandchild in its *own* session, which is exactly what a

@@ -532,6 +532,123 @@ class UrgentWatchTests(JournalTestCase):
         self.assertEqual([0.5], controller.waits)
 
 
+class SuccessorGateTests(JournalTestCase):
+    """What the gate lets through once the turn it interrupted is over.
+
+    The wait in ``close`` is bounded and the escalation's cleanup is not: it
+    probes descendants against a real process table, per pid, after the kill. So
+    "the report is not here" is a state an ordinary redirect can reach, and the
+    only safe reading of it is that nothing has been proven about the worker.
+    """
+
+    def _blocked_cleanup_gate(self, cleanup_gate: threading.Event):
+        """A gate over a real controller whose escalation cannot finish."""
+        tools = _Tools(cleanup_gate=cleanup_gate)
+        cancellation = _FakeCancellation()
+        controllers: list[redirect_control.UrgentController] = []
+
+        def build(worker):
+            controller = redirect_control.UrgentController(
+                worker=worker,
+                cancellation=cancellation,
+                tools=tools.bundle(),
+                window_seconds=0.02,
+                collection_wait_seconds=0.0,
+                environ={},
+            )
+            controllers.append(controller)
+            # LIFO: the join is registered first so it runs after the release.
+            self.addCleanup(controller.join, 10.0)
+            self.addCleanup(controller.release)
+            return controller
+
+        turn_redirect = redirect_continuation.TurnRedirect(
+            plan_dir=self.plan_dir,
+            target=target(),
+            state_dir=self.state_dir,
+            build_controller=build,
+            poll_seconds=0.01,
+            bind_wait_seconds=0.5,
+            # Shorter than the cleanup this test holds open, which is the whole
+            # case: the teardown gives up and the turn is over anyway.
+            report_wait_seconds=0.05,
+        )
+        self.addCleanup(turn_redirect.close)
+        return turn_redirect, tools, cancellation
+
+    def test_an_escalation_that_never_reported_launches_no_successor(self) -> None:
+        """The report wait is exhausted mid-cleanup, and nothing is admitted.
+
+        Driven against the real
+        :class:`~agent_session_loop.redirect_control.UrgentController`, because
+        the fact under test is that a *bounded* wait and an *unbounded* cleanup
+        disagree, and a stand-in for either one would decide that by fiat.
+        """
+        cleanup = threading.Event()
+        self.addCleanup(cleanup.set)
+        turn_redirect, tools, cancellation = self._blocked_cleanup_gate(cleanup)
+        turn_redirect.bind_worker(WORKER_PID)
+        accepted = turn_redirect.accept(self.submit())
+        self.assertIsNotNone(accepted)
+        self.assertTrue(tools.cleanup_entered.wait(10.0), "cleanup never began")
+        # The turn's owner has finished with the process; the only thing still
+        # missing is the proof that nothing of it is left running.
+        cancellation.collect()
+
+        turn_redirect.close()
+
+        with self.assertRaises(redirect_control.SuccessorBlockedError) as caught:
+            turn_redirect.require_successor_allowed()
+        self.assertEqual(redirect_control.BLOCK_UNREPORTED, caught.exception.reason)
+        self.assertIsNone(caught.exception.report)
+        self.assertTrue(
+            turn_redirect.to_payload()["report_wait_exhausted"],
+            "the teardown dropped the report wait it lost",
+        )
+
+    def test_a_complete_report_still_admits_the_successor(self) -> None:
+        """The same path with the cleanup allowed to finish: continuation."""
+        cleanup = threading.Event()
+        cleanup.set()
+        turn_redirect, _, cancellation = self._blocked_cleanup_gate(cleanup)
+        turn_redirect.bind_worker(WORKER_PID)
+        self.assertIsNotNone(turn_redirect.accept(self.submit()))
+        cancellation.collect()
+
+        turn_redirect.close()
+
+        report = turn_redirect.require_successor_allowed()
+        assert report is not None
+        self.assertTrue(report.permits_continuation)
+
+    def test_a_controller_that_answers_nothing_cannot_admit_a_redirect(self) -> None:
+        """The gate's own record outranks a controller that lost track of it.
+
+        Belt and braces on purpose: the controller refuses this case itself, and
+        this asserts the gate does not depend on that. The two know different
+        things -- only the latch knows which corrections this turn was
+        interrupted for -- so a disagreement between them is not the gate's to
+        resolve in favour of running a second worker.
+        """
+        turn_redirect, controller = self.gate(controller=FakeController(report=None))
+        turn_redirect.bind_worker(WORKER_PID)
+        self.assertIsNotNone(turn_redirect.accept(self.submit()))
+
+        with self.assertRaises(redirect_control.SuccessorBlockedError) as caught:
+            turn_redirect.require_successor_allowed()
+
+        self.assertEqual(redirect_control.BLOCK_UNREPORTED, caught.exception.reason)
+
+    def test_a_turn_nothing_corrected_is_left_to_its_successor(self) -> None:
+        """The unredirected turn keeps its no-report answer, which is every turn."""
+        turn_redirect, _ = self.gate(controller=FakeController(report=None))
+        turn_redirect.bind_worker(WORKER_PID)
+
+        self.assertIsNone(turn_redirect.require_successor_allowed())
+        turn_redirect.close()
+        self.assertIsNone(turn_redirect.require_successor_allowed())
+
+
 class PendingRedirectTests(unittest.TestCase):
     """What survives the turn, and what deliberately does not."""
 

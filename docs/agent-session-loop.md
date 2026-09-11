@@ -3189,6 +3189,25 @@ withholds the evidence and therefore the proof, which reports as incomplete and
 blocks; it does not stop the run's own worker group from being killed, because
 that group is this run's to stop and was never what the opt-out was about.
 
+A report that never arrived is a refusal too, and for an accepted correction it
+is the same refusal a negative one is. Cleanup and confirmation run per pid
+against a real process table after the kill, while the turn's teardown waits for
+the report on a fixed bound, so "the report is not here" is the shape an
+ordinary slow cleanup takes as readily as a wedged one — and a watchdog thread
+that died on the way leaves exactly the same nothing behind. None of the three
+is evidence that anything stopped, so once an acceptance is durable the gate
+blocks on `termination-unreported`, or on `termination-failed` when the
+escalation is known to have raised. Only a turn nothing was accepted against
+keeps the no-report pass, which is every ordinary turn and also one that armed
+for a correction the store then refused: that turn interrupted nothing and owes
+its successor no proof. The gate does not wait for a late report — the teardown
+already spent its bound, and a second wait would push an unbounded cleanup into
+the disposition that has to decide — but it re-reads the machine on every call,
+so a report that lands afterwards clears the block on the next attempt rather
+than being stale. A teardown whose wait ran out records `report_wait_exhausted`
+on the turn's redirect payload, so a blocked continuation can be told from one
+that was never given time.
+
 What the run does next is the `redirected` turn disposition, dispatched after
 `interrupted` and before `timeout`, `aborted` and every other terminating
 branch. It is selected from the acceptance record rather than from the harness

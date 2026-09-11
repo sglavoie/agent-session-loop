@@ -354,6 +354,7 @@ class TurnRedirect:
         self._accepted: list[AcceptedRedirect] = []
         self._refused: list[dict[str, Any]] = []
         self._controller: TurnController | None = None
+        self._report_wait_exhausted = False
 
         self._bound = threading.Event()
         self._stop = threading.Event()
@@ -386,12 +387,14 @@ class TurnRedirect:
             accepted = [record.to_payload() for record in self._accepted]
             refused = [dict(record) for record in self._refused]
             settled = self._settled
+            exhausted = self._report_wait_exhausted
             controller = self._controller if self._armed else None
         return {
             "target": self._target.to_payload(),
             "accepted": accepted,
             "refused": refused,
             "settled": settled,
+            "report_wait_exhausted": exhausted,
             "control": controller.to_payload() if controller is not None else None,
         }
 
@@ -448,6 +451,13 @@ class TurnRedirect:
         controller is released only after the turn's own owner has finished with
         the worker, which is what lets its report claim the predecessor was
         collected rather than merely killed.
+
+        The report wait can expire, and that outcome is recorded rather than
+        dropped. It does not decide anything here -- the escalation may still
+        publish between this line and the gate, and admitting it then is
+        correct -- but a teardown that waited out its whole bound and got
+        nothing is the fact an operator reading a blocked continuation needs,
+        and it is visible nowhere else once this call returns.
         """
         self.settle()
         self._stop.set()
@@ -461,11 +471,12 @@ class TurnRedirect:
         if controller is None:
             return
         controller.release()
-        if armed:
-            # Only an armed controller has a watchdog that will ever publish
-            # one. Waiting on an unarmed controller would spend the whole
-            # timeout on every ordinary turn.
-            controller.wait_escalated(self._report_wait)
+        # Only an armed controller has a watchdog that will ever publish a
+        # report. Waiting on an unarmed one would spend the whole timeout on
+        # every ordinary turn.
+        if armed and not controller.wait_escalated(self._report_wait):
+            with self._lock:
+                self._report_wait_exhausted = True
 
     # -- acceptance ----------------------------------------------------------
 
@@ -515,13 +526,28 @@ class TurnRedirect:
         otherwise, and the caller turns that into a pause: a successor that
         started beside a live predecessor would have two workers holding the
         same plan lock.
+
+        A turn that *did* accept a correction may not leave here without a
+        report. The controller refuses that case on its own, and this gate
+        refuses it again on its own record of what it accepted, because the two
+        facts have different owners: the controller knows whether an acceptance
+        was made durable, and only this latch knows which corrections this turn
+        was interrupted for. A controller that answered ``None`` to an accepted
+        redirect has contradicted the gate, and the one reading that is not the
+        one entitled to resolve it in favour of continuing.
         """
         with self._lock:
             controller = self._controller
             armed = self._armed
+            redirected = bool(self._accepted)
         if controller is None or not armed:
             return None
-        return controller.require_successor_allowed()
+        report = controller.require_successor_allowed()
+        if report is None and redirected:
+            raise redirect_control.SuccessorBlockedError(
+                redirect_control.BLOCK_UNREPORTED, None
+            )
+        return report
 
     # -- internals -----------------------------------------------------------
 
