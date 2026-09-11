@@ -1,16 +1,22 @@
 """What the run does with a turn that ended in something other than progress.
 
 ``turn_postflight`` names the disposition; this boundary is what that name
-selects. It owns the six terminating branches of the session loop -- the ways a
-turn can end that are not "the session advanced" -- and the one retry path
+selects. It owns the seven terminating branches of the session loop -- the ways
+a turn can end that are not "the session advanced" -- and the retry paths
 hidden among them.
 
-Six branches, in the order the loop tests them, which is the whole of what this
-module owns:
+Seven branches, in the order the loop tests them, which is the whole of what
+this module owns:
 
 * **interrupted** and **timeout** end a turn the plan could not be re-inspected
   after. Both publish the last plan image the run actually holds -- the
   after-image when one was read, the before-image otherwise -- and pause.
+* **redirected** sits between them and is the only branch that continues the
+  *same* session on purpose: an operator's correction was accepted against the
+  live turn, so that attempt cannot earn a completion and the next one carries
+  the correction forward. It runs ahead of ``timeout`` and ``aborted`` because
+  a redirect arms the same abort signal an operator stop does and the result
+  flags cannot tell them apart; only the acceptance can.
 * **aborted** sits beside them and is deliberately *not* a pause: an operator
   asked for the stop, so it is recorded as one.
 * **malformed-plan** is the only branch that may retry. It is the sole owner of
@@ -30,7 +36,8 @@ Durable records this boundary writes: the run's final snapshot on every path
 that ends the run, the rejection event for a refused turn, the spark fallback
 event and re-written result artifact for a retry, the reopen event and
 ``completion_reconciliation`` result block for a withdrawn completion claim,
-and the mailbox wait's own lifecycle. Every pause is recorded by
+the redirect continuation event and its result block, and the mailbox wait's
+own lifecycle. Every pause is recorded by
 ``run_termination`` through ``ctx.pause``, and every write goes through the
 run's persistence seam.
 
@@ -45,7 +52,7 @@ patches from the runner's retired aliases to ``run_coordination`` itself, which
 is where the loop now resolves them; a branch that imported them here instead
 would bind them once and silently ignore the patch.
 
-Each of the three branches the loop can survive returns ``None`` when it ended
+Each of the four branches the loop can survive returns ``None`` when it ended
 the run and a continuation object when it did not, rather than performing the
 loop's ``break``: a boundary cannot break a loop it does not own, and "no
 continuation" is the more honest name for a run that stopped than an action
@@ -53,14 +60,15 @@ enum whose other half would have to carry a snapshot that is never read.
 
 Four invariants survive the move:
 
-* **A session advances to ``complete`` only through a settled turn.** A nonzero
-  exit is not a settlement, so the completion claim in its after-image is
-  withdrawn through the same reverter every guard refusal uses, leaving the
-  work on disk untouched and only the claim taken back.
-* **The loop still names its own branch.** The six ``if terminating_disposition
-  == ...`` tests stay in the loop, each delegating its body here and then taking
-  its own edge. The dispatch is the loop's contract with the disposition; only
-  the work behind it moved.
+* **A session advances to ``complete`` only through a settled turn.** Neither a
+  nonzero exit nor an accepted redirect is a settlement, so the completion
+  claim in either after-image is withdrawn through the same reverter every
+  guard refusal uses, leaving the work on disk untouched and only the claim
+  taken back.
+* **The loop still names its own branch.** The seven ``if
+  terminating_disposition == ...`` tests stay in the loop, each delegating its
+  body here and then taking its own edge. The dispatch is the loop's contract
+  with the disposition; only the work behind it moved.
 * **A retried turn re-enters the loop with the plan image the retry was decided
   against.** Both retry paths hand back the snapshot the next pass must start
   from, because a pass that re-read the plan instead could adopt a change made
@@ -90,6 +98,8 @@ from . import (
     mailbox,
     model_availability,
     plans,
+    redirect_continuation,
+    redirect_control,
     run_control,
     run_coordination,
     run_persistence,
@@ -111,7 +121,7 @@ class RunContext(Protocol):
     """One locked run's own state, as the terminating branches need it.
 
     Declared structurally rather than imported so this module never depends on
-    ``run_loop``, which owns the dataclass. Only the members these six
+    ``run_loop``, which owns the dataclass. Only the members these seven
     branches reach are named: the run payload and event log every record lands
     in, the persistence seam that serializes them, the plan cache a correction
     re-reads the plan from, the run and control identifiers the records are
@@ -172,6 +182,23 @@ class MailboxContinuation:
     snapshot: plans.PlanSnapshot
     pending_reply: run_prompts._PendingReply | None
     pending_resolution: run_prompts._PendingResolution | None
+
+
+@dataclasses.dataclass(frozen=True)
+class RedirectContinuation:
+    """The same session again, carrying the correction that interrupted it.
+
+    ``snapshot`` is ``None`` when the plan could not be inspected after the
+    forced stop. The correction is not lost to that: the loop hands such a turn
+    to the malformed-plan branch, which owns every ``after is None`` turn, and
+    ``pending`` rides along into whichever attempt that repair produces.
+
+    ``pending`` is never ``None`` -- a branch reached only because an acceptance
+    was recorded always has one -- and it is what the next attempt resumes from.
+    """
+
+    snapshot: plans.PlanSnapshot | None
+    pending: redirect_continuation.PendingRedirect
 
 
 @dataclasses.dataclass(frozen=True)
@@ -356,6 +383,242 @@ def settle_malformed_plan(
         details=malformed_details,
     )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Turns an operator corrected while they were still running
+# ---------------------------------------------------------------------------
+
+
+#: Why the redirected attempt's completion claim is taken back. Distinct from
+#: the nonzero-exit reason because it is not a failure: the turn may have
+#: exited cleanly, and what disqualifies its claim is that a correction reached
+#: it before anything adjudicated one.
+REDIRECT_COMPLETION_REASON = "unsettled-completion-after-redirect"
+
+REDIRECT_COMPLETION_NOTE = (
+    "an operator correction was accepted against this turn before it reached "
+    "an accepted settlement; the completion claim is withdrawn and the work "
+    "this session already wrote is left in place for the next attempt"
+)
+
+#: The correction becomes the next attempt of the same session.
+REDIRECT_OUTCOME_CONTINUED = "continued"
+#: The interrupted worker could not be shown gone, so nothing may succeed it.
+REDIRECT_OUTCOME_BLOCKED = "blocked"
+#: A stop or abort queued after the correction ended the run instead.
+REDIRECT_OUTCOME_STOPPED = "stopped"
+
+
+def _record_redirect_continuation(
+    ctx: RunContext,
+    *,
+    redirect: redirect_continuation.TurnRedirect,
+    pending: redirect_continuation.PendingRedirect,
+    session_id: str,
+    turn_index: int,
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+    outcome: str,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """Publish what this turn's correction became, before anything acts on it.
+
+    The gate's projection is refreshed rather than left as the run loop wrote
+    it: the escalation's report only exists once the turn is torn down, so the
+    record written mid-turn names an acceptance whose outcome was still open.
+    All three writes go under one lock, because the result artifact, the event
+    and the run state are one claim about the same turn.
+    """
+    continuation_record: dict[str, Any] = {
+        "outcome": outcome,
+        "redirect": pending.to_payload(),
+        **(detail or {}),
+    }
+    with ctx.persistence.lock:
+        turn_payload[redirect_continuation.TURN_PAYLOAD_KEY] = redirect.to_payload()
+        turn_payload["redirect_continuation"] = continuation_record
+        durability.write_json_file(paths["result"], turn_payload)
+        ctx.persistence.append_event(
+            ctx.event_path,
+            events.REDIRECT_CONTINUATION_EVENT,
+            {
+                "run_id": ctx.run_id,
+                "turn_index": turn_index,
+                **plans.session_identity_payload(session_id),
+                **continuation_record,
+            },
+        )
+        ctx.persistence.write_state(ctx.payload)
+
+
+def settle_redirected_turn(
+    ctx: RunContext,
+    listener: run_control.RunControlListener,
+    *,
+    before: plans.PlanSnapshot,
+    after: plans.PlanSnapshot | None,
+    redirect: redirect_continuation.TurnRedirect,
+    harness: str,
+    conversation_id: str | None,
+    session_id: str,
+    session_label: str,
+    turn_index: int,
+    result: harnesses.HarnessResult,
+    turn_payload: dict[str, Any],
+    paths: dict[str, Path],
+    session_details: dict[str, Any],
+    pending: redirect_continuation.PendingRedirect | None,
+) -> RedirectContinuation | None:
+    """Turn an accepted correction into the next attempt of the same session.
+
+    Returns the continuation the next pass runs, or ``None`` when the run
+    stopped. Three things happen in an order that is the contract:
+
+    1. **The predecessor has to be gone.** A forced stop that could not be
+       confirmed means a worker may still hold this plan's lock, its
+       conversation and its worktree, so a successor is refused and the run
+       pauses on ``redirect-successor-blocked`` rather than starting a second
+       worker beside the first.
+    2. **The attempt gives up its completion claim.** A redirected turn is not a
+       settled one even when the harness exited zero, and the claim is withdrawn
+       through the same reverter every guard refusal uses -- the work the
+       session already wrote stays on disk for the next attempt to build on.
+    3. **A later stop or abort outranks the correction.** An operator who asked
+       to stop after telling the run what to fix meant the stop; the correction
+       stays pending in the journal for a later run rather than being spent on
+       an attempt nobody is waiting for.
+
+    No commit happens on any of these paths and none is reachable from one: the
+    branch never settles a turn, and the pause it can take is non-recoverable,
+    which is what the automatic paused-work commit is gated on.
+    """
+    carried = redirect_continuation.PendingRedirect.after_turn(
+        redirect.accepted,
+        session_id=session_id,
+        harness=harness,
+        conversation_id=conversation_id,
+        turn_index=turn_index,
+        previous=pending,
+    )
+    # The disposition is reached only from a recorded acceptance, so the fold
+    # above always has something to fold.
+    assert carried is not None
+
+    try:
+        report = redirect.require_successor_allowed()
+    except redirect_control.SuccessorBlockedError as error:
+        blocked = error.to_payload()
+        _record_redirect_continuation(
+            ctx,
+            redirect=redirect,
+            pending=carried,
+            session_id=session_id,
+            turn_index=turn_index,
+            turn_payload=turn_payload,
+            paths=paths,
+            outcome=REDIRECT_OUTCOME_BLOCKED,
+            detail={"blocked": blocked},
+        )
+        ctx.record_final_snapshot(after if after is not None else before)
+        ctx.pause(
+            reason=events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
+            message=(
+                f"the redirected turn for {session_label} could not be confirmed "
+                f"stopped: {error.reason}"
+            ),
+            details={**session_details, "redirect_continuation": blocked},
+        )
+        return None
+
+    reconciled = after
+    reconciliation: dict[str, Any] | None = None
+    if after is not None:
+        reconciled, reconciliation = _reconcile_unsettled_completion(
+            ctx,
+            after=after,
+            selected_after=next(
+                (item for item in after.sessions if item.id == session_id),
+                None,
+            ),
+            session_id=session_id,
+            turn_index=turn_index,
+            result=result,
+            turn_payload=turn_payload,
+            paths=paths,
+            reason=REDIRECT_COMPLETION_REASON,
+            failure_note=REDIRECT_COMPLETION_NOTE,
+        )
+
+    stop_snapshot = reconciled if reconciled is not None else before
+    stop_detail: dict[str, Any] = {
+        **({"completion_reconciliation": reconciliation} if reconciliation else {}),
+        "termination": report.to_payload() if report is not None else None,
+    }
+    if listener.state.abort_turn_requested:
+        _record_redirect_continuation(
+            ctx,
+            redirect=redirect,
+            pending=carried,
+            session_id=session_id,
+            turn_index=turn_index,
+            turn_payload=turn_payload,
+            paths=paths,
+            outcome=REDIRECT_OUTCOME_STOPPED,
+            detail={**stop_detail, "stopped_by": "abort-turn"},
+        )
+        with ctx.persistence.lock:
+            run_termination._honor_abort_turn(
+                listener,
+                snapshot=stop_snapshot,
+                session_id=session_id,
+                payload=ctx.payload,
+                event_path=ctx.event_path,
+                control_payload=ctx.control_payload,
+                plan_cache=ctx.plan_cache,
+                revert_session_status=handoff_guards.session_status_reverter(
+                    handoff_correction._append_handoff_note
+                ),
+                reinspect=session_verification._reinspect_after_revert,
+                context=turn_payload,
+                persistence=ctx.persistence,
+            )
+        return None
+    if listener.state.stop_after_current:
+        _record_redirect_continuation(
+            ctx,
+            redirect=redirect,
+            pending=carried,
+            session_id=session_id,
+            turn_index=turn_index,
+            turn_payload=turn_payload,
+            paths=paths,
+            outcome=REDIRECT_OUTCOME_STOPPED,
+            detail={**stop_detail, "stopped_by": "stop-after-current"},
+        )
+        run_termination._honor_stop_after_current(
+            listener,
+            snapshot=stop_snapshot,
+            payload=ctx.payload,
+            event_path=ctx.event_path,
+            control_payload=ctx.control_payload,
+            context=turn_payload,
+            persistence=ctx.persistence,
+        )
+        return None
+
+    _record_redirect_continuation(
+        ctx,
+        redirect=redirect,
+        pending=carried,
+        session_id=session_id,
+        turn_index=turn_index,
+        turn_payload=turn_payload,
+        paths=paths,
+        outcome=REDIRECT_OUTCOME_CONTINUED,
+        detail=stop_detail,
+    )
+    return RedirectContinuation(snapshot=reconciled, pending=carried)
 
 
 # ---------------------------------------------------------------------------
@@ -619,8 +882,10 @@ def _reconcile_unsettled_completion(
     result: harnesses.HarnessResult,
     turn_payload: dict[str, Any],
     paths: dict[str, Path],
+    reason: str = "unsettled-completion-after-nonzero-exit",
+    failure_note: str | None = None,
 ) -> tuple[plans.PlanSnapshot, dict[str, Any] | None]:
-    """Take back a completion claim the failed turn never settled.
+    """Take back a completion claim a terminating turn never settled.
 
     A nonzero exit ends the turn ahead of verification and the handoff guards,
     so a session left ``complete`` in the after-image holds a claim nothing
@@ -628,6 +893,11 @@ def _reconcile_unsettled_completion(
     permanent across a resume and advance the plan's next pending session past
     work no check ever passed. The revert is the same one every guard refusal
     uses, so the work on disk is untouched and only the claim is withdrawn.
+
+    ``reason`` and ``failure_note`` default to the nonzero-exit wording this was
+    written for. The redirect branch supplies its own: the claim there is
+    withdrawn because an operator's correction reached the turn before it
+    settled, which is not a failure and must not be recorded as one.
 
     Returns the snapshot to publish and the reconciliation record, or the
     unchanged snapshot and ``None`` when the session claimed nothing.
@@ -638,9 +908,14 @@ def _reconcile_unsettled_completion(
         after,
         session_id,
         failure_note=(
-            f"harness exited with status {result.returncode} before this turn "
-            "reached an accepted settlement; the completion claim is withdrawn "
-            "and the work this session already wrote is left in place"
+            failure_note
+            if failure_note is not None
+            else (
+                f"harness exited with status {result.returncode} before this "
+                "turn reached an accepted settlement; the completion claim is "
+                "withdrawn and the work this session already wrote is left in "
+                "place"
+            )
         ),
         append_handoff_note=handoff_correction._append_handoff_note,
     )
@@ -651,7 +926,7 @@ def _reconcile_unsettled_completion(
         "session_id": session_id,
         "claimed_status": "complete",
         "restored_status": "pending" if reverted is not None else "complete",
-        "reason": "unsettled-completion-after-nonzero-exit",
+        "reason": reason,
         "returncode": result.returncode,
         "reverted": reverted is not None,
         "session_path": str(reverted) if reverted is not None else None,
@@ -670,7 +945,7 @@ def _reconcile_unsettled_completion(
                     "from_status": "complete",
                     "to_status": "pending",
                     "guard": "turn-completion-reconciliation",
-                    "reason": "unsettled-completion-after-nonzero-exit",
+                    "reason": reason,
                     **turn_execution.reopened_snapshot_identity(
                         plans.snapshot_payload(snapshot_after)
                     ),

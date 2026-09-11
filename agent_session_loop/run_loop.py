@@ -84,6 +84,8 @@ from . import (
     preflight,
     qna,
     readiness_gate,
+    redirect_continuation,
+    redirect_store,
     review,
     review_continuation,
     review_cycle,
@@ -717,11 +719,75 @@ def _expire_run_guards(ctx: RunContext) -> None:
     )
 
 
-def _abandon_turn(ctx: RunContext) -> None:
-    """Drop this run's interactive surfaces when a turn cannot be launched."""
+def _abandon_turn(
+    ctx: RunContext,
+    redirect: redirect_continuation.TurnRedirect | None = None,
+) -> None:
+    """Drop this run's interactive surfaces when a turn cannot be launched.
+
+    The redirect gate is closed here for the same reason the run controls are
+    stopped: it holds a watch thread and an escalation clock aimed at a process
+    that never became this turn's worker, and a launch that died leaves nobody
+    else to take either of them down.
+    """
+    if redirect is not None:
+        redirect.close()
     if ctx.run_controls is not None:
         ctx.run_controls.stop()
     ctx.inline_tail.stop()
+
+
+def _close_turn_controls(
+    redirect: redirect_continuation.TurnRedirect,
+    mailbox_poll: run_coordination.MailboxPoll,
+) -> None:
+    """Disarm everything the turn was handed, in the order that proves it.
+
+    Settling the redirect gate first is what serializes completion against
+    acceptance: from this line on a correction is refused rather than accepted
+    against a turn whose process is already gone. Closing it second is what
+    releases the escalation, and it happens here rather than later because the
+    harness has by now waited on its child -- which is the only evidence that
+    lets the escalation's report claim the predecessor was collected rather
+    than merely killed.
+    """
+    redirect.close()
+    run_termination._detach_turn_controls(mailbox_poll)
+
+
+def _redirected_turn_harness(
+    ctx: RunContext,
+    *,
+    pending: redirect_continuation.PendingRedirect | None,
+    selected: str,
+    session_id: str,
+    turn_index: int,
+) -> str:
+    """Pin a redirected attempt to the harness its predecessor ran on.
+
+    A future-harness selection queued mid-run is a statement about the *next*
+    session, not about finishing the one an operator just corrected. Letting it
+    apply here would either strand the conversation the correction was written
+    against or fail the resume outright on ``SELECTION_INCOMPATIBLE``, so the
+    switch is deferred and recorded rather than silently taken.
+    """
+    if pending is None or pending.session_id != session_id:
+        return selected
+    if pending.harness is None or pending.harness == selected:
+        return selected
+    ctx.persistence.append_event(
+        ctx.event_path,
+        events.REDIRECT_CONTINUATION_EVENT,
+        {
+            "run_id": ctx.run_id,
+            "turn_index": turn_index,
+            **plans.session_identity_payload(session_id),
+            "outcome": "harness-deferred",
+            "redirect": pending.to_payload(),
+            "deferred_harness": selected,
+        },
+    )
+    return pending.harness
 
 
 def run_locked(
@@ -737,6 +803,7 @@ def run_locked(
     reply_origin: str = run_prompts.REPLY_ORIGIN_ARGV,
     verification_context: verification.VerificationContext | None = None,
     wakeup: threading.Event | None = None,
+    redirect_wakeup: threading.Event | None = None,
 ) -> tuple[int, dict[str, Any]]:
     # The caller holds this run's lock and opened the wakeup endpoint before
     # publishing it, so `wakeup` is already being set by producers from here
@@ -922,6 +989,12 @@ def run_locked(
     # a distinct one-shot type here prevents answerless continuations from
     # inheriting reply semantics or leaking into a later turn.
     pending_resolution: run_prompts._PendingResolution | None = None
+    # The correction an accepted redirect left for the next attempt of the same
+    # session. A third one-shot slot rather than a reuse of either above: this
+    # one is not an answer to anything the worker asked, it pins the harness and
+    # conversation the interrupted attempt ran on, and it carries no text -- the
+    # feedback stays in the redirect journal.
+    pending_redirect: redirect_continuation.PendingRedirect | None = None
 
     persist_run_state = not (args.dry_run and reply_text is not None)
     output = run_reporting._StderrOutputCoordinator(enabled=not args.json)
@@ -1571,6 +1644,13 @@ def run_locked(
                     )
             if turn_harness is None:
                 raise RunError("--review-harness is required for a review session")
+            turn_harness = _redirected_turn_harness(
+                ctx,
+                pending=pending_redirect,
+                selected=turn_harness,
+                session_id=session_id,
+                turn_index=turn_index,
+            )
             if getattr(args, "spark", False) and spark_run_suppression is None:
                 try:
                     refreshed_availability = model_availability.availability(
@@ -1693,6 +1773,16 @@ def run_locked(
                 session_scope=session_scope,
                 workspace=workspace,
                 authorization=fresh_conversation,
+                # The conversation the correction was written against is the
+                # one this attempt continues, and the resumed worker is told
+                # which operations were cut short by identifier. The words stay
+                # in the redirect journal: this is the handle, not the feedback.
+                interrupted_operations=(
+                    pending_redirect.resumable_operation_ids()
+                    if pending_redirect is not None
+                    and pending_redirect.session_id == session_id
+                    else ()
+                ),
             )
             if continuation.paused:
                 break
@@ -1724,6 +1814,26 @@ def run_locked(
             # the signal object already exists when the harness is launched.
             abort_signal = harnesses.AbortSignal()
             mailbox_poll.set_abort(abort_signal)
+            # The turn's redirect gate, bound to the same identity a producer
+            # reads out of `active_turn` when it submits a correction, and
+            # sharing the abort signal above rather than owning a second one:
+            # the cooperative cancellation a redirect initiates and the one an
+            # operator abort initiates are the same request to the same turn,
+            # and the signal is also the only proof the escalation has that the
+            # worker was reaped. It watches its own event, not the control
+            # wakeup, so a correction never queues behind the control poll.
+            turn_redirect = redirect_continuation.TurnRedirect(
+                plan_dir=before.plan_dir,
+                target=redirect_store.RedirectTarget(
+                    run_id=ctx.run_id,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    harness=turn_harness,
+                ),
+                state_dir=args.state_dir,
+                wakeup=redirect_wakeup,
+                cancellation=abort_signal,
+            )
             # The other turn-scoped control input beside the abort signal, and
             # bound to the same identity the delivery ledger records. It stays
             # inert until the harness opens it around the live process.
@@ -1801,6 +1911,39 @@ def run_locked(
             plan_artifacts_before = plans.session_artifact_digests(
                 before.plan_dir, exclude_session_id=session_id
             )
+            if pending_redirect is not None:
+                # Consumed at the last point before the turn starts, and only
+                # against the session it was accepted for. Selection can move on
+                # while a correction is in flight -- a repair child, the
+                # generated review -- and a correction spent on a session the
+                # operator was not talking about is worse than one dropped, so
+                # the mismatch is recorded and the slot cleared either way.
+                consumed_redirect = pending_redirect
+                pending_redirect = None
+                ctx.persistence.append_event(
+                    ctx.event_path,
+                    events.REDIRECT_CONTINUATION_EVENT,
+                    {
+                        "run_id": ctx.run_id,
+                        "turn_index": turn_index,
+                        **session_identity,
+                        "outcome": (
+                            "resumed"
+                            if consumed_redirect.session_id == session_id
+                            else "dropped"
+                        ),
+                        "redirect": consumed_redirect.to_payload(),
+                        "harness": turn_harness,
+                        "conversation": continuation.resume_conversation_id,
+                        "interrupted_operations": list(
+                            consumed_redirect.resumable_operation_ids()
+                        ),
+                    },
+                )
+                if consumed_redirect.session_id == session_id:
+                    with ctx.persistence.lock:
+                        active_turn["redirect_resumed"] = consumed_redirect.to_payload()
+
             if use_reply_prompt:
                 assert reply_source_meta is not None and turn_reply is not None
                 # Consumption is explicit rather than positional: a mailbox
@@ -1877,6 +2020,11 @@ def run_locked(
                     ).enforces_guard_pretool,
                 )
 
+            # Started before the launch, not after it: a correction submitted
+            # against this turn's identity can land the instant that identity is
+            # published, and the gate's own bind wait is what holds such an
+            # acceptance until there is a worker to interrupt.
+            turn_redirect.start()
             execution = turn_executor.launch(
                 turn_execution.TurnLaunch(
                     env=turn_env,
@@ -1922,14 +2070,15 @@ def run_locked(
                     ),
                     resume_conversation_id=continuation.resume_conversation_id,
                     on_conversation=conversation_capture,
+                    on_worker=turn_redirect.bind_worker,
                 ),
                 live_turn=live_turn,
                 active_turn=active_turn,
                 payload=ctx.payload,
                 after_stop=functools.partial(
-                    run_termination._detach_turn_controls, mailbox_poll
+                    _close_turn_controls, turn_redirect, mailbox_poll
                 ),
-                on_failure=functools.partial(_abandon_turn, ctx),
+                on_failure=functools.partial(_abandon_turn, ctx, turn_redirect),
             )
             result = execution.result
             live_turn_payload = execution.live_turn
@@ -1995,6 +2144,17 @@ def run_locked(
             after = finalization.after
             plan_error = finalization.plan_error
             turn_payload = finalization.turn_payload
+            if turn_redirect.redirected or turn_redirect.to_payload()["refused"]:
+                # Recorded ahead of every guard because this is what names the
+                # turn's disposition: `_terminating_result_disposition` reads
+                # the acceptance back out of here rather than off the harness
+                # result, which cannot distinguish a redirect from an abort. A
+                # turn that only ever refused corrections records them too --
+                # an operator whose correction arrived a moment too late is
+                # owed the evidence of where it went.
+                turn_payload[redirect_continuation.TURN_PAYLOAD_KEY] = (
+                    turn_redirect.to_payload()
+                )
             # The turn enters run state as executed-but-unaccepted. Every guard
             # below may still amend or refuse it; `turn_execution.commit_turn`
             # is what replaces this record with the published one.
@@ -2119,6 +2279,38 @@ def run_locked(
                     session_details=session_details,
                 )
                 break
+
+            if terminating_disposition == redirect_continuation.DISPOSITION_REDIRECTED:
+                redirected = turn_dispositions.settle_redirected_turn(
+                    ctx,
+                    ctx.run_controls,
+                    before=before,
+                    after=after,
+                    redirect=turn_redirect,
+                    harness=turn_harness,
+                    conversation_id=(
+                        result.conversation_id or continuation.resume_conversation_id
+                    ),
+                    session_id=session_id,
+                    session_label=session_label,
+                    turn_index=turn_index,
+                    result=result,
+                    turn_payload=turn_payload,
+                    paths=paths,
+                    session_details=session_details,
+                    pending=pending_redirect,
+                )
+                if redirected is None:
+                    break
+                pending_redirect = redirected.pending
+                if redirected.snapshot is not None:
+                    snapshot = redirected.snapshot
+                    continue
+                # The plan could not be inspected after the forced stop. The
+                # correction is already held above, so it rides along into
+                # whatever attempt the repair below produces rather than being
+                # spent on a turn that has no plan image to run against.
+                terminating_disposition = "malformed-plan"
 
             if terminating_disposition == "timeout":
                 turn_dispositions.pause_timed_out_turn(

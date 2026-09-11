@@ -1885,6 +1885,13 @@ class TurnLaunch:
     #: earliest point at which guidance carried in that prompt can honestly be
     #: called delivered, and the latest at which it is still this turn's news.
     on_prompt_accepted: Callable[[], None] | None = None
+    #: Called with the harness process's pid the moment it exists, ahead of
+    #: ``on_prompt_accepted``. It is how a turn-scoped controller learns which
+    #: process it is permitted to stop, and it has to be stated at spawn rather
+    #: than looked up later: a pid discovered at a deadline names whatever holds
+    #: that number by then. Failures propagate -- a controller that could not be
+    #: bound would leave an accepted correction with nothing to interrupt.
+    on_worker: Callable[[int], None] | None = None
     #: The native conversation this turn continues, or ``None`` to let the
     #: harness open one. Exact-or-refusal: an adapter that cannot restore this
     #: identifier fails the turn rather than running a fresh conversation, so a
@@ -1966,6 +1973,8 @@ class TurnExecutor:
 
         def on_spawn(pid: int) -> None:
             live_turn.note_harness_pid(pid)
+            if launch.on_worker is not None:
+                launch.on_worker(pid)
             if launch.on_prompt_accepted is not None:
                 # Suppressed rather than propagated: recording a delivery is
                 # bookkeeping about a turn that has already started, and a

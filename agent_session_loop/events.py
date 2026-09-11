@@ -111,6 +111,11 @@ HARNESS_DEGRADED_EVENT = "harness_degraded"
 # did *not* continue what came before -- and a decision only recorded when it
 # went wrong leaves no baseline to read that against.
 CONVERSATION_CONTINUATION_EVENT = "conversation_continuation"
+# Appended when a correction accepted mid-turn becomes the next attempt of the
+# same session, is dropped because selection moved on, or is consumed by the
+# attempt that carries it. Never carries the feedback itself: the operation ids
+# are the handle, and the words stay behind `redirect_store.read_feedback`.
+REDIRECT_CONTINUATION_EVENT = "redirect_continuation"
 STATE_FILE_NAME = "state.json"
 EVENTS_FILE_NAME = "events.jsonl"
 RUN_CONTROL_ACTION_STOP_AFTER_CURRENT_REQUESTED = "stop-after-current-requested"
@@ -273,6 +278,15 @@ PAUSE_REASON_REVIEW_NOT_CLEAR = "review-not-clear"
 # second conversation. Clearing it is an operator decision — relaunch with the
 # one-use ``--fresh-conversation`` authorization — never an automatic retry.
 PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED = "conversation-recovery-required"
+# An accepted redirect force-stopped a turn, and the predecessor could not be
+# shown to be gone: a process of the interrupted worker is still running, or
+# nobody ever waited on it. The correction stays pending in the journal, but no
+# successor turn may start beside a worker that still holds this plan's lock,
+# its conversation and its worktree. Never automatic: the machine has to be
+# looked at, which is why this reason is classified `inspect` rather than
+# recoverable — and being non-recoverable is also what keeps the run from
+# committing the interrupted turn's retained work.
+PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED = "redirect-successor-blocked"
 
 # The subset of harness-failure categories that a supervisor may safely retry
 # by relaunching the same session. Quota, authentication, invalid-model, and
@@ -315,6 +329,7 @@ PAUSE_REASONS: tuple[str, ...] = (
     PAUSE_REASON_REQUIRED_CHECKS_INCOMPLETE,
     PAUSE_REASON_REVIEW_NOT_CLEAR,
     PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
+    PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
     PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     PAUSE_REASON_QUOTA_EXHAUSTED,
     PAUSE_REASON_AUTH_FAILED,

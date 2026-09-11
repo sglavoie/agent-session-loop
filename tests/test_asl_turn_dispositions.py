@@ -1,13 +1,14 @@
-"""The six terminating branches, exercised without the run loop.
+"""The seven terminating branches, exercised without the run loop.
 
 ``turn_dispositions`` owns what a turn that did not advance the session does
 next: two pauses for a plan that could not be re-inspected, an operator abort
 that is recorded rather than paused, a malformed plan that may repair itself, a
-worker pause that may be answered out of, and a failed harness exit that may
-retry off Spark. These tests drive each branch through a stand-in run context
-defined here rather than through ``runner``, which is the point of the boundary,
-and every collaborator is replaced by a recorder so what is asserted is the
-decision and the record rather than any collaborator's own behaviour.
+worker pause that may be answered out of, a failed harness exit that may retry
+off Spark, and a turn an operator corrected mid-flight, which earns the same
+session another attempt. These tests drive each branch through a stand-in run
+context defined here rather than through ``runner``, which is the point of the
+boundary, and every collaborator is replaced by a recorder so what is asserted
+is the decision and the record rather than any collaborator's own behaviour.
 
 What is covered is the shape the module docstring claims, as properties rather
 than as a walk through one happy path:
@@ -30,6 +31,9 @@ than as a walk through one happy path:
   settled, publishes the reconciled plan image rather than the claimed one,
   and says so in the pause when the reversion itself could not be written;
 * the module owns no loop statement, because the loop is not its to break;
+* the redirected branch is dispatched from the same table, and is argued in
+  ``tests/test_asl_redirect_continuation.py`` alongside the gate whose
+  acceptance is the only thing that can select it;
 * the runner's own body reaches these entry points and no longer performs any
   of the branch work itself.
 """
@@ -70,7 +74,7 @@ STATE_DIR_ARG = "/tmp/asl-state-does-not-exist"
 
 #: The entry points the run loop is allowed to reach here: one per terminating
 #: branch. The loop keeps the ``if terminating_disposition == ...`` dispatch
-#: itself, so a seventh name would be a branch that was never dispatched.
+#: itself, so an eighth name would be a branch that was never dispatched.
 ENTRY_POINTS = (
     "turn_dispositions.pause_interrupted_run",
     "turn_dispositions.pause_timed_out_turn",
@@ -78,6 +82,7 @@ ENTRY_POINTS = (
     "turn_dispositions.settle_malformed_plan",
     "turn_dispositions.settle_runner_pause",
     "turn_dispositions.settle_nonzero_exit",
+    "turn_dispositions.settle_redirected_turn",
 )
 
 #: Branch work that belonged to the loop and now belongs here. Each of these is
@@ -137,7 +142,7 @@ class RecordingPersistence:
 class FakeRunContext:
     """A :class:`turn_dispositions.RunContext` built by hand, not by a run.
 
-    Only the members these six branches reach are populated, which is what the
+    Only the members these branches reach are populated, which is what the
     Protocol declares; anything else is absent so reaching it is an
     ``AttributeError`` here instead of a silently tolerated call.
     """

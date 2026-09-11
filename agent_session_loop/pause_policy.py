@@ -137,6 +137,13 @@ ENVIRONMENT_BLOCKED_PAUSE_REASONS: tuple[str, ...] = (
 #   review has to be regrouped or the plan resplit.
 # - ``interrupted``: the operator stopped the run themselves. There is nobody
 #   left waiting for an answer.
+# - ``redirect-successor-blocked``: a redirect force-stopped a turn and the
+#   predecessor could not be shown gone. The repair is to the machine -- a
+#   surviving process, an unreaped child -- and no text an operator sends makes
+#   a successor safe to start. Not in ``ENVIRONMENT_BLOCKED_PAUSE_REASONS``
+#   because that set is the standing-blocker vocabulary a review continuation
+#   emits verbatim, and this pause is a property of one interrupted turn rather
+#   than of the environment the next run will find.
 UNANSWERABLE_OUTCOME_PAUSE_REASONS: tuple[str, ...] = (
     events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
     events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
@@ -149,6 +156,7 @@ UNANSWERABLE_OUTCOME_PAUSE_REASONS: tuple[str, ...] = (
     "malformed-plan",
     events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     events.PAUSE_REASON_INTERRUPTED,
+    events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
 )
 
 # Every pause an operator must inspect rather than answer, from any source: a

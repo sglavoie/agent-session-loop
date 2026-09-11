@@ -137,6 +137,7 @@ class LockedRun(Protocol):
         reply_origin: str,
         verification_context: verification.VerificationContext | None,
         wakeup: threading.Event | None,
+        redirect_wakeup: threading.Event | None,
     ) -> tuple[int, dict[str, Any]]: ...
 
 
@@ -643,6 +644,7 @@ def run_from_args(
                     reply_text=reply_text,
                     reply_origin=reply_origin,
                     wakeup=wakeup,
+                    redirect_wakeup=redirect_wakeup,
                 )
             finally:
                 state.release_lock(initial_snapshot.plan_dir, args.state_dir)

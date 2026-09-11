@@ -3159,6 +3159,49 @@ withholds the evidence and therefore the proof, which reports as incomplete and
 blocks; it does not stop the run's own worker group from being killed, because
 that group is this run's to stop and was never what the opt-out was about.
 
+What the run does next is the `redirected` turn disposition, dispatched after
+`interrupted` and before `timeout`, `aborted` and every other terminating
+branch. It is selected from the acceptance record rather than from the harness
+result, because a redirect arms the same abort signal an `abort-turn` does — so
+`aborted` and a 137 exit describe both — while a worker that finished inside
+the grace window sets no flag at all and still owes the operator the attempt
+their correction was promised. Only the operator's own Ctrl-C outranks it.
+Completion and acceptance contend for one latch and exactly one wins: a
+correction accepted before the turn settled denies that attempt its completion,
+and the claim is taken back the way the nonzero-exit branch takes one back,
+recorded as `unsettled-completion-after-redirect` with the reconciled plan image
+published rather than the claimed one; a turn that settled first refuses every
+later correction with `turn-already-settled` and — deliberately — does not
+settle it in the journal, so the request expires on the deadline its producer
+was already told about instead of being answered by a turn that is over.
+
+The correction then buys another attempt at the *same* session, on the same
+plan lock. The next turn resumes the conversation the correction was written
+against and names the operations that were cut short by identifier only; the
+feedback itself is never carried, because the worker reads its words out of the
+journal. Nothing else advances: the session status is what the corrected turn
+left, no failure budget is charged (a redirect is not a failed turn, so it earns
+no handoff correction, no reopen, no Spark retry), and no commit is made for the
+attempt that was stopped. A second correction against the same session extends
+one lineage rather than starting a new one — the attempt number rises, the
+operation ids accumulate — and a correction naming a different session replaces
+it rather than merging into it. A harness selection queued mid-run is a
+statement about the next session, not about finishing the one an operator just
+corrected, so the redirected attempt stays pinned to its predecessor's harness
+and the switch is deferred and recorded rather than silently taken. A stop or an
+abort queued after the correction still wins: the attempt is not started, and
+the withdrawal of the completion claim happens either way. Every one of these
+outcomes is published as a `redirect_continuation` event — `continued`,
+`blocked`, `stopped`, `harness-deferred`, `resumed` — carrying the digests and
+byte counts but never the bytes.
+
+When the successor gate refuses, the run pauses with
+`redirect-successor-blocked` rather than starting a second worker beside a
+predecessor that could not be shown gone. It is an `inspect` pause and a
+non-recoverable one: the repair is to the machine — a surviving process, an
+unreaped child — and no text an operator sends makes a successor safe to start,
+so the pause also makes no automatic commit of the retained work.
+
 All four subcommands accept `--wait` and `--timeout SECONDS`, which turn the
 fire-and-forget append into a receipt. Without `--wait`, nothing changes: the
 command is appended, a best-effort wakeup is sent, and the handler returns 0
@@ -6742,7 +6785,8 @@ question about (`workspace-write-scope-violation`,
 `workspace-write-guard-unavailable`, `review-guard-unavailable`,
 `review-mutated-worktree`, `plan-artifact-tampered`, `unexpected-status-change`,
 `multiple-status-changes`, `nonzero-exit`, `malformed-plan`,
-`malformed-review-repair`, `interrupted`). The dividing principle is whether a
+`malformed-review-repair`, `interrupted`, `redirect-successor-blocked`). The
+dividing principle is whether a
 mailbox answer can make the run proceed: a dirty worktree stays dirty however
 the operator answers, so waiting for a reply would only burn the mailbox lease
 before escalating anyway. That third group is the same principle read from the

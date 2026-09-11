@@ -77,6 +77,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -358,6 +359,7 @@ def prepare_turn_continuation(
     session_scope: plans.SessionScope | None,
     workspace: workspaces.ResolvedWorkspace | None,
     authorization: conversation_resume.FreshConversationAuthorization,
+    interrupted_operations: Sequence[str] = (),
 ) -> conversation_resume.TurnContinuation:
     """Decide this turn's conversation, record the decision, and pause if refused.
 
@@ -370,6 +372,12 @@ def prepare_turn_continuation(
     writable aliases every turn — never carried forward — because the whole
     point of the check is to notice when one of them stopped matching what the
     conversation was recorded under.
+
+    ``interrupted_operations`` names what a previous attempt was cut short in
+    the middle of, by identifier only. It is the redirect journal's ids on a
+    turn that succeeds a corrected one and empty everywhere else, and it is
+    passed rather than looked up here because which correction a turn carries is
+    the loop's bookkeeping, not this decision's.
     """
     plan_state = state.plan_state_dir(snapshot.plan_dir, args.state_dir)
     binding = conversation_resume.turn_binding(
@@ -386,7 +394,10 @@ def prepare_turn_continuation(
         scope_aliases=() if session_scope is None else tuple(session_scope.writes),
     )
     continuation = conversation_resume.plan_turn_continuation(
-        plan_state, binding=binding, authorization=authorization
+        plan_state,
+        binding=binding,
+        authorization=authorization,
+        interrupted_operations=interrupted_operations,
     )
     ctx.persistence.append_event(
         ctx.event_path,

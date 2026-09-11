@@ -88,6 +88,7 @@ from . import (
     harnesses,
     mailbox,
     plans,
+    redirect_continuation,
     repository_evidence,
     repository_intent,
     review,
@@ -544,6 +545,15 @@ def _terminating_result_disposition(
     """
     if result.interrupted:
         return "interrupted"
+    if redirect_continuation.turn_was_redirected(turn_payload):
+        # Ahead of every result flag but the operator's own Ctrl-C, and decided
+        # from the acceptance rather than from the exit. A redirect arms the
+        # same abort signal an `abort-turn` does, so `aborted` and a 137 exit
+        # describe both; and a worker that finished inside the grace window
+        # sets no flag at all while still owing the operator the attempt their
+        # correction was promised. The acceptance is the only fact that
+        # separates the three, which is why it is what this reads.
+        return redirect_continuation.DISPOSITION_REDIRECTED
     if result.timed_out:
         return "timeout"
     if result.aborted:
