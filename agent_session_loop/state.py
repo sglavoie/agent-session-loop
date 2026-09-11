@@ -2582,6 +2582,9 @@ class MigrationReport:
     conversation_records: int = 0
     conversation_records_rewritten: int = 0
     conversation_note: str | None = None
+    redirect_requests: int = 0
+    redirect_requests_unfinished: int = 0
+    redirect_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2604,6 +2607,9 @@ class MigrationReport:
             "conversation_records": self.conversation_records,
             "conversation_records_rewritten": self.conversation_records_rewritten,
             "conversation_note": self.conversation_note,
+            "redirect_requests": self.redirect_requests,
+            "redirect_requests_unfinished": self.redirect_requests_unfinished,
+            "redirect_note": self.redirect_note,
         }
 
 
@@ -2842,6 +2848,77 @@ def _conversation_note(report: conversations.RelocationReport) -> str | None:
     return "; ".join(parts) + "."
 
 
+@dataclass(frozen=True)
+class _RedirectJournalSurvey:
+    """What the redirect journal holds, counted without reading a word of it."""
+
+    requests: int
+    unfinished: int
+    unreadable_lines: int
+    torn_tail: bool
+
+
+def _survey_redirect_journal(state_dir: Path) -> _RedirectJournalSurvey:
+    """Count the redirect journal's requests, or refuse if it cannot be read.
+
+    Imported locally because :mod:`redirect_store` imports this module; a
+    top-level import would close the cycle. Migration needs only counts, so
+    nothing here reaches ``read_feedback`` and no operator correction can travel
+    into a report, an event, or a printed line.
+    """
+    from . import redirect_store  # local: it imports state
+
+    try:
+        view = redirect_store.read_journal_at(state_dir)
+    except redirect_store.RedirectStoreError as error:
+        raise MigrationError(
+            "redirect-journal-error",
+            f"source redirect journal could not be read: {error}",
+            {"from_state_dir": str(state_dir)},
+        ) from error
+    return _RedirectJournalSurvey(
+        requests=len(view.requests),
+        unfinished=sum(
+            1
+            for request in view.requests
+            if not request.terminal or (request.accepted and not request.carried)
+        ),
+        unreadable_lines=len(view.rejected),
+        torn_tail=view.torn_tail,
+    )
+
+
+def _redirect_note(survey: _RedirectJournalSurvey, *, applied: bool) -> str | None:
+    """Describe what relocation does to the redirect journal, if anything.
+
+    Relocation moves the journal with its directory and rewrites nothing inside
+    it, because a redirect request names a run, a session and a turn — none of
+    which is a path. What the note reports is therefore what an operator is
+    carrying to the new location rather than what changed, which matters
+    because an unfinished request is a correction still owed an answer and the
+    run that owed it is, by the time anyone is migrating, long gone.
+    """
+    if not survey.requests and not survey.unreadable_lines and not survey.torn_tail:
+        return None
+    parts = [
+        f"{survey.requests} redirect request(s) "
+        f"{'moved' if applied else 'would move'} with the state directory; "
+        "their run, session and turn identities are unchanged by relocation"
+    ]
+    if survey.unfinished:
+        parts.append(
+            f"{survey.unfinished} of them {'is' if survey.unfinished == 1 else 'are'} "
+            "still unfinished and will be reconciled by the next run"
+        )
+    if survey.unreadable_lines or survey.torn_tail:
+        parts.append(
+            f"{survey.unreadable_lines} unreadable line(s)"
+            f"{' and a torn tail' if survey.torn_tail else ''} "
+            "were preserved unchanged"
+        )
+    return "; ".join(parts) + "."
+
+
 def migrate_plan_state(
     plan_dir: str | Path,
     *,
@@ -3034,6 +3111,14 @@ def migrate_plan_state(
         or version_before in agent_mux_projection.UPGRADABLE_STATE_SCHEMA_VERSIONS
     )
 
+    # Surveyed before either branch, and before anything is renamed: an
+    # unreadable redirect journal is a refusal rather than a relocation with a
+    # missing count, on the same terms as the conversation ledger beside it.
+    # The journal is the only durable record of a correction, so moving a state
+    # directory whose journal cannot be read would relocate a promise nothing
+    # can later account for.
+    redirect_survey = _survey_redirect_journal(old_state_dir)
+
     if not apply:
         try:
             preview_conversations = conversations.relocate_records(
@@ -3096,6 +3181,9 @@ def migrate_plan_state(
             conversation_records=preview_conversations.records,
             conversation_records_rewritten=preview_conversations.rewritten,
             conversation_note=_conversation_note(preview_conversations),
+            redirect_requests=redirect_survey.requests,
+            redirect_requests_unfinished=redirect_survey.unfinished,
+            redirect_note=_redirect_note(redirect_survey, applied=False),
         )
 
     new_state_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -3185,6 +3273,12 @@ def migrate_plan_state(
         migrated_details["projection_generation"] = migrated[
             agent_mux_projection.PROJECTION_KEY
         ]["projection_generation"]
+    if redirect_survey.requests or redirect_survey.unreadable_lines:
+        migrated_details["redirect_requests"] = redirect_survey.requests
+        migrated_details["redirect_requests_unfinished"] = redirect_survey.unfinished
+        migrated_details["redirect_requests_unreadable"] = (
+            redirect_survey.unreadable_lines
+        )
     if relocated_conversations.records or relocated_conversations.rejected:
         migrated_details["conversation_records"] = relocated_conversations.records
         migrated_details["conversation_records_rewritten"] = (
@@ -3215,6 +3309,9 @@ def migrate_plan_state(
         conversation_records=relocated_conversations.records,
         conversation_records_rewritten=relocated_conversations.rewritten,
         conversation_note=_conversation_note(relocated_conversations),
+        redirect_requests=redirect_survey.requests,
+        redirect_requests_unfinished=redirect_survey.unfinished,
+        redirect_note=_redirect_note(redirect_survey, applied=True),
     )
 
 
@@ -3236,6 +3333,8 @@ def _print_migration_report(report: MigrationReport) -> None:
         print(f"Schema: {report.schema_note}")
     if report.conversation_note:
         print(f"Conversations: {report.conversation_note}")
+    if report.redirect_note:
+        print(f"Redirects: {report.redirect_note}")
     if report.unmigrated_artifacts_note:
         print(report.unmigrated_artifacts_note)
     if not report.applied:

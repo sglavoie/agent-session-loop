@@ -86,6 +86,7 @@ from . import (
     readiness_gate,
     redirect_ack,
     redirect_continuation,
+    redirect_recovery,
     redirect_store,
     review,
     review_continuation,
@@ -174,6 +175,11 @@ class RunContext:
     #: Wired once the control listener exists, because the listener is built
     #: from the two handlers that already take this context.
     run_controls: run_control.RunControlListener | None = None
+    #: What a crashed predecessor left unfinished in the redirect journal,
+    #: settled once under this run's lock before any turn is selected. Held for
+    #: the whole run because the session a stranded correction belongs to may
+    #: not be the first one this run selects.
+    redirect_recovery_report: redirect_recovery.ReconciliationReport | None = None
 
     # Updated once per loop pass: the counters and flags that decide whether
     # the next pass runs, and the readiness gate's latest verdict.
@@ -791,6 +797,79 @@ def _redirected_turn_harness(
     return pending.harness
 
 
+def _reconcile_stranded_redirects(
+    ctx: RunContext,
+    *,
+    args: argparse.Namespace,
+    snapshot: plans.PlanSnapshot,
+) -> None:
+    """Settle what a crashed predecessor left in the redirect journal.
+
+    Runs once, under this run's own lock, before the first session is selected
+    — the same placement and the same reason as the repair-publication
+    rollback above it. A correction the dead run accepted and never delivered is
+    not something a turn can discover later: by the time a prompt is being built
+    the loop is already deciding what that prompt says, and a journal still
+    claiming an unanswered correction for a run that no longer exists would make
+    that decision on a lie.
+
+    Unlike the repair rollback this never refuses the run. Everything it settles
+    is a correction nothing was going to act on, and everything it cannot settle
+    it reports; a plan whose journal is unreadable still has sessions worth
+    running, and pausing here would turn a redirect that was never delivered
+    into a run that never started.
+    """
+    if args.dry_run:
+        # A dry run promises to write nothing durable, and settling a request is
+        # durable. The corrections stay stranded for the real run to reconcile.
+        return
+    pending_sessions = tuple(
+        session.id for session in snapshot.sessions if session.status == "pending"
+    )
+    try:
+        report = redirect_recovery.reconcile_startup(
+            snapshot.plan_dir,
+            run_id=ctx.run_id,
+            pending_session_ids=pending_sessions,
+            state_dir=args.state_dir,
+        )
+    except (redirect_store.RedirectStoreError, OSError) as error:
+        ctx.persistence.append_event(
+            ctx.event_path,
+            events.REDIRECT_CONTINUATION_EVENT,
+            {
+                "run_id": ctx.run_id,
+                "outcome": "recovery-failed",
+                "error": str(error),
+            },
+        )
+        return
+    ctx.redirect_recovery_report = report
+    notable = (
+        report.blocked
+        or report.expired
+        or report.settled
+        or report.stranded
+        or report.recoverable
+        or report.uncertain
+        or report.torn_tail
+        or report.unreadable_lines
+    )
+    if not notable:
+        # Nothing was stranded and nothing is in doubt: the overwhelmingly
+        # common case, and an event for it would be noise in every run's log.
+        return
+    ctx.persistence.append_event(
+        ctx.event_path,
+        events.REDIRECT_CONTINUATION_EVENT,
+        {
+            "run_id": ctx.run_id,
+            "outcome": "recovery-blocked" if report.blocked else "recovered",
+            "recovery": report.to_payload(),
+        },
+    )
+
+
 def _carried_corrections(
     ctx: RunContext,
     *,
@@ -800,6 +879,7 @@ def _carried_corrections(
     session_id: str,
     turn_index: int,
     harness: str,
+    recovery: redirect_recovery.ReconciliationReport | None = None,
 ) -> redirect_ack.CarriedCorrections | None:
     """Bind every correction this attempt should carry, just before its prompt.
 
@@ -817,9 +897,26 @@ def _carried_corrections(
     the resumed worker is still told which operations were interrupted — and
     the corrections stay accepted in the journal rather than being lost, so the
     failure is recorded instead of silently changing what the worker reads.
+
+    A second population reaches the same boundary: corrections a *previous* run
+    was holding when it died. They have no ``PendingRedirect`` — the object that
+    would have carried them across attempts died with the process that built it
+    — so they arrive from the startup reconciliation instead, and they are the
+    reason this can run for a session that was never redirected in this run.
     """
-    if pending is None or pending.session_id != session_id:
+    recovered_ids: tuple[str, ...] = ()
+    if recovery is not None:
+        recovered_ids = redirect_recovery.recoverable_operation_ids(
+            recovery, session_id
+        )
+    redirected_here = pending is not None and pending.session_id == session_id
+    if not redirected_here and not recovered_ids:
         return None
+    redirect_payload: dict[str, Any] = (
+        pending.to_payload()
+        if pending is not None and redirected_here
+        else {**plans.session_identity_payload(session_id), "recovered": True}
+    )
     continuation = redirect_store.RedirectTarget(
         run_id=ctx.run_id,
         session_id=session_id,
@@ -830,7 +927,10 @@ def _carried_corrections(
         carried = redirect_ack.carry_corrections(
             plan_dir,
             continuation=continuation,
-            accepted_operation_ids=pending.operation_ids,
+            accepted_operation_ids=(
+                pending.operation_ids if pending is not None and redirected_here else ()
+            ),
+            recovered_operation_ids=recovered_ids,
             state_dir=state_dir_arg,
         )
     except redirect_store.RedirectStoreError as error:
@@ -842,11 +942,18 @@ def _carried_corrections(
                 "turn_index": turn_index,
                 **plans.session_identity_payload(session_id),
                 "outcome": "carry-failed",
-                "redirect": pending.to_payload(),
+                "redirect": redirect_payload,
                 "harness": harness,
                 "error": {"reason": error.reason, "message": str(error)},
             },
         )
+        return None
+    if not redirected_here and not carried.corrections:
+        # The recoverable list is a fact about the crash and does not shrink as
+        # this run works through it, so it still names this session on every
+        # later turn. By then the journal has recorded the delivery and the
+        # coalescing boundary drops the ids; saying "carried" again would claim
+        # a delivery per turn for one correction handed over once.
         return None
     ctx.persistence.append_event(
         ctx.event_path,
@@ -856,7 +963,7 @@ def _carried_corrections(
             "turn_index": turn_index,
             **plans.session_identity_payload(session_id),
             "outcome": "carried",
-            "redirect": pending.to_payload(),
+            "redirect": redirect_payload,
             "harness": harness,
             # Digests, byte counts and operation ids. The words are in the
             # journal and reach nothing but the prompt itself.
@@ -1141,6 +1248,7 @@ def run_locked(
             ),
         },
     )
+    _reconcile_stranded_redirects(ctx, args=args, snapshot=snapshot)
     ctx.persistence.write_state(ctx.payload)
     run_persistence._notify_agent_mux_loop_started(ctx.payload, ctx.persistence)
     ctx.progress.run_started(ctx.payload)
@@ -1829,6 +1937,7 @@ def run_locked(
                 session_id=session_id,
                 turn_index=turn_index,
                 harness=turn_harness,
+                recovery=ctx.redirect_recovery_report,
             )
             turn_prompt = turn_preparation.prepare_turn_prompt(
                 ctx,

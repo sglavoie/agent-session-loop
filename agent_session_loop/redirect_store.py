@@ -33,6 +33,14 @@ Four properties are structural rather than incidental:
   bounded, and submissions stop one tier below the cap so a full journal can
   still record the acceptance, rejection, or expiry of what is already in it.
 
+A ``continued`` line ordinarily names a later turn of the request's own run.
+The one exception is marked on the line itself: ``recovered`` says a run that
+died was holding this correction and the run resuming the same session took
+delivery of it, which is the only continuation whose run id differs from the
+target's and whose turn index may be lower. Replay holds an unmarked line to the
+ordinary ordering, so the latitude is reachable only from a line that asked for
+it, and the matching ``acknowledged`` line has to restate the same marker.
+
 Concurrency is coordinated through an exclusive ``fcntl.flock`` held across
 read, decide, and append, so the reducer's view is the one the append is
 validated against. Completed appends are flushed with
@@ -299,6 +307,7 @@ class RedirectRequest:
     continuation: RedirectTarget | None = None
     continued_at: str | None = None
     continued_seq: int | None = None
+    continuation_recovered: bool = False
     acknowledged_at: str | None = None
     acknowledged_seq: int | None = None
 
@@ -314,6 +323,19 @@ class RedirectRequest:
     def carried(self) -> bool:
         """Whether a continuation attempt has taken delivery of this correction."""
         return self.continuation is not None
+
+    @property
+    def recovered(self) -> bool:
+        """Whether the attempt that carried this correction crossed a crash.
+
+        A continuation of the ordinary kind is a later turn of the *same* run,
+        so the marker is only ever true for a correction a new run picked up
+        from a run that died holding it. It is kept as its own fact rather than
+        inferred from a run-id comparison because the inference would also fire
+        on a hand-written line, and the whole point of the marker is that a
+        cross-run delivery must have been asked for explicitly.
+        """
+        return self.continuation_recovered
 
     @property
     def acknowledged(self) -> bool:
@@ -357,6 +379,7 @@ class RedirectRequest:
             ),
             "continued_at": self.continued_at,
             "continued_seq": self.continued_seq,
+            "continuation_recovered": self.continuation_recovered,
             "acknowledged_at": self.acknowledged_at,
             "acknowledged_seq": self.acknowledged_seq,
             **self.target.to_payload(),
@@ -390,6 +413,18 @@ class RedirectJournalView:
     rejected: tuple[RejectedRecord, ...] = field(default=(), repr=False)
     last_seq: int = 0
     size_bytes: int = 0
+    torn_tail: bool = False
+    """Whether the file's last physical line was never terminated.
+
+    A writer that died between ``write`` and its ``fullsync`` -- or a device
+    that lost the tail of a page -- leaves a final line with no newline after
+    it. Replay already refuses that line, and the next append terminates it
+    rather than merging with it, so nothing here is broken. What the flag adds
+    is that the refusal is *attributable*: a projection built after a crash can
+    say "one record may be missing from this answer" instead of presenting a
+    possibly-truncated history as the whole truth. Mid-file corruption shows up
+    in :attr:`rejected` instead, which is why the two are separate.
+    """
 
     def request(self, operation_id: str) -> RedirectRequest | None:
         for request in self.requests:
@@ -434,6 +469,29 @@ class RedirectJournalView:
             request for request in self.requests if request.continues_attempt(attempt)
         )
 
+    def strandable_by(self, run_id: str) -> tuple[RedirectRequest, ...]:
+        """Requests a crash left unfinished for some *other* run, oldest first.
+
+        "Unfinished" is exactly two states: never settled, and settled as
+        accepted but never carried into a prompt. Both describe a correction the
+        operator was promised something about and whose promise no process is
+        keeping any more, because the run named in the target is not this one.
+
+        A carried request is excluded on purpose even when nobody receipted it.
+        The journal records that some attempt took delivery of it, and the whole
+        acknowledgment protocol exists because delivery is not receipt: deciding
+        here that an unreceipted delivery never happened would be the guess that
+        protocol refuses to make. :mod:`redirect_recovery` reports those as
+        uncertain instead.
+        """
+        return tuple(
+            request
+            for request in self.requests
+            if request.target.run_id != run_id
+            and not request.carried
+            and (not request.terminal or request.accepted)
+        )
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "journal_path": str(self.journal_path),
@@ -441,6 +499,7 @@ class RedirectJournalView:
             "rejected": [record.to_payload() for record in self.rejected],
             "last_seq": self.last_seq,
             "size_bytes": self.size_bytes,
+            "torn_tail": self.torn_tail,
         }
 
 
@@ -522,22 +581,61 @@ def _precedes_continuation(
     )
 
 
+def _recovers_continuation(
+    target: RedirectTarget,
+    continuation: RedirectTarget,
+) -> bool:
+    """Whether ``continuation`` is a *different run's* retry of ``target``'s session.
+
+    The turn index is deliberately not compared. A run numbers its turns from
+    one, so a correction aimed at turn 7 of a run that died is legitimately
+    carried by turn 1 of the run that resumes the same session, and requiring a
+    greater index would refuse every real crash recovery there is. What still
+    has to hold is the session: a correction is about the work of one session,
+    and carrying it into another is delivering it to a worker it was not
+    written for.
+
+    Requiring a *different* run id is what keeps this from widening the ordinary
+    rule. Within one run the strict ordering of :func:`_precedes_continuation`
+    remains the only way a correction moves forward.
+    """
+    return (
+        target.session_id == continuation.session_id
+        and target.run_id != continuation.run_id
+    )
+
+
 def validate_continuation(
     target: RedirectTarget,
     continuation: RedirectTarget,
-) -> RedirectTarget:
-    """Return ``continuation`` if it may carry a correction aimed at ``target``."""
+    *,
+    allow_recovery: bool = False,
+) -> bool:
+    """Check ``continuation`` may carry ``target``; return whether it recovers it.
+
+    ``allow_recovery`` is opt-in and off by default, so every existing caller
+    keeps the session-12 rule exactly: a continuation is a later turn of the
+    same run and session. A caller that has established the target's run is gone
+    -- :mod:`redirect_recovery`, under the new run's own lock -- passes it to
+    admit the one other continuation that can honour the correction, and the
+    ``True`` it gets back is what the journal records on the line, so a
+    cross-crash delivery is legible as one rather than looking like an ordinary
+    carry with a surprising run id in it.
+    """
     validate_target(continuation)
-    if not _precedes_continuation(target, continuation):
-        raise RedirectStoreError(
-            ERROR_INVALID_CONTINUATION,
-            "continuation must be a later attempt of the same run and session",
-            details={
-                "request_target": target.to_payload(),
-                "continuation": continuation.to_payload(),
-            },
-        )
-    return continuation
+    if _precedes_continuation(target, continuation):
+        return False
+    if allow_recovery and _recovers_continuation(target, continuation):
+        return True
+    raise RedirectStoreError(
+        ERROR_INVALID_CONTINUATION,
+        "continuation must be a later attempt of the same run and session",
+        details={
+            "request_target": target.to_payload(),
+            "continuation": continuation.to_payload(),
+            "recovery_allowed": allow_recovery,
+        },
+    )
 
 
 def validate_feedback(feedback: str) -> str:
@@ -648,6 +746,7 @@ class _Replay:
         self.rejected: list[RejectedRecord] = []
         self.last_seq = 0
         self.size_bytes = 0
+        self.torn_tail = False
 
     def reject(self, seq: int, reason: str, detail: str | None = None) -> None:
         self.rejected.append(RejectedRecord(seq=seq, reason=reason, detail=detail))
@@ -732,9 +831,19 @@ class _Replay:
             self.reject(seq, REJECT_UNKNOWN_REQUEST, operation_id)
             return
         continuation = _parse_target(payload.get("continuation"))
-        if continuation is None or not _precedes_continuation(
-            existing.target, continuation
-        ):
+        if continuation is None:
+            self.reject(seq, REJECT_INVALID_CONTINUATION, operation_id)
+            return
+        # The relaxed cross-run rule is reachable only from a line that says so.
+        # An unmarked line is held to the ordinary ordering, so a hand-written
+        # continuation cannot borrow recovery's latitude by omitting the marker.
+        recovered = payload.get("recovered") is True
+        admissible = (
+            _recovers_continuation(existing.target, continuation)
+            if recovered
+            else _precedes_continuation(existing.target, continuation)
+        )
+        if not admissible:
             self.reject(seq, REJECT_INVALID_CONTINUATION, operation_id)
             return
         if kind == KIND_CONTINUED:
@@ -757,12 +866,19 @@ class _Replay:
                 continuation=continuation,
                 continued_at=created_at,
                 continued_seq=seq,
+                continuation_recovered=recovered,
             )
             return
         if not existing.carried:
             self.reject(seq, REJECT_NOT_CARRIED, operation_id)
             return
         if not existing.continues_attempt(continuation):
+            self.reject(seq, REJECT_CONTINUATION_MISMATCH, operation_id)
+            return
+        if recovered != existing.continuation_recovered:
+            # The receipt has to name delivery as the journal recorded it. A
+            # line that agrees on the turn but disagrees on whether that turn
+            # crossed a crash is describing a delivery that never happened.
             self.reject(seq, REJECT_CONTINUATION_MISMATCH, operation_id)
             return
         if existing.acknowledged:
@@ -818,6 +934,7 @@ def _replay(data: bytes) -> _Replay:
     lines = _physical_lines(data)
     replay.last_seq = len(lines)
     replay.size_bytes = len(data)
+    replay.torn_tail = bool(data) and not data.endswith(b"\n")
     for seq, raw_bytes in enumerate(lines, start=1):
         raw = raw_bytes.decode("utf-8", errors="replace")
         if not raw.strip():
@@ -843,6 +960,7 @@ def _view(replay: _Replay, journal_path: Path) -> RedirectJournalView:
         rejected=tuple(replay.rejected),
         last_seq=replay.last_seq,
         size_bytes=replay.size_bytes,
+        torn_tail=replay.torn_tail,
     )
 
 
@@ -864,6 +982,19 @@ def read_journal(
 ) -> RedirectJournalView:
     """Replay the whole journal under a shared lock."""
     journal_path = journal_path_for_plan(plan_dir, state_dir)
+    return _view(_replay(_read_shared(journal_path)), journal_path)
+
+
+def read_journal_at(state_dir: str | Path) -> RedirectJournalView:
+    """Replay the journal in one plan-state directory named directly.
+
+    :func:`read_journal` resolves a plan directory to its hashed state
+    directory, which is the right addressing for everything that runs while a
+    plan is where it says it is. A migrator holds the hashed directory itself
+    and no longer has a plan path that maps to it, so it names the directory.
+    Read-only on the same terms as every other read here.
+    """
+    journal_path = Path(state_dir) / REDIRECT_JOURNAL_FILE_NAME
     return _view(_replay(_read_shared(journal_path)), journal_path)
 
 
@@ -1257,6 +1388,7 @@ def _annotate_locked(
     kind: RecordKind,
     continuation: RedirectTarget,
     moment: datetime,
+    recovered: bool = False,
 ) -> RedirectRequest:
     """Append one annotation to an accepted request and return the new record.
 
@@ -1267,10 +1399,14 @@ def _annotate_locked(
     which attempt carried it, which is the only thing a receipt can be checked
     against.
     """
-    record = {
+    record: dict[str, Any] = {
         **_record(kind, existing.operation_id, clock.isoformat(moment)),
         "continuation": continuation.to_payload(),
     }
+    if recovered:
+        # Written only when true. An absent key and a false one mean the same
+        # thing to replay, and the journal's older lines have neither.
+        record["recovered"] = True
     seq = _append_locked(
         fd,
         replay,
@@ -1285,6 +1421,7 @@ def _annotate_locked(
             continuation=continuation,
             continued_at=created_at,
             continued_seq=seq,
+            continuation_recovered=recovered,
         )
     else:
         annotated = replace(
@@ -1305,6 +1442,7 @@ def carry_request(
     continuation: RedirectTarget,
     state_dir: str | Path | None = None,
     now: datetime | None = None,
+    allow_recovery: bool = False,
 ) -> RedirectRequest:
     """Bind one correction to the continuation attempt that will deliver it.
 
@@ -1330,6 +1468,13 @@ def carry_request(
       valid correction for the turn it actually names;
     - a submitted request past ``expires_at`` is expired in the journal and then
       refused, exactly as :func:`accept_request` does it.
+
+    ``allow_recovery`` widens only the third of those, and only to a
+    continuation of the same session under a *different* run id, which is the
+    shape a crash leaves behind: the run holding the correction died, and the
+    run that resumes the session mints its own id and numbers its turns from
+    one. The resulting line records ``recovered``, so what crossed the crash is
+    a fact in the journal rather than an inference from two run ids.
     """
     validate_target(continuation)
     moment = _moment(now)
@@ -1370,7 +1515,11 @@ def carry_request(
             )
         # Checked before any append: a correction aimed elsewhere keeps its
         # pending state, so refusing to carry it here cannot retire it.
-        validate_continuation(existing.target, continuation)
+        recovered = validate_continuation(
+            existing.target,
+            continuation,
+            allow_recovery=allow_recovery,
+        )
         if not existing.accepted:
             if existing.is_expired_at(moment):
                 settled = _settle_locked(
@@ -1410,6 +1559,7 @@ def carry_request(
             kind=KIND_CONTINUED,
             continuation=continuation,
             moment=moment,
+            recovered=recovered,
         )
 
 
@@ -1495,6 +1645,10 @@ def acknowledge_request(
             # the same turn, and the journal should say what it already knows.
             continuation=carried_into,
             moment=_moment(now),
+            # Same reasoning for the marker: the receipt restates the delivery
+            # the journal recorded, so a worker cannot receipt an ordinary carry
+            # as a recovered one or the other way round.
+            recovered=existing.continuation_recovered,
         )
 
 

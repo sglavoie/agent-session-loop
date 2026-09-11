@@ -3292,6 +3292,89 @@ non-recoverable one: the repair is to the machine — a surviving process, an
 unreaped child — and no text an operator sends makes a successor safe to start,
 so the pause also makes no automatic commit of the retained work.
 
+A crash is not a fifth kind of failure here; it is the same four states seen
+from the next process. A correction can stop existing mid-flight at five
+instants — before anyone accepted it, after acceptance and before it reached a
+prompt, after it reached a prompt and before the worker said so, after the
+receipt, and mid-append on the journal's own last line — and each leaves a
+different, readable file behind. Recovery is therefore reconstruction from
+durable evidence rather than replay: the next run reads what the dead one wrote
+and works out what is still owed, and no part of that answer comes from memory,
+a heartbeat, or a retry the operator did not ask for.
+
+Reading that state never starts anything. `asl` inspects a plan's redirects by
+replaying the journal shared, reading the conversation ledger, and classifying
+the lock *without* reclaiming it — a status question does not delete the stale
+`lock.json` that explains what happened, does not open the urgent FIFO, and does
+not consult the process table. An operator checking twice gets the same answer
+twice and changes nothing by asking, which is what keeps "check before acting"
+the safe option rather than the expensive one. The same evidence gives a request
+an honest status: an unanswered correction reads as `submitted` while some run
+could still answer it and as `unanswered` once none can, and the difference is a
+fact about locks rather than about the file.
+
+Reconciliation — the half that writes — runs once at run start, under the new
+run's own lock, and refuses before it acts. A plan a live process owns, or one
+whose lock was written on a host this machine cannot evaluate, is left exactly
+as it was: a second reconciler settling requests the first is still answering is
+how one correction acquires two contradictory outcomes. Past that gate, anything
+past its deadline is expired in the journal; an *unanswered* correction whose
+session this plan will not run again is settled `rejected` with reason
+`run-ended`, which says the process that owed an answer ended rather than that a
+deadline passed; and one the dead run had already *accepted* is reported rather
+than rewritten, because first terminal wins and recording a rejection over an
+acceptance would reverse a decision about a turn nobody living saw. Everything
+still unfinished whose session *is* pending is reported as recoverable and
+carried later, when a continuation attempt actually exists to carry it into.
+
+Carrying a correction across a crash needs something the ordinary continuation
+rule cannot give it. Every run mints a fresh `run_id` and numbers its turns from
+one, so the successor attempt differs from the correction's target in both
+fields — a different run, and a *lower* turn index — which is precisely what the
+ordinary rule refuses. The recovery case is admitted explicitly and marked: the
+`continued` line carries `recovered`, replay grants the cross-run latitude only
+to a line bearing that marker, and the opt-in is made per operation id rather
+than per batch, so naming one genuine recovery cannot widen the rule for the
+corrections beside it. A hand-added annotation therefore forges nothing, and an
+acknowledgment whose marker disagrees with the delivery it claims is rejected on
+replay like any other mismatch. An operator's ordering survives the crash the
+same way it survives an interruption, by journal sequence.
+
+The one outcome recovery refuses to decide is delivery without a receipt. The
+journal records what was handed to a worker; whether a model read it is the
+question the acknowledgment protocol exists because nothing cheaper answers.
+Re-handing the correction would tell a worker its first correction is new;
+dropping it would discard one that may never have been read. So it is reported
+as `uncertain` and nothing acts on it automatically — and there is no flag that
+does, because the coalescing boundary refuses a second delivery of an already
+carried request in any case. The operator who reads the report and concludes it
+went unread says so by submitting the correction again: a new request, its own
+acceptance, and words chosen knowing what happened. That is the ambiguity
+reaching a person, which is the only place it can be resolved.
+
+Damage is reported as incompleteness rather than worked around. A journal whose
+last line was cut mid-append is flagged as a torn tail and the next append
+terminates it instead of merging into it; a line that cannot be attributed
+consumes its sequence and is counted, leaving the requests around it untouched;
+and a conversation ledger that cannot be trusted withholds every recovery,
+because the turn a correction would be delivered into cannot be selected until
+the ledger is repaired — handing it over then would mark it delivered to a
+prompt that is never built, while withholding it leaves it recoverable for the
+run that starts afterwards. A journal that cannot be read at all stops
+reconciliation outright, since every answer it would give is a claim about what
+the journal says.
+
+Relocating a plan's state carries the journal across unedited. A redirect
+request names a run, a session and a turn, none of which is a path, so
+`asl migrate-state` has nothing to rewrite inside it and reports counts instead:
+how many requests move with the directory, how many of those are still
+unfinished and will be reconciled by the next run, and whether any line was
+unreadable or torn. Those counts reach the report, the printed summary, and the
+`state_migrated` event; none of them is a word of the correction itself. A
+journal that cannot be read refuses the migration with `redirect-journal-error`
+before anything is renamed, the same way an unreadable conversation ledger
+already does.
+
 All four subcommands accept `--wait` and `--timeout SECONDS`, which turn the
 fire-and-forget append into a receipt. Without `--wait`, nothing changes: the
 command is appended, a best-effort wakeup is sent, and the handler returns 0

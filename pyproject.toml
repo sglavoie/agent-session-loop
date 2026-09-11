@@ -172,6 +172,7 @@ module = [
     "agent_session_loop.redirect_admission",
     "agent_session_loop.redirect_continuation",
     "agent_session_loop.redirect_control",
+    "agent_session_loop.redirect_recovery",
     "agent_session_loop.redirect_store",
     "agent_session_loop.repository_evidence",
     "agent_session_loop.repository_intent",

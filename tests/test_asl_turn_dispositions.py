@@ -161,6 +161,10 @@ class FakeRunContext:
         self.idle_baseline_pinned = False
         self.final_snapshots: list[plans.PlanSnapshot] = []
         self.pauses: list[dict[str, Any]] = []
+        # Present and None, exactly as `run_loop.RunContext` declares it: the
+        # crash-recovery branches read it before anything sets it, and absent
+        # here that read would raise instead of taking the untouched path.
+        self.redirect_recovery_report: Any = None
 
     def record_final_snapshot(self, snapshot: plans.PlanSnapshot) -> None:
         self.final_snapshots.append(snapshot)

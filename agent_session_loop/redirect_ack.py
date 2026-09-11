@@ -141,6 +141,13 @@ class Correction:
     feedback_digest: str
     feedback_bytes: int
     text: str = field(repr=False)
+    recovered: bool = False
+    """Whether this correction reached the prompt across a crash.
+
+    Recorded so an event can distinguish a correction the run accepted itself
+    from one it picked up from a dead predecessor. The two are the same words to
+    the worker and a very different story to whoever is reading the run back.
+    """
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -149,6 +156,7 @@ class Correction:
             "submitted_seq": self.submitted_seq,
             "feedback_digest": self.feedback_digest,
             "feedback_bytes": self.feedback_bytes,
+            "recovered": self.recovered,
         }
 
 
@@ -193,6 +201,7 @@ class CarriedCorrections:
             "continuation": self.continuation.to_payload(),
             "carried": [item.to_payload() for item in self.corrections],
             "carried_count": len(self.corrections),
+            "recovered_count": sum(1 for item in self.corrections if item.recovered),
             "feedback_bytes": sum(item.feedback_bytes for item in self.corrections),
             "refused": [item.to_payload() for item in self.refused],
         }
@@ -203,6 +212,7 @@ def coalesced_candidates(
     *,
     continuation: redirect_store.RedirectTarget,
     accepted_operation_ids: Sequence[str] = (),
+    recovered_operation_ids: Sequence[str] = (),
 ) -> tuple[str, ...]:
     """Return the operation ids ``continuation`` should carry, oldest first.
 
@@ -224,9 +234,18 @@ def coalesced_candidates(
     whole set of accepted ids; those already delivered are in the pinned
     conversation's own history, and re-rendering them would tell a worker its
     first correction is new while re-reporting a delivered one as refused.
+
+    ``recovered_operation_ids`` is a third population and the only one whose
+    members were never in this run at all: corrections a previous run was
+    holding when it died, which :mod:`redirect_recovery` established are still
+    unfinished and still belong to this session. They merge by journal sequence
+    like the rest, so an operator's order survives a crash the same way it
+    survives an interruption. The list is a caller's claim rather than something
+    inferred here, because "the run that owned this is gone" is a fact about
+    locks and processes, not about the journal.
     """
     ranked: dict[str, int] = {}
-    for operation_id in accepted_operation_ids:
+    for operation_id in (*accepted_operation_ids, *recovered_operation_ids):
         request = view.request(operation_id)
         if request is None or (request.terminal and not request.accepted):
             # An id the gate reported but the journal cannot corroborate is not
@@ -245,6 +264,7 @@ def carry_corrections(
     *,
     continuation: redirect_store.RedirectTarget,
     accepted_operation_ids: Sequence[str] = (),
+    recovered_operation_ids: Sequence[str] = (),
     state_dir: str | Path | None = None,
     now: datetime | None = None,
 ) -> CarriedCorrections:
@@ -256,6 +276,13 @@ def carry_corrections(
     an event is strictly better than a prompt that was never built. A journal
     that cannot be read or written at all still raises, because then nothing
     about the attempt is trustworthy.
+
+    ``recovered_operation_ids`` are the ones this attempt is picking up from a
+    run that died holding them. They are the only ids carried with
+    ``allow_recovery``, and the permission is granted per id rather than for the
+    whole call: a correction that merely happens to name another run is still
+    refused, so a caller cannot widen the rule for the batch by naming one
+    genuine recovery in it.
     """
     redirect_store.validate_target(continuation)
     view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
@@ -263,7 +290,9 @@ def carry_corrections(
         view,
         continuation=continuation,
         accepted_operation_ids=accepted_operation_ids,
+        recovered_operation_ids=recovered_operation_ids,
     )
+    recovered = frozenset(recovered_operation_ids)
     carried: list[Correction] = []
     refused: list[RefusedCorrection] = []
     for operation_id in candidates:
@@ -274,6 +303,7 @@ def carry_corrections(
                 continuation=continuation,
                 state_dir=state_dir,
                 now=now,
+                allow_recovery=operation_id in recovered,
             )
         except redirect_store.RedirectStoreError as error:
             refused.append(
@@ -309,6 +339,7 @@ def carry_corrections(
                 feedback_digest=request.feedback_digest,
                 feedback_bytes=request.feedback_bytes,
                 text=text,
+                recovered=request.continuation_recovered,
             )
         )
     return CarriedCorrections(
@@ -357,6 +388,7 @@ def carried_corrections(
                 feedback_digest=request.feedback_digest,
                 feedback_bytes=request.feedback_bytes,
                 text=text,
+                recovered=request.continuation_recovered,
             )
         )
     return CarriedCorrections(
