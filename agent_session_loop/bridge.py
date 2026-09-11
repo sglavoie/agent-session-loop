@@ -1954,7 +1954,9 @@ class BridgeSession:
             # Null exactly when nothing was persisted. Echoing the client's own
             # id for a refusal that never reached the journal would invite it to
             # ask after a correction that does not exist.
-            "operation_id": _bounded_id(operation_id) if operation is not None else None,
+            "operation_id": (
+                _bounded_id(operation_id) if operation is not None else None
+            ),
             "plan_dir": _bounded_path(facts.plan_dir),
             "row_id": row_id(str(facts.plan_dir), facts.run_id),
             "run_id": _bounded_id(facts.run_id),

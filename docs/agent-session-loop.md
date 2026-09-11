@@ -8594,18 +8594,25 @@ to that list is gated by construction.
 ### Hello
 
 ```json
-{"type":"hello","protocol":1,"asl_version":"...",
- "capabilities":["runs.snapshot","runs.changed","question.get",
+{"type":"hello","protocol":2,"asl_version":"...",
+ "contract_set_id":"asl-amx-1.<16 hex>",
+ "capabilities":["session.handshake","runs.snapshot","question.get",
    "question.reply","question.resolve","run.resume",
-   "run.stop_after_current","run.abort","operation.updated",
-   "workbench.ensure"],
- "max_frame_bytes":1048576}
+   "run.stop_after_current","run.abort","workbench.ensure",
+   "run.redirect","run.redirect_status","run.recover_conversation"],
+ "events":["runs.changed","operation.updated"],
+ "mutation_methods":["question.reply","question.resolve","run.resume",
+   "run.stop_after_current","run.abort","run.redirect"],
+ "handshake_required":true,
+ "max_frame_bytes":1048576,"poll_interval_seconds":1.0}
 ```
 
 Capabilities are ordered and additive. Detect a feature by membership,
 never by position or list length. The list is derived from the registered
 method handlers and event names rather than written by hand, so a name
-cannot be advertised before something stands behind it.
+cannot be advertised before something stands behind it. `mutation_methods`
+is a subset of `capabilities` in the same order; a capability absent from
+it is a read, and reads are never gated behind the handshake.
 
 ### Requests and responses
 
@@ -8680,7 +8687,8 @@ timestamps, `pause_reason`, `question`, `actions`, `disabled_reasons`,
 
 `actions` lists exactly what this run permits right now, drawn from
 `question.reply`, `question.resolve`, `run.resume`,
-`run.stop_after_current`, `run.abort`, and `workbench.ensure`.
+`run.stop_after_current`, `run.abort`, `workbench.ensure`, and
+`run.redirect`.
 `disabled_reasons` explains, per unavailable action, why. `action_token`
 fingerprints the plan identity together with the run, question, and
 permitted-action state the row was built from; a mutation must return it.
@@ -8795,11 +8803,14 @@ any size and a truncated question is worse than an explicit redirect.
 ### Mutating methods
 
 `question.reply`, `question.resolve`, `run.resume`,
-`run.stop_after_current`, and `run.abort` all take `plan_dir`,
-`operation_id` (client-chosen, non-empty), and `action_token`, plus
-optional `run_id` and `question_id` for exact-match validation.
-`question.reply` and `run.resume` take `text`; `question.resolve` takes
-`action` (`continue` or `pause`) and an optional `note`.
+`run.stop_after_current`, `run.abort`, and `run.redirect` all take
+`plan_dir`, `operation_id` (client-chosen, non-empty), and
+`action_token`, plus optional `run_id` and `question_id` for exact-match
+validation. `question.reply`, `run.resume`, and `run.redirect` take
+`text`; `question.resolve` takes `action` (`continue` or `pause`) and an
+optional `note`. `run.redirect` has its own section below: it is the only
+mutation aimed at a turn that is still running rather than at one that
+has already stopped.
 
 On a run holding several open questions, `question.reply` and
 `question.resolve` close whichever `question_id` the caller names, as long
@@ -8870,6 +8881,139 @@ string because a fragment is never sent to the server, and the plan
 selection rides in the fragment because the Workbench front end routes on
 it.
 
+### `run.redirect`
+
+Submits one urgent correction against the turn the run is on *now*,
+rather than waiting for it to finish and pause. It is a mutating method,
+so it takes `plan_dir`, `operation_id`, and `action_token` like the
+others, plus `text`, an optional `expected_target`, and an optional
+`wait_seconds`:
+
+```json
+{"plan_dir":"/plans/alpha","operation_id":"amx-op-9c31aa",
+ "action_token":"<hex>","text":"...",
+ "expected_target":{"run_id":"...","session_id":"9","turn_index":1,
+   "harness":"claude"},
+ "wait_seconds":5.0}
+```
+
+`expected_target` is optional and load-bearing when supplied. A client
+that rendered a row and then waited for a human is exactly the client
+whose turn may have ended in between; naming the turn turns that race
+into a `stale-target` refusal instead of a correction delivered to
+whatever the runner moved on to. `wait_seconds` defaults to 2 and is
+capped at 30, because the bridge answers one frame at a time and a wait
+one client chooses is a wait every other client on the session pays.
+
+The receipt is body-free — the correction's words appear in no frame the
+bridge can emit, and `feedback_digest` with `feedback_bytes` is what lets
+a client prove *which* correction a record is:
+
+```json
+{"operation_id":"amx-op-9c31aa","plan_dir":"/plans/alpha",
+ "row_id":"<hex>","run_id":"...","outcome":"accepted","reason":null,
+ "target":{"run_id":"...","session_id":"9","turn_index":1,
+   "harness":"claude"},
+ "waited_seconds":0.053,"replayed":false,"journal_complete":true,
+ "operation":{"operation_id":"amx-op-9c31aa","status":"accepted",
+   "stage":"interrupting","stage_description":"...",
+   "journal_state":"accepted","reason":null,"target":{...},
+   "continuation":null,"continuation_recovered":false,
+   "feedback_digest":"<32 hex>","feedback_bytes":37,
+   "created_at":"...","expires_at":"..."}}
+```
+
+`operation` is re-read from the redirect journal after the submission
+rather than built from the submission in hand, so the status this client
+is told and the status the next reader of that journal computes are the
+same projection of the same bytes.
+
+Replay is served from the journal **before** anything else is checked,
+including the action token, and that ordering is the whole reason the
+method can be retried. A correction that landed moves the plan, which
+moves the action token, which would make the retry of a request whose
+answer was lost in transit look like a stale second correction. Asking
+the journal first makes the `operation_id` the client already holds the
+answer: `replayed` is true, `outcome` is null — a replay submitted
+nothing, so it has no outcome of its own — and `operation` carries the
+durable truth. The same id can never carry different text.
+
+### `run.redirect_status`
+
+Projects this plan's durable redirect state without writing anything.
+`params` are `plan_dir` and an optional `operation_ids` array to select a
+subset. It is a **read**: it needs no handshake, because the client most
+in need of it is the one that just lost its own record of what it
+submitted — including a client whose contract set no longer matches and
+which therefore cannot mutate at all.
+
+The result carries `journal_path`, `owner` (`live`, `gone`, or
+`unknown`, read from the lock alone), `owner_run_id`, `live_target`, the
+`operations` window, `uncertain_operation_ids`, `journal_complete`,
+`torn_tail`, `unreadable_lines`, `truncated`, `checked_at`,
+`conversations`, and a fresh `action_token`.
+
+Each operation reports both a `status` and a `stage`. `status` is the
+correction's durable standing recomputed from the journal — `submitted`,
+`unanswered`, `accepted`, `delivered`, `acknowledged`, `rejected`,
+`expired`, `uncertain`. `stage` is the same correction as an operator
+reads it, derived from that status *plus* the turn the run is on now —
+`submitted`, `unaccepted`, `interrupting`, `stopped`, `resuming`,
+`acknowledged`, `rejected`, `blocked`, `uncertain`. A client renders the
+stage and reconciles on the status. Neither is `OperationStatus`: that
+describes a bridge-session receipt, and a redirect outlives the session
+that submitted it, so its status has to survive a restart the receipt
+does not.
+
+`journal_complete` is the honesty flag and `truncated` is its projection
+counterpart: the first says a record may be missing from the source, the
+second that one is missing from this frame. The window holds at most 64
+operations and truncates from the front, so the most recent corrections
+are the ones a client is guaranteed to see. `uncertain_operation_ids`
+names the corrections that reached an attempt which never receipted them
+— the one state a client must never act on automatically.
+
+Because status is reconstructed from the journal rather than from the
+bridge session's in-memory receipt window, a second bridge process
+started after a restart answers identically about a correction the first
+one submitted.
+
+### `run.recover_conversation`
+
+Reports which manual recovery a pause is waiting on and how to authorize
+it. `params` is `plan_dir`. Also a read, and deliberately only a read:
+performing the recovery here would persist the operator's one-use
+authorization in the one place it must never live — a request that can be
+replayed.
+
+```json
+{"plan_dir":"/plans/alpha","row_id":"<hex>","run_id":"...",
+ "recovery_required":true,
+ "pause_reason":"conversation-recovery-required",
+ "decision":"fresh-conversation","auto_resume":false,
+ "authorized_by":"operator",
+ "inspect_command":"asl control recover-conversation ... --json",
+ "authorization_command":"asl run ... --resume --fresh-conversation",
+ "one_use":true,"note":"...","conversations":{...},
+ "retained_operations":[...]}
+```
+
+`decision` is `fresh-conversation`, `predecessor-not-stopped`, or null
+when the run is not paused or is paused on something an operator does not
+decide. `predecessor-not-stopped` has no authorization command at all, so
+`authorization_command` is null, `one_use` is false, and `note` is null —
+telling an operator that an absent authorization is one-use would read as
+an invitation to find it. `pause_reason` is reported whether or not it
+maps to a decision, because "paused, and no manual recovery is what it is
+waiting on" is an answer while an unexplained null is a second question.
+`retained_operations` are the corrections a fresh start would still
+carry, listed body-free like everywhere else.
+
+Both commands and the pause-to-decision mapping are derived from
+`intervention` and `redirect_cli` rather than re-assembled here, so this
+projection and `asl control recover-conversation` cannot hand an operator
+two different answers about the same pause.
+
 ### Observational and mutation guarantees
 
 Every read the bridge performs — Workbench summary, Q&A context, lock
@@ -8897,7 +9041,8 @@ a corpus exists to prevent.
 `tests/fixtures/agent_mux_contract/fixtures/bridge-protocol-v2/` holds one
 canonical document per message — hello, handshake accepted, handshake
 read-only, snapshot, `runs.changed`, question body, operation receipt,
-`operation.updated`, error response, Workbench link — beside documents the
+`operation.updated`, error response, Workbench link, redirect receipt,
+redirect status, recovery options — beside documents the
 schema must reject for a named reason at a named JSON pointer. The
 corpus's `manifest.json` pins the protocol vocabulary (methods, the
 mutating subset, events, error codes), a SHA-256 per file, and the corpus

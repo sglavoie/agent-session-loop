@@ -12,7 +12,10 @@
       "run.resume",
       "run.stop_after_current",
       "run.abort",
-      "workbench.ensure"
+      "workbench.ensure",
+      "run.redirect",
+      "run.redirect_status",
+      "run.recover_conversation"
     ],
     "contract_set_id": "asl-amx-1.0000000000000000",
     "events": [
@@ -26,7 +29,8 @@
       "question.resolve",
       "run.resume",
       "run.stop_after_current",
-      "run.abort"
+      "run.abort",
+      "run.redirect"
     ],
     "poll_interval_seconds": 1.0,
     "protocol": 2,

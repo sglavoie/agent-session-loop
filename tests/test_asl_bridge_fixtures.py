@@ -508,6 +508,8 @@ class MutationGateTests(unittest.TestCase):
                 "runs.snapshot",
                 "question.get",
                 "workbench.ensure",
+                bridge.METHOD_REDIRECT_STATUS,
+                bridge.METHOD_RECOVER_CONVERSATION,
             },
             readable,
         )

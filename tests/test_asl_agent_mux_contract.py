@@ -49,6 +49,22 @@ class CorpusIntegrityTests(unittest.TestCase):
                 self.assertTrue(positive, "component has no accepting fixture")
                 self.assertTrue(negative, "component has no rejecting fixture")
 
+    def test_every_declared_root_carries_an_accepting_fixture(self) -> None:
+        # A root is a frame a producer may put on the wire, so a root nobody
+        # pinned is a frame the consumer's implementation is guessing at. The
+        # per-component polarity check above cannot see this: one fixture makes
+        # a whole component look covered however many roots it declares.
+        for component in contract.COMPONENTS:
+            roots = set(contract.load_schema(component).get("roots") or {})
+            if not roots:
+                continue
+            pinned = {
+                json.loads(path.read_text(encoding="utf-8"))["root"]
+                for path in contract.fixture_paths(component, valid=True)
+            }
+            with self.subTest(component=component):
+                self.assertEqual(roots - pinned, set())
+
     def test_negative_fixtures_cover_every_contract_property(self) -> None:
         # These are the refusals the session's completion contract names. A
         # corpus that stopped exercising one of them would still check clean,

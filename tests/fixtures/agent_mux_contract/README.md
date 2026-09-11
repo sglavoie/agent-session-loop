@@ -76,6 +76,13 @@ python3 -m agent_session_loop.agent_mux_contract --write   # rebuild manifest.js
 asl contract-check <plan-dir> --agent-mux --json           # the same report, in the CLI
 ```
 
+Rebuilding the manifest is not the whole edit. The contract-set ID is pinned as
+`agent_session_loop.agent_mux_projection.CONTRACT_SET_ID` — recomputing it on
+every state write would put this corpus on the durable-write path of every run,
+and an installed ASL need not ship its test fixtures at all — so a corpus edit
+that moves the identity must move that constant too. The suite fails until it
+does, so a stale pin cannot ship.
+
 `tests/test_asl_agent_mux_contract.py` runs the whole corpus: every schema lints
 clean, every valid fixture is accepted, every invalid fixture is rejected for
 the exact reason and pointer it declares, every file is byte-identical to its

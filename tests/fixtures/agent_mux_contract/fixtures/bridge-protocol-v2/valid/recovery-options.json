@@ -1,0 +1,80 @@
+{
+  "case": "recovery-options",
+  "description": "The manual recovery a pause is waiting on, reported and not performed: the authorization is a command an operator runs, never a field a client sets.",
+  "document": {
+    "id": "req-9",
+    "ok": true,
+    "protocol": 2,
+    "result": {
+      "authorization_command": "asl run /fixtures/plans/plan-alpha --resume --state-dir /fixtures/state --fresh-conversation",
+      "authorized_by": "operator",
+      "auto_resume": false,
+      "conversations": {
+        "detail": null,
+        "readable": true,
+        "records": 2,
+        "trustworthy": true,
+        "unreadable_lines": 0,
+        "usable": true
+      },
+      "decision": "fresh-conversation",
+      "inspect_command": "asl control recover-conversation /fixtures/plans/plan-alpha --state-dir /fixtures/state --json",
+      "note": "the authorization is one-use: the first turn that needs it consumes it, and it is never persisted, rehydrated by --resume, or replayed by a retry",
+      "one_use": true,
+      "pause_reason": "conversation-recovery-required",
+      "plan_dir": "/fixtures/plans/plan-alpha",
+      "recovery_required": true,
+      "retained_operations": [
+        {
+          "continuation": null,
+          "continuation_recovered": false,
+          "created_at": "2026-06-19T14:02:00+00:00",
+          "expires_at": "2026-06-19T14:04:00+00:00",
+          "feedback_bytes": 37,
+          "feedback_digest": "85a898f1bd1597fd22b538b50fcb49cf",
+          "journal_state": "accepted",
+          "operation_id": "amx-op-9c31aa",
+          "reason": null,
+          "stage": "stopped",
+          "stage_description": "accepted; the turn it named is gone and a successor owes it",
+          "status": "accepted",
+          "target": {
+            "harness": "claude",
+            "run_id": "20260619T140000Z-1",
+            "session_id": "9",
+            "turn_index": 1
+          }
+        },
+        {
+          "continuation": {
+            "harness": "claude",
+            "run_id": "20260619T140000Z-1",
+            "session_id": "9",
+            "turn_index": 2
+          },
+          "continuation_recovered": false,
+          "created_at": "2026-06-19T14:02:30+00:00",
+          "expires_at": "2026-06-19T14:04:30+00:00",
+          "feedback_bytes": 45,
+          "feedback_digest": "9e11f52e8dfd18c8f606d60a8cb204e6",
+          "journal_state": "accepted",
+          "operation_id": "amx-op-4e0b72",
+          "reason": null,
+          "stage": "uncertain",
+          "stage_description": "delivered to an attempt that never receipted it",
+          "status": "uncertain",
+          "target": {
+            "harness": "claude",
+            "run_id": "20260619T140000Z-1",
+            "session_id": "9",
+            "turn_index": 1
+          }
+        }
+      ],
+      "row_id": "80505101697f6cce",
+      "run_id": "20260619T140000Z-1"
+    },
+    "type": "response"
+  },
+  "root": "recovery_options_response"
+}

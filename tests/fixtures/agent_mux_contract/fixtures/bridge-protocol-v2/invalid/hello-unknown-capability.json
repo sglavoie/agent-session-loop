@@ -13,6 +13,9 @@
       "run.stop_after_current",
       "run.abort",
       "workbench.ensure",
+      "run.redirect",
+      "run.redirect_status",
+      "run.recover_conversation",
       "run.rewind"
     ],
     "contract_set_id": "asl-amx-1.0000000000000000",
@@ -27,13 +30,14 @@
       "question.resolve",
       "run.resume",
       "run.stop_after_current",
-      "run.abort"
+      "run.abort",
+      "run.redirect"
     ],
     "poll_interval_seconds": 1.0,
     "protocol": 2,
     "type": "hello"
   },
-  "pointer": "/capabilities/9",
+  "pointer": "/capabilities/12",
   "reason": "invalid-enum",
   "root": "hello"
 }

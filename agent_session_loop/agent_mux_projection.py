@@ -60,13 +60,13 @@ UPGRADABLE_STATE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
 
 #: Identity of the contract corpus under ``tests/fixtures/agent_mux_contract``.
 #:
-#: Pinned rather than recomputed: the digest covers 44 files, and re-reading
+#: Pinned rather than recomputed: the digest covers 55 files, and re-reading
 #: them on every state write would put the corpus on the durable-write path of
 #: every run — and an installed ASL need not ship its test fixtures at all.
 #: ``tests.test_asl_agent_mux_projection`` asserts this constant still equals
 #: :func:`agent_session_loop.agent_mux_contract.contract_set_id`, so a corpus
 #: edit that moves the identity fails the suite instead of shipping a stale ID.
-CONTRACT_SET_ID = "asl-amx-1.6f30193cd1744a98"
+CONTRACT_SET_ID = "asl-amx-1.85ec3041b9f03f47"
 
 # --------------------------------------------------------------------------
 # Phase vocabulary
