@@ -19,11 +19,19 @@ Four properties are structural rather than incidental:
   ``accepted``, ``rejected``, and ``expired`` are terminal, and the reducer
   keeps the first terminal record it sees. A second acceptance appended by a
   racing writer is rejected as a line, not applied as a transition, which is
-  what stops two turns from being redirected by one request. ``continued`` and
-  ``acknowledged`` are annotations *on* an accepted request rather than states
-  of it: they record which continuation attempt carried the correction and that
-  a worker running that exact attempt receipted it, and neither may precede the
-  acceptance it annotates or repeat itself.
+  what stops two turns from being redirected by one request. ``continued``,
+  ``delivered``, ``released`` and ``acknowledged`` are annotations *on* an
+  accepted request rather than states of it, and none of them may precede the
+  acceptance it annotates.
+- **Planned delivery and actual delivery are different facts.** ``continued``
+  says an attempt bound this correction into the prompt it was assembling;
+  ``delivered`` says that attempt's worker was actually launched with it. The
+  window between them is real — a prompt still has to be built, a conversation
+  still has to be selected, and either can refuse — so a correction that never
+  crossed it is given back with ``released`` rather than left claiming a
+  delivery to a worker that never ran. A released correction is carryable again;
+  a delivered one is not, because only the worker can say what it read and
+  :mod:`redirect_ack` exists for that answer.
 - **The feedback text never leaves this module by accident.** No parsed object
   carries it: :class:`RedirectRequest` holds a byte count and a digest, and
   rejected lines are reported without their raw bytes because a malformed line
@@ -105,6 +113,8 @@ RecordKind = Literal[
     "rejected",
     "expired",
     "continued",
+    "delivered",
+    "released",
     "acknowledged",
 ]
 KIND_SUBMITTED: RecordKind = "submitted"
@@ -112,6 +122,8 @@ KIND_ACCEPTED: RecordKind = "accepted"
 KIND_REJECTED: RecordKind = "rejected"
 KIND_EXPIRED: RecordKind = "expired"
 KIND_CONTINUED: RecordKind = "continued"
+KIND_DELIVERED: RecordKind = "delivered"
+KIND_RELEASED: RecordKind = "released"
 KIND_ACKNOWLEDGED: RecordKind = "acknowledged"
 RECORD_KINDS: tuple[RecordKind, ...] = (
     KIND_SUBMITTED,
@@ -119,6 +131,8 @@ RECORD_KINDS: tuple[RecordKind, ...] = (
     KIND_REJECTED,
     KIND_EXPIRED,
     KIND_CONTINUED,
+    KIND_DELIVERED,
+    KIND_RELEASED,
     KIND_ACKNOWLEDGED,
 )
 #: The kinds that describe what happened to an already-accepted request. They
@@ -128,6 +142,16 @@ RECORD_KINDS: tuple[RecordKind, ...] = (
 #: remainder, which is how :meth:`_Replay._apply` reaches them.
 ANNOTATION_KINDS: tuple[RecordKind, ...] = (
     KIND_CONTINUED,
+    KIND_DELIVERED,
+    KIND_RELEASED,
+    KIND_ACKNOWLEDGED,
+)
+#: The annotations that say something about a carry already on the record, as
+#: opposed to creating one. All three name the continuation they are about and
+#: are refused unless that is the carry the journal currently holds.
+CARRY_ANNOTATION_KINDS: tuple[RecordKind, ...] = (
+    KIND_DELIVERED,
+    KIND_RELEASED,
     KIND_ACKNOWLEDGED,
 )
 
@@ -195,6 +219,8 @@ ERROR_NOT_ACCEPTED = "redirect-not-accepted"
 ERROR_ALREADY_CARRIED = "redirect-already-carried"
 ERROR_NOT_CARRIED = "redirect-not-carried"
 ERROR_CONTINUATION_MISMATCH = "redirect-continuation-mismatch"
+ERROR_ALREADY_DELIVERED = "redirect-already-delivered"
+ERROR_ALREADY_ACKNOWLEDGED = "redirect-already-acknowledged"
 
 # Why one physical line was not applied. A rejected line is reported without
 # its bytes: a malformed submission still carries the operator's words.
@@ -216,6 +242,7 @@ REJECT_NOT_ACCEPTED = "not-accepted"
 REJECT_ALREADY_CARRIED = "already-carried"
 REJECT_NOT_CARRIED = "not-carried"
 REJECT_CONTINUATION_MISMATCH = "continuation-mismatch"
+REJECT_ALREADY_DELIVERED = "already-delivered"
 REJECT_ALREADY_ACKNOWLEDGED = "already-acknowledged"
 
 
@@ -286,11 +313,19 @@ class RedirectRequest:
     a projection, a receipt, or an operator prove *which* correction this is
     without any surface but :func:`read_feedback` ever holding the words.
 
-    ``continuation`` is the attempt that actually carried this correction into a
-    prompt, recorded when the run finalizes that prompt. It is what makes a
-    worker receipt checkable: acknowledging a correction means naming the
-    attempt it was delivered in, and an attempt that never carried it -- a stale
-    predecessor, a transcript echo of an older attempt -- names the wrong one.
+    ``continuation`` is the attempt that bound this correction into the prompt
+    it was assembling, recorded when the run finalizes that prompt. It is what
+    makes a worker receipt checkable: acknowledging a correction means naming
+    the attempt it was delivered in, and an attempt that never carried it -- a
+    stale predecessor, a transcript echo of an older attempt -- names the wrong
+    one.
+
+    ``delivered_at`` is the strictly later fact that the attempt named by
+    ``continuation`` actually launched a worker with that prompt. Between the
+    two marks sits every way an attempt can die before submitting: a prompt
+    build that refuses, a conversation the run cannot prove is usable, a crash.
+    ``released_at`` is that window's undo -- it withdraws a carry that never
+    reached a worker and puts the correction back in front of the next attempt.
     """
 
     operation_id: str
@@ -308,6 +343,11 @@ class RedirectRequest:
     continued_at: str | None = None
     continued_seq: int | None = None
     continuation_recovered: bool = False
+    delivered_at: str | None = None
+    delivered_seq: int | None = None
+    released_at: str | None = None
+    released_seq: int | None = None
+    released_from: RedirectTarget | None = None
     acknowledged_at: str | None = None
     acknowledged_seq: int | None = None
 
@@ -321,8 +361,41 @@ class RedirectRequest:
 
     @property
     def carried(self) -> bool:
-        """Whether a continuation attempt has taken delivery of this correction."""
+        """Whether a continuation attempt has bound this correction into a prompt.
+
+        This is an undertaking, not an outcome. The attempt named by
+        :attr:`continuation` promised to put these words in front of a worker;
+        :attr:`delivered` is what says it got that far.
+        """
         return self.continuation is not None
+
+    @property
+    def delivered(self) -> bool:
+        """Whether the carrying attempt actually launched a worker with it."""
+        return self.delivered_at is not None
+
+    @property
+    def released(self) -> bool:
+        """Whether a carry was ever withdrawn because its attempt never launched.
+
+        Releasing clears the continuation, so ``released_from`` is the only
+        trace the withdrawn carry leaves. The trace matters because "never
+        carried" and "carried, then released" answer the same question for the
+        next attempt but a different one for an operator asking what became of
+        their words. It survives a later re-carry for the same reason.
+        """
+        return self.released_at is not None
+
+    @property
+    def reached_a_worker(self) -> bool:
+        """Whether any worker was launched with this correction, or receipted it.
+
+        The question behind every "is this still owed to someone" decision. A
+        receipt implies delivery even on a journal written before delivery was
+        recorded, which is why this is a disjunction rather than a read of
+        :attr:`delivered` alone.
+        """
+        return self.delivered or self.acknowledged
 
     @property
     def recovered(self) -> bool:
@@ -380,6 +453,15 @@ class RedirectRequest:
             "continued_at": self.continued_at,
             "continued_seq": self.continued_seq,
             "continuation_recovered": self.continuation_recovered,
+            "delivered_at": self.delivered_at,
+            "delivered_seq": self.delivered_seq,
+            "released_at": self.released_at,
+            "released_seq": self.released_seq,
+            "released_from": (
+                self.released_from.to_payload()
+                if self.released_from is not None
+                else None
+            ),
             "acknowledged_at": self.acknowledged_at,
             "acknowledged_seq": self.acknowledged_seq,
             **self.target.to_payload(),
@@ -473,22 +555,25 @@ class RedirectJournalView:
         """Requests a crash left unfinished for some *other* run, oldest first.
 
         "Unfinished" is exactly two states: never settled, and settled as
-        accepted but never carried into a prompt. Both describe a correction the
-        operator was promised something about and whose promise no process is
-        keeping any more, because the run named in the target is not this one.
+        accepted but never put in front of a worker. Both describe a correction
+        the operator was promised something about and whose promise no process
+        is keeping any more, because the run named in the target is not this
+        one.
 
-        A carried request is excluded on purpose even when nobody receipted it.
-        The journal records that some attempt took delivery of it, and the whole
-        acknowledgment protocol exists because delivery is not receipt: deciding
-        here that an unreceipted delivery never happened would be the guess that
-        protocol refuses to make. :mod:`redirect_recovery` reports those as
-        uncertain instead.
+        A *delivered* request is excluded on purpose even when nobody receipted
+        it. The journal records that a worker was launched holding it, and the
+        whole acknowledgment protocol exists because delivery is not receipt:
+        deciding here that a launched delivery never happened would be the guess
+        that protocol refuses to make. :mod:`redirect_recovery` reports those as
+        uncertain instead. A carry with no delivery is a different animal --
+        nothing ran, so there is nothing to be uncertain about -- and stays
+        strandable so the words can be recovered.
         """
         return tuple(
             request
             for request in self.requests
             if request.target.run_id != run_id
-            and not request.carried
+            and not request.reached_a_worker
             and (not request.terminal or request.accepted)
         )
 
@@ -819,12 +904,18 @@ class _Replay:
         created_at: str,
         kind: str,
     ) -> None:
-        """Apply a ``continued`` or ``acknowledged`` line to an accepted request.
+        """Apply a carry annotation to an accepted request.
+
+        ``continued`` creates the carry; ``delivered``, ``released`` and
+        ``acknowledged`` all speak about a carry already on the record and are
+        refused unless they name the one the journal currently holds.
 
         Every condition the appenders check is re-checked here, because a replay
         that trusted the file would let a hand-edited or racing line invent a
         receipt for an attempt that never carried the correction — and a receipt
-        is the whole evidence that a worker read it.
+        is the whole evidence that a worker read it. The same applies to
+        ``delivered``: it is what stops a later reader from recovering words a
+        worker is already acting on.
         """
         existing = self.requests.get(operation_id)
         if existing is None:
@@ -876,10 +967,42 @@ class _Replay:
             self.reject(seq, REJECT_CONTINUATION_MISMATCH, operation_id)
             return
         if recovered != existing.continuation_recovered:
-            # The receipt has to name delivery as the journal recorded it. A
+            # The annotation has to name delivery as the journal recorded it. A
             # line that agrees on the turn but disagrees on whether that turn
             # crossed a crash is describing a delivery that never happened.
             self.reject(seq, REJECT_CONTINUATION_MISMATCH, operation_id)
+            return
+        if kind == KIND_DELIVERED:
+            if existing.delivered:
+                self.reject(seq, REJECT_ALREADY_DELIVERED, operation_id)
+                return
+            self.requests[operation_id] = replace(
+                existing,
+                delivered_at=created_at,
+                delivered_seq=seq,
+            )
+            return
+        if kind == KIND_RELEASED:
+            # Releasing is only ever the undo of a carry nothing saw. Once a
+            # worker was launched with the words -- or receipted them -- the
+            # attempt owns them, and withdrawing the carry here would hand the
+            # same correction to a second worker.
+            if existing.delivered:
+                self.reject(seq, REJECT_ALREADY_DELIVERED, operation_id)
+                return
+            if existing.acknowledged:
+                self.reject(seq, REJECT_ALREADY_ACKNOWLEDGED, operation_id)
+                return
+            self.requests[operation_id] = replace(
+                existing,
+                continuation=None,
+                continued_at=None,
+                continued_seq=None,
+                continuation_recovered=False,
+                released_at=created_at,
+                released_seq=seq,
+                released_from=continuation,
+            )
             return
         if existing.acknowledged:
             self.reject(seq, REJECT_ALREADY_ACKNOWLEDGED, operation_id)
@@ -1394,10 +1517,15 @@ def _annotate_locked(
 
     Annotations are charged against the settlement reserve rather than the
     submission tier. They are records *about* a request already in the journal,
-    at most one of each per accepted request, so they add no unbounded demand —
     and refusing one would leave an accepted correction with no durable trace of
     which attempt carried it, which is the only thing a receipt can be checked
     against.
+
+    Their demand is bounded by the run loop rather than by the record kinds.
+    ``delivered`` and ``acknowledged`` are still at most one apiece, and a
+    release-then-recarry cycle costs two more lines per attempt that gave up
+    before launching -- bounded by the run's own attempt limits, which already
+    bound the submission tier.
     """
     record: dict[str, Any] = {
         **_record(kind, existing.operation_id, clock.isoformat(moment)),
@@ -1415,6 +1543,7 @@ def _annotate_locked(
         effective_max_bytes=REDIRECT_JOURNAL_MAX_BYTES,
     )
     created_at = str(record["created_at"])
+    annotated: RedirectRequest
     if kind == KIND_CONTINUED:
         annotated = replace(
             existing,
@@ -1422,6 +1551,23 @@ def _annotate_locked(
             continued_at=created_at,
             continued_seq=seq,
             continuation_recovered=recovered,
+        )
+    elif kind == KIND_DELIVERED:
+        annotated = replace(
+            existing,
+            delivered_at=created_at,
+            delivered_seq=seq,
+        )
+    elif kind == KIND_RELEASED:
+        annotated = replace(
+            existing,
+            continuation=None,
+            continued_at=None,
+            continued_seq=None,
+            continuation_recovered=False,
+            released_at=created_at,
+            released_seq=seq,
+            released_from=continuation,
         )
     else:
         annotated = replace(
@@ -1560,6 +1706,192 @@ def carry_request(
             continuation=continuation,
             moment=moment,
             recovered=recovered,
+        )
+
+
+def _require_carried_by(
+    replay: _Replay,
+    operation_id: str,
+    *,
+    journal_path: Path,
+    continuation: RedirectTarget,
+) -> RedirectRequest:
+    """Return the request ``continuation`` currently holds a carry on.
+
+    Shared by the two annotations that speak about an existing carry rather than
+    creating one. Both have exactly one thing to prove before they may append --
+    that the carry on the record is *this* attempt's -- and both have to refuse a
+    settled, uncarried or foreign-carried request the same way, because the
+    caller cannot tell those apart from a successful no-op.
+    """
+    existing = replay.requests.get(operation_id)
+    if existing is None:
+        raise RedirectStoreError(
+            ERROR_UNKNOWN_REQUEST,
+            f"no redirect request named {operation_id!r}",
+            path=journal_path,
+            details={"operation_id": operation_id},
+        )
+    if not existing.accepted:
+        raise RedirectStoreError(
+            (
+                ERROR_REQUEST_EXPIRED
+                if existing.state == STATE_EXPIRED
+                else ERROR_ALREADY_SETTLED
+                if existing.terminal
+                else ERROR_NOT_ACCEPTED
+            ),
+            f"redirect request {operation_id!r} is {existing.state}, not accepted",
+            path=journal_path,
+            details={"operation_id": operation_id, "state": existing.state},
+        )
+    if not existing.carried:
+        raise RedirectStoreError(
+            ERROR_NOT_CARRIED,
+            f"redirect request {operation_id!r} has not been carried into a "
+            f"continuation attempt yet",
+            path=journal_path,
+            details={
+                "operation_id": operation_id,
+                "continuation": continuation.to_payload(),
+            },
+        )
+    if not existing.continues_attempt(continuation):
+        raise RedirectStoreError(
+            ERROR_CONTINUATION_MISMATCH,
+            f"redirect request {operation_id!r} was carried by a different "
+            f"attempt than the one annotating it",
+            path=journal_path,
+            details={
+                "operation_id": operation_id,
+                "continuation": existing.to_payload()["continuation"],
+                "attempt": continuation.to_payload(),
+            },
+        )
+    return existing
+
+
+def deliver_request(
+    plan_dir: str | Path,
+    operation_id: str,
+    *,
+    continuation: RedirectTarget,
+    state_dir: str | Path | None = None,
+    now: datetime | None = None,
+) -> RedirectRequest:
+    """Record that ``continuation`` actually launched a worker with this carry.
+
+    :func:`carry_request` records an undertaking made while a prompt is still
+    being assembled; this records that the undertaking was kept. Everything
+    between the two is a window in which the attempt can still die -- a prompt
+    build that refuses, a conversation the run cannot prove is usable, a crash --
+    and only a mark on this side of it justifies treating the correction as
+    spent. Without it a reader has to choose between stranding words a live
+    worker is acting on and losing words nothing ever saw; with it, neither
+    guess is needed.
+
+    Repeating the mark for the same continuation returns the existing record and
+    appends nothing, so a retried launch does not claim two deliveries.
+    """
+    validate_target(continuation)
+    journal_path = journal_path_for_plan(plan_dir, state_dir)
+    with _locked_journal(journal_path) as (fd, replay):
+        existing = _require_carried_by(
+            replay,
+            operation_id,
+            journal_path=journal_path,
+            continuation=continuation,
+        )
+        if existing.delivered:
+            return existing
+        return _annotate_locked(
+            fd,
+            replay,
+            journal_path=journal_path,
+            existing=existing,
+            kind=KIND_DELIVERED,
+            # The recorded continuation, not the caller's copy: they identify
+            # the same turn, and the journal should say what it already knows.
+            continuation=existing.continuation or continuation,
+            moment=_moment(now),
+            recovered=existing.continuation_recovered,
+        )
+
+
+def release_request(
+    plan_dir: str | Path,
+    operation_id: str,
+    *,
+    continuation: RedirectTarget,
+    state_dir: str | Path | None = None,
+    now: datetime | None = None,
+) -> RedirectRequest:
+    """Withdraw a carry whose attempt gave up before launching a worker.
+
+    The carry's undo, and the reason a refusal between prompt assembly and
+    launch does not cost the operator their words. The request goes back to
+    accepted-and-uncarried, so the next attempt coalesces it again exactly as if
+    the abandoned one had never touched it, and a crash in the same window
+    leaves it recoverable instead of claimed by a turn that never ran.
+
+    Refused once the carry was delivered or receipted: at that point a worker is
+    acting on the words, and handing them to a second attempt would be a
+    duplicate rather than a rescue. Repeating the release for the same
+    continuation returns the existing record and appends nothing.
+    """
+    validate_target(continuation)
+    journal_path = journal_path_for_plan(plan_dir, state_dir)
+    with _locked_journal(journal_path) as (fd, replay):
+        recorded = replay.requests.get(operation_id)
+        if (
+            recorded is not None
+            and not recorded.carried
+            and recorded.released_from is not None
+            and recorded.released_from.identifies_same_turn(continuation)
+        ):
+            # Already released from this very attempt. Checked before the carry
+            # requirement, because releasing clears the carry that requirement
+            # looks for, and a retried release must not read as a mismatch.
+            return recorded
+        existing = _require_carried_by(
+            replay,
+            operation_id,
+            journal_path=journal_path,
+            continuation=continuation,
+        )
+        if existing.delivered:
+            raise RedirectStoreError(
+                ERROR_ALREADY_DELIVERED,
+                f"redirect request {operation_id!r} was already delivered to a "
+                f"launched worker",
+                path=journal_path,
+                details={
+                    "operation_id": operation_id,
+                    "continuation": existing.to_payload()["continuation"],
+                    "delivered_at": existing.delivered_at,
+                },
+            )
+        if existing.acknowledged:
+            raise RedirectStoreError(
+                ERROR_ALREADY_ACKNOWLEDGED,
+                f"redirect request {operation_id!r} was already acknowledged by "
+                f"the worker that carried it",
+                path=journal_path,
+                details={
+                    "operation_id": operation_id,
+                    "continuation": existing.to_payload()["continuation"],
+                    "acknowledged_at": existing.acknowledged_at,
+                },
+            )
+        return _annotate_locked(
+            fd,
+            replay,
+            journal_path=journal_path,
+            existing=existing,
+            kind=KIND_RELEASED,
+            continuation=existing.continuation or continuation,
+            moment=_moment(now),
+            recovered=existing.continuation_recovered,
         )
 
 

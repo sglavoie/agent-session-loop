@@ -163,10 +163,16 @@ def stage_for_operation(
 
     Derived from the durable status plus one fact the status cannot hold: which
     turn the run is on now. The two ambiguous statuses are the ones that split
-    on it -- ``accepted`` into ``interrupting`` against ``stopped``, and
+    on it -- ``accepted`` into ``resuming``, ``interrupting`` or ``stopped``, and
     ``uncertain`` into ``resuming`` against a genuinely open question -- because
     in both the journal says what was undertaken and only the live run says
     whether it is still happening.
+
+    ``resuming`` is reached from either of those statuses, and deliberately. An
+    operator asking where their correction is wants to know it is in the prompt
+    the live attempt is running; whether the launch mark was written yet is the
+    difference between two instants of the same answer, and reporting one of
+    them as ``stopped`` would say the turn it was carried into is gone.
     """
     status = operation.status
     if status == redirect_recovery.STATUS_ACKNOWLEDGED:
@@ -183,25 +189,38 @@ def stage_for_operation(
             return STAGE_BLOCKED
         return STAGE_REJECTED
     if status == redirect_recovery.STATUS_ACCEPTED:
+        if _carried_into_live_attempt(operation, live_target):
+            return STAGE_RESUMING
         if live_target is not None and live_target.identifies_same_turn(
             operation.target
         ):
             return STAGE_INTERRUPTING
+        # Covers a carry the live run gave back as well as one it never made:
+        # both leave the named turn gone with the correction still owed, which
+        # is what ``stopped`` says.
         return STAGE_STOPPED
     if status == redirect_recovery.STATUS_UNCERTAIN:
-        continuation = operation.continuation
-        if (
-            continuation is not None
-            and live_target is not None
-            and live_target.identifies_same_turn(continuation)
-        ):
+        if _carried_into_live_attempt(operation, live_target):
             return STAGE_RESUMING
         return STAGE_UNCERTAIN
     # ``delivered`` is in the status vocabulary but no projection emits it: a
-    # carried, unreceipted correction is reported ``uncertain``. Anything else
+    # launched, unreceipted correction is reported ``uncertain``. Anything else
     # reaching here is a status this surface has not been taught, and saying so
     # beats inventing a stage for it.
     return STAGE_UNCERTAIN
+
+
+def _carried_into_live_attempt(
+    operation: redirect_recovery.OperationOutcome,
+    live_target: redirect_store.RedirectTarget | None,
+) -> bool:
+    """Whether the turn running now is the one holding this correction."""
+    continuation = operation.continuation
+    return (
+        continuation is not None
+        and live_target is not None
+        and live_target.identifies_same_turn(continuation)
+    )
 
 
 def operation_payload(

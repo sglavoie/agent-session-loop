@@ -1,7 +1,7 @@
 """What happens to a correction when the process holding it stops existing.
 
-Every earlier redirect test drives a live runner. These drive the five instants
-a crash can land on, by building the journal a crash would have left and then
+Every earlier redirect test drives a live runner. These drive the instants a
+crash can land on, by building the journal a crash would have left and then
 asking what the next run does with it. Fault injection here means writing the
 exact prefix of records the dead process got through -- nothing is mocked into
 failing, because the thing under test is a file, and the file after a crash is
@@ -20,6 +20,10 @@ The claims, in the order the module argues them:
 * no correction is lost at any boundary: one accepted and never delivered is
   carried by the run that resumes the session, across a run id that changed and
   a turn index that went backwards, and the journal records that it did;
+* a crash inside the window between binding a correction to a prompt and
+  launching the worker that would hold it is recoverable rather than uncertain:
+  the carry is handed back at startup, because the launch is written down
+  separately and its absence is therefore evidence;
 * no correction is silently re-delivered either. Delivered-but-unreceipted is
   reported as uncertain and never acted on automatically, because the journal
   records what was handed to a worker and not what a worker read;
@@ -263,6 +267,12 @@ class StatusProjectionTests(RecoveryTestCase):
             continuation=target(2),
             state_dir=self.state_dir,
         )
+        redirect_store.deliver_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(2),
+            state_dir=self.state_dir,
+        )
         self.write_lock(pid=self.DEAD_PID)
 
         # The journal knows what was handed to a worker. Whether a model read
@@ -271,6 +281,26 @@ class StatusProjectionTests(RecoveryTestCase):
         self.assertEqual(
             self.status_of(request.operation_id),
             redirect_recovery.STATUS_UNCERTAIN,
+        )
+
+    def test_a_prompt_that_never_launched_stays_owed_to_the_next_attempt(
+        self,
+    ) -> None:
+        request = self.accept(self.submit())
+        redirect_store.carry_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(2),
+            state_dir=self.state_dir,
+        )
+        self.write_lock(pid=self.DEAD_PID)
+
+        # Carried into a prompt, and then nothing ran. There is no ambiguity to
+        # report: no worker has seen these words, so the status is the same one
+        # a never-carried correction gets.
+        self.assertEqual(
+            self.status_of(request.operation_id),
+            redirect_recovery.STATUS_ACCEPTED,
         )
 
     def test_a_receipt_settles_the_status(self) -> None:
@@ -588,12 +618,145 @@ class NoLostCorrectionTests(RecoveryTestCase):
         self.assertEqual(stored.continuation, target(1, run_id=NEW_RUN))
 
 
+class CrashBeforeLaunchTests(RecoveryTestCase):
+    """A crash inside the window between building a prompt and starting a worker.
+
+    The prefix a crash leaves here is the whole difficulty: acceptance, then a
+    carry, then nothing. Read as delivery it is indistinguishable from a worker
+    that ran and said nothing -- which is uncertain, and uncertain is terminal
+    for the words. What makes it recoverable is that the launch is written down
+    separately, so its absence is evidence rather than silence.
+    """
+
+    def carried_but_unlaunched(self) -> redirect_store.RedirectRequest:
+        """Accepted, bound into the next attempt's prompt, and then the crash."""
+        request = self.accept(self.submit(turn_index=7))
+        redirect_store.carry_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(8),
+            state_dir=self.state_dir,
+        )
+        self.write_lock(pid=self.DEAD_PID)
+        return request
+
+    def test_the_unlaunched_carry_is_handed_back_at_startup(self) -> None:
+        request = self.carried_but_unlaunched()
+
+        report = self.reconcile()
+
+        self.assertEqual((request.operation_id,), report.released)
+        stored = self.read().request(request.operation_id)
+        assert stored is not None
+        self.assertFalse(stored.carried)
+        self.assertTrue(stored.released)
+        self.assertFalse(stored.delivered)
+
+    def test_it_is_offered_rather_than_reported_uncertain(self) -> None:
+        request = self.carried_but_unlaunched()
+
+        report = self.reconcile()
+
+        self.assertEqual((request.operation_id,), report.recoverable_for(SESSION_ID))
+        self.assertEqual((), report.uncertain_for(SESSION_ID))
+        self.assertEqual(
+            redirect_recovery.STATUS_ACCEPTED, self.status_of(request.operation_id)
+        )
+
+    def test_the_successor_carries_the_words_themselves(self) -> None:
+        request = self.carried_but_unlaunched()
+        report = self.reconcile()
+
+        carried = redirect_ack.carry_corrections(
+            self.plan_dir,
+            continuation=target(1, run_id=NEW_RUN),
+            recovered_operation_ids=redirect_recovery.recoverable_operation_ids(
+                report, SESSION_ID
+            ),
+            state_dir=self.state_dir,
+        )
+
+        self.assertEqual((request.operation_id,), carried.operation_ids())
+        self.assertEqual(FIRST, carried.corrections[0].text)
+        self.assertTrue(carried.corrections[0].recovered)
+        self.assertEqual((), carried.refused)
+
+    def test_a_carry_that_did_reach_a_worker_is_left_alone(self) -> None:
+        """The other side of the same evidence, and the reason it is separate.
+
+        Identical journals up to the carry. This one has the launch recorded, so
+        what a model may have read is genuinely unknown and the correction is
+        reported as uncertain rather than handed to a second worker.
+        """
+        request = self.accept(self.submit(turn_index=7))
+        redirect_store.carry_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(8),
+            state_dir=self.state_dir,
+        )
+        redirect_store.deliver_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(8),
+            state_dir=self.state_dir,
+        )
+        self.write_lock(pid=self.DEAD_PID)
+
+        report = self.reconcile()
+
+        self.assertEqual((), report.released)
+        self.assertEqual((request.operation_id,), report.uncertain_for(SESSION_ID))
+        self.assertEqual((), report.recoverable_for(SESSION_ID))
+
+    def test_reconciling_twice_releases_once(self) -> None:
+        request = self.carried_but_unlaunched()
+        self.reconcile()
+        lines = len(self.journal_lines())
+
+        again = self.reconcile()
+
+        self.assertEqual((), again.released)
+        self.assertEqual((request.operation_id,), again.recoverable_for(SESSION_ID))
+        self.assertEqual(lines, len(self.journal_lines()))
+
+    def test_a_blocked_reconciliation_releases_nothing(self) -> None:
+        """The refusal comes first, as it does for every other write here."""
+        request = self.carried_but_unlaunched()
+        self.write_lock(pid=self.LIVE_FOREIGN_PID)
+
+        report = self.reconcile()
+
+        self.assertTrue(report.blocked)
+        self.assertEqual((), report.released)
+        stored = self.read().request(request.operation_id)
+        assert stored is not None
+        self.assertTrue(stored.carried)
+
+    def test_the_release_is_reported_without_the_operators_words(self) -> None:
+        self.carried_but_unlaunched()
+
+        payload = self.reconcile().to_payload()
+
+        self.assertNotIn(FIRST, json.dumps(payload))
+        self.assertEqual(1, len(payload["released"]))
+
+
 class NoSilentRedeliveryTests(RecoveryTestCase):
     """A crash after delivery is ambiguous, and ambiguity is reported."""
 
     def delivered_but_unreceipted(self) -> redirect_store.RedirectRequest:
         request = self.accept(self.submit(turn_index=7))
         redirect_store.carry_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(8),
+            state_dir=self.state_dir,
+        )
+        # The launch mark, not just the carry: a carry on its own says a prompt
+        # was assembled, and the ambiguity these tests are about begins only
+        # once a worker was started holding the words.
+        redirect_store.deliver_request(
             self.plan_dir,
             request.operation_id,
             continuation=target(8),

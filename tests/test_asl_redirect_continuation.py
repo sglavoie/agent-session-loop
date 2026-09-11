@@ -28,14 +28,20 @@ The claims, in the order the module argues them:
 * and, end to end through the run loop with a fake worker: the corrected
   session is attempted again on the conversation it was corrected on, told
   which operations were interrupted, without the plan advancing, without a
-  failure budget being spent, and without a commit.
+  failure budget being spent, and without a commit;
+* and, when that next attempt never launches -- its conversation could not be
+  confirmed, so the run pauses between assembling the prompt and spawning a
+  worker -- the correction is handed back rather than counted as delivered, and
+  the authorized fresh start that follows is the one that says it.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -53,9 +59,11 @@ from agent_session_loop import (
     harnesses,
     pause_policy,
     plans,
+    redirect_ack,
     redirect_admission,
     redirect_continuation,
     redirect_control,
+    redirect_recovery,
     redirect_store,
     review_guard,
     run_commit,
@@ -1243,14 +1251,15 @@ class RedirectedHarnessTests(unittest.TestCase):
         self.assertEqual([], self.deferrals())
 
 
-class RedirectedRunTests(unittest.TestCase):
-    """A fake worker, corrected mid-turn, resuming with what it was told.
+class _RedirectedRun(unittest.TestCase):
+    """The whole-loop fixture: a real run around a fake worker.
 
-    The one case that cannot be made from parts: the loop has to reach the
-    disposition, carry the correction across the iteration, and not mistake any
-    of it for a failure. Everything real is real here -- the plan, the journal,
-    the run state, the conversation ledger and a git repository with commits
-    enabled -- and only the worker and the four process operations are fakes.
+    Everything real is real here -- the plan, the journal, the run state, the
+    conversation ledger and a git repository with commits enabled -- and only
+    the worker and the four process operations are fakes. Kept apart from the
+    claims that use it because more than one story needs the same run, and each
+    of them changes the worker; a fixture that also carried tests would run the
+    first story's assertions against the second story's worker.
     """
 
     def setUp(self) -> None:
@@ -1436,8 +1445,23 @@ class RedirectedRunTests(unittest.TestCase):
 
     # -- the run -------------------------------------------------------------
 
-    def run_loop_once(self) -> dict[str, Any]:
-        write_plan(self.plan_dir, ("pending",))
+    def run_loop_once(
+        self,
+        *,
+        run_id: str = RUN_ID,
+        fresh_conversation: bool = False,
+        prepare_plan: bool = True,
+        expect_exit_code: int = 0,
+    ) -> dict[str, Any]:
+        """Spend one whole run against the fakes, as the real entry point would.
+
+        The keyword arguments exist for the second run of a recovery case: it
+        mints its own id the way a relaunch does, carries the one-use fresh
+        conversation authorization, and must not rewrite the plan the first run
+        already touched.
+        """
+        if prepare_plan:
+            write_plan(self.plan_dir, ("pending",))
         listener = FakeRunControlListener(current_harness="codex")
         real_state_dir = state.plan_state_dir(self.plan_dir, self.state_dir)
         listener.state_path = real_state_dir / events.STATE_FILE_NAME
@@ -1464,6 +1488,7 @@ class RedirectedRunTests(unittest.TestCase):
             effort=None,
             note=None,
             allow_not_loop_ready=True,
+            fresh_conversation=fresh_conversation,
         )
         with (
             patched_env(
@@ -1490,12 +1515,12 @@ class RedirectedRunTests(unittest.TestCase):
                     max_sessions=None,
                     commit_mode=run_selection.COMMIT_MODE_PER_SESSION,
                     lock_info=lock_info,
-                    run_id=RUN_ID,
+                    run_id=run_id,
                     redirect_wakeup=self.wakeup,
                 )
             finally:
                 state.release_lock(self.plan_dir, self.state_dir)
-        self.assertEqual(0, exit_code, payload)
+        self.assertEqual(expect_exit_code, exit_code, payload)
         return payload
 
     def events_named(self, name: str) -> list[dict[str, Any]]:
@@ -1507,7 +1532,14 @@ class RedirectedRunTests(unittest.TestCase):
             record["payload"] for record in read_jsonl(path) if record["name"] == name
         ]
 
-    # -- the claims ----------------------------------------------------------
+
+class RedirectedRunTests(_RedirectedRun):
+    """A fake worker, corrected mid-turn, resuming with what it was told.
+
+    The one case that cannot be made from parts: the loop has to reach the
+    disposition, carry the correction across the iteration, and not mistake any
+    of it for a failure.
+    """
 
     def test_the_corrected_session_is_attempted_again_with_its_correction(
         self,
@@ -1516,18 +1548,25 @@ class RedirectedRunTests(unittest.TestCase):
 
         self.assertEqual(["codex", "codex"], self.harness_calls)
         continuations = self.events_named(events.REDIRECT_CONTINUATION_EVENT)
-        # `carried` falls between the two because binding a correction to the
-        # attempt that will deliver it happens while that attempt's prompt is
-        # being assembled — after the predecessor is settled, before the
-        # resumed turn is planned.
+        # `carried` falls between the first two because binding a correction to
+        # the attempt that will deliver it happens while that attempt's prompt
+        # is being assembled — after the predecessor is settled, before the
+        # resumed turn is planned. `delivered` is last because it is the one
+        # fact none of the others establish: a worker was actually spawned
+        # holding the words.
         self.assertEqual(
             [
                 turn_dispositions.REDIRECT_OUTCOME_CONTINUED,
                 "carried",
                 "resumed",
+                "delivered",
             ],
             [record["outcome"] for record in continuations],
         )
+        delivered = continuations[3]
+        self.assertEqual(["op-1"], delivered["operation_ids"])
+        self.assertEqual(f"{RUN_ID}/{SESSION_ID}/2", delivered["attempt"])
+        self.assertEqual([], delivered["refused"])
         carried = continuations[1]
         self.assertEqual(
             ["op-1"], [item["operation_id"] for item in carried["carried"]]
@@ -1592,6 +1631,207 @@ class RedirectedRunTests(unittest.TestCase):
         self.assertEqual(
             [SESSION_ID], [call["session_id"] for call in self.commit_calls]
         )
+
+
+class PrelaunchPauseRecoveryTests(_RedirectedRun):
+    """The gap between assembling a prompt and spawning the worker that holds it.
+
+    The same run as :class:`RedirectedRunTests` up to the moment the successor
+    would launch, and then a worker whose conversation was never confirmed, so
+    the run refuses to open a second one and pauses. Nothing was ever told the
+    correction. The claims are what the operator is owed afterwards: the words
+    are still outstanding, the journal does not say otherwise, and the one-use
+    authorization to start fresh is what finally delivers them.
+    """
+
+    #: The relaunch mints its own id, exactly as a second ``asl run`` would.
+    RECOVERY_RUN_ID = "run-redirect-2"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.prompts: list[str] = []
+        self.receipt: redirect_ack.Acknowledgment | None = None
+        self.stale_refusal: redirect_ack.RedirectAckError | None = None
+
+    def _fake_worker(self, name: str, **kwargs: Any) -> harnesses.HarnessResult:
+        """The shared worker, with the first turn's conversation left unconfirmed.
+
+        ``CANCEL_STAGE_HANDSHAKE`` is the harness saying the conversation id it
+        reported never carried accepted work. The successor's prompt is built
+        and its correction bound to it regardless -- that happens first -- and
+        only then does conversation recovery refuse the launch.
+        """
+        prompt = str(kwargs.get("prompt") or "")
+        self.prompts.append(prompt)
+        result = super()._fake_worker(name, **kwargs)
+        if len(self.harness_calls) == 1:
+            return dataclasses.replace(
+                result, cancel_stage=harnesses.CANCEL_STAGE_HANDSHAKE
+            )
+        self._receipt_from_prompt(prompt, harness=name)
+        return result
+
+    def _receipt_from_prompt(self, prompt: str, *, harness: str) -> None:
+        """Acknowledge as a real worker does: from the words it was handed.
+
+        The prompt carries both halves of the receipt's identity, so parsing it
+        is what proves the worker could acknowledge at all -- an attempt token
+        the test supplied would prove only that the journal accepts one.
+        """
+        match = re.search(r"--redirect-id (\S+) --attempt (\S+)", prompt)
+        assert match is not None, prompt
+        operation_id, token = match.group(1), match.group(2)
+        run_id, session_id, turn_index = token.split("/")
+        live = redirect_store.RedirectTarget(
+            run_id=run_id,
+            session_id=session_id,
+            turn_index=int(turn_index),
+            harness=harness,
+        )
+        # The receipt the paused run's successor would have written if it had
+        # ever started. It names an attempt that no longer exists, and it is
+        # refused here for the same reason a stale worker's would be.
+        try:
+            redirect_ack.acknowledge_correction(
+                self.plan_dir,
+                operation_id,
+                token=redirect_ack.attempt_token(target(2)),
+                live_attempt=live,
+                state_dir=self.state_dir,
+            )
+        except redirect_ack.RedirectAckError as error:
+            self.stale_refusal = error
+        self.receipt = redirect_ack.acknowledge_correction(
+            self.plan_dir,
+            operation_id,
+            token=token,
+            live_attempt=live,
+            state_dir=self.state_dir,
+        )
+
+    def _request(self) -> redirect_store.RedirectRequest:
+        request = redirect_store.read_journal(
+            self.plan_dir, state_dir=self.state_dir
+        ).request("op-1")
+        assert request is not None
+        return request
+
+    def _pause(self) -> dict[str, Any]:
+        """The first run, up to and including the refusal to launch."""
+        payload = self.run_loop_once(expect_exit_code=1)
+        self.assertTrue(payload["paused"])
+        self.assertEqual("conversation-recovery-required", payload["reason"])
+        self.assertEqual(["codex"], self.harness_calls)
+        return payload
+
+    def _recover(self) -> dict[str, Any]:
+        """The authorized relaunch: a new run id, one fresh conversation."""
+        return self.run_loop_once(
+            run_id=self.RECOVERY_RUN_ID,
+            fresh_conversation=True,
+            prepare_plan=False,
+        )
+
+    def test_a_pause_before_launch_leaves_the_correction_undelivered(self) -> None:
+        self._pause()
+
+        request = self._request()
+        self.assertTrue(request.accepted)
+        # The three facts that have to move together. Delivery is what no
+        # worker established here, so the carry that anticipated it is withdrawn
+        # rather than left standing as a record of an attempt that never ran.
+        self.assertFalse(request.delivered)
+        self.assertFalse(request.reached_a_worker)
+        self.assertFalse(request.carried)
+        self.assertTrue(request.released)
+        self.assertEqual(
+            redirect_ack.attempt_token(target(2)),
+            redirect_ack.attempt_token(request.released_from),
+        )
+
+    def test_the_paused_run_hands_the_correction_back_itself(self) -> None:
+        self._pause()
+
+        # The run that bound the correction is the one that releases it, before
+        # it exits. Leaving that to the next run's startup reconciliation would
+        # make recovery depend on a relaunch ever happening.
+        continuations = self.events_named(events.REDIRECT_CONTINUATION_EVENT)
+        self.assertEqual(
+            [turn_dispositions.REDIRECT_OUTCOME_CONTINUED, "carried", "released"],
+            [record["outcome"] for record in continuations],
+        )
+        released = continuations[2]
+        self.assertEqual(["op-1"], released["operation_ids"])
+        self.assertEqual(f"{RUN_ID}/{SESSION_ID}/2", released["attempt"])
+        self.assertEqual([], released["refused"])
+        self.assertNotIn(FEEDBACK, json.dumps(continuations))
+
+    def test_the_outstanding_correction_is_offered_to_the_next_run(self) -> None:
+        self._pause()
+
+        # What a relaunch sees before it does anything: a correction owed to the
+        # session, not one in doubt. Uncertainty is the failure this repair is
+        # about -- it is terminal for the words, because nothing may be handed
+        # to a second attempt once the journal says a first one was given it.
+        report = redirect_recovery.reconcile_startup(
+            self.plan_dir,
+            run_id=self.RECOVERY_RUN_ID,
+            pending_session_ids=(SESSION_ID,),
+            state_dir=self.state_dir,
+        )
+        self.assertEqual(("op-1",), report.recoverable_for(SESSION_ID))
+        self.assertEqual((), report.uncertain_for(SESSION_ID))
+
+    def test_an_authorized_fresh_start_is_told_what_the_pause_withheld(self) -> None:
+        payload = self._recover_after_pause()
+
+        self.assertEqual(["codex", "codex"], self.harness_calls)
+        self.assertIn(FEEDBACK, self.prompts[1])
+        request = self._request()
+        # Carried again, by a different run than the one that accepted it, and
+        # this time by an attempt that actually launched.
+        self.assertTrue(request.carried)
+        self.assertTrue(request.delivered)
+        self.assertTrue(request.recovered)
+        self.assertEqual(
+            f"{self.RECOVERY_RUN_ID}/{SESSION_ID}/1",
+            redirect_ack.attempt_token(request.continuation),
+        )
+        self.assertFalse(payload["paused"])
+        self.assertEqual([1], payload["completed_sessions"])
+
+    def test_the_fresh_attempt_acknowledges_on_its_own_attempt(self) -> None:
+        self._recover_after_pause()
+
+        assert self.receipt is not None
+        self.assertEqual("op-1", self.receipt.operation_id)
+        self.assertEqual(f"{self.RECOVERY_RUN_ID}/{SESSION_ID}/1", self.receipt.attempt)
+        self.assertFalse(self.receipt.repeated)
+        self.assertTrue(self._request().acknowledged)
+
+    def test_a_receipt_naming_the_attempt_that_never_launched_is_refused(self) -> None:
+        self._recover_after_pause()
+
+        # Refused twice over, and both refusals matter: the surface will not
+        # verify a token against a live attempt it does not name, and the
+        # journal will not take a receipt from an attempt it never recorded as
+        # the carrier -- which is the one that survives a forged live attempt.
+        assert self.stale_refusal is not None
+        self.assertEqual(redirect_ack.ERROR_ATTEMPT_MISMATCH, self.stale_refusal.reason)
+        with self.assertRaises(redirect_store.RedirectStoreError) as raised:
+            redirect_store.acknowledge_request(
+                self.plan_dir,
+                "op-1",
+                attempt=target(2),
+                state_dir=self.state_dir,
+            )
+        self.assertEqual(
+            redirect_store.ERROR_CONTINUATION_MISMATCH, raised.exception.reason
+        )
+
+    def _recover_after_pause(self) -> dict[str, Any]:
+        self._pause()
+        return self._recover()
 
 
 if __name__ == "__main__":

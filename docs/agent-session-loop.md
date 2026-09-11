@@ -3071,18 +3071,36 @@ What a redirect producer writes before it signals is `redirect-journal.jsonl`,
 an append-only 4 MiB-capped ledger in the same plan hash directory, with a
 512 KiB tail reserved so a journal too full to accept a new submission is never
 too full to record the settlement that closes an existing one. Each physical
-line is a versioned record of one of six kinds, and they divide into two groups.
-Four are settlements — `submitted`, `accepted`, `rejected`, `expired` — and a
-request's state is a reduction over those records rather than a field anything
-rewrites, so no line is edited in place and the file is never truncated. Two are
-annotations — `continued` and `acknowledged` — which say which continuation
-attempt took delivery of an accepted correction and that its worker receipted
-it. An annotation changes no state, so `submitted` remains the only non-terminal
-one and a carried, receipted correction is still settled exactly once. At most
-one of each exists per request, and both are charged against the settlement
-reserve rather than the submission tier: refusing one would leave an accepted
-correction with no durable record of which attempt carried it, which is the only
-thing a receipt can be checked against. Identity is the producer's own
+line is a versioned record of one of eight kinds, and they divide into two
+groups. Four are settlements — `submitted`, `accepted`, `rejected`, `expired` —
+and a request's state is a reduction over those records rather than a field
+anything rewrites, so no line is edited in place and the file is never
+truncated. Four are annotations — `continued`, `delivered`, `released`,
+`acknowledged` — which say which continuation attempt bound an accepted
+correction into its prompt, whether that attempt's worker was actually launched
+holding it, whether a carry that never launched was given back, and that a
+worker receipted it. An annotation changes no state, so `submitted` remains the
+only non-terminal one and a carried, receipted correction is still settled
+exactly once. All four are charged against the settlement reserve rather than
+the submission tier: refusing one would leave an accepted correction with no
+durable record of which attempt carried it, which is the only thing a receipt
+can be checked against.
+
+Three of those annotations exist because planned delivery and actual delivery
+are different facts, and a correction can be lost in the gap between them.
+Everything from finalizing a prompt to spawning the process that holds it can
+still refuse — the prompt build, the conversation selection, an authorized
+pause — and a journal that recorded only the carry would say the words had been
+given to an attempt that never ran. `continued` is therefore the undertaking and
+`delivered` the launch, and `released` is the undo an attempt owes the operator
+when it gives up in between: it clears the carry, so the request is accepted and
+uncarried again and the next attempt that names it may take it. The asymmetry is
+what makes releasing safe to call from any unwind path — a correction that
+`reached_a_worker`, meaning delivered or acknowledged, may never be released,
+because re-offering words a worker was already shown would present one worker's
+correction to a second as if it were new. At most one `delivered` and one
+`acknowledged` exist per request; `continued` and `released` may alternate, and
+each pairing is one attempt's whole story. Identity is the producer's own
 `operation_id`: resubmitting it with the same target and the same feedback
 digest returns the existing request instead of appending a second one, while
 resubmitting it with a different target or digest fails with
@@ -3349,6 +3367,19 @@ acceptance would reverse a decision about a turn nobody living saw. Everything
 still unfinished whose session *is* pending is reported as recoverable and
 carried later, when a continuation attempt actually exists to carry it into.
 
+Before any of that, reconciliation hands back the carries the dead run never
+launched with. A correction bound into a prompt whose worker never started is
+not in any conversation's history and was never in front of anybody, so
+releasing it costs nothing and leaves it takeable; left carried it would be
+unreachable forever, because a second carry over an existing one is refused. The
+release is restricted to *other* runs: a carry belonging to the starting run is
+impossible, since its id was minted for this process, and a rule that did not
+say so would become a live run releasing its own in-flight prompt the first time
+reconciliation ran from somewhere else. A refusal is swallowed rather than
+raised — the request stays carried, which is the state it was already in — since
+settling a crash's leftovers should not fail over one line that could not be
+appended.
+
 Carrying a correction across a crash needs something the ordinary continuation
 rule cannot give it. Every run mints a fresh `run_id` and numbers its turns from
 one, so the successor attempt differs from the correction's target in both
@@ -3362,9 +3393,12 @@ acknowledgment whose marker disagrees with the delivery it claims is rejected on
 replay like any other mismatch. An operator's ordering survives the crash the
 same way it survives an interruption, by journal sequence.
 
-The one outcome recovery refuses to decide is delivery without a receipt. The
-journal records what was handed to a worker; whether a model read it is the
-question the acknowledgment protocol exists because nothing cheaper answers.
+The one outcome recovery refuses to decide is a *launched* delivery without a
+receipt. The journal records that a worker was started holding the words;
+whether a model read them is the question the acknowledgment protocol exists
+because nothing cheaper answers. That is the whole reason the launch is written
+down apart from the carry: without it this uncertainty would swallow every crash
+in the window before the spawn too, and those corrections are recoverable.
 Re-handing the correction would tell a worker its first correction is new;
 dropping it would discard one that may never have been read. So it is reported
 as `uncertain` and nothing acts on it automatically — and there is no flag that
@@ -3460,7 +3494,13 @@ correction named:
 | `acknowledged` | a worker receipted it on the attempt that carried it |
 | `rejected` | settled without being acted on |
 | `blocked` | the urgent channel could not carry it; durably settled |
-| `uncertain` | delivered to an attempt that never receipted it |
+| `uncertain` | a worker was launched with it and never receipted it |
+
+`resuming` is read off the carry rather than off the status, so it covers the
+live attempt that is holding a correction it has not launched with yet as well
+as the one that has. A carry belonging to an attempt that is *not* live reads
+`stopped` — a successor still owes it — which is what a prompt that was
+assembled and then abandoned leaves behind.
 
 Exit codes mean the same thing in both commands, because the caller that reads
 nothing else reads them. `0` is the command doing what was asked. `1` is a
@@ -7096,8 +7136,8 @@ the helper and `asl control recover-conversation` cannot disagree). For
 left as a missing key: no text an operator sends makes a second worker safe to
 start beside a live one.
 
-Uncertain evidence stays uncertain everywhere. A correction recorded as
-delivered but never receipted comes back as `redirect_recovery.STATUS_UNCERTAIN`
+Uncertain evidence stays uncertain everywhere. A correction a worker was
+launched with and never receipted comes back as `redirect_recovery.STATUS_UNCERTAIN`
 and is excluded from `recoverable_operation_ids`, so no later attempt carries
 it automatically; re-submitting is the operator's move, with its own words
 chosen knowing what happened. A stop stays stopped for the same reason:

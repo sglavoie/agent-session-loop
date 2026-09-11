@@ -567,6 +567,24 @@ class RedirectStatusTests(RedirectCliTestCase):
             state_dir=self.state_dir,
         )
 
+    def delivered(self, *, turn_index: int) -> redirect_store.RedirectRequest:
+        """A correction a worker on ``turn_index`` was actually launched with."""
+        request = self.submitted()
+        continuation = self.target(turn_index=turn_index)
+        redirect_store.carry_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=continuation,
+            state_dir=self.state_dir,
+        )
+        redirect_store.deliver_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=continuation,
+            state_dir=self.state_dir,
+        )
+        return request
+
     def test_an_empty_journal_reports_nothing_and_exits_zero(self) -> None:
         self.make_live_run()
 
@@ -634,7 +652,21 @@ class RedirectStatusTests(RedirectCliTestCase):
         self.assertEqual(redirect_recovery.STATUS_ACCEPTED, operation["status"])
         self.assertEqual(redirect_cli.STAGE_STOPPED, operation["stage"])
 
-    def test_a_carried_correction_on_the_live_attempt_is_resuming(self) -> None:
+    def test_a_delivered_correction_on_the_live_attempt_is_resuming(self) -> None:
+        self.make_live_run(turn_index=2)
+        request = self.delivered(turn_index=2)
+
+        code, payload = self.status()
+
+        operation = payload["operations"][0]
+        self.assertEqual(redirect_recovery.STATUS_UNCERTAIN, operation["status"])
+        self.assertEqual(redirect_cli.STAGE_RESUMING, operation["stage"])
+        # Resuming is not an open question, so it does not force reconciliation.
+        self.assertEqual(redirect_cli.EXIT_OK, code)
+        self.assertEqual([], payload["uncertain_operation_ids"])
+        self.assertEqual(request.operation_id, operation["operation_id"])
+
+    def test_a_carried_correction_not_yet_launched_is_also_resuming(self) -> None:
         self.make_live_run(turn_index=2)
         request = self.submitted()
         redirect_store.carry_request(
@@ -647,13 +679,27 @@ class RedirectStatusTests(RedirectCliTestCase):
         code, payload = self.status()
 
         operation = payload["operations"][0]
-        self.assertEqual(redirect_recovery.STATUS_UNCERTAIN, operation["status"])
+        # The prompt holds it and the run is on that turn. Nothing has launched
+        # yet, so the durable status is still ``accepted`` -- but an operator
+        # asking where their words are is being told the same thing either way.
+        self.assertEqual(redirect_recovery.STATUS_ACCEPTED, operation["status"])
         self.assertEqual(redirect_cli.STAGE_RESUMING, operation["stage"])
-        # Resuming is not an open question, so it does not force reconciliation.
         self.assertEqual(redirect_cli.EXIT_OK, code)
         self.assertEqual([], payload["uncertain_operation_ids"])
 
-    def test_a_carried_correction_whose_attempt_is_gone_exits_three(self) -> None:
+    def test_a_delivered_correction_whose_attempt_is_gone_exits_three(self) -> None:
+        self.make_live_run(turn_index=2)
+        request = self.delivered(turn_index=2)
+        self.write_state(turn_index=3)
+
+        code, payload = self.status()
+
+        operation = payload["operations"][0]
+        self.assertEqual(redirect_cli.STAGE_UNCERTAIN, operation["stage"])
+        self.assertEqual(redirect_cli.EXIT_UNRESOLVED, code)
+        self.assertEqual([request.operation_id], payload["uncertain_operation_ids"])
+
+    def test_a_carry_that_never_launched_is_owed_rather_than_in_doubt(self) -> None:
         self.make_live_run(turn_index=2)
         request = self.submitted()
         redirect_store.carry_request(
@@ -666,10 +712,13 @@ class RedirectStatusTests(RedirectCliTestCase):
 
         code, payload = self.status()
 
+        # No worker was ever started with it, so there is nothing to reconcile:
+        # the successor owes it, which is exactly ``stopped``.
         operation = payload["operations"][0]
-        self.assertEqual(redirect_cli.STAGE_UNCERTAIN, operation["stage"])
-        self.assertEqual(redirect_cli.EXIT_UNRESOLVED, code)
-        self.assertEqual([request.operation_id], payload["uncertain_operation_ids"])
+        self.assertEqual(redirect_cli.STAGE_STOPPED, operation["stage"])
+        self.assertEqual(redirect_cli.EXIT_OK, code)
+        self.assertEqual([], payload["uncertain_operation_ids"])
+        self.assertEqual(request.operation_id, operation["operation_id"])
 
     def test_an_acknowledged_correction_is_acknowledged(self) -> None:
         self.make_live_run(turn_index=2)

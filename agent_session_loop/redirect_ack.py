@@ -14,6 +14,14 @@ this session at the instant the prompt is finalized is carried and marked
 redirect against the attempt the prompt is about to start -- which is the
 existing session-11 path, not a late edit to a prompt already written.
 
+Finalizing a prompt is not the same as running one, and the gap between them is
+where an attempt can still refuse or die. :func:`deliver_corrections` closes
+that gap on the success side -- the worker was launched holding these words --
+and :func:`release_corrections` closes it on the other, handing a carry back to
+the next attempt when this one never got as far as a process. Without the pair,
+a refusal after the coalescing boundary reads exactly like a delivery nobody
+receipted, and the operator's words are spent on a turn that never happened.
+
 **What counts as the worker having received it?** Only an explicit receipt from
 the worker, naming the correction *and* the attempt it is running:
 :func:`acknowledge_correction`. Everything cheaper is evidence of something
@@ -47,7 +55,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from . import clock, redirect_store
 
@@ -394,6 +402,181 @@ def carried_corrections(
     return CarriedCorrections(
         continuation=attempt,
         corrections=tuple(carried),
+        refused=tuple(refused),
+    )
+
+
+class _CarryAnnotator(Protocol):
+    """The shape :func:`redirect_store.deliver_request` and its sibling share."""
+
+    def __call__(
+        self,
+        plan_dir: str | Path,
+        operation_id: str,
+        *,
+        continuation: redirect_store.RedirectTarget,
+        state_dir: str | Path | None = None,
+        now: datetime | None = None,
+    ) -> redirect_store.RedirectRequest: ...
+
+
+@dataclass(frozen=True)
+class CarryAnnotations:
+    """The outcome of settling what became of one attempt's carries.
+
+    Two facts share this shape because they are the two answers to the same
+    question -- did the attempt that bound these corrections into a prompt
+    actually put them in front of a worker -- and a caller reporting either one
+    wants the same three things: which attempt, which ids moved, and which the
+    journal would not move.
+    """
+
+    continuation: redirect_store.RedirectTarget
+    kind: str
+    operation_ids: tuple[str, ...] = ()
+    refused: tuple[RefusedCorrection, ...] = ()
+
+    @property
+    def attempt(self) -> str:
+        return attempt_token(self.continuation)
+
+    def __bool__(self) -> bool:
+        return bool(self.operation_ids)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "attempt": self.attempt,
+            "continuation": self.continuation.to_payload(),
+            "kind": self.kind,
+            "operation_ids": list(self.operation_ids),
+            "count": len(self.operation_ids),
+            "refused": [item.to_payload() for item in self.refused],
+        }
+
+
+def _carry_annotation_targets(
+    plan_dir: str | Path,
+    *,
+    continuation: redirect_store.RedirectTarget,
+    operation_ids: Sequence[str] | None,
+    state_dir: str | Path | None,
+) -> tuple[str, ...]:
+    """Resolve which ids an annotation pass should attempt, oldest first.
+
+    ``None`` means "whatever the journal says this attempt is holding", which is
+    what a recovery path has to ask: the process that knew the ids is the one
+    that died. An explicit sequence is kept verbatim, including ids the journal
+    disagrees about, so the per-id refusal reaches the caller instead of the id
+    silently vanishing from a list they supplied.
+    """
+    if operation_ids is not None:
+        return tuple(operation_ids)
+    view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    return tuple(request.operation_id for request in view.carried_for(continuation))
+
+
+def deliver_corrections(
+    plan_dir: str | Path,
+    *,
+    continuation: redirect_store.RedirectTarget,
+    operation_ids: Sequence[str] | None = None,
+    state_dir: str | Path | None = None,
+    now: datetime | None = None,
+) -> CarryAnnotations:
+    """Record that ``continuation`` launched a worker holding these corrections.
+
+    Called on the launch side of the window :func:`carry_corrections` opens. Up
+    to here the journal only knows an attempt *undertook* to deliver the words;
+    from here it knows a process was started with them, which is what makes
+    stranding them afterwards a duplicate rather than a rescue.
+
+    Per-id refusals are collected rather than raised, for the same reason they
+    are in :func:`carry_corrections`: the worker is already running, and an
+    exception thrown at that point would abandon a turn over a bookkeeping line.
+    """
+    return _annotate_carries(
+        plan_dir,
+        continuation=continuation,
+        operation_ids=operation_ids,
+        kind=redirect_store.KIND_DELIVERED,
+        annotate=redirect_store.deliver_request,
+        state_dir=state_dir,
+        now=now,
+    )
+
+
+def release_corrections(
+    plan_dir: str | Path,
+    *,
+    continuation: redirect_store.RedirectTarget,
+    operation_ids: Sequence[str] | None = None,
+    state_dir: str | Path | None = None,
+    now: datetime | None = None,
+) -> CarryAnnotations:
+    """Give back the corrections ``continuation`` bound but never launched with.
+
+    The call an attempt owes the operator when it gives up between finalizing a
+    prompt and starting a worker -- a prompt build that refuses, a conversation
+    it cannot prove is usable, an authorized pause. Released corrections are
+    accepted and uncarried again, so the next attempt coalesces them normally
+    and a reader after a crash finds them recoverable rather than spent.
+
+    Refusals are collected, and a correction the journal has already delivered
+    or seen receipted is one of them: it is no longer this attempt's to give
+    back.
+    """
+    return _annotate_carries(
+        plan_dir,
+        continuation=continuation,
+        operation_ids=operation_ids,
+        kind=redirect_store.KIND_RELEASED,
+        annotate=redirect_store.release_request,
+        state_dir=state_dir,
+        now=now,
+    )
+
+
+def _annotate_carries(
+    plan_dir: str | Path,
+    *,
+    continuation: redirect_store.RedirectTarget,
+    operation_ids: Sequence[str] | None,
+    kind: str,
+    annotate: _CarryAnnotator,
+    state_dir: str | Path | None,
+    now: datetime | None,
+) -> CarryAnnotations:
+    redirect_store.validate_target(continuation)
+    annotated: list[str] = []
+    refused: list[RefusedCorrection] = []
+    for operation_id in _carry_annotation_targets(
+        plan_dir,
+        continuation=continuation,
+        operation_ids=operation_ids,
+        state_dir=state_dir,
+    ):
+        try:
+            annotate(
+                plan_dir,
+                operation_id,
+                continuation=continuation,
+                state_dir=state_dir,
+                now=now,
+            )
+        except redirect_store.RedirectStoreError as error:
+            refused.append(
+                RefusedCorrection(
+                    operation_id=operation_id,
+                    reason=error.reason,
+                    message=str(error),
+                )
+            )
+            continue
+        annotated.append(operation_id)
+    return CarryAnnotations(
+        continuation=continuation,
+        kind=kind,
+        operation_ids=tuple(annotated),
         refused=tuple(refused),
     )
 

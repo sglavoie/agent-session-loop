@@ -973,6 +973,157 @@ def _carried_corrections(
     return carried
 
 
+def _annotate_carried_corrections(
+    ctx: RunContext,
+    *,
+    plan_dir: Path,
+    state_dir_arg: str | Path | None,
+    carried: redirect_ack.CarriedCorrections | None,
+    session_id: str,
+    turn_index: int,
+    harness: str,
+    outcome: str,
+    annotate: Callable[..., redirect_ack.CarryAnnotations],
+) -> None:
+    """Record what became of this attempt's carry, and say so in an event.
+
+    Shared by the two sides of the launch boundary because they differ in one
+    call and one word. Both are bookkeeping about a decision already made, so a
+    journal that refuses them is reported and never raised: at the release site
+    the run is already pausing for a reason of its own, and at the delivery site
+    a worker is already running.
+    """
+    if carried is None or not carried.corrections:
+        return
+    try:
+        result = annotate(
+            plan_dir,
+            continuation=carried.continuation,
+            operation_ids=carried.operation_ids(),
+            state_dir=state_dir_arg,
+        )
+    except redirect_store.RedirectStoreError as error:
+        ctx.persistence.append_event(
+            ctx.event_path,
+            events.REDIRECT_CONTINUATION_EVENT,
+            {
+                "run_id": ctx.run_id,
+                "turn_index": turn_index,
+                **plans.session_identity_payload(session_id),
+                "outcome": f"{outcome}-failed",
+                "harness": harness,
+                "error": {"reason": error.reason, "message": str(error)},
+            },
+        )
+        return
+    ctx.persistence.append_event(
+        ctx.event_path,
+        events.REDIRECT_CONTINUATION_EVENT,
+        {
+            "run_id": ctx.run_id,
+            "turn_index": turn_index,
+            **plans.session_identity_payload(session_id),
+            "outcome": outcome,
+            "harness": harness,
+            **result.to_payload(),
+        },
+    )
+
+
+def _release_carried_corrections(
+    ctx: RunContext,
+    *,
+    plan_dir: Path,
+    state_dir_arg: str | Path | None,
+    carried: redirect_ack.CarriedCorrections | None,
+    session_id: str,
+    turn_index: int,
+    harness: str,
+) -> None:
+    """Hand back a carry this attempt assembled a prompt for but never launched.
+
+    Called at every way out between the coalescing boundary and the launch: a
+    prompt build that pauses, a conversation this run cannot prove is usable, a
+    baseline capture that refuses. Each of them ends the attempt with the
+    correction bound to a turn that will never run, and without this the journal
+    would go on claiming the operator's words were delivered to it -- which is
+    what makes a later authorized fresh start arrive empty-handed.
+    """
+    _annotate_carried_corrections(
+        ctx,
+        plan_dir=plan_dir,
+        state_dir_arg=state_dir_arg,
+        carried=carried,
+        session_id=session_id,
+        turn_index=turn_index,
+        harness=harness,
+        outcome="released",
+        annotate=redirect_ack.release_corrections,
+    )
+
+
+def _deliver_carried_corrections(
+    ctx: RunContext,
+    *,
+    plan_dir: Path,
+    state_dir_arg: str | Path | None,
+    carried: redirect_ack.CarriedCorrections | None,
+    session_id: str,
+    turn_index: int,
+    harness: str,
+) -> None:
+    """Record that a worker was spawned holding this attempt's carry.
+
+    Hung off the same spawn callback the guidance ledger uses, for the same
+    reason: the process exists and it was started with this prompt, which is the
+    earliest moment anything can honestly be called delivery. From here the
+    correction is the running worker's, and recovery treats an unreceipted one
+    as an open question rather than something to hand out again.
+    """
+    _annotate_carried_corrections(
+        ctx,
+        plan_dir=plan_dir,
+        state_dir_arg=state_dir_arg,
+        carried=carried,
+        session_id=session_id,
+        turn_index=turn_index,
+        harness=harness,
+        outcome="delivered",
+        annotate=redirect_ack.deliver_corrections,
+    )
+
+
+def _record_prompt_submission(
+    ctx: RunContext,
+    *,
+    plan_dir: Path,
+    state_dir_arg: str | Path | None,
+    carried: redirect_ack.CarriedCorrections | None,
+    session_id: str,
+    turn_index: int,
+    harness: str,
+    record_guidance_delivery: Callable[[], None] | None,
+) -> None:
+    """The spawn callback: a process now exists holding this prompt.
+
+    Both ledgers hanging off it record the same fact for the same reason. Up to
+    here the run had only undertaken to deliver these words; from here a worker
+    was started with them, and that is what makes withdrawing them a duplicate
+    rather than a rescue.
+    """
+    if record_guidance_delivery is not None:
+        record_guidance_delivery()
+    _deliver_carried_corrections(
+        ctx,
+        plan_dir=plan_dir,
+        state_dir_arg=state_dir_arg,
+        carried=carried,
+        session_id=session_id,
+        turn_index=turn_index,
+        harness=harness,
+    )
+
+
 def run_locked(
     *,
     args: argparse.Namespace,
@@ -1958,6 +2109,15 @@ def run_locked(
                 corrections=turn_corrections,
             )
             if turn_prompt.paused:
+                _release_carried_corrections(
+                    ctx,
+                    plan_dir=before.plan_dir,
+                    state_dir_arg=args.state_dir,
+                    carried=turn_corrections,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    harness=turn_harness,
+                )
                 break
             continuation = turn_preparation.prepare_turn_continuation(
                 ctx,
@@ -1982,6 +2142,15 @@ def run_locked(
                 ),
             )
             if continuation.paused:
+                _release_carried_corrections(
+                    ctx,
+                    plan_dir=before.plan_dir,
+                    state_dir_arg=args.state_dir,
+                    carried=turn_corrections,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    harness=turn_harness,
+                )
                 break
             conversation_capture = continuation.capture(
                 state.plan_state_dir(before.plan_dir, args.state_dir)
@@ -2097,6 +2266,15 @@ def run_locked(
                 paths=paths,
             )
             if baselines.paused:
+                _release_carried_corrections(
+                    ctx,
+                    plan_dir=before.plan_dir,
+                    state_dir_arg=args.state_dir,
+                    carried=turn_corrections,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    harness=turn_harness,
+                )
                 break
             workspace_snapshot_before = baselines.workspace_snapshot
             legacy_snapshot_before = baselines.legacy_snapshot
@@ -2217,6 +2395,41 @@ def run_locked(
                     ).enforces_guard_pretool,
                 )
 
+            record_guidance_delivery = (
+                functools.partial(
+                    run_selection._record_next_turn_guidance_delivery,
+                    plan_dir=before.plan_dir,
+                    state_dir_arg=args.state_dir,
+                    event_path=ctx.event_path,
+                    append_event=ctx.persistence.append_event,
+                    pending_guidance=packet_inputs.pending_guidance,
+                    harness=turn_harness,
+                    run_id=ctx.run_id,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                )
+                if (
+                    packet_inputs.pending_guidance
+                    and harnesses.delivers_guidance_next_turn(turn_harness)
+                )
+                else None
+            )
+
+            # Bound rather than closed over, like the guidance delivery it
+            # wraps: this is one iteration's callback and a closure would read
+            # the loop variables as the *next* iteration left them.
+            on_prompt_accepted = functools.partial(
+                _record_prompt_submission,
+                ctx,
+                plan_dir=before.plan_dir,
+                state_dir_arg=args.state_dir,
+                carried=turn_corrections,
+                session_id=session_id,
+                turn_index=turn_index,
+                harness=turn_harness,
+                record_guidance_delivery=record_guidance_delivery,
+            )
+
             # Started before the launch, not after it: a correction submitted
             # against this turn's identity can land the instant that identity is
             # published, and the gate's own bind wait is what holds such an
@@ -2236,25 +2449,7 @@ def run_locked(
                     abort=abort_signal,
                     live_delivery=delivery_endpoint,
                     stream_callback=stream_callback,
-                    on_prompt_accepted=(
-                        functools.partial(
-                            run_selection._record_next_turn_guidance_delivery,
-                            plan_dir=before.plan_dir,
-                            state_dir_arg=args.state_dir,
-                            event_path=ctx.event_path,
-                            append_event=ctx.persistence.append_event,
-                            pending_guidance=packet_inputs.pending_guidance,
-                            harness=turn_harness,
-                            run_id=ctx.run_id,
-                            session_id=session_id,
-                            turn_index=turn_index,
-                        )
-                        if (
-                            packet_inputs.pending_guidance
-                            and harnesses.delivers_guidance_next_turn(turn_harness)
-                        )
-                        else None
-                    ),
+                    on_prompt_accepted=on_prompt_accepted,
                     build_invocation=functools.partial(
                         run_prompts.build_harness_invocation,
                         turn_harness,

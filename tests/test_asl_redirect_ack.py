@@ -17,6 +17,10 @@ The claims, in the order the module argues them:
   same set instead of sweeping up whatever arrived since, and no annotation
   moves a request out of ``accepted``, so the journal's "settled once"
   invariant is untouched;
+* carrying is also not yet delivering: an attempt that binds a correction into
+  a prompt and then never launches gives it back, an attempt that launched may
+  not, and the difference is recorded rather than inferred -- which is what
+  keeps a pause between the two from spending the operator's words;
 * a receipt needs both halves of its identity, so the two cheap impostors --
   the stale worker still alive from the interrupted turn, and a transcript
   replaying an older prompt -- are refused, as is a worker naming an attempt
@@ -452,6 +456,274 @@ class CoalescingTests(RedirectAckTestCase):
     def test_an_empty_carry_is_falsey_so_no_block_is_rendered(self) -> None:
         self.assertFalse(self.carry())
         self.assertTrue(bool(self.submit(FIRST)) and bool(self.carry()))
+
+
+class LaunchBoundaryTests(RedirectAckTestCase):
+    """The window between binding a correction to a prompt and starting a worker.
+
+    A carry says an attempt undertook to deliver the words. Everything between
+    that and a running process can still refuse -- the prompt build, the
+    conversation selection, an operator's pause -- and the attempt that refuses
+    is the one that has to say so, because nothing else can tell a correction
+    that was never shown to anybody from one that was.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.request = self.submit(FIRST, accept=True)
+        self.continuation = target(2, harness="codex")
+        self.carry(
+            continuation=self.continuation, accepted=(self.request.operation_id,)
+        )
+
+    def stored(self) -> redirect_store.RedirectRequest:
+        stored = self.read().request(self.request.operation_id)
+        assert stored is not None
+        return stored
+
+    def deliver(self, **kwargs: Any) -> redirect_ack.CarryAnnotations:
+        return redirect_ack.deliver_corrections(
+            self.plan_dir,
+            continuation=self.continuation,
+            state_dir=self.state_dir,
+            **kwargs,
+        )
+
+    def release(self, **kwargs: Any) -> redirect_ack.CarryAnnotations:
+        return redirect_ack.release_corrections(
+            self.plan_dir,
+            continuation=self.continuation,
+            state_dir=self.state_dir,
+            **kwargs,
+        )
+
+    def test_a_carry_is_not_yet_a_delivery(self) -> None:
+        """The distinction the whole boundary rests on."""
+        stored = self.stored()
+
+        self.assertTrue(stored.carried)
+        self.assertFalse(stored.delivered)
+        self.assertFalse(stored.released)
+        self.assertFalse(stored.reached_a_worker)
+
+    def test_delivery_settles_whatever_the_attempt_was_holding(self) -> None:
+        """Named by the attempt, not by a list.
+
+        The caller on the launch side is a spawn callback that knows which turn
+        started and nothing about which ids were swept into its prompt; asking
+        it to repeat them would be asking it to be right about something it did
+        not compute.
+        """
+        annotations = self.deliver()
+
+        self.assertEqual(redirect_store.KIND_DELIVERED, annotations.kind)
+        self.assertEqual((self.request.operation_id,), annotations.operation_ids)
+        self.assertEqual((), annotations.refused)
+        self.assertEqual(f"{RUN_ID}/1/2", annotations.attempt)
+        stored = self.stored()
+        self.assertTrue(stored.delivered)
+        self.assertTrue(stored.reached_a_worker)
+        self.assertTrue(stored.carried)
+
+    def test_a_release_hands_the_correction_back_uncarried(self) -> None:
+        annotations = self.release()
+
+        self.assertEqual(redirect_store.KIND_RELEASED, annotations.kind)
+        self.assertEqual((self.request.operation_id,), annotations.operation_ids)
+        self.assertEqual((), annotations.refused)
+        stored = self.stored()
+        self.assertFalse(stored.carried)
+        self.assertFalse(stored.delivered)
+        self.assertFalse(stored.reached_a_worker)
+        self.assertTrue(stored.released)
+        # Which attempt gave it back is kept: an operator reading a journal
+        # after the fact needs to see the attempt that was planned and failed,
+        # and the carry it would otherwise read is gone.
+        self.assertIsNotNone(stored.released_from)
+        self.assertTrue(stored.released_from.identifies_same_turn(self.continuation))
+
+    def test_a_released_correction_is_carryable_again(self) -> None:
+        """What the release is for, and the whole of what it does.
+
+        A second carry is refused outright once one is on the record, so a
+        correction whose attempt never launched would be unreachable forever
+        without this. The release does not re-offer it -- the sweep still only
+        volunteers corrections nobody has settled -- it makes it takeable by the
+        next attempt that names it, which is what recovery does after a crash.
+        """
+        self.release()
+
+        later = self.carry(
+            continuation=target(3), accepted=(self.request.operation_id,)
+        )
+
+        self.assertEqual((self.request.operation_id,), later.operation_ids())
+        self.assertEqual((), later.refused)
+        self.assertTrue(self.stored().continues_attempt(target(3)))
+
+    def test_neither_annotation_settles_an_accepted_request_twice(self) -> None:
+        """The journal's "settled once" invariant, restated for two more kinds."""
+        self.release()
+        self.carry(continuation=target(3), accepted=(self.request.operation_id,))
+        redirect_ack.deliver_corrections(
+            self.plan_dir,
+            continuation=target(3),
+            state_dir=self.state_dir,
+        )
+
+        stored = self.stored()
+        self.assertEqual(redirect_store.STATE_ACCEPTED, stored.state)
+        self.assertTrue(stored.terminal)
+        self.assertEqual(
+            [
+                redirect_store.KIND_SUBMITTED,
+                redirect_store.KIND_ACCEPTED,
+                redirect_store.KIND_CONTINUED,
+                redirect_store.KIND_RELEASED,
+                redirect_store.KIND_CONTINUED,
+                redirect_store.KIND_DELIVERED,
+            ],
+            [line["kind"] for line in self.journal_lines()],
+        )
+
+    def test_a_correction_that_reached_a_worker_cannot_be_taken_back(self) -> None:
+        """The asymmetry that makes the release safe to call on any refusal.
+
+        A release after a launch would offer the same words to a second worker
+        as if they were new. It is refused by the journal rather than by the
+        caller's judgement, because the caller is a pause path that cannot know
+        whether the process it is unwinding ever started.
+        """
+        self.deliver()
+
+        annotations = self.release()
+
+        self.assertEqual((), annotations.operation_ids)
+        self.assertEqual(
+            [redirect_store.ERROR_ALREADY_DELIVERED],
+            [item.reason for item in annotations.refused],
+        )
+        stored = self.stored()
+        self.assertTrue(stored.delivered)
+        self.assertTrue(stored.carried)
+        self.assertFalse(stored.released)
+
+    def test_a_receipted_correction_cannot_be_taken_back_either(self) -> None:
+        """A worker that answered is proof enough on its own.
+
+        Reaching a worker is what forbids the release, and a receipt says so
+        more strongly than the delivery record does -- so a receipt recorded
+        without one still closes the door.
+        """
+        redirect_ack.acknowledge_correction(
+            self.plan_dir,
+            self.request.operation_id,
+            token=redirect_ack.attempt_token(self.continuation),
+            live_attempt=self.continuation,
+            state_dir=self.state_dir,
+        )
+
+        annotations = self.release()
+
+        self.assertEqual((), annotations.operation_ids)
+        self.assertEqual(
+            [redirect_store.ERROR_ALREADY_ACKNOWLEDGED],
+            [item.reason for item in annotations.refused],
+        )
+        self.assertTrue(self.stored().acknowledged)
+
+    def test_repeating_a_delivery_appends_nothing(self) -> None:
+        """A runner retried after a crash must not deliver one as two."""
+        self.deliver()
+        lines = len(self.journal_lines())
+        delivered_at = self.stored().delivered_seq
+
+        again = self.deliver()
+
+        self.assertEqual((self.request.operation_id,), again.operation_ids)
+        self.assertEqual(lines, len(self.journal_lines()))
+        self.assertEqual(delivered_at, self.stored().delivered_seq)
+
+    def test_repeating_a_release_appends_nothing(self) -> None:
+        """Named explicitly, because the first release erased the carry.
+
+        A pause path that is re-entered has no journal record left to ask, so
+        the ids come from the caller -- and the second pass has to be a no-op
+        rather than a refusal, or a retried pause would report a loss it did
+        not cause.
+        """
+        self.release()
+        lines = len(self.journal_lines())
+        released_at = self.stored().released_seq
+
+        again = self.release(operation_ids=(self.request.operation_id,))
+
+        self.assertEqual((self.request.operation_id,), again.operation_ids)
+        self.assertEqual((), again.refused)
+        self.assertEqual(lines, len(self.journal_lines()))
+        self.assertEqual(released_at, self.stored().released_seq)
+
+    def test_one_refusal_does_not_cost_the_annotations_beside_it(self) -> None:
+        second = self.submit(SECOND, accept=True)
+        self.carry(continuation=self.continuation, accepted=(second.operation_id,))
+
+        annotations = self.deliver(
+            operation_ids=(
+                self.request.operation_id,
+                "op-that-never-existed",
+                second.operation_id,
+            )
+        )
+
+        self.assertEqual(
+            (self.request.operation_id, second.operation_id),
+            annotations.operation_ids,
+        )
+        self.assertEqual(
+            [("op-that-never-existed", redirect_store.ERROR_UNKNOWN_REQUEST)],
+            [(item.operation_id, item.reason) for item in annotations.refused],
+        )
+
+    def test_an_annotation_by_an_attempt_that_holds_nothing_moves_nothing(self) -> None:
+        """The foreign-carrier case, reached through the boundary.
+
+        Two attempts each able to prove delivery of one correction is the exact
+        ambiguity the receipt exists to remove, so an attempt annotating a carry
+        that is not its own is refused rather than believed.
+        """
+        annotations = redirect_ack.deliver_corrections(
+            self.plan_dir,
+            continuation=target(3),
+            operation_ids=(self.request.operation_id,),
+            state_dir=self.state_dir,
+        )
+
+        self.assertEqual((), annotations.operation_ids)
+        self.assertEqual(
+            [redirect_store.ERROR_CONTINUATION_MISMATCH],
+            [item.reason for item in annotations.refused],
+        )
+        self.assertFalse(self.stored().delivered)
+
+    def test_an_annotation_projection_never_carries_the_operators_words(self) -> None:
+        payload = self.deliver().to_payload()
+
+        self.assertNotIn(FIRST, json.dumps(payload))
+        self.assertEqual(f"{RUN_ID}/1/2", payload["attempt"])
+        self.assertEqual(redirect_store.KIND_DELIVERED, payload["kind"])
+        self.assertEqual([self.request.operation_id], payload["operation_ids"])
+        self.assertEqual(1, payload["count"])
+        self.assertEqual([], payload["refused"])
+
+    def test_an_empty_annotation_is_falsey_so_no_event_is_written(self) -> None:
+        self.assertTrue(self.deliver())
+        self.assertFalse(
+            redirect_ack.deliver_corrections(
+                self.plan_dir,
+                continuation=target(3),
+                state_dir=self.state_dir,
+            )
+        )
 
 
 class AcknowledgmentTests(RedirectAckTestCase):

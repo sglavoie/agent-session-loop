@@ -4,17 +4,22 @@ Every earlier module in this subsystem assumes a live runner. Submission waits
 on one, acceptance is a statement by one, escalation is a deadline inside one,
 and delivery is a prompt one builds. A crash removes that process at an
 arbitrary instant, and the instant it removes it decides what the operator is
-owed. Five boundaries matter, and the journal distinguishes all five because
+owed. Six boundaries matter, and the journal distinguishes all six because
 nothing in it is ever rewritten:
 
 - before acceptance: a ``submitted`` line and nothing after it. Nobody promised
   the operator anything except that the correction was written down;
-- after acceptance, before delivery: ``accepted`` with no ``continued``. A
+- after acceptance, before the prompt: ``accepted`` with no ``continued``. A
   process undertook to stop a worker and hand this correction to its successor,
   and then stopped existing. Nobody else has taken that on;
-- after delivery, before receipt: ``continued`` with no ``acknowledged``. Some
-  attempt took delivery. Whether a model read it is exactly the question the
-  acknowledgment protocol exists because nothing cheaper answers;
+- after the prompt, before launch: ``continued`` with no ``delivered``. The
+  words were bound into a prompt, and then the process that was going to run it
+  died or refused. No worker has ever seen them, so this reads like the line
+  above it: still owed, and :func:`reconcile_startup` releases the carry so the
+  next attempt can pick it up;
+- after launch, before receipt: ``delivered`` with no ``acknowledged``. A worker
+  was started holding the words. Whether a model read them is exactly the
+  question the acknowledgment protocol exists because nothing cheaper answers;
 - after receipt: ``acknowledged``. Settled in the only sense that counts;
 - the torn tail: a line that was being written when the machine stopped. Replay
   refuses it and the next append terminates it, but a projection built in
@@ -30,7 +35,7 @@ to a correction must not be the reason a worker starts, and a status command
 that spawned one would make "check before acting" the dangerous option.
 
 **Ambiguity is reported, never resolved by guessing.** The one case this module
-refuses to decide is delivery without receipt. Re-handing the correction to a
+refuses to decide is a launch without receipt. Re-handing the correction to a
 new worker would tell it the operator's first correction is new; dropping it
 would discard a correction that may never have been read. Both are worse than
 saying so, so those ids come back as :data:`STATUS_UNCERTAIN` and nothing here
@@ -77,9 +82,13 @@ OperationStatus = Literal[
 STATUS_SUBMITTED: OperationStatus = "submitted"
 #: Persisted and unanswered, but the run that could have answered it is gone.
 STATUS_UNANSWERED: OperationStatus = "unanswered"
-#: A runner undertook to act on it and did not record delivery.
+#: A runner undertook to act on it and no worker was ever launched holding it.
+#: Covers a request never carried and one carried into a prompt that never ran,
+#: because they owe the operator the same thing.
 STATUS_ACCEPTED: OperationStatus = "accepted"
-#: An attempt took delivery; no worker has receipted it.
+#: An attempt launched a worker with it; no receipt. Kept in the vocabulary and
+#: deliberately never produced: that shape is reported as :data:`STATUS_UNCERTAIN`,
+#: since knowing a process was started is not knowing a model read anything.
 STATUS_DELIVERED: OperationStatus = "delivered"
 #: A worker running the carrying attempt receipted it.
 STATUS_ACKNOWLEDGED: OperationStatus = "acknowledged"
@@ -291,11 +300,16 @@ def operation_status(
     if request.accepted:
         if request.acknowledged:
             return STATUS_ACKNOWLEDGED
-        if request.carried:
-            # Delivered and unreceipted. Not a state to be resolved by looking
+        if request.delivered:
+            # Launched and unreceipted. Not a state to be resolved by looking
             # harder at this journal: what is unknown is what a worker read,
             # and the journal records only what was handed to it.
             return STATUS_UNCERTAIN
+        # A carry with no delivery reads as ``accepted`` alongside one that was
+        # never carried at all, and the collapse is deliberate. Both say a
+        # runner undertook to act and no process ever ran holding the words, so
+        # both are owed to the next attempt; keeping them apart here would put a
+        # correction nothing saw into the one bucket recovery refuses to touch.
         return STATUS_ACCEPTED
     if request.is_expired_at(moment):
         # Past its window but not yet settled as such. Reported as expired
@@ -480,6 +494,7 @@ class ReconciliationReport:
     reconciled: bool
     blocked_reason: str | None = None
     expired: tuple[str, ...] = ()
+    released: tuple[str, ...] = ()
     settled: tuple[str, ...] = ()
     stranded: tuple[StrandedCorrection, ...] = ()
     recoverable: tuple[StrandedCorrection, ...] = ()
@@ -517,6 +532,7 @@ class ReconciliationReport:
             "blocked": self.blocked,
             "blocked_reason": self.blocked_reason,
             "expired": list(self.expired),
+            "released": list(self.released),
             "settled": list(self.settled),
             "stranded": [item.to_payload() for item in self.stranded],
             "recoverable": [item.to_payload() for item in self.recoverable],
@@ -557,10 +573,17 @@ def reconcile_startup(
     """Settle what a crash stranded, and say what this run may pick up.
 
     Called once by a starting run, under that run's own lock and before the
-    first turn is selected. Three things happen and nothing else does:
+    first turn is selected. Four things happen and nothing else does:
 
     - every request past its window is expired in the journal, so the refusal
       survives this process too;
+    - every correction a dead run bound into a prompt but never launched a
+      worker with is released. That window -- prompt finalized, process not yet
+      started -- is the one place a carry proves nothing about what anybody saw,
+      and leaving the carry standing would let a crash inside it retire the
+      operator's words to a turn that never ran. Releasing is safe precisely
+      because ``delivered`` is written on the far side of it: a correction a
+      worker actually received is not touched here;
     - every *unanswered* request of a dead run whose session this plan is not
       going to run again is settled ``rejected``/``run-ended``. That reason is
       written exactly here: it means the process that owed the operator an
@@ -571,10 +594,10 @@ def reconcile_startup(
       "accepted, and then nobody was left to deliver it", and inventing one
       would overwrite the runner's own decision after the fact;
     - everything still unfinished whose session *is* pending is reported as
-      recoverable, and every delivered-but-unreceipted request is reported as
-      uncertain. Neither is acted on here. Recovery happens when the session is
-      actually selected, because only then does a continuation attempt exist to
-      carry a correction into.
+      recoverable, and every request a launched worker never receipted is
+      reported as uncertain. Neither is acted on here. Recovery happens when the
+      session is actually selected, because only then does a continuation
+      attempt exist to carry a correction into.
 
     ``pending_session_ids`` is supplied by the caller rather than read from the
     plan: this module has no business deciding what a plan is going to run, and
@@ -606,6 +629,12 @@ def reconcile_startup(
 
     ledger = inspect_conversations(plan_dir, state_dir=state_dir)
     view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    released = _release_unlaunched_carries(plan_dir, view, run_id, state_dir, moment)
+    if released:
+        # The releases changed what the journal says about these requests, and
+        # every answer below is read off the view. Re-reading is cheaper than
+        # reasoning about which of the two states each branch wanted.
+        view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
     live_sessions = frozenset(pending_session_ids)
 
     settled: list[str] = []
@@ -648,7 +677,7 @@ def reconcile_startup(
         for request in view.requests
         if request.target.run_id != run_id
         and request.accepted
-        and request.carried
+        and request.delivered
         and not request.acknowledged
     )
     return ReconciliationReport(
@@ -656,6 +685,7 @@ def reconcile_startup(
         run_id=run_id,
         reconciled=True,
         expired=tuple(request.operation_id for request in expired),
+        released=released,
         settled=tuple(settled),
         stranded=tuple(stranded),
         recoverable=tuple(recoverable),
@@ -665,6 +695,46 @@ def reconcile_startup(
         owner=owner,
         conversations=ledger,
     )
+
+
+def _release_unlaunched_carries(
+    plan_dir: str | Path,
+    view: redirect_store.RedirectJournalView,
+    run_id: str,
+    state_dir: str | Path | None,
+    moment: datetime,
+) -> tuple[str, ...]:
+    """Hand back every carry a dead run made but never launched with, oldest first.
+
+    Restricted to *other* runs on purpose. A carry belonging to this run at
+    startup is impossible -- the run id is minted for this process -- and a rule
+    that did not say so would become a live run releasing its own in-flight
+    prompt the first time reconciliation was called from anywhere else.
+
+    A refusal is swallowed rather than raised or reported: the request is simply
+    left carried, which is the state it was already in, and the caller's job of
+    settling a crash's leftovers should not fail over one line it could not
+    append.
+    """
+    released: list[str] = []
+    for request in view.requests:
+        if request.target.run_id == run_id or not request.accepted:
+            continue
+        carried_into = request.continuation
+        if carried_into is None or request.reached_a_worker:
+            continue
+        try:
+            redirect_store.release_request(
+                plan_dir,
+                request.operation_id,
+                continuation=carried_into,
+                state_dir=state_dir,
+                now=moment,
+            )
+        except redirect_store.RedirectStoreError:
+            continue
+        released.append(request.operation_id)
+    return tuple(released)
 
 
 def _resolved_pid(owner_pid: int | None) -> int:
