@@ -8142,12 +8142,26 @@ Mutating endpoints (bearer-token required):
   redirect journal and rings the urgent channel — so its status codes
   report what became durable: `202` with `accepted` and a `redirect`
   receipt when anything was persisted, `200` with `redirect.replayed:
-  true` when the `operation_id` was already submitted, `409` when nothing
-  was persisted (a stale action token, an action the run does not permit,
-  or an admission refusal such as `stale-target`), `400` for a malformed
-  or oversized body, and `503` with `reason: "redirect-unavailable"` when
-  the journal itself cannot be read. The response carries
-  `feedback_digest` and `feedback_bytes`, never the correction text.
+  true` when the `operation_id` was already submitted *and* carries the
+  same correction, `409` when nothing was persisted (a stale action
+  token, an action the run does not permit, an admission refusal such as
+  `stale-target`, or `reason: "redirect-replay-conflict"` — see below),
+  `400` for a malformed or oversized body, and `503` with `reason:
+  "redirect-unavailable"` when the journal itself cannot be read. The
+  response carries `feedback_digest` and `feedback_bytes`, never the
+  correction text.
+
+  Replay is by request identity, not by id alone. Before answering a
+  known `operation_id` the handler compares the submitted `text` — and
+  the `expected_target`, when one is supplied — against the durable
+  record, the same rule `redirect_store.submit_request` applies to a
+  first submission. A retry that changed either is not a retry: it is
+  refused `409` with `reason: "redirect-replay-conflict"`,
+  `retryable: false`, and `details.conflict` of `feedback` or `target`,
+  the recorded receipt in `details.redirect`, and the journal untouched.
+  Because identity includes the words, `text` is required even on a
+  replay; `GET /api/redirect-status` is the body-free way to ask what
+  became of an id.
 - `POST /api/unlock` — remove an operational lock. Active locks return
   409 unless the payload includes `"force": true`; idempotent missing
   locks return 200 with `had_lock: false`.
@@ -8171,7 +8185,10 @@ records to appeal to:
   journal. Replay is checked by `operation_id` *before* the action token
   is validated, because the correction that landed is exactly what made
   the token the client still holds stale; checking the token first would
-  turn every lost response into a refused retry.
+  turn every lost response into a refused retry. The request itself is
+  still checked: a resend must carry the same correction (and the same
+  turn, when it names one) the journal recorded under that id, or it is
+  refused `409 redirect-replay-conflict` with nothing rewritten.
 - `POST /api/launch` and `POST /api/reply` accept an optional `launch_id`
   bounded by `redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS`, and return
   the original launch result with `replayed: true` for a repeat of an id
@@ -8792,6 +8809,19 @@ the Python package (no build tooling, no third-party JS). Pages:
   switching plans resets the composer rather than carrying a draft
   across.
 
+  A retry is only a retry while the draft is unchanged. If the operator
+  edits the text (or the tab names a different turn) after the id was
+  accepted, the server refuses it `409
+  redirect-replay-conflict` rather than replaying the old receipt, and
+  the composer keeps the draft and reveals `#wb-redirect-conflict`: what
+  changed, the recorded digest, that nothing was resubmitted and the
+  recorded correction is unchanged, and the same reconciliation hint the
+  CLI prints. The only offered way forward is the explicit "keep this
+  draft and send it as a new correction" button, which mints a fresh id
+  and sends nothing — the operator still presses submit — because
+  auto-retrying under a new id is exactly the silent second correction
+  the id was minted once to prevent.
+
   Because nothing is persisted, a reload repopulates the panel purely
   from `/api/redirect-status`. Operations still in `submitted` or
   `uncertain` are surfaced by id under "Unresolved after reconnect",
@@ -9311,15 +9341,28 @@ rather than built from the submission in hand, so the status this client
 is told and the status the next reader of that journal computes are the
 same projection of the same bytes.
 
-Replay is served from the journal **before** anything else is checked,
-including the action token, and that ordering is the whole reason the
-method can be retried. A correction that landed moves the plan, which
-moves the action token, which would make the retry of a request whose
-answer was lost in transit look like a stale second correction. Asking
-the journal first makes the `operation_id` the client already holds the
-answer: `replayed` is true, `outcome` is null — a replay submitted
-nothing, so it has no outcome of its own — and `operation` carries the
-durable truth. The same id can never carry different text.
+Replay is served from the journal **before** the freshness proof is
+checked, and that ordering is the whole reason the method can be
+retried. A correction that landed moves the plan, which moves the action
+token, which would make the retry of a request whose answer was lost in
+transit look like a stale second correction. Asking the journal first
+makes the `operation_id` the client already holds the answer:
+`replayed` is true, `outcome` is null — a replay submitted nothing, so
+it has no outcome of its own — and `operation` carries the durable
+truth.
+
+What is not short-circuited is the request itself. A replay must present
+the same request identity the journal recorded — the same `text`, and a
+matching turn if it supplies `expected_target` — which is the rule
+`submit_request` applies to a first submission, applied again here.
+`text` is therefore required even on a retry; `run.redirect_status` is
+the body-free way to ask after an id. A resubmission that changed either
+half is refused `invalid-request` with `details.reason:
+"redirect-replay-conflict"` and `details.conflict` of `feedback` or
+`target` (the closed `ErrorCode` enum is versioned, so the durable
+reason travels in `details`), and the recorded request is left exactly
+as it was. The same id can never carry different text, and now cannot
+claim to.
 
 ### `run.redirect_status`
 

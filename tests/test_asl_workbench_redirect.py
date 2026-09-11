@@ -71,6 +71,9 @@ OPERATION_ID = "wb-op-4f1c22"
 # Long enough that a substring search for it is meaningful, and distinctive
 # enough that finding it anywhere in a response is unambiguous.
 FEEDBACK = "stop and re-read the session contract before touching the journal"
+# What a second correction looks like: the operator kept typing after the
+# response was lost, so the draft no longer matches the id the browser holds.
+EDITED_FEEDBACK = "stop, re-read the session contract, and then revert the journal"
 
 
 class WorkbenchRedirectTestCase(unittest.TestCase):
@@ -640,6 +643,156 @@ class RedirectIdempotencyTests(WorkbenchRedirectTestCase):
         self.assertEqual(202, status)
         self.assertFalse(body["redirect"]["replayed"])
         self.assertEqual(2, len(self.journal().requests))
+
+    def test_a_retry_to_a_restarted_server_still_replays(self) -> None:
+        """Replay is a property of the journal, not of the process that wrote it."""
+        self.live_run()
+        self.accept_when_pending()
+        self.submit(wait_seconds=5.0)
+
+        status, body, _ = self.submit(server=self.start_server())
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["redirect"]["replayed"])
+        self.assertEqual(1, len(self.journal().requests))
+
+
+class ReplayIdentityTests(WorkbenchRedirectTestCase):
+    """A retry is the same correction, or it is not a retry.
+
+    A lost response leaves the browser holding both halves of the request: the
+    operation id, and an editable textarea. Retrying after an edit is the one
+    way a second correction can wear a durable id, and answering it with the
+    original receipt would clear the edited draft while telling the operator it
+    landed — the composer's whole contract, inverted.
+    """
+
+    def submitted(self) -> None:
+        """One accepted correction under the default operation id."""
+        self.live_run()
+        self.accept_when_pending()
+        self.submit(wait_seconds=5.0)
+
+    def assert_journal_unchanged(self) -> None:
+        requests = self.journal().requests
+        self.assertEqual(1, len(requests))
+        self.assertEqual(
+            redirect_store.feedback_digest(FEEDBACK), requests[0].feedback_digest
+        )
+        self.assertEqual(self.target(), requests[0].target)
+        self.assertEqual(
+            FEEDBACK,
+            redirect_store.read_feedback(
+                self.plan_dir, OPERATION_ID, state_dir=self.state_dir
+            ),
+        )
+
+    def test_an_edited_draft_under_the_same_id_is_refused(self) -> None:
+        self.submitted()
+
+        status, body, _ = self.submit(text=EDITED_FEEDBACK, wait_seconds=5.0)
+
+        # 409, not 400: the body is well formed and what it contradicts is a
+        # durable record, which a client resolves by reconciling the id.
+        self.assertEqual(409, status)
+        self.assertEqual(redirect_store.ERROR_REPLAY_CONFLICT, body["reason"])
+        self.assertEqual(redirect_store.CONFLICT_FEEDBACK, body["details"]["conflict"])
+        self.assertFalse(body["retryable"])
+        self.assert_journal_unchanged()
+
+    def test_the_refusal_hands_back_the_recorded_correction(self) -> None:
+        """What the composer needs to offer reconciliation: the durable record."""
+        self.submitted()
+
+        _, body, _ = self.submit(text=EDITED_FEEDBACK, wait_seconds=5.0)
+
+        receipt = body["details"]["redirect"]
+        self.assertEqual(OPERATION_ID, receipt["operation_id"])
+        self.assertTrue(receipt["replayed"])
+        # The digest of the correction that landed, so a browser can say which
+        # one it is refusing to overwrite without ever holding its words.
+        self.assertEqual(
+            redirect_store.feedback_digest(FEEDBACK),
+            receipt["operation"]["feedback_digest"],
+        )
+
+    def test_a_retry_naming_a_different_turn_is_refused(self) -> None:
+        """The id is bound to the turn its submission was accepted against."""
+        self.submitted()
+
+        status, body, _ = self.submit(
+            expected_target=self.target(turn_index=2).to_payload(), wait_seconds=5.0
+        )
+
+        self.assertEqual(409, status)
+        self.assertEqual(redirect_store.ERROR_REPLAY_CONFLICT, body["reason"])
+        self.assertEqual(redirect_store.CONFLICT_TARGET, body["details"]["conflict"])
+        self.assert_journal_unchanged()
+
+    def test_a_retry_naming_the_same_turn_still_replays(self) -> None:
+        """A client that named its turn must be able to name it again."""
+        self.submitted()
+
+        status, body, _ = self.submit(
+            expected_target=self.target().to_payload(), wait_seconds=5.0
+        )
+
+        self.assertEqual(200, status)
+        self.assertTrue(body["redirect"]["replayed"])
+        self.assert_journal_unchanged()
+
+    def test_a_refusal_never_quotes_either_correction(self) -> None:
+        """Both are the operator's words; neither belongs in a response."""
+        self.submitted()
+
+        _, body, _ = self.submit(text=EDITED_FEEDBACK, wait_seconds=5.0)
+
+        rendered = json.dumps(body)
+        self.assertNotIn(FEEDBACK, rendered)
+        self.assertNotIn(EDITED_FEEDBACK, rendered)
+
+    def test_an_edited_draft_is_refused_by_a_restarted_server_too(self) -> None:
+        """The check reads the journal, so it outlives the process that wrote it."""
+        self.submitted()
+
+        status, body, _ = self.submit(
+            server=self.start_server(), text=EDITED_FEEDBACK, wait_seconds=5.0
+        )
+
+        self.assertEqual(409, status)
+        self.assertEqual(redirect_store.ERROR_REPLAY_CONFLICT, body["reason"])
+        self.assert_journal_unchanged()
+
+    def test_an_edited_draft_is_refused_after_the_turn_ended(self) -> None:
+        """Turn completion is what makes the original unrecallable, not writable."""
+        self.submitted()
+        self.write_state(turn_index=None)
+
+        status, body, _ = self.submit(text=EDITED_FEEDBACK)
+
+        self.assertEqual(409, status)
+        self.assertEqual(redirect_store.ERROR_REPLAY_CONFLICT, body["reason"])
+        self.assert_journal_unchanged()
+
+    def test_a_new_operation_id_sends_the_edited_draft(self) -> None:
+        """The way out the composer offers: a second correction, said so."""
+        self.submitted()
+        self.accept_when_pending()
+
+        status, body, _ = self.submit(
+            operation_id="wb-op-edited", text=EDITED_FEEDBACK, wait_seconds=5.0
+        )
+
+        self.assertEqual(202, status)
+        self.assertFalse(body["redirect"]["replayed"])
+        digests = {request.feedback_digest for request in self.journal().requests}
+        self.assertEqual(
+            {
+                redirect_store.feedback_digest(FEEDBACK),
+                redirect_store.feedback_digest(EDITED_FEEDBACK),
+            },
+            digests,
+        )
 
 
 class RedirectStatusTests(WorkbenchRedirectTestCase):

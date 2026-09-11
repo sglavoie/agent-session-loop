@@ -182,6 +182,12 @@
   const REDIRECT_MAX_FEEDBACK_BYTES = 65536;
   // Mirrors redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS.
   const REDIRECT_MAX_OPERATION_ID_CHARS = 64;
+  // Mirrors redirect_store.ERROR_REPLAY_CONFLICT. The server says this when the
+  // operation id in hand already names a *different* correction, which is the
+  // one refusal the composer cannot answer on the operator's behalf: the draft
+  // in the textarea and the words in the journal are two corrections, and only
+  // a person can say whether the second one should be sent at all.
+  const REDIRECT_CONFLICT_REASON = "redirect-replay-conflict";
   const REDIRECT_CONFIRM =
     "Interrupt the in-flight turn now and resume the saved conversation with " +
     "this correction first? The session stays pending, the interrupted " +
@@ -4449,8 +4455,15 @@
   //
   // Only a durable answer clears the textarea. "Durable" means the server said
   // ok — a 202 that persisted, or a 200 replay that recognized an id already in
-  // the journal. Everything else keeps the text exactly where the operator left
-  // it.
+  // the journal carrying *this* correction. Everything else keeps the text
+  // exactly where the operator left it.
+  //
+  // A retry is only a retry while the draft is unchanged. Editing the textarea
+  // after a lost response makes the next submit a different correction under an
+  // id the journal already holds, which the server refuses. That refusal is the
+  // one case where the two rules above pull apart — the id has to move for the
+  // draft to be sendable — so it is the operator who moves it, through the
+  // conflict panel below, and never this code on their behalf.
 
   function wireRedirectForm() {
     const form = document.getElementById("wb-redirect-form");
@@ -4464,6 +4477,10 @@
         resetRedirectComposer();
       });
     }
+    const newIdBtn = document.getElementById("wb-redirect-new-identity");
+    if (newIdBtn) {
+      newIdBtn.addEventListener("click", adoptNewRedirectIdentity);
+    }
   }
 
   function resetRedirectComposer() {
@@ -4472,7 +4489,71 @@
     state.redirect.operationId = null;
     state.redirect.inFlight = false;
     clearFormErrors("wb-redirect-form-errors");
+    hideRedirectConflict();
     renderRedirectOperationId();
+  }
+
+  function isRedirectConflict(body) {
+    return !!(body && body.ok === false && body.reason === REDIRECT_CONFLICT_REASON);
+  }
+
+  function hideRedirectConflict() {
+    const panel = document.getElementById("wb-redirect-conflict");
+    if (panel) panel.hidden = true;
+  }
+
+  // The refused draft is still on screen and still the operator's. All this
+  // does is say what the journal holds and offer the only two ways out:
+  // reconcile the recorded id, or deliberately send the draft as its own
+  // correction.
+  function showRedirectConflict(body, operationId) {
+    const panel = document.getElementById("wb-redirect-conflict");
+    const message = document.getElementById("wb-redirect-conflict-message");
+    if (!panel || !message) return;
+    const details = (body && body.details) || {};
+    const recorded = details.redirect && details.redirect.operation;
+    const changed =
+      details.conflict === "target"
+        ? "names a different turn than"
+        : "carries different words from";
+    message.textContent =
+      "This draft " +
+      changed +
+      " correction " +
+      operationId +
+      ", which is already in the journal" +
+      (recorded && recorded.feedback_digest
+        ? " (recorded digest " + recorded.feedback_digest + ")"
+        : "") +
+      ". Nothing was resubmitted and the recorded correction is unchanged. " +
+      REDIRECT_RECONCILE_HINT +
+      ". Your draft is kept below.";
+    panel.hidden = false;
+  }
+
+  // The "second correction" the reconcile hint warns about, made explicit. The
+  // draft is untouched and nothing is sent: this only mints the new identity a
+  // different correction needs, and the operator still has to press submit —
+  // which is what keeps one refused replay from becoming two corrections.
+  function adoptNewRedirectIdentity() {
+    const textarea = document.getElementById("wb-redirect-text");
+    if (!textarea || !textarea.value.trim()) {
+      showFormError(
+        "wb-redirect-form-errors",
+        "there is no draft to send as a new correction"
+      );
+      return;
+    }
+    state.redirect.operationId = mintRedirectOperationId();
+    renderRedirectOperationId();
+    hideRedirectConflict();
+    clearFormErrors("wb-redirect-form-errors");
+    showControlsFeedback(
+      "info",
+      "draft kept under new operation id " +
+        state.redirect.operationId +
+        "; it is a second correction and is sent only when you submit again"
+    );
   }
 
   // Leaving the plan drops the attribution too: a correction id means nothing
@@ -4797,6 +4878,7 @@
   async function handleRedirectSubmit(event) {
     event.preventDefault();
     clearFormErrors("wb-redirect-form-errors");
+    hideRedirectConflict();
     if (state.redirect.inFlight) {
       // The double-click guard. The button is disabled below too, but a second
       // submit can still arrive by keyboard before the first response lands.
@@ -4872,6 +4954,9 @@
             : "correction " + operationId + " recorded; watch Progress for acknowledgment"
         );
       } else {
+        // The draft stays put on every refusal, and on this one the panel says
+        // why and offers the new identity that sending it would need.
+        if (isRedirectConflict(body)) showRedirectConflict(body, operationId);
         showFormError(
           "wb-redirect-form-errors",
           redirectFailureMessage(body, operationId)

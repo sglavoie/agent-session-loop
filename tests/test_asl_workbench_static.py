@@ -1570,9 +1570,18 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             'id="wb-redirect-progress-section"',
             'id="wb-redirect-phases"',
             'id="wb-redirect-operations"',
+            'id="wb-redirect-conflict"',
+            'id="wb-redirect-conflict-message"',
+            'id="wb-redirect-new-identity"',
             'data-action="redirect-submit"',
+            'data-action="redirect-new-identity"',
         ):
             self.assertIn(fragment, markup, msg=f"missing composer markup: {fragment}")
+        # The way out of a refused replay is a labeled control, not a hidden
+        # retry: it says it keeps the draft and that the result is a new
+        # correction, because the alternative reading -- resending the old one
+        # -- is the mistake the refusal exists to prevent.
+        self.assertIn("keep this draft and send it as a new correction", markup)
         # The action names both halves of what it does. A button labeled only
         # "submit" would hide the interruption behind a confirm dialog.
         self.assertIn("interrupt turn &amp; resume with this correction", markup)
@@ -1668,6 +1677,15 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
             f"{redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS};",
             decoded,
         )
+        # A refused replay is recognized by its reason, so the string has to be
+        # the server's: a drifted copy would render the refusal as a generic
+        # error and clear nothing up about the draft still on screen.
+        self.assertIn(
+            "const REDIRECT_CONFLICT_REASON = "
+            f'"{redirect_store.ERROR_REPLAY_CONFLICT}";',
+            decoded,
+        )
+        self.assertIn(f'=== "{redirect_store.CONFLICT_TARGET}"', decoded)
 
     def test_app_js_redirect_reconcile_hint_mirrors_cli_text(self) -> None:
         # A browser that lost its answer and the operator reading
@@ -1728,6 +1746,75 @@ class WorkbenchStaticAssetTests(unittest.TestCase):
         self.assertIn("body.redirect.replayed", source)
         # The freshness proof is the server's, never derived locally.
         self.assertIn("const token = state.redirect.actionToken;", source)
+
+    def test_app_js_redirect_conflict_keeps_the_draft_and_sends_nothing(self) -> None:
+        # The lost-response case with an edited draft: the server refuses the
+        # replay because the id already names different words, and the tab is
+        # then holding a correction no one has accepted. Clearing it would lose
+        # the operator's text; resending it under a fresh id behind their back
+        # would be a second correction they never asked for. So the branch
+        # explains, keeps, and waits.
+        import re as _re
+
+        server = self._start_server()
+        _, body, _ = _http_request_raw(self._base_url(server) + "/static/app.js")
+        decoded = body.decode("utf-8")
+
+        handler = _re.search(
+            r"async function handleRedirectSubmit\(event\) \{(.*?)\n  \}\n",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(handler)
+        assert handler is not None
+        _, _, failure = handler.group(1).partition("if (body && body.ok === true) {")
+        _, _, refused = failure.partition("} else {")
+        self.assertIn("if (isRedirectConflict(body))", refused)
+        self.assertIn("showRedirectConflict(body, operationId);", refused)
+        # Whatever else the branch does, it does not clear the composer and it
+        # does not mint a replacement id on the operator's behalf.
+        self.assertNotIn("resetRedirectComposer();", refused)
+        self.assertNotIn("mintRedirectOperationId()", refused)
+
+        conflict = _re.search(
+            r"function showRedirectConflict\(body, operationId\) \{(.*?)\n  \}\n",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(conflict)
+        assert conflict is not None
+        shown = conflict.group(1)
+        # Which half of the identity disagreed, that nothing landed, and how to
+        # reconcile -- the same hint the CLI gives.
+        self.assertIn("names a different turn than", shown)
+        self.assertIn("carries different words from", shown)
+        self.assertIn("Nothing was resubmitted", shown)
+        self.assertIn("REDIRECT_RECONCILE_HINT", shown)
+        self.assertIn("Your draft is kept below.", shown)
+        # Body-free like every other redirect frame: a digest identifies the
+        # recorded correction, never its words.
+        self.assertIn("recorded.feedback_digest", shown)
+        self.assertEqual({"feedback_digest"}, set(_re.findall(r"feedback\w*", shown)))
+
+        adopt = _re.search(
+            r"function adoptNewRedirectIdentity\(\) \{(.*?)\n  \}\n",
+            decoded,
+            flags=_re.DOTALL,
+        )
+        self.assertIsNotNone(adopt)
+        assert adopt is not None
+        adopted = adopt.group(1)
+        # The explicit way out: a new id for the draft already on screen, and
+        # not one byte sent until the operator submits again.
+        self.assertIn(
+            "state.redirect.operationId = mintRedirectOperationId();", adopted
+        )
+        self.assertNotIn("apiRequest(", adopted)
+        self.assertNotIn("textarea.value = ", adopted)
+        self.assertIn("second correction", adopted)
+        self.assertIn(
+            'newIdBtn.addEventListener("click", adoptNewRedirectIdentity);', decoded
+        )
 
     def test_app_js_redirect_availability_comes_from_the_server(self) -> None:
         # Whether a correction is possible is a property of the run, not of the

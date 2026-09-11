@@ -643,14 +643,10 @@ class ReplayTests(RedirectBridgeTestCase):
         self.accept_when_pending()
         self.submit(wait_seconds=5.0)
 
-        replay = self.submit(
-            action_token="0" * 32, request_id="req-5", text="a different correction"
-        )
+        replay = self.submit(action_token="0" * 32, request_id="req-5")
 
         self.assertTrue(replay["ok"])
         self.assertTrue(replay["result"]["replayed"])
-        # The replay answers with the correction that landed, not the text of
-        # the retry, so a retry can never smuggle a second correction through.
         self.assertEqual(
             redirect_store.feedback_digest(FEEDBACK),
             replay["result"]["operation"]["feedback_digest"],
@@ -668,6 +664,104 @@ class ReplayTests(RedirectBridgeTestCase):
 
         self.assertTrue(replay["ok"])
         self.assertTrue(replay["result"]["replayed"])
+
+
+class ReplayIdentityTests(RedirectBridgeTestCase):
+    """A retry is the same request, or it is not a retry.
+
+    Replay is served before the action token is checked, so identity is the
+    only thing left standing between "my answer was lost, here it is again" and
+    "I changed my mind, send this instead". A client that submits different
+    content under a durable id is told so, rather than handed a receipt for
+    words the worker was never given.
+    """
+
+    def submitted(self) -> None:
+        """One accepted correction under the default operation id."""
+        self.live_run()
+        self.accept_when_pending()
+        self.submit(wait_seconds=5.0)
+
+    def assert_journal_unchanged(self) -> None:
+        requests = self.journal().requests
+        self.assertEqual(1, len(requests))
+        self.assertEqual(
+            redirect_store.feedback_digest(FEEDBACK), requests[0].feedback_digest
+        )
+        self.assertEqual(self.target(), requests[0].target)
+        self.assertEqual(
+            FEEDBACK,
+            redirect_store.read_feedback(
+                self.plan_dir, "amx-op-9c31aa", state_dir=self.state_dir
+            ),
+        )
+
+    def test_a_replay_carrying_different_words_is_refused(self) -> None:
+        self.submitted()
+
+        refusal = self.submit(request_id="req-5", text=SECOND_FEEDBACK)
+
+        self.assertFalse(refusal["ok"])
+        self.assertEqual(bridge.ERROR_INVALID_REQUEST, refusal["error"]["code"])
+        self.assertEqual(
+            redirect_store.ERROR_REPLAY_CONFLICT, refusal["error"]["details"]["reason"]
+        )
+        self.assertEqual(
+            redirect_store.CONFLICT_FEEDBACK, refusal["error"]["details"]["conflict"]
+        )
+        self.assertFalse(refusal["error"]["retryable"])
+        self.assert_journal_unchanged()
+
+    def test_a_replay_naming_a_different_turn_is_refused(self) -> None:
+        """The id is bound to the turn it was submitted against."""
+        self.submitted()
+
+        refusal = self.submit(
+            request_id="req-5",
+            expected_target=self.target(turn_index=2).to_payload(),
+        )
+
+        self.assertFalse(refusal["ok"])
+        self.assertEqual(
+            redirect_store.CONFLICT_TARGET, refusal["error"]["details"]["conflict"]
+        )
+        self.assert_journal_unchanged()
+
+    def test_a_refused_replay_never_quotes_either_correction(self) -> None:
+        """Both corrections are the operator's words; neither travels."""
+        self.submitted()
+
+        refusal = self.submit(request_id="req-5", text=SECOND_FEEDBACK)
+
+        frame = json.dumps(refusal)
+        self.assertNotIn(FEEDBACK, frame)
+        self.assertNotIn(SECOND_FEEDBACK, frame)
+
+    def test_a_retry_naming_the_same_turn_still_replays(self) -> None:
+        """A client that named its turn must be able to name it again."""
+        self.submitted()
+
+        replay = self.submit(
+            request_id="req-5", expected_target=self.target().to_payload()
+        )
+
+        self.assertTrue(replay["ok"])
+        self.assertTrue(replay["result"]["replayed"])
+        self.assert_journal_unchanged()
+
+    def test_a_second_bridge_process_refuses_the_same_conflict(self) -> None:
+        """The identity check reads the journal, so it survives a restart."""
+        self.submitted()
+
+        refusal = self.submit(
+            self.handshaken(), request_id="req-5", text=SECOND_FEEDBACK
+        )
+
+        self.assertFalse(refusal["ok"])
+        self.assertEqual(
+            redirect_store.ERROR_REPLAY_CONFLICT, refusal["error"]["details"]["reason"]
+        )
+        self.assert_journal_unchanged()
 
 
 class RestartTests(RedirectBridgeTestCase):

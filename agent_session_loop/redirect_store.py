@@ -221,6 +221,16 @@ ERROR_NOT_CARRIED = "redirect-not-carried"
 ERROR_CONTINUATION_MISMATCH = "redirect-continuation-mismatch"
 ERROR_ALREADY_DELIVERED = "redirect-already-delivered"
 ERROR_ALREADY_ACKNOWLEDGED = "redirect-already-acknowledged"
+ERROR_REPLAY_CONFLICT = "redirect-replay-conflict"
+
+#: Which half of a request's identity a resubmission disagreed with. Reported
+#: rather than collapsed into one refusal because the two have different
+#: answers: changed words are a second correction the operator has to decide
+#: about, while a changed target is a client correcting a turn other than the
+#: one its id is bound to.
+CONFLICT_FEEDBACK = "feedback"
+CONFLICT_TARGET = "target"
+REPLAY_CONFLICTS: tuple[str, ...] = (CONFLICT_FEEDBACK, CONFLICT_TARGET)
 
 # Why one physical line was not applied. A rejected line is reported without
 # its bytes: a malformed submission still carries the operator's words.
@@ -768,6 +778,40 @@ def feedback_digest(feedback: str) -> str:
 def new_operation_id() -> str:
     """Mint a durable operation identity for one redirect."""
     return uuid.uuid4().hex
+
+
+def replay_conflict(
+    recorded_digest: str,
+    recorded_target: RedirectTarget,
+    *,
+    feedback: str,
+    expected_target: RedirectTarget | None,
+) -> str | None:
+    """Name what a resubmission changed about a request already recorded here.
+
+    :func:`submit_request` already refuses an operation id that names different
+    content, and that refusal is the rule. This function exists because the
+    public surfaces never reach it: a browser or a bridge client whose response
+    was lost retries the whole request, so those surfaces answer an id the
+    journal already holds *before* re-checking a freshness proof the landed
+    correction itself invalidated. That short-circuit is what makes a retry
+    possible, and it is also the only place an operator's second, different
+    correction can be reported as a successful replay of their first. Asking
+    this before serving the replay is what keeps the two apart.
+
+    The comparison is on identity, never on words: the digest names the
+    correction, and ``expected_target`` is checked only when the caller supplied
+    one, exactly as a fresh submission checks it. Returns ``None`` when the
+    resubmission is the recorded request, and otherwise which half of its
+    identity disagrees, so a surface can tell an operator what to reconcile.
+    """
+    if feedback_digest(feedback) != recorded_digest:
+        return CONFLICT_FEEDBACK
+    if expected_target is not None and not recorded_target.identifies_same_turn(
+        expected_target
+    ):
+        return CONFLICT_TARGET
+    return None
 
 
 # ---------------------------------------------------------------------------

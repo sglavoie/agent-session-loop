@@ -435,6 +435,22 @@
             role="alert"
             hidden
           ></p>
+          <div class="wb-redirect__conflict" id="wb-redirect-conflict" hidden>
+            <p
+              class="wb-redirect__conflict-message"
+              id="wb-redirect-conflict-message"
+              role="alert"
+            ></p>
+            <button
+              class="wb-button wb-button--ghost"
+              id="wb-redirect-new-identity"
+              type="button"
+              data-action="redirect-new-identity"
+              title="Keeps this draft and gives it a new operation id. Nothing is sent until you submit again, and the correction already in the journal is untouched."
+            >
+              keep this draft and send it as a new correction
+            </button>
+          </div>
           <div class="wb-redirect__actions">
             <button
               class="wb-button wb-button--danger"

@@ -1787,6 +1787,29 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
                 f"redirect journal could not be read: {error}"
             ) from error
 
+    def _recorded_redirect(
+        self, plan_dir: Path, operation_id: str
+    ) -> redirect_recovery.OperationOutcome | None:
+        """Read the request this ``operation_id`` already names, if there is one.
+
+        Separate from :meth:`_redirect_receipt` because a replay has to be
+        *judged* before it is rendered, and the judgement needs the record's own
+        identity rather than its projection. The two reads cannot disagree about
+        what they read: an operation's target and feedback digest are written by
+        its submission and no later line revises them, so anything that moves
+        between them moves the request's stage, which is what the receipt is
+        re-read to report anyway.
+        """
+        report = self._redirect_report(plan_dir)
+        return next(
+            (
+                operation
+                for operation in report.operations
+                if operation.operation_id == operation_id
+            ),
+            None,
+        )
+
     def _live_redirect_target(
         self, plan_dir: Path
     ) -> redirect_store.RedirectTarget | None:
@@ -1853,28 +1876,75 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
     def _handle_control_redirect(self, *, query: Mapping[str, list[str]]) -> None:
         """Submit one urgent correction against the turn this run is on now.
 
-        Replay is served out of the redirect journal before anything else is
-        checked, and that ordering is the whole reason a browser may retry this
-        request. A correction that landed moves the plan, which moves the action
-        token, which would make the retry of a request whose response was lost
-        look like a stale second correction. Asking the journal first makes the
-        ``operation_id`` the client already holds the answer.
+        Replay is served out of the redirect journal before the freshness proof
+        is checked, and that ordering is the whole reason a browser may retry
+        this request. A correction that landed moves the plan, which moves the
+        action token, which would make the retry of a request whose response was
+        lost look like a stale second correction. Asking the journal first makes
+        the ``operation_id`` the client already holds the answer.
+
+        What is *not* short-circuited is the request itself. The body is read
+        and compared against the record that id already names, because a retry
+        is only a retry when it carries the same correction: an operator whose
+        response was lost still has an editable textarea, and reporting their
+        edited words as a successful replay of the words the worker actually got
+        is the one falsehood this path exists to avoid.
         """
         del query
         body = self._read_json_body()
         plan_dir = _require_string(body, "plan_dir")
         operation_id = _require_string(body, "operation_id")
         facts = self._run_facts(plan_dir)
-        replay = self._redirect_receipt(
-            facts=facts,
-            operation_id=operation_id,
-            outcome=None,
-            reason=None,
-            target=None,
-            waited_seconds=0.0,
-            replayed=True,
-        )
-        if replay["operation"] is not None:
+
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip():
+            self._send_error(
+                400,
+                intervention.REASON_EMPTY_TEXT,
+                "redirect text must contain non-whitespace content",
+                details={"plan_dir": str(facts.plan_dir)},
+            )
+            return
+        expected_target = _expected_redirect_target(body)
+
+        recorded = self._recorded_redirect(facts.plan_dir, operation_id)
+        if recorded is not None:
+            replay = self._redirect_receipt(
+                facts=facts,
+                operation_id=operation_id,
+                outcome=None,
+                reason=None,
+                target=None,
+                waited_seconds=0.0,
+                replayed=True,
+            )
+            conflict = redirect_store.replay_conflict(
+                recorded.feedback_digest,
+                recorded.target,
+                feedback=text,
+                expected_target=expected_target,
+            )
+            if conflict is not None:
+                # Nothing was written, and nothing about the recorded request
+                # changed. 409 rather than 400 because the body is well formed:
+                # what it contradicts is a durable record, and the client
+                # resolves that by reconciling the id, not by fixing a field.
+                self._send_error(
+                    409,
+                    redirect_store.ERROR_REPLAY_CONFLICT,
+                    (
+                        "operation id already names a different correction; "
+                        "the recorded one was left untouched"
+                    ),
+                    details={
+                        "plan_dir": str(facts.plan_dir),
+                        "operation_id": operation_id,
+                        "conflict": conflict,
+                        "redirect": replay,
+                    },
+                    retryable=False,
+                )
+                return
             # 200 rather than 202: this call accepted nothing, it recognized a
             # request that was already accepted once.
             self._send_success(reason="ok", redirect=replay)
@@ -1898,16 +1968,6 @@ class WorkbenchRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
-        text = body.get("text")
-        if not isinstance(text, str) or not text.strip():
-            self._send_error(
-                400,
-                intervention.REASON_EMPTY_TEXT,
-                "redirect text must contain non-whitespace content",
-                details={"plan_dir": str(facts.plan_dir)},
-            )
-            return
-        expected_target = _expected_redirect_target(body)
         wait_seconds = _redirect_wait_seconds(body)
         try:
             outcome = redirect_admission.submit_redirect(

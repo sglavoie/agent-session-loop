@@ -1336,6 +1336,25 @@ a:hover {
   align-items: center;
 }
 
+/* The refused-replay panel. It sits between the error line and the submit row
+   because it is read after the refusal and acted on before the next submit,
+   and it carries a warning rather than a danger colour: nothing went wrong
+   with the recorded correction, the draft is simply not that correction. */
+.wb-redirect__conflict {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--wb-warning-soft);
+  border-left: 2px solid var(--wb-warning);
+}
+
+.wb-redirect__conflict-message {
+  margin: 0;
+  font-size: 12px;
+  color: var(--wb-text);
+}
+
 /* The disabled submit has to read as disabled. Everywhere else in this UI a
    disabled button is a transient nicety; here it is the availability gate, and
    an operator who cannot see that the action is closed reads the panel as

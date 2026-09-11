@@ -1839,6 +1839,29 @@ class BridgeSession:
                 retryable=True,
             ) from error
 
+    def _recorded_redirect(
+        self, plan_dir: Path, operation_id: str
+    ) -> redirect_recovery.OperationOutcome | None:
+        """Read the request this ``operation_id`` already names, if there is one.
+
+        Separate from :meth:`_redirect_receipt` because a replay has to be
+        *judged* before it is rendered, and the judgement needs the record's own
+        identity rather than its projection. The two reads cannot disagree about
+        what they read: an operation's target and feedback digest are written by
+        its submission and no later line revises them, so anything that moves
+        between them moves the request's stage, which is what the receipt is
+        re-read to report anyway.
+        """
+        report = self._redirect_report(plan_dir)
+        return next(
+            (
+                operation
+                for operation in report.operations
+                if operation.operation_id == operation_id
+            ),
+            None,
+        )
+
     def _live_redirect_target(
         self, plan_dir: Path
     ) -> redirect_store.RedirectTarget | None:
@@ -1974,28 +1997,22 @@ class BridgeSession:
     def run_redirect(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """Submit one urgent correction against the turn this run is on now.
 
-        Replay is served out of the redirect journal before anything else is
-        checked, and that ordering is the whole reason this method can be
+        Replay is served out of the redirect journal before the freshness proof
+        is checked, and that ordering is the whole reason this method can be
         retried. A correction that landed moves the plan, which moves the action
         token, which would make the retry of a request whose answer was lost in
         transit look like a stale second correction. Asking the journal first
         makes the id the client already holds the answer.
+
+        What is *not* short-circuited is the request itself. ``text`` and any
+        ``expected_target`` are compared against the record that id already
+        names, because a retry is only a retry when it carries the same
+        correction. Reporting different words as a successful replay would tell
+        a client its second correction landed when the worker was handed the
+        first.
         """
         operation_id = _require_str(params, "operation_id")
         facts = self._facts(params)
-        replay = self._redirect_receipt(
-            facts=facts,
-            operation_id=operation_id,
-            outcome=None,
-            reason=None,
-            target=None,
-            waited_seconds=0.0,
-            replayed=True,
-        )
-        if replay["operation"] is not None:
-            return replay
-
-        facts = self._authorize(params, intervention.ACTION_REDIRECT)
         text = params.get("text")
         if not isinstance(text, str) or not text.strip():
             raise BridgeError(
@@ -2003,6 +2020,44 @@ class BridgeSession:
                 "redirect text must contain non-whitespace content",
             )
         expected_target = self._expected_target(params)
+
+        recorded = self._recorded_redirect(facts.plan_dir, operation_id)
+        if recorded is not None:
+            conflict = redirect_store.replay_conflict(
+                recorded.feedback_digest,
+                recorded.target,
+                feedback=text,
+                expected_target=expected_target,
+            )
+            if conflict is not None:
+                # `invalid-request` rather than a refusal code of its own: the
+                # protocol's error space is a closed, versioned enum, and the
+                # durable reason travels in `details` where a client can act on
+                # it without this surface widening the contract. Nothing was
+                # written, and the recorded request is unchanged.
+                raise BridgeError(
+                    ERROR_INVALID_REQUEST,
+                    (
+                        "operation id already names a different correction; "
+                        "the recorded one was left untouched"
+                    ),
+                    details={
+                        "reason": redirect_store.ERROR_REPLAY_CONFLICT,
+                        "conflict": conflict,
+                        "operation_id": operation_id,
+                    },
+                )
+            return self._redirect_receipt(
+                facts=facts,
+                operation_id=operation_id,
+                outcome=None,
+                reason=None,
+                target=None,
+                waited_seconds=0.0,
+                replayed=True,
+            )
+
+        facts = self._authorize(params, intervention.ACTION_REDIRECT)
         wait_seconds = self._redirect_wait_seconds(params)
         try:
             outcome = redirect_admission.submit_redirect(
