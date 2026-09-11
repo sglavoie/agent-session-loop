@@ -93,6 +93,7 @@ FAST_MODULES = (
     "tests.test_asl_redirect_ack",
     "tests.test_asl_redirect_recovery",
     "tests.test_asl_redirect_supervision",
+    "tests.test_asl_redirect_adversarial",
     "tests.test_asl_review_cycle",
     "tests.test_asl_review_delta",
     "tests.test_asl_guidance_delivery",

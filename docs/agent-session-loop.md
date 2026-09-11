@@ -7199,7 +7199,19 @@ readiness pause names the exact command that clears it — for example
 runner-side refusal carries findings rather than hints in its details, so the
 stable pause reason resolves one from `preflight.RUNTIME_REPAIR_HINTS` instead —
 that fallback is what keeps an `inspect` pause from telling an operator to look
-without saying where. A pause whose reason has no hint either still gets the
+without saying where. `redirect-successor-blocked` is the reason that needs it
+most, because it is the one pause no reply clears and no flag overrides: its hint
+reads `details.termination` back in operator terms — `remaining_pids` are
+descendants still answering under the identity they were sampled with,
+`unverified_pids` are ones whose identity could not be read at all,
+`ownership_unknown` means a probe was refused, `predecessor-uncollected` means the
+stopped worker was never reaped — and names the `ps -p <pid> -o
+pid,ppid,lstart,command` that tells a survivor from a reused pid. It also covers
+the one reason that names a setting instead of a process: under
+`process-sweep-opt-out` the operator's own `ASL_PROCESS_SWEEP_DISABLED` withheld
+the descendant evidence, so there is no pid to inspect and unsetting it is the
+whole repair. A pause whose
+reason has no hint either still gets the
 block, with an empty `remediation` list; a live intervention signal the turn
 already raised is the more specific record of the same ask and is left in place.
 
@@ -9527,6 +9539,45 @@ real tools — the Git-backed repository evidence, the shell helpers, the launch
 maintenance definitions, the harness adapters — is left to the macOS job, which
 runs `just test-all` on the platform the pair is actually released against, so
 the portable lane never reports a pass it did not earn.
+
+`just reliability-stress` is a fourth lane, and it judges what the other three
+cannot: whether a result still holds when the machine is hostile. It keeps three
+lists rather than one. The correctness scenarios are the ones observed failing
+under load or as the calendar moved, and they synchronize on run state and pin
+their own clock, so neither contention nor the calendar may change their outcome.
+The date-sensitive subset of those is swept again across UTC, a whole-hour offset,
+a three-quarter-hour offset, and a southern-hemisphere DST zone, because a path
+that reached for a naive local clock reads differently under each. The third list
+is the crash, race, and cancellation scenarios — the fault groups of
+`tests/test_asl_redirect_adversarial.py` alongside the escalation-timing, blocked
+transport, live termination, and serialization groups of
+`tests/test_asl_redirect_control.py` and `tests/test_asl_redirect_continuation.py`.
+
+That third list is separate because contention is the only condition under which
+most of its claims can fail at all: a kill that has to land on a deadline, a latch
+two threads reach at once, a journal several producers append to, an expiry and an
+acceptance racing to answer one request. It repeats in isolation and again as
+concurrent shards while the full suite saturates the machine, and it is
+deliberately excluded from the final phase, which measures end-to-end CLI latency
+on a quiet machine. A wall-clock budget has nothing to say about a deadline a test
+pins against its own injected clock; reading those scenarios with a stopwatch
+would measure the test's own patience and report it as a regression.
+
+The adversarial module is organised by fault rather than by the module under
+test, because each fault crosses several of them: slow storage, a blocked pipe, a
+completion race, concurrent feedback, a stale process identity, partial
+multi-repository work, a review repair, a stopped supervisor, missing history, and
+an expired submission. Three of its groups drive real child processes and are
+POSIX-only, which is why it is registered in `FAST_MODULES` and not in
+`PORTABLE_MODULES`. Two of its claims are worth naming here because each reads
+like a defect until the ordering is spelled out. An acceptance whose journal
+append stalls past the escalation deadline must force-stop nothing and report its
+decision window skipped, then force-stop the worker once the append lands — the
+promise is made durable before it is kept, never the other way round. And an
+answer that arrives after the turn has already settled records no refusal at all:
+the drain returns as soon as it observes the settled turn, so the request stays
+`submitted` for `redirect-status` to report rather than being rewritten by a turn
+that no longer exists.
 
 The bridge's cross-language contract is checked from both sides.
 `tests/test_asl_bridge_fixtures.py` runs in `just test-fast` and verifies that

@@ -1275,6 +1275,36 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
         ),
         fix_category="env-state",
     ),
+    "redirect-successor-blocked": RepairHint(
+        category="redirect-successor-blocked",
+        check_id="runtime.redirect-successor-blocked",
+        severity_hint="red",
+        message=(
+            "An urgent correction force-stopped the turn and the stopped "
+            "worker could not be shown gone, so the run refused to start a "
+            "successor that would share the workspace with it. "
+            "`details.termination` carries the reason: `remaining_pids` are "
+            "descendants still answering under the identity they were sampled "
+            "with, `unverified_pids` are ones whose identity could not be read "
+            "at all, `ownership_unknown` means a probe was refused, and "
+            "`predecessor-uncollected` means the stopped worker was never "
+            "reaped by the turn that owned it. Check those pids with "
+            "`ps -p <pid> -o pid,ppid,lstart,command`; a survivor has to be "
+            "ended and a reused pid is already harmless. One reason names a "
+            "setting rather than a process: `process-sweep-opt-out` means "
+            "`ASL_PROCESS_SWEEP_DISABLED` withheld the descendant evidence, so "
+            "nothing is known to be running and nothing can be shown stopped "
+            "either -- unset it to let the next run collect that evidence. "
+            "No reply clears this "
+            "and no flag overrides it: the next run re-probes, and a machine "
+            "that has since gone quiet simply proceeds."
+        ),
+        question_template=(
+            "Runner paused: the force-stopped worker could not be shown gone "
+            "({message}). Should I identify the surviving processes?"
+        ),
+        fix_category="env-state",
+    ),
 }
 
 

@@ -53,12 +53,13 @@ from .support import assert_no_runner_import, patched_env, write_plan
 
 RUN_ID = "run-preparation-1"
 
-#: The five entry points the run loop is allowed to reach here. A sixth would
+#: The six entry points the run loop is allowed to reach here. A seventh would
 #: be work the loop kept that this boundary was supposed to take.
 ENTRY_POINTS = (
     "turn_preparation.classify_session",
     "turn_preparation.prepare_review_session",
     "turn_preparation.collect_packet_inputs",
+    "turn_preparation.prepare_turn_continuation",
     "turn_preparation.resume_repair_session",
     "turn_preparation.prepare_turn_prompt",
 )
@@ -247,11 +248,11 @@ class PreparationBoundaryTests(unittest.TestCase):
                     f"back to the loop (turn_preparation.py:{statement.lineno})",
                 )
         self.assertEqual(
-            4,
+            5,
             pauses,
-            "the four refusals moved here are the malformed review scope, "
-            "the ineligible repair child, its dirty writable set, and the "
-            "repository-intent gate",
+            "the five refusals that live here are the malformed review scope, "
+            "the conversation-recovery gate, the ineligible repair child, its "
+            "dirty writable set, and the repository-intent gate",
         )
 
     def test_the_boundary_carries_no_loop_statements(self) -> None:

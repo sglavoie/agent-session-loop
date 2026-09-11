@@ -572,9 +572,21 @@ class RecoveryPauseRegistrationTests(unittest.TestCase):
         self.assertIn(self.reason, pause_policy.ENVIRONMENT_BLOCKED_PAUSE_REASONS)
         self.assertNotIn(self.reason, pause_policy.RECOVERABLE_PAUSE_REASONS)
 
-    def test_the_workbench_offers_generic_recovery_only(self) -> None:
-        self.assertIn(self.reason, workbench.GENERIC_RECOVERY_PAUSE_REASONS)
-        self.assertNotIn(self.reason, workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON)
+    def test_the_workbench_routes_the_reason_to_its_own_recovery_card(self) -> None:
+        """The dedicated card, not the generic one.
+
+        This reason was in the generic allowlist when it was registered, because
+        nothing yet knew how to render it. The Workbench later grew a
+        `conversation-recovery` card that reads the decision, the one-use
+        authorization, and the evidence behind both, and the two tables are
+        disjoint by construction, so the card is now the only place the reason
+        may appear.
+        """
+        self.assertEqual(
+            "conversation-recovery",
+            workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON[self.reason],
+        )
+        self.assertNotIn(self.reason, workbench.GENERIC_RECOVERY_PAUSE_REASONS)
 
     def test_a_repair_hint_explains_the_two_ways_forward(self) -> None:
         hint = preflight.RUNTIME_REPAIR_HINTS[self.reason]

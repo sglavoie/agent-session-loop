@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import ast
 import dataclasses
+import importlib
 import io
 import json
 import os
@@ -1358,6 +1359,7 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
 
     DISPOSITION_NAMES = (
         "interrupted",
+        "redirected",
         "timeout",
         "aborted",
         "malformed-plan",
@@ -1407,13 +1409,16 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
             and node.name == "_terminating_result_disposition"
         ]
         self.assertEqual(1, len(functions), "expected one disposition function")
-        return [
-            node.value.value
-            for node in ast.walk(functions[0])
-            if isinstance(node, ast.Return)
-            and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str)
-        ]
+        named: list[tuple[int, str]] = []
+        for node in ast.walk(functions[0]):
+            if not isinstance(node, ast.Return) or node.value is None:
+                continue
+            # A name, not only a literal: the redirected disposition is a module
+            # constant because the module that produces it dispatches on it too.
+            name = self.dispatch_disposition(node.value)
+            if name is not None:
+                named.append((node.lineno, name))
+        return [name for _, name in sorted(named)]
 
     def session_loop(self, tree: ast.Module) -> ast.While:
         loops = [
@@ -1632,14 +1637,39 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
             left = test.left
             if not isinstance(left, ast.Name) or left.id != "terminating_disposition":
                 continue
-            comparator = test.comparators[0]
-            if not isinstance(comparator, ast.Constant):
+            name = self.dispatch_disposition(test.comparators[0])
+            if name is None:
                 continue
-            if not isinstance(comparator.value, str):
-                continue
-            branches.append((node, comparator.value))
+            branches.append((node, name))
         branches.sort(key=lambda branch: branch[0].lineno)
         return branches
+
+    def dispatch_disposition(self, comparator: ast.expr) -> str | None:
+        """The disposition a dispatch branch selects, written out or named.
+
+        Not every branch compares against a literal: the redirected one selects
+        ``redirect_continuation.DISPOSITION_REDIRECTED``, because the value is
+        shared with the module that produces it. Reading only literals would
+        drop that branch from every structural check in this class -- not fail
+        them, *drop* it -- so the one branch that ends a turn by force-stopping a
+        worker would be the one nothing here covered.
+        """
+        if isinstance(comparator, ast.Constant):
+            if isinstance(comparator.value, str):
+                return comparator.value
+            return None
+        if not isinstance(comparator, ast.Attribute):
+            return None
+        if not isinstance(comparator.value, ast.Name):
+            return None
+        try:
+            module = importlib.import_module(
+                f"agent_session_loop.{comparator.value.id}"
+            )
+        except ModuleNotFoundError:
+            return None
+        resolved = getattr(module, comparator.attr, None)
+        return resolved if isinstance(resolved, str) else None
 
     def turn_edges(
         self, node: ast.AST, *, in_inner_loop: bool = False
@@ -1760,8 +1790,23 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
             "dispatch cannot disagree about which branch ends the turn",
         )
         self.assertLess(computed[0].lineno, guard_line)
+        branches = self.dispatch_branches(loop)
         if site.owner is not None:
-            forwarded = self.disposition_assignments(loop)
+            forwarded: list[ast.Assign] = []
+            relabels: list[tuple[ast.Assign, ast.If]] = []
+            for node in self.disposition_assignments(loop):
+                owner = next(
+                    (
+                        branch
+                        for branch, _ in branches
+                        if branch.lineno <= node.lineno <= cast(int, branch.end_lineno)
+                    ),
+                    None,
+                )
+                if owner is None:
+                    forwarded.append(node)
+                else:
+                    relabels.append((node, owner))
             self.assertEqual(
                 1,
                 len(forwarded),
@@ -1776,7 +1821,36 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
                 "the loop must dispatch on the disposition the guard was gated "
                 "on rather than compute a second one the guard never saw",
             )
-        branches = self.dispatch_branches(loop)
+            # A branch may hand its turn to a later branch instead of repeating
+            # it: the redirected turn whose plan could not be re-read after the
+            # forced stop *is* a malformed-plan turn, and the branch that owns
+            # that settlement is the only place the handling lives. The guard has
+            # already run, so the relabel may only name a disposition this same
+            # dispatch owns and may only hand the turn forward -- a backwards
+            # relabel would reach a branch the loop has passed and fall through
+            # to the status guards with nothing having ended the turn.
+            for relabel, owner in relabels:
+                name = self.dispatch_disposition(relabel.value)
+                self.assertIsNotNone(
+                    name,
+                    f"the relabel at agent_session_loop/run_loop.py:"
+                    f"{relabel.lineno} must name a disposition",
+                )
+                target = next((node for node, label in branches if label == name), None)
+                self.assertIsNotNone(
+                    target,
+                    f"the relabel at agent_session_loop/run_loop.py:"
+                    f"{relabel.lineno} names {name!r}, which this dispatch has "
+                    "no branch for, so the turn would fall through to the "
+                    "status guards unended",
+                )
+                self.assertLess(
+                    cast(int, owner.end_lineno),
+                    cast(ast.If, target).lineno,
+                    f"the relabel at agent_session_loop/run_loop.py:"
+                    f"{relabel.lineno} hands the turn to a branch the loop has "
+                    "already passed",
+                )
         self.assertTrue(branches, "expected the dispatch to name its branches")
         for node, name in branches:
             self.assertLess(

@@ -340,6 +340,22 @@ class PauseWriteTests(_TerminationCase):
     def test_a_reason_that_resolves_to_nothing_records_no_guesswork(self) -> None:
         self.assertEqual([], run_termination._pause_remediation({}, reason="inspect"))
 
+    def test_an_unanswerable_pause_still_says_where_to_look(self) -> None:
+        # A pause no reply can clear is exactly the one an operator most needs
+        # directed: there is no question coming, so the remediation is the only
+        # thing that tells them which pids to check.
+        remediation = run_termination._pause_remediation(
+            {}, reason=events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED
+        )
+
+        self.assertEqual(
+            ["runtime.redirect-successor-blocked"],
+            [entry["check_id"] for entry in remediation],
+        )
+        [entry] = remediation
+        self.assertIn("ps -p", entry["message"])
+        self.assertIn("No reply clears this", entry["message"])
+
     def _live_signal(self, reason: str = "runner-status-paused") -> dict[str, Any]:
         return {
             "reason": reason,

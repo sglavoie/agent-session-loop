@@ -114,7 +114,7 @@ POLICY: Mapping[HarnessName, HarnessPolicy] = {
     "codex": HarnessPolicy(
         harness="codex",
         version_argv=("--version",),
-        latest="0.149.1",
+        latest="0.154.0",
         previous="0.148.0",
         minimum="0.140.0",
         note="Codex CLI reports `codex-cli <version>`.",
@@ -122,7 +122,7 @@ POLICY: Mapping[HarnessName, HarnessPolicy] = {
     "claude": HarnessPolicy(
         harness="claude",
         version_argv=("--version",),
-        latest="2.1.231",
+        latest="2.1.236",
         previous="2.0.0",
         minimum="1.0.0",
         note="Claude Code reports `<version> (Claude Code)`.",
