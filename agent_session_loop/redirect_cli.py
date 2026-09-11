@@ -59,6 +59,7 @@ from typing import Any
 from . import (
     cli_common,
     events,
+    intervention,
     redirect_ack,
     redirect_admission,
     redirect_recovery,
@@ -811,6 +812,60 @@ def fresh_conversation_command(
         parts.extend(["--state-dir", state_dir])
     parts.append("--fresh-conversation")
     return shlex.join(parts)
+
+
+def _state_dir_args(state_dir: str | None) -> list[str]:
+    return ["--state-dir", state_dir] if state_dir else []
+
+
+def recovery_commands(
+    plan_dir: Path | str,
+    state_dir: str | None = None,
+    *,
+    decision: str | None,
+) -> dict[str, str | None]:
+    """Render what an operator runs to inspect, then authorize, one recovery.
+
+    The single renderer for both commands, for the same reason
+    :func:`fresh_conversation_command` is the single renderer of the relaunch:
+    the supervision helper, this CLI, and the bridge all report these two pauses,
+    and three surfaces printing three slightly different commands for the same
+    decision is how an operator ends up running the wrong one. The decision
+    itself comes from :func:`intervention.recovery_decision`, so the mapping is
+    not restated here either.
+    """
+    if decision == intervention.RECOVERY_DECISION_FRESH_CONVERSATION:
+        return {
+            "inspect_command": shlex.join(
+                [
+                    "asl",
+                    "control",
+                    "recover-conversation",
+                    str(plan_dir),
+                    *_state_dir_args(state_dir),
+                    "--json",
+                ]
+            ),
+            "authorization_command": fresh_conversation_command(plan_dir, state_dir),
+        }
+    if decision == intervention.RECOVERY_DECISION_PREDECESSOR_ALIVE:
+        return {
+            "inspect_command": shlex.join(
+                [
+                    "asl",
+                    "control",
+                    "redirect-status",
+                    str(plan_dir),
+                    *_state_dir_args(state_dir),
+                    "--json",
+                ]
+            ),
+            # No authorization exists for this one: a predecessor that cannot be
+            # shown stopped is a fact about the machine, and no text an operator
+            # sends makes a second worker safe to start beside it.
+            "authorization_command": None,
+        }
+    return {"inspect_command": None, "authorization_command": None}
 
 
 def control_recover_conversation_from_args(args: argparse.Namespace) -> int:

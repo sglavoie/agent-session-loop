@@ -65,6 +65,9 @@ from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     harnesses as _harnesses,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
+    intervention as _intervention,
+)
+from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
     mailbox as _mailbox,
 )
 from agent_session_loop import (  # noqa: E402 - needs the sys.path insert above
@@ -331,16 +334,23 @@ classify_pause = _pause_policy.classify_pause
 # pause message to infer all three from, and the inference it would most
 # naturally make is "relaunch and see", which is the one move that must never
 # be made here.
+#
+# Aliased rather than declared. The mapping from pause reason to decision lives
+# in `intervention` because more than one surface now reports these two pauses
+# — this helper's `user_required` stop and the bridge's recovery projection —
+# and a second copy here is how the two would come to name different decisions
+# for the same pause.
 RECOVERY_DECISION_PAUSE_REASONS: tuple[str, ...] = (
-    _events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
-    _events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
+    _intervention.RECOVERY_DECISION_PAUSE_REASONS
 )
 
 # Which decision a recovery pause hands over. `fresh-conversation` is answered
 # by an operator authorizing one fresh start; `predecessor-not-stopped` is
 # answered by the machine, not by anyone's words.
-RECOVERY_DECISION_FRESH_CONVERSATION = "fresh-conversation"
-RECOVERY_DECISION_PREDECESSOR_ALIVE = "predecessor-not-stopped"
+RECOVERY_DECISION_FRESH_CONVERSATION = (
+    _intervention.RECOVERY_DECISION_FRESH_CONVERSATION
+)
+RECOVERY_DECISION_PREDECESSOR_ALIVE = _intervention.RECOVERY_DECISION_PREDECESSOR_ALIVE
 
 # Default automatic repair/rereview cycle cap, mirroring
 # ``agent_session_loop.run_inputs.DEFAULT_MAX_REVIEW_FIX_CYCLES``. The runner owns
@@ -3054,10 +3064,12 @@ def _recovery_payload(
     supervision loop's behaviour here is a consequence of the pause being
     non-recoverable, which is a fact about ``pause_policy``; a supervising
     agent reading this result should not have to re-derive that to know it must
-    not relaunch. ``authorization_command`` is rendered by
-    :func:`agent_session_loop.redirect_cli.fresh_conversation_command`, the
-    single renderer of that relaunch, so the helper and
-    ``asl control recover-conversation`` cannot print two different commands.
+    not relaunch. Neither the decision nor the two commands are assembled here:
+    :func:`agent_session_loop.intervention.recovery_decision` owns the mapping
+    and :func:`agent_session_loop.redirect_cli.recovery_commands` owns the
+    rendering, so this helper, ``asl control recover-conversation``, and the
+    bridge's recovery projection cannot name different decisions or print
+    different commands for the same pause.
     """
     if pause_reason not in RECOVERY_DECISION_PAUSE_REASONS:
         return None
@@ -3067,28 +3079,19 @@ def _recovery_payload(
     state_dir = parsed.get("state_dir")
     state_dir = state_dir if isinstance(state_dir, str) and state_dir else None
     details = _pause_details(run_payload)
+    classified = _intervention.recovery_decision(pause_reason)
     payload: dict = {
         "reason": pause_reason,
-        "auto_resume": False,
-        "authorized_by": "operator",
+        "auto_resume": classified.auto_resume,
+        "authorized_by": classified.authorized_by,
+        "decision": classified.decision,
+        **_redirect_cli.recovery_commands(
+            plan_dir, state_dir, decision=classified.decision
+        ),
     }
     if pause_reason == _events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED:
         recovery = details.get("conversation_recovery")
         recovery = recovery if isinstance(recovery, dict) else {}
-        payload["decision"] = RECOVERY_DECISION_FRESH_CONVERSATION
-        payload["inspect_command"] = shlex.join(
-            [
-                "asl",
-                "control",
-                "recover-conversation",
-                plan_dir,
-                *_state_dir_args(state_dir),
-                "--json",
-            ]
-        )
-        payload["authorization_command"] = _redirect_cli.fresh_conversation_command(
-            plan_dir, state_dir
-        )
         payload["selection_state"] = recovery.get("selection_state")
         mismatched = recovery.get("mismatched_fields")
         payload["mismatched_fields"] = (
@@ -3099,21 +3102,6 @@ def _recovery_payload(
         return payload
     blocked = details.get("redirect_continuation")
     blocked = blocked if isinstance(blocked, dict) else {}
-    payload["decision"] = RECOVERY_DECISION_PREDECESSOR_ALIVE
-    payload["inspect_command"] = shlex.join(
-        [
-            "asl",
-            "control",
-            "redirect-status",
-            plan_dir,
-            *_state_dir_args(state_dir),
-            "--json",
-        ]
-    )
-    # No authorization exists for this one: a predecessor that cannot be shown
-    # stopped is a fact about the machine, and no text an operator sends makes a
-    # second worker safe to start beside it.
-    payload["authorization_command"] = None
     payload["blocked_reason"] = blocked.get("reason")
     return payload
 

@@ -6,6 +6,18 @@
   ],
   "component": "bridge_protocol",
   "definitions": {
+    "Action": {
+      "description": "What a client may invoke against one row. A superset of `MutationMethod`: `workbench.ensure` changes no ASL state and so needs no handshake, but it is still offered on a row and still has a reason when it is unavailable. Appended to, never reordered -- the action token fingerprints this sequence, so moving an entry invalidates every token in flight.",
+      "enum": [
+        "question.reply",
+        "question.resolve",
+        "run.resume",
+        "run.stop_after_current",
+        "run.abort",
+        "workbench.ensure",
+        "run.redirect"
+      ]
+    },
     "Cadence": {
       "additionalProperties": false,
       "description": "How stale the data on the wire can already be. Attached when a snapshot is served rather than when it is built, so it is excluded from the snapshot digest and never moves runs.changed.",
@@ -51,6 +63,45 @@
         "pause",
         "waiting"
       ]
+    },
+    "ConversationEvidence": {
+      "additionalProperties": false,
+      "description": "What the conversation ledger can still say about this plan. Carried by both redirect reads because an untrustworthy ledger already forces its own pause, and a correction waiting on the turn that pause prevented is a symptom rather than the problem.",
+      "properties": {
+        "detail": {
+          "maxLength": 400,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readable": {
+          "type": "boolean"
+        },
+        "records": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trustworthy": {
+          "type": "boolean"
+        },
+        "unreadable_lines": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "usable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "detail",
+        "readable",
+        "records",
+        "trustworthy",
+        "unreadable_lines",
+        "usable"
+      ],
+      "type": "object"
     },
     "ErrorBody": {
       "additionalProperties": false,
@@ -292,7 +343,10 @@
         "run.resume",
         "run.stop_after_current",
         "run.abort",
-        "workbench.ensure"
+        "workbench.ensure",
+        "run.redirect",
+        "run.redirect_status",
+        "run.recover_conversation"
       ]
     },
     "MutationMethod": {
@@ -302,7 +356,8 @@
         "question.resolve",
         "run.resume",
         "run.stop_after_current",
-        "run.abort"
+        "run.abort",
+        "run.redirect"
       ]
     },
     "Operation": {
@@ -443,6 +498,14 @@
         "type"
       ],
       "type": "object"
+    },
+    "OwnerLiveness": {
+      "description": "Who is still answerable for this plan's redirects, read from the lock alone. `unknown` is a real answer and not an error: every cheaper probe has a side effect on the thing it probes.",
+      "enum": [
+        "live",
+        "gone",
+        "unknown"
+      ]
     },
     "Question": {
       "additionalProperties": false,
@@ -621,6 +684,529 @@
       ],
       "type": "object"
     },
+    "RecoveryDecision": {
+      "description": "Which manual recovery a pause is waiting on. Null when the run is not paused, or is paused on something an operator does not decide.",
+      "enum": [
+        null,
+        "fresh-conversation",
+        "predecessor-not-stopped"
+      ]
+    },
+    "RecoveryOptions": {
+      "additionalProperties": false,
+      "description": "Which manual recovery a pause is waiting on and how to authorize it. A report and only a report: performing the recovery through the protocol would persist a one-use authorization in a request that can be replayed. `retained_operations` are the corrections a fresh start would still carry.",
+      "properties": {
+        "authorization_command": {
+          "maxLength": 400,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorized_by": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "auto_resume": {
+          "type": "boolean"
+        },
+        "conversations": {
+          "$ref": "#/definitions/ConversationEvidence"
+        },
+        "decision": {
+          "$ref": "#/definitions/RecoveryDecision"
+        },
+        "inspect_command": {
+          "maxLength": 400,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "note": {
+          "maxLength": 400,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "one_use": {
+          "type": "boolean"
+        },
+        "pause_reason": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan_dir": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "recovery_required": {
+          "type": "boolean"
+        },
+        "retained_operations": {
+          "items": {
+            "$ref": "#/definitions/RedirectOperation"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "row_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "run_id": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "authorization_command",
+        "authorized_by",
+        "auto_resume",
+        "conversations",
+        "decision",
+        "inspect_command",
+        "note",
+        "one_use",
+        "pause_reason",
+        "plan_dir",
+        "recovery_required",
+        "retained_operations",
+        "row_id",
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "RecoveryOptionsResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "ok": {
+          "const": true
+        },
+        "protocol": {
+          "const": 2
+        },
+        "result": {
+          "$ref": "#/definitions/RecoveryOptions"
+        },
+        "type": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "protocol",
+        "result",
+        "type"
+      ],
+      "type": "object"
+    },
+    "RedirectJournalState": {
+      "description": "The last state the append-only journal recorded for a request.",
+      "enum": [
+        "submitted",
+        "accepted",
+        "rejected",
+        "expired"
+      ]
+    },
+    "RedirectOperation": {
+      "additionalProperties": false,
+      "description": "One correction as the journal can still describe it after any restart. Body-free by construction: `feedback_digest` and `feedback_bytes` are what let a client prove which correction this is, and the words themselves are reachable only through the journal's own reader.",
+      "properties": {
+        "continuation": {
+          "$ref": "#/definitions/RedirectTarget"
+        },
+        "continuation_recovered": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
+        "feedback_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feedback_digest": {
+          "maxLength": 32,
+          "pattern": "[0-9a-f]{32}",
+          "type": "string"
+        },
+        "journal_state": {
+          "$ref": "#/definitions/RedirectJournalState"
+        },
+        "operation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/definitions/RedirectReason"
+        },
+        "stage": {
+          "$ref": "#/definitions/RedirectStage"
+        },
+        "stage_description": {
+          "maxLength": 400,
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/RedirectStatus"
+        },
+        "target": {
+          "$ref": "#/definitions/RedirectTarget"
+        }
+      },
+      "required": [
+        "continuation",
+        "continuation_recovered",
+        "created_at",
+        "expires_at",
+        "feedback_bytes",
+        "feedback_digest",
+        "journal_state",
+        "operation_id",
+        "reason",
+        "stage",
+        "stage_description",
+        "status",
+        "target"
+      ],
+      "type": "object"
+    },
+    "RedirectOutcome": {
+      "description": "What this call's submission learned. Null exactly when the call submitted nothing because the journal already held the operation id -- a replay has no outcome of its own, only the durable one it found.",
+      "enum": [
+        null,
+        "accepted",
+        "rejected",
+        "unavailable",
+        "uncertain"
+      ]
+    },
+    "RedirectReason": {
+      "description": "Why a correction was refused, or how it settled. Null while it is still in flight and nothing has decided either yet.",
+      "enum": [
+        null,
+        "invalid-plan",
+        "no-active-run",
+        "run-paused",
+        "no-active-turn",
+        "stale-target",
+        "terminal-audit",
+        "remote-owner",
+        "stale-lock",
+        "urgent-channel-unavailable",
+        "expired",
+        "run-ended",
+        "superseded",
+        "operator-cancelled",
+        "submitted"
+      ]
+    },
+    "RedirectReceipt": {
+      "additionalProperties": false,
+      "description": "The answer to one `run.redirect`. `operation` is re-read from the journal rather than built from the submission in hand, so retrying a request whose response was lost returns the same durable record instead of a second correction.",
+      "properties": {
+        "journal_complete": {
+          "type": "boolean"
+        },
+        "operation": {
+          "$ref": "#/definitions/RedirectOperation"
+        },
+        "operation_id": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/definitions/RedirectOutcome"
+        },
+        "plan_dir": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/definitions/RedirectReason"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "row_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "run_id": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/definitions/RedirectTarget"
+        },
+        "waited_seconds": {
+          "minimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "journal_complete",
+        "operation",
+        "operation_id",
+        "outcome",
+        "plan_dir",
+        "reason",
+        "replayed",
+        "row_id",
+        "run_id",
+        "target",
+        "waited_seconds"
+      ],
+      "type": "object"
+    },
+    "RedirectReceiptResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "ok": {
+          "const": true
+        },
+        "protocol": {
+          "const": 2
+        },
+        "result": {
+          "$ref": "#/definitions/RedirectReceipt"
+        },
+        "type": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "protocol",
+        "result",
+        "type"
+      ],
+      "type": "object"
+    },
+    "RedirectStage": {
+      "description": "The same correction as an operator reads it: where it got to, not what the journal calls it. Derived from the status plus the turn the run is on now, so a client renders the stage and reconciles on the status.",
+      "enum": [
+        "submitted",
+        "unaccepted",
+        "interrupting",
+        "stopped",
+        "resuming",
+        "acknowledged",
+        "rejected",
+        "blocked",
+        "uncertain"
+      ]
+    },
+    "RedirectStatus": {
+      "description": "One correction's durable standing, recomputed from the journal rather than remembered. Distinct from `OperationStatus`, which describes a bridge-session receipt: a redirect outlives the session that submitted it, so its status has to survive a restart that the receipt does not.",
+      "enum": [
+        "submitted",
+        "unanswered",
+        "accepted",
+        "delivered",
+        "acknowledged",
+        "rejected",
+        "expired",
+        "uncertain"
+      ]
+    },
+    "RedirectStatusResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "ok": {
+          "const": true
+        },
+        "protocol": {
+          "const": 2
+        },
+        "result": {
+          "$ref": "#/definitions/RedirectStatusResult"
+        },
+        "type": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "protocol",
+        "result",
+        "type"
+      ],
+      "type": "object"
+    },
+    "RedirectStatusResult": {
+      "additionalProperties": false,
+      "description": "This plan's durable redirect state, projected without writing. `journal_complete` is the honesty flag and `truncated` is its projection counterpart: the first says a record may be missing from the source, the second says one is missing from this frame.",
+      "properties": {
+        "action_token": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "checked_at": {
+          "format": "timestamp",
+          "type": "string"
+        },
+        "conversations": {
+          "$ref": "#/definitions/ConversationEvidence"
+        },
+        "journal_complete": {
+          "type": "boolean"
+        },
+        "journal_path": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "live_target": {
+          "$ref": "#/definitions/RedirectTarget"
+        },
+        "operations": {
+          "items": {
+            "$ref": "#/definitions/RedirectOperation"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "owner": {
+          "$ref": "#/definitions/OwnerLiveness"
+        },
+        "owner_run_id": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan_dir": {
+          "format": "canonical-path",
+          "type": "string"
+        },
+        "row_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "run_id": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "torn_tail": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "uncertain_operation_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "unreadable_lines": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "action_token",
+        "checked_at",
+        "conversations",
+        "journal_complete",
+        "journal_path",
+        "live_target",
+        "operations",
+        "owner",
+        "owner_run_id",
+        "plan_dir",
+        "row_id",
+        "run_id",
+        "torn_tail",
+        "truncated",
+        "uncertain_operation_ids",
+        "unreadable_lines"
+      ],
+      "type": "object"
+    },
+    "RedirectTarget": {
+      "additionalProperties": false,
+      "description": "The exact turn a correction is bound to. Identity is the `(run_id, session_id, turn_index)` triple; `harness` is recorded because an operator wants to know what was interrupted, and is deliberately not part of that identity.",
+      "properties": {
+        "harness": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "turn_index": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "harness",
+        "run_id",
+        "session_id",
+        "turn_index"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "RequestId": {
       "maxLength": 64,
       "minLength": 1,
@@ -637,9 +1223,9 @@
         },
         "actions": {
           "items": {
-            "$ref": "#/definitions/MutationMethod"
+            "$ref": "#/definitions/Action"
           },
-          "maxItems": 8,
+          "maxItems": 7,
           "type": "array",
           "uniqueItems": true
         },
@@ -655,9 +1241,9 @@
             "maxLength": 400,
             "type": "string"
           },
-          "description": "Why each unavailable action is unavailable. A map node: the key space is the closed method vocabulary and the value is bounded, so an operator-authored string cannot become a key.",
+          "description": "Why each unavailable action is unavailable. A map node: the key space is the closed action vocabulary and the value is bounded, so an operator-authored string cannot become a key.",
           "propertyNames": {
-            "$ref": "#/definitions/Method"
+            "$ref": "#/definitions/Action"
           },
           "type": "object"
         },
@@ -1054,6 +1640,9 @@
     "operation_receipt_response": "OperationReceiptResponse",
     "operation_updated_event": "OperationUpdatedEvent",
     "question_body_response": "QuestionBodyResponse",
+    "recovery_options_response": "RecoveryOptionsResponse",
+    "redirect_receipt_response": "RedirectReceiptResponse",
+    "redirect_status_response": "RedirectStatusResponse",
     "runs_changed_event": "RunsChangedEvent",
     "runs_snapshot_response": "RunsSnapshotResponse",
     "workbench_link_response": "WorkbenchLinkResponse"

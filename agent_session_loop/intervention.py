@@ -37,6 +37,11 @@ ACTION_RESUME = "run.resume"
 ACTION_STOP_AFTER_CURRENT = "run.stop_after_current"
 ACTION_ABORT = "run.abort"
 ACTION_WORKBENCH = "workbench.ensure"
+ACTION_REDIRECT = "run.redirect"
+#: Appended to, never reordered. A caller compares the ``actions`` list it was
+#: shown against the one it holds, and the action token fingerprints this exact
+#: sequence, so moving an existing entry invalidates every token in flight for
+#: no reason a client can act on.
 ACTIONS: tuple[str, ...] = (
     ACTION_REPLY,
     ACTION_RESOLVE,
@@ -44,6 +49,7 @@ ACTIONS: tuple[str, ...] = (
     ACTION_STOP_AFTER_CURRENT,
     ACTION_ABORT,
     ACTION_WORKBENCH,
+    ACTION_REDIRECT,
 )
 
 REASON_INVALID_PLAN = "invalid-plan"
@@ -68,6 +74,80 @@ DISABLED_NO_ACTIVE_RUN = "no active run holds this plan"
 DISABLED_NO_LIVE_QUESTION = "no live question is waiting for a reply"
 DISABLED_NOT_PAUSED = "run is not paused for a reply"
 DISABLED_PAUSED = "run is paused and holds no live turn"
+DISABLED_NO_ACTIVE_TURN = "run holds no live turn to correct"
+
+# --------------------------------------------------------------------------
+# Recovery decisions
+# --------------------------------------------------------------------------
+
+#: The two pauses that hand a decision to a person rather than to a retry, and
+#: the decision each one hands over. Single-sourced here because more than one
+#: surface reports them -- the supervision helper's ``user_required`` stop, the
+#: ``asl control recover-conversation`` command, and the bridge's recovery
+#: projection -- and a surface that re-assembled the mapping could name a
+#: different decision for the same pause.
+RECOVERY_DECISION_FRESH_CONVERSATION = "fresh-conversation"
+RECOVERY_DECISION_PREDECESSOR_ALIVE = "predecessor-not-stopped"
+RECOVERY_DECISIONS: tuple[str, ...] = (
+    RECOVERY_DECISION_FRESH_CONVERSATION,
+    RECOVERY_DECISION_PREDECESSOR_ALIVE,
+)
+
+RECOVERY_DECISION_BY_PAUSE_REASON: dict[str, str] = {
+    events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED: (
+        RECOVERY_DECISION_FRESH_CONVERSATION
+    ),
+    events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED: (
+        RECOVERY_DECISION_PREDECESSOR_ALIVE
+    ),
+}
+RECOVERY_DECISION_PAUSE_REASONS: tuple[str, ...] = tuple(
+    RECOVERY_DECISION_BY_PAUSE_REASON
+)
+
+#: Who may make these decisions. Stated rather than implied: neither pause is
+#: recoverable by the run loop, so an automated surface reading one of them must
+#: not read "paused" as "relaunch and see".
+RECOVERY_AUTHORIZED_BY = "operator"
+
+
+@dataclass(frozen=True)
+class RecoveryDecision:
+    """What a recovery pause hands to a person, derived from the pause alone.
+
+    Reads no file and settles nothing, so building one cannot change what it
+    describes. ``decision`` is ``None`` for every pause that is not one of
+    :data:`RECOVERY_DECISION_PAUSE_REASONS`, including "not paused at all";
+    ``auto_resume`` is ``False`` in every case there is.
+    """
+
+    pause_reason: str | None
+    decision: str | None
+    auto_resume: bool = False
+    authorized_by: str = RECOVERY_AUTHORIZED_BY
+
+    @property
+    def required(self) -> bool:
+        return self.decision is not None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "pause_reason": self.pause_reason,
+            "decision": self.decision,
+            "auto_resume": self.auto_resume,
+            "authorized_by": self.authorized_by,
+        }
+
+
+def recovery_decision(
+    pause_reason: str | None, *, paused: bool = True
+) -> RecoveryDecision:
+    """Classify one pause reason into the decision it hands to an operator."""
+    reason = pause_reason if paused and pause_reason else None
+    return RecoveryDecision(
+        pause_reason=reason,
+        decision=RECOVERY_DECISION_BY_PAUSE_REASON.get(reason or ""),
+    )
 
 
 class InterventionError(Exception):
@@ -244,6 +324,15 @@ def permitted_actions(facts: RunFacts) -> tuple[str, ...]:
     if facts.run_active:
         allowed.append(ACTION_STOP_AFTER_CURRENT)
         allowed.append(ACTION_ABORT)
+    if facts.run_active and facts.turn_active:
+        # Deliberately coarse: a correction needs a turn to interrupt, and that
+        # is the whole of what this layer can establish without writing. Every
+        # finer refusal -- a terminal audit, a target that moved, an urgent
+        # channel that is not listening -- is a fact about the runner that only
+        # admission can read, and which would be stale by the time a caller
+        # acted on it anyway. Mirrors `run.resume`, which is permitted on a
+        # paused run and can still fail at launch.
+        allowed.append(ACTION_REDIRECT)
     allowed.append(ACTION_WORKBENCH)
     return tuple(action for action in ACTIONS if action in allowed)
 
@@ -268,6 +357,13 @@ def disabled_reasons(facts: RunFacts) -> dict[str, str]:
             reasons[action] = (
                 DISABLED_PAUSED if facts.paused else DISABLED_NO_ACTIVE_RUN
             )
+    if ACTION_REDIRECT not in allowed:
+        if not facts.run_active:
+            reasons[ACTION_REDIRECT] = (
+                DISABLED_PAUSED if facts.paused else DISABLED_NO_ACTIVE_RUN
+            )
+        else:
+            reasons[ACTION_REDIRECT] = DISABLED_NO_ACTIVE_TURN
     return reasons
 
 
