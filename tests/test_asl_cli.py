@@ -39,6 +39,9 @@ from agent_session_loop import (
     plans,
     preflight,
     prepare,
+    redirect_ack,
+    redirect_admission,
+    redirect_store,
     repository_registration,
     responses,
     retention,
@@ -1492,6 +1495,30 @@ class CommandAndConfigTests(unittest.TestCase):
         self.assertEqual(
             commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS,
             cli._COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            redirect_store.REDIRECT_DEFAULT_TTL_SECONDS,
+            cli._REDIRECT_DEFAULT_TTL_SECONDS,
+        )
+        self.assertEqual(
+            redirect_store.REDIRECT_MAX_TTL_SECONDS,
+            cli._REDIRECT_MAX_TTL_SECONDS,
+        )
+        self.assertEqual(
+            redirect_admission.ACCEPTANCE_WAIT_SECONDS,
+            cli._REDIRECT_ACCEPTANCE_WAIT_SECONDS,
+        )
+        self.assertEqual(
+            redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS,
+            cli._REDIRECT_MAX_ACCEPTANCE_WAIT_SECONDS,
+        )
+        self.assertEqual(
+            redirect_ack.DEFAULT_ACK_WAIT_SECONDS,
+            cli._REDIRECT_DEFAULT_ACK_WAIT_SECONDS,
+        )
+        self.assertEqual(
+            redirect_ack.MAX_ACK_WAIT_SECONDS,
+            cli._REDIRECT_MAX_ACK_WAIT_SECONDS,
         )
         self.assertEqual(turn_execution.INTERRUPTED_EXIT, cli._INTERRUPTED_EXIT)
         self.assertEqual(bridge.PROTOCOL_VERSION, cli._BRIDGE_PROTOCOL_VERSION)

@@ -596,9 +596,19 @@ def _build_interactive_help(
         context = qna.load_qna_context(plan_dir, state_dir=state_dir_arg)
     except qna.QnAError, plans.PlanError, OSError:
         return None
+    # An unresumable conversation is the one pause with no question in it, so
+    # it gets the recovery route in place of a reply command rather than
+    # alongside one: an operator handed both would reasonably try the reply.
+    recovery_required = qna.requires_conversation_recovery(context)
     return {
         "questions_command": _questions_command_text(plan_dir, state_dir_arg),
-        "reply_command": _reply_command_text(plan_dir, state_dir_arg),
+        "reply_command": (
+            None if recovery_required else _reply_command_text(plan_dir, state_dir_arg)
+        ),
+        "recovery_required": recovery_required,
+        "recovery_command": (
+            qna.recovery_command_text(context) if recovery_required else None
+        ),
         "session_id": context.session_id,
         "next_pending_id": context.next_pending_id,
         "turn_index": context.turn_index,

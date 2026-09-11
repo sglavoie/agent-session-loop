@@ -570,6 +570,9 @@ asl control set-model PLAN_DIR_OR_ID [--harness codex|claude|copilot] [--harness
 asl control guard add PLAN_DIR_OR_ID [--deny-command "CMD ARG ..."] [--protect-path ALIAS:PATH] [--reason TEXT] [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control guard remove PLAN_DIR_OR_ID --id GUARD_ID [--wait] [--timeout SECONDS] [--state-dir DIR] [--json]
 asl control guard list PLAN_DIR_OR_ID [--state-dir DIR] [--json]
+asl control redirect PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--session N] [--turn N] [--run-id RUN_ID] [--operation-id ID] [--ttl SECONDS] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control redirect-status PLAN_DIR_OR_ID [--redirect-id ID ...] [--wait-acknowledged] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control recover-conversation PLAN_DIR_OR_ID [--state-dir DIR] [--json]
 asl unlock PLAN_DIR [--state-dir DIR] [--force] [--json]
 asl compact-state PLAN_DIR [--state-dir DIR] [--apply] [--json]
 asl gc [PLAN_DIR] [--state-dir DIR] [--max-age-days DAYS] [--dry-run|--apply] [--json]
@@ -3375,7 +3378,103 @@ journal that cannot be read refuses the migration with `redirect-journal-error`
 before anything is renamed, the same way an unreadable conversation ledger
 already does.
 
-All four subcommands accept `--wait` and `--timeout SECONDS`, which turn the
+```
+asl control redirect PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--session N] [--turn N] [--run-id RUN_ID] [--operation-id ID] [--ttl SECONDS] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control redirect-status PLAN_DIR_OR_ID [--redirect-id ID ...] [--wait-acknowledged] [--timeout SECONDS] [--state-dir DIR] [--json]
+asl control recover-conversation PLAN_DIR_OR_ID [--state-dir DIR] [--json]
+```
+
+`asl control redirect PLAN_DIR_OR_ID --text TEXT` is the operator surface for
+all of that, and it is the only one of the three redirect commands that writes.
+It takes one correction — `--text` or `--text-stdin`, exactly one, strict UTF-8,
+never blank — and submits it against the turn running right now, then waits out
+the acceptance window (`--timeout`, default `2`, maximum `30` seconds) for the
+runner's own acceptance record. The payload reports `outcome`, `reason`,
+`operation_id`, `target`, `delivery`, `waited_seconds`, the `stage` described
+below, and the `expected_target` the submission was checked against; it never
+carries the correction's text, only its `feedback_digest` and byte count.
+`--session`, `--turn`, and `--run-id` state which turn the correction is meant
+for, and every field left out is filled from the live turn, so `--turn 7` alone
+still refuses a run that has moved to turn 8 with `stale-target`. `--ttl`
+bounds how long the correction stays claimable (default `120`, range
+`1`–`3600` seconds). `--operation-id` reuses the identity of an earlier
+submission: the journal treats the same id with the same words as the same
+request and appends nothing, and refuses the same id carrying different words or
+naming a different turn as `invalid-redirect-operation-id`, so a retry
+reconciles instead of correcting the worker twice. The command's own input reasons are `missing-text`,
+`invalid-text-source`, `stdin-read-error`, `invalid-timeout`, and
+`invalid-target`; every other refusal is reported under the word the journal or
+the admission layer already uses for it — `invalid-plan`, `no-active-run`,
+`run-paused`, `no-active-turn`, `stale-target`, `terminal-audit`,
+`remote-owner`, `stale-lock`, `urgent-channel-unavailable`,
+`invalid-redirect-feedback`, `invalid-redirect-ttl`,
+`invalid-redirect-operation-id`, and `os-error`.
+
+`asl control redirect-status PLAN_DIR_OR_ID` reports what became of corrections
+already submitted, and changes nothing by asking: it replays the journal shared,
+classifies the lock without reclaiming it, and opens no FIFO. `--redirect-id` is
+repeatable and narrows the report; an id the journal has no record of fails with
+`unknown-redirect-request` rather than being reported as an empty result, and an
+incomplete journal says so in the same breath. `--wait-acknowledged` adds the
+observational receipt wait against the live attempt (`--timeout`, default `30`,
+maximum `900` seconds; without the flag, supplying `--timeout` fails with
+`invalid-timeout`), refuses with `redirect-no-live-attempt` when no attempt is
+running to receipt anything, and re-reads the journal afterwards so the reported
+result is the one the receipts produced. A wait that runs out is not a failure:
+the correction is still carried, still in the worker's prompt, and still
+unsettled, which the payload states as `observational: true`.
+
+Both commands report every operation twice over: `status` is the durable
+projection (`submitted`, `unanswered`, `accepted`, `acknowledged`, `rejected`,
+`expired`, `uncertain`), copied verbatim so the CLI never becomes a second
+source of truth, and `stage` answers "where is my correction?" by adding the one
+fact the journal cannot hold — whether the live run is still on the turn the
+correction named:
+
+| Stage | Meaning |
+| --- | --- |
+| `submitted` | persisted and unanswered; a live run may still take it |
+| `unaccepted` | persisted and unanswered; no run is left to take it |
+| `interrupting` | accepted; the turn it names is still being stopped |
+| `stopped` | accepted; the turn it named is gone and a successor owes it |
+| `resuming` | carried into the live attempt; no worker receipt yet |
+| `acknowledged` | a worker receipted it on the attempt that carried it |
+| `rejected` | settled without being acted on |
+| `blocked` | the urgent channel could not carry it; durably settled |
+| `uncertain` | delivered to an attempt that never receipted it |
+
+Exit codes mean the same thing in both commands, because the caller that reads
+nothing else reads them. `0` is the command doing what was asked. `1` is a
+refusal: a usage error, an unresolvable plan, an unreadable journal, or a
+redirect definitely refused — nothing to retry unchanged. `2` is
+`urgent-channel-unavailable`: the request is durably settled so no later run
+will act on it, and resubmitting once a run holds the plan again is safe. `3` is
+unresolved, where the answer is an operation id rather than a verdict — an
+uncertain submission, or an acknowledgment wait that ended with receipts
+outstanding — and the correct next move is to reconcile that id with
+`redirect-status`, or to resubmit carrying the same `--operation-id`, never to
+send the correction again as new work.
+
+`asl control recover-conversation PLAN_DIR_OR_ID` covers the one pause that has
+no question in it. When a run stops on `conversation-recovery-required`, the
+harness conversation it would resume can no longer be selected, so there is
+nothing for a user to answer and no `--reply` that restarts it. The command
+reports `recovery_required`, the pause reason, the conversation ledger's health,
+the corrections a fresh start would still carry, and the exact relaunch —
+`asl run PLAN_DIR --resume [--state-dir DIR] --fresh-conversation` — which it
+prints rather than runs. That is deliberate: the authorization is one-use, is
+consumed by the first turn that needs it, and is never persisted, rehydrated by
+a later `--resume`, or replayed by a retry, so a command that spent it on the
+operator's behalf would be storing the decision it exists to keep with a person.
+`asl questions` and the paused task packet follow the same rule for the same
+pause: the rendered prompt becomes a recovery prompt that never asks the
+resolver to invent a question, `recovery_required` and `recovery_command` carry
+the route, and `resume_command` / `reply_stdin_command` / `reply_command` are
+`null` so a consumer that prints them without reading `recovery_required` prints
+nothing rather than a reply for a question nobody asked.
+
+The four queued subcommands — `stop-after-current`, `abort`, `select-harness`,
+and `set-model` — accept `--wait` and `--timeout SECONDS`, which turn the
 fire-and-forget append into a receipt. Without `--wait`, nothing changes: the
 command is appended, a best-effort wakeup is sent, and the handler returns 0
 whether or not a runner ever sees it. With `--wait` the handler tails

@@ -676,16 +676,44 @@ def artifact_paths_payload(context: QnAContext) -> dict[str, str | None]:
     }
 
 
+def requires_conversation_recovery(context: QnAContext) -> bool:
+    """Report whether this pause is a lost conversation rather than a question.
+
+    The distinction matters because every other paused context has a question
+    in it. This one does not: the run stopped because it cannot resume the
+    harness conversation at all, so an operator told to "ask the user the
+    question the agent needed answered" would go looking for words nobody
+    wrote.
+    """
+    return (
+        context.context_kind != "waiting"
+        and context.pause_reason == events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED
+    )
+
+
+def recovery_command_text(context: QnAContext) -> str:
+    """``asl run <plan> --resume [--state-dir X] --fresh-conversation`` guidance.
+
+    The authorization is one-use and is never persisted, so this is rendered
+    rather than performed: the operator has to decide, each time, that starting
+    a fresh conversation on the retained files is the right trade.
+    """
+    return shlex.join([*_resume_command_base(context), "--fresh-conversation"])
+
+
 def render_resolver_prompt(context: QnAContext) -> str:
     """Render a selected Q&A context as a ready-to-send resolver prompt.
 
     The output is plain Markdown suitable for handing to another AI agent.
     The agent is expected to ask the user the question(s) the original
     harness asked, then return a concise reply that the appropriate paused or
-    live reply command can consume verbatim.
+    live reply command can consume verbatim -- except for a lost conversation,
+    which has no question and gets a recovery prompt instead.
     """
     if context.context_kind == "waiting":
         return _render_waiting_resolver_prompt(context)
+    if requires_conversation_recovery(context):
+        return _render_recovery_resolver_prompt(context)
 
     lines: list[str] = []
     lines.append("# Paused Agent Session - Resolver Prompt")
@@ -763,6 +791,97 @@ def render_resolver_prompt(context: QnAContext) -> str:
     lines.append("")
 
     return "\n".join(lines)
+
+
+def _render_recovery_resolver_prompt(context: QnAContext) -> str:
+    """Render the one pause that must not be read as a question.
+
+    Deliberately different from the paused prompt in the only way that matters:
+    it never tells the resolver to ask the user anything. There is no question
+    here, so an instruction to find one produces an invented one, and a reply
+    built from it would be handed to a session that cannot use it.
+    """
+    lines: list[str] = []
+    lines.append("# Unresumable Conversation - Recovery Prompt")
+    lines.append("")
+    lines.append(
+        "This run did not stop on a question. It stopped because the harness "
+        "conversation it would resume can no longer be selected, so there is "
+        "nothing for the user to answer and no reply that would restart it."
+    )
+    lines.append("")
+
+    lines.append("## Plan")
+    lines.append(f"- Plan directory: {context.plan_dir}")
+    lines.append(f"- State file: {context.state_path}")
+    lines.append(f"- Run ID: {_display(context.run_id)}")
+    lines.append(f"- Session ID: {context.session_id}")
+    lines.append(f"- Turn index: {_display(context.turn_index)}")
+    lines.append("")
+
+    lines.append("## Harness")
+    lines.append(f"- Harness: {_display(context.harness)}")
+    lines.append(
+        f"- Model: {_display(context.model)}{_source_suffix(context.model_source)}"
+    )
+    lines.append(
+        f"- Effort: {_display(context.effort)}{_source_suffix(context.effort_source)}"
+    )
+    lines.append("")
+
+    lines.append("## Pause")
+    lines.append(f"- Reason: {_display(context.pause_reason)}")
+    lines.append(f"- Message: {_display(context.pause_message)}")
+    if context.pause_details:
+        details_json = json.dumps(context.pause_details, sort_keys=True)
+        lines.append(f"- Details: {details_json}")
+    else:
+        lines.append("- Details: (none)")
+    lines.append("")
+
+    lines.append("## Artifacts")
+    artifacts = artifact_paths_payload(context)
+    lines.append(f"- Run dir: {_display(artifacts['run_dir'])}")
+    lines.append(f"- Artifact dir: {_display(artifacts['artifact_dir'])}")
+    lines.append(f"- Stdout: {_display(artifacts['stdout_path'])}")
+    lines.append(f"- Stderr: {_display(artifacts['stderr_path'])}")
+    lines.append(f"- Last message: {artifacts['last_message_path']}")
+    lines.append(f"- Result: {_display(artifacts['result_path'])}")
+    lines.append("")
+
+    lines.append("## Recovery")
+    lines.append("")
+    lines.append(
+        "1. Read the evidence first: "
+        f"`{shlex.join(_recovery_inspect_command(context))}` reports whether a "
+        "fresh conversation is required and which corrections a fresh start "
+        "would still carry."
+    )
+    lines.append(
+        "2. If a fresh start is the right trade, authorize exactly one: "
+        f"`{recovery_command_text(context)}`. The session keeps its files, its "
+        "recovery context, and any outstanding feedback; it loses only the "
+        "prior conversation."
+    )
+    lines.append(
+        "3. That authorization is one-use. It is never persisted, never "
+        "rehydrated by a later `--resume`, and never replayed by a retry, so a "
+        "second lost conversation has to be authorized again."
+    )
+    lines.append(
+        "4. Do not ask the user to answer a question here, and do not resume "
+        "with `--reply`: there is no pending question this session can consume."
+    )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def _recovery_inspect_command(context: QnAContext) -> list[str]:
+    parts = ["asl", "control", "recover-conversation", str(context.plan_dir)]
+    if context.state_dir_override:
+        parts.extend(["--state-dir", context.state_dir_override])
+    return parts
 
 
 def _render_waiting_resolver_prompt(context: QnAContext) -> str:
@@ -1023,10 +1142,22 @@ def questions_payload(context: QnAContext) -> dict[str, Any]:
             rendered_prompt=render_resolver_prompt(context),
         )
 
+    # The recovery keys are always present and ``None`` unless the pause is an
+    # unresumable conversation: a consumer should branch on a key it can rely
+    # on, not on whether the producer felt like emitting one. When recovery is
+    # required the reply commands go to ``None`` for the same reason the prompt
+    # stops asking for an answer -- a consumer that prints ``resume_command``
+    # without reading ``recovery_required`` would otherwise hand the operator a
+    # `--reply` for a question that does not exist.
+    recovery_required = requires_conversation_recovery(context)
     return responses.success_payload(
         "questions",
-        resume_command=resume_command_text(context),
-        reply_stdin_command=reply_stdin_command_text(context),
+        resume_command=None if recovery_required else resume_command_text(context),
+        reply_stdin_command=(
+            None if recovery_required else reply_stdin_command_text(context)
+        ),
+        recovery_required=recovery_required,
+        recovery_command=recovery_command_text(context) if recovery_required else None,
         plan_dir=str(context.plan_dir),
         state_dir=str(context.state_dir),
         state_path=str(context.state_path),

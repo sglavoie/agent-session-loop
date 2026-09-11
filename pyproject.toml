@@ -170,6 +170,7 @@ module = [
     "agent_session_loop.readiness_gate",
     "agent_session_loop.redirect_ack",
     "agent_session_loop.redirect_admission",
+    "agent_session_loop.redirect_cli",
     "agent_session_loop.redirect_continuation",
     "agent_session_loop.redirect_control",
     "agent_session_loop.redirect_recovery",

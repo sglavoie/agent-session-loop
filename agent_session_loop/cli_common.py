@@ -24,6 +24,31 @@ class PlanCommandContext:
     status: dict[str, Any]
 
 
+def read_stdin_text() -> str:
+    """Read all of standard input as strict UTF-8 text.
+
+    Shared by every producer that accepts a body on stdin so the awkward cases
+    are decided once: an absent stream, a text-backed stream with no binary
+    buffer (test and embedding harnesses), and undecodable bytes. Strict
+    decoding in both branches is the point -- a surrogateescaped body would be
+    persisted as text nothing can round-trip.
+
+    Raises whatever the read or decode raises (``OSError``, ``TypeError``,
+    ``UnicodeError``, ``ValueError``); each caller reports it under its own
+    command's reason vocabulary rather than sharing one message.
+    """
+    if sys.stdin is None:
+        raise ValueError("standard input is unavailable")
+    stdin_stream = getattr(sys.stdin, "buffer", sys.stdin)
+    raw = stdin_stream.read()
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="strict")
+    if isinstance(raw, str):
+        raw.encode("utf-8", errors="strict")
+        return raw
+    raise TypeError("standard input did not return text or bytes")
+
+
 def print_error(
     args: argparse.Namespace,
     *,

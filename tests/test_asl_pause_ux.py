@@ -52,6 +52,8 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         last_message_text: str = "Should we use 1a or 1b?\n",
         statuses: tuple[str, ...] = ("pending", "pending"),
         paused_session_id: str = "1",
+        pause_reason: str = "runner-pause",
+        pause_message: str = "agent asked a question",
     ) -> tuple[Path, Path, Path]:
         init_git_repo(tmp_dir)
         plan_dir = tmp_dir / "plan"
@@ -82,9 +84,9 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
         payload = {
             "ok": False,
             "paused": True,
-            "reason": "runner-pause",
-            "pause_reason": "runner-pause",
-            "pause_message": "agent asked a question",
+            "reason": pause_reason,
+            "pause_reason": pause_reason,
+            "pause_message": pause_message,
             "pause_details": {"session": int(paused_session_id)},
             "details": {"session": int(paused_session_id)},
             "run_id": "run-prev",
@@ -1071,6 +1073,117 @@ class ArtifactSafetyAndPauseUxTests(unittest.TestCase):
             task_packet._attach_interactive_help(args, payload)
 
             self.assertNotIn("interactive_help", payload)
+
+    def _seed_lost_conversation(self, tmp_dir: Path) -> tuple[Path, Path]:
+        plan_dir, state_dir, _ = self._seed_paused_plan(
+            tmp_dir,
+            pause_reason=events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
+            pause_message="the recorded conversation can no longer be selected",
+        )
+        return plan_dir, state_dir
+
+    def test_a_lost_conversation_prompt_never_asks_for_an_answer(self) -> None:
+        """The one pause with no question in it must not be read as one.
+
+        Every other paused context ends with "ask the user the question the
+        previous agent needed answered". Here there is no question, so that
+        instruction produces an invented one and a reply that no session can
+        consume.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir = self._seed_lost_conversation(Path(tmp))
+            context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            prompt = qna.render_resolver_prompt(context)
+
+            self.assertTrue(qna.requires_conversation_recovery(context))
+            self.assertIn("# Unresumable Conversation - Recovery Prompt", prompt)
+            self.assertNotIn("Ask the user the question", prompt)
+            self.assertNotIn("--reply TEXT", prompt)
+
+    def test_a_lost_conversation_prompt_names_the_one_use_relaunch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir = self._seed_lost_conversation(Path(tmp))
+            context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            prompt = qna.render_resolver_prompt(context)
+
+            self.assertIn(qna.recovery_command_text(context), prompt)
+            self.assertIn("--fresh-conversation", prompt)
+            self.assertIn("one-use", prompt)
+            self.assertIn("asl control recover-conversation", prompt)
+
+    def test_the_recovery_command_resumes_rather_than_starting_over(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir = self._seed_lost_conversation(Path(tmp))
+            context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            parts = shlex.split(qna.recovery_command_text(context))
+
+            # ``--resume`` is what rehydrates the harness, model, and effort the
+            # run was using; a fresh conversation must not also mean a fresh
+            # harness selection.
+            self.assertEqual(
+                ["asl", "run", str(context.plan_dir), "--resume"], parts[:4]
+            )
+            self.assertEqual("--fresh-conversation", parts[-1])
+            # Same resume base as the reply route, differing only in the final
+            # flag: the two commands must not drift into resuming differently.
+            self.assertEqual(
+                shlex.split(qna.resume_command_text(context))[:-2], parts[:-1]
+            )
+
+    def test_questions_payload_swaps_reply_guidance_for_the_recovery_route(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir = self._seed_lost_conversation(Path(tmp))
+            context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            payload = qna.questions_payload(context)
+
+            self.assertTrue(payload["recovery_required"])
+            self.assertEqual(
+                qna.recovery_command_text(context), payload["recovery_command"]
+            )
+            # A consumer that prints ``resume_command`` without reading
+            # ``recovery_required`` prints nothing rather than a `--reply` for a
+            # question that does not exist.
+            self.assertIsNone(payload["resume_command"])
+            self.assertIsNone(payload["reply_stdin_command"])
+
+    def test_an_ordinary_pause_keeps_its_reply_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir, _ = self._seed_paused_plan(Path(tmp))
+            context = qna.load_qna_context(plan_dir, state_dir=state_dir)
+
+            payload = qna.questions_payload(context)
+
+            self.assertFalse(payload["recovery_required"])
+            self.assertIsNone(payload["recovery_command"])
+            self.assertIn("--reply", payload["resume_command"])
+
+    def test_interactive_help_carries_recovery_instead_of_a_reply_command(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_dir, state_dir = self._seed_lost_conversation(Path(tmp))
+            args = self._paused_args(plan_dir, state_dir)
+            payload: dict[str, object] = {
+                "paused": True,
+                "plan_dir": str(plan_dir),
+            }
+
+            task_packet._attach_interactive_help(args, payload)
+
+            help_payload = payload["interactive_help"]
+            self.assertTrue(help_payload["recovery_required"])
+            self.assertIn("--fresh-conversation", help_payload["recovery_command"])
+            self.assertIsNone(help_payload["reply_command"])
+            self.assertIn(
+                "# Unresumable Conversation - Recovery Prompt",
+                help_payload["rendered_prompt"],
+            )
 
     def test_paused_text_output_prints_questions_hint_after_last_message(
         self,

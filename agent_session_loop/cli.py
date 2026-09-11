@@ -43,6 +43,14 @@ _CONTROL_DEFAULT_WAIT_TIMEOUT_SECONDS = (
 _COMMIT_DEFAULT_GENERATION_TIMEOUT_SECONDS = (
     900  # commit_message.DEFAULT_GENERATION_TIMEOUT_SECONDS
 )
+_REDIRECT_DEFAULT_TTL_SECONDS = 120  # redirect_store.REDIRECT_DEFAULT_TTL_SECONDS
+_REDIRECT_MAX_TTL_SECONDS = 3600  # redirect_store.REDIRECT_MAX_TTL_SECONDS
+_REDIRECT_ACCEPTANCE_WAIT_SECONDS = 2.0  # redirect_admission.ACCEPTANCE_WAIT_SECONDS
+_REDIRECT_MAX_ACCEPTANCE_WAIT_SECONDS = (
+    30.0  # redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS
+)
+_REDIRECT_DEFAULT_ACK_WAIT_SECONDS = 30.0  # redirect_ack.DEFAULT_ACK_WAIT_SECONDS
+_REDIRECT_MAX_ACK_WAIT_SECONDS = 900.0  # redirect_ack.MAX_ACK_WAIT_SECONDS
 _INTERRUPTED_EXIT = 130  # turn_execution.INTERRUPTED_EXIT
 _BRIDGE_PROTOCOL_VERSION = 2  # bridge.PROTOCOL_VERSION
 
@@ -2508,6 +2516,139 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     _add_plan_reference_args(control_guard_list_parser)
     control_guard_list_parser.set_defaults(
         handler_ref="control_cli:control_guard_list_from_args",
+    )
+
+    control_redirect_parser = control_sub.add_parser(
+        "redirect",
+        help=(
+            "Correct the turn that is running now: stop it and hand the "
+            "correction to its successor."
+        ),
+    )
+    _add_plan_reference_args(control_redirect_parser)
+    redirect_body = control_redirect_parser.add_mutually_exclusive_group()
+    redirect_body.add_argument(
+        "--text",
+        help="Correction delivered to the worker",
+    )
+    redirect_body.add_argument(
+        "--text-stdin",
+        dest="text_stdin",
+        action="store_true",
+        help="Read the correction from standard input instead of --text",
+    )
+    control_redirect_parser.add_argument(
+        "--session",
+        default=None,
+        metavar="SESSION_ID",
+        help=(
+            "Session the correction is meant for; refuses with stale-target "
+            "when the run has moved on (default: whichever turn is live)"
+        ),
+    )
+    control_redirect_parser.add_argument(
+        "--turn",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Turn index the correction is meant for (default: the live turn)",
+    )
+    control_redirect_parser.add_argument(
+        "--run-id",
+        dest="run_id",
+        default=None,
+        metavar="RUN_ID",
+        help="Run the correction is meant for (default: the live run)",
+    )
+    control_redirect_parser.add_argument(
+        "--operation-id",
+        dest="operation_id",
+        default=None,
+        metavar="ID",
+        help=(
+            "Reuse an identifier from an earlier uncertain submission; the "
+            "same id with the same text is the same request, never a second one"
+        ),
+    )
+    control_redirect_parser.add_argument(
+        "--ttl",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "How long the correction stays claimable before it expires "
+            f"(default: {_REDIRECT_DEFAULT_TTL_SECONDS}; "
+            f"maximum: {_REDIRECT_MAX_TTL_SECONDS})"
+        ),
+    )
+    control_redirect_parser.add_argument(
+        "--timeout",
+        dest="wait_timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Seconds to wait for the runner's acceptance before reporting the "
+            "submission uncertain "
+            f"(default: {_REDIRECT_ACCEPTANCE_WAIT_SECONDS:g}; "
+            f"maximum: {_REDIRECT_MAX_ACCEPTANCE_WAIT_SECONDS:g})"
+        ),
+    )
+    control_redirect_parser.set_defaults(
+        handler_ref="redirect_cli:control_redirect_from_args",
+    )
+
+    control_redirect_status_parser = control_sub.add_parser(
+        "redirect-status",
+        help="Report what became of this plan's corrections, without changing any.",
+    )
+    _add_plan_reference_args(control_redirect_status_parser)
+    control_redirect_status_parser.add_argument(
+        "--redirect-id",
+        dest="redirect_id",
+        action="append",
+        default=None,
+        metavar="ID",
+        help=(
+            "Operation to report, repeatable "
+            "(default: every operation the journal holds)"
+        ),
+    )
+    control_redirect_status_parser.add_argument(
+        "--wait-acknowledged",
+        dest="wait_acknowledged",
+        action="store_true",
+        help=(
+            "Watch until the live attempt receipts the named corrections; "
+            "observational, so a timeout retracts nothing"
+        ),
+    )
+    control_redirect_status_parser.add_argument(
+        "--timeout",
+        dest="wait_timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Receipt wait timeout in seconds; requires --wait-acknowledged "
+            f"(default: {_REDIRECT_DEFAULT_ACK_WAIT_SECONDS:g}; "
+            f"maximum: {_REDIRECT_MAX_ACK_WAIT_SECONDS:g})"
+        ),
+    )
+    control_redirect_status_parser.set_defaults(
+        handler_ref="redirect_cli:control_redirect_status_from_args",
+    )
+
+    control_recover_conversation_parser = control_sub.add_parser(
+        "recover-conversation",
+        help=(
+            "Report an unresumable conversation and print the one-use relaunch "
+            "that authorizes a fresh one."
+        ),
+    )
+    _add_plan_reference_args(control_recover_conversation_parser)
+    control_recover_conversation_parser.set_defaults(
+        handler_ref="redirect_cli:control_recover_conversation_from_args",
     )
 
     inbox_parser = subparsers.add_parser(

@@ -678,20 +678,7 @@ def _body_from_args(
         return None
     if from_stdin:
         try:
-            if sys.stdin is None:
-                raise ValueError("standard input is unavailable")
-            stdin_stream = getattr(sys.stdin, "buffer", sys.stdin)
-            raw_body = stdin_stream.read()
-            if isinstance(raw_body, bytes):
-                body = raw_body.decode("utf-8", errors="strict")
-            elif isinstance(raw_body, str):
-                # String-backed test and embedding streams have no binary
-                # buffer. Reject surrogateescaped input just as the binary
-                # UTF-8 path rejects undecodable bytes.
-                raw_body.encode("utf-8", errors="strict")
-                body = raw_body
-            else:
-                raise TypeError("standard input did not return text or bytes")
+            body = cli_common.read_stdin_text()
         except (OSError, TypeError, UnicodeError, ValueError) as error:
             cli_common.print_error(
                 args,
@@ -742,17 +729,7 @@ def _optional_note_from_args(
             return False, None
         return True, inline
     try:
-        if sys.stdin is None:
-            raise ValueError("standard input is unavailable")
-        stdin_stream = getattr(sys.stdin, "buffer", sys.stdin)
-        raw_note = stdin_stream.read()
-        if isinstance(raw_note, bytes):
-            note = raw_note.decode("utf-8", errors="strict")
-        elif isinstance(raw_note, str):
-            raw_note.encode("utf-8", errors="strict")
-            note = raw_note
-        else:
-            raise TypeError("standard input did not return text or bytes")
+        note = cli_common.read_stdin_text()
     except (OSError, TypeError, UnicodeError, ValueError) as error:
         cli_common.print_error(
             args,
