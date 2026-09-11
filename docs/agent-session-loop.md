@@ -8535,9 +8535,10 @@ the Python package (no build tooling, no third-party JS). Pages:
   `matchMedia` on every render.
 - **Detail (`#plan?dir=<encoded>[&focus=<key>]`)** — per-plan view with
   the Recovery Center, active turn, active verification, session table,
-  recent events, progress journal, artifacts, and operator controls
-  (pin/unpin, edit profile, launch, reply, stop-after-current, select
-  harness, unlock). The Recovery Center appears near the top of the
+  recent events, progress journal, artifacts, the urgent-correction
+  composer, and operator controls (pin/unpin, edit profile, launch,
+  reply, stop-after-current, select harness, unlock).
+  The Recovery Center appears near the top of the
   detail page so a paused/failed/stale plan shows the diagnosis,
   evidence, copyable commands, related artifacts, and confirmed next
   actions before the raw logs. Dangerous actions (unlock with an active
@@ -8546,8 +8547,9 @@ the Python package (no build tooling, no third-party JS). Pages:
 
   The optional `focus=<key>` hash query parameter accepts the keys
   registered in `DETAIL_FOCUS_TARGETS` (`recovery`, `reply`, `events`,
-  `active`, `launch`, `unlock`). The router validates the key against
-  the map and silently drops unknown values. `applyDetailFocus` is
+  `active`, `launch`, `unlock`, `redirect`). The router validates the
+  key against the map and silently drops unknown values.
+  `applyDetailFocus` is
   one-shot — it
   scrolls and focuses the target element on the first render after
   navigation, then clears `state.route.focus` so subsequent 5 s polls
@@ -8575,6 +8577,66 @@ the Python package (no build tooling, no third-party JS). Pages:
   `/api/plan`, not `/api/state`); that fallback only surfaces before
   the first successful `/api/state` poll.
 
+  **Urgent correction composer.** `#wb-redirect-panel` is the browser
+  entry point to the redirect path. Its submit button is labeled with
+  both halves of what it does — "interrupt turn & resume with this
+  correction" — and a confirm dialog restates that the session stays
+  pending and the interrupted attempt earns no completion. The panel
+  polls `/api/redirect-status` on the same 5 s detail cycle and takes
+  three things from that response and nowhere else: the `action_token`
+  it must return with a submission, whether `run.redirect` appears in
+  `permitted_actions`, and the `disabled_reasons[run.redirect]` string
+  shown when it does not. A composer never derives its own freshness
+  proof, and it never infers availability from the queue row it was
+  opened from.
+
+  Progress renders as six fixed phases — awaiting acceptance,
+  cancelling the turn, resuming with the correction, worker
+  acknowledged, unresolved, settled — with `REDIRECT_STAGE_PHASES`
+  mapping every `redirect_cli` stage onto exactly one of them.
+  Acknowledgment is deliberately its own phase: "the turn was stopped"
+  and "a worker receipted the correction" are different facts, and only
+  the second says the correction landed. Operation rows carry
+  `data-stage` and `data-phase` and show the journal's
+  `stage_description`, feedback digest, and byte count — never the
+  correction body.
+
+  Operation identity outlives any one answer. The composer mints a
+  memory-only `operation_id` on first submit and keeps it through every
+  uncertain, refused, or failed response, because the journal treats a
+  resubmission carrying the same id as the same request; minting a
+  fresh id on retry is how one correction silently becomes two. The
+  textarea is cleared only on a durable answer (a 202 that persisted, or
+  a 200 replay that recognized an id already in the journal) and is
+  preserved on every failure path. A submission in flight sets
+  `state.redirect.inFlight`, which both disables the button and refuses
+  a second submit arriving by keyboard, so a double click is one
+  correction. Discarding the draft discards the id with it, and
+  switching plans resets the composer rather than carrying a draft
+  across.
+
+  Because nothing is persisted, a reload repopulates the panel purely
+  from `/api/redirect-status`. Operations still in `submitted` or
+  `uncertain` are surfaced by id under "Unresolved after reconnect",
+  carrying a verbatim mirror of `redirect_cli.RECONCILE_HINT`, so a
+  reconnecting operator reconciles by id instead of resubmitting blind.
+  A failed poll marks the panel unreadable and disables submission but
+  leaves the rendered operations in place — a failed read is not
+  evidence that a correction went away.
+
+  **Conversation recovery.** When `/api/recovery` classifies the pause
+  as `conversation-recovery`, the Recovery Center reveals
+  `#wb-conversation-recovery` and fills it from
+  `/api/conversation-recovery`: the decision, pause reason, whether the
+  run resumes automatically (it does not), who must authorize it, the
+  inspect and authorization commands as copyable text, the one-use note
+  when an authorization exists, and the corrections a fresh start would
+  still carry. This group is report-only by construction — it issues no
+  POST and ships no button that performs the recovery — because
+  authorizing a fresh conversation discards the agent's saved context
+  and the authorization is one-use, so it is typed deliberately into a
+  terminal rather than clicked.
+
 Persistence and privacy:
 
 - The frontend persists operator preferences under the `wb.*`
@@ -8591,6 +8653,14 @@ Persistence and privacy:
   written, and no refresh path mutates `#wb-reply-text.value` outside
   the explicit clear-on-success flow. An in-progress reply draft
   survives any number of 5 s polls without being clobbered.
+- The urgent-correction textarea follows the same rule and is held to it
+  by a regression test: no `wb.redirect` storage key exists, no
+  `setItem` call touches the correction text, and no refresh path
+  mutates `#wb-redirect-text.value` outside the clear-on-durable-success
+  flow. The minted `operation_id` is likewise memory-only, so it does
+  not survive a reload — the journal does, which is why unresolved
+  operations are recovered by id from `/api/redirect-status` rather than
+  from the browser.
 
 Static asset caching:
 

@@ -87,6 +87,7 @@
   const DETAIL_FOCUS_TARGETS = {
     recovery: { scroll: "wb-recovery-panel", focus: null },
     reply: { scroll: "wb-recovery-panel", focus: "wb-reply-text" },
+    redirect: { scroll: "wb-redirect-panel", focus: "wb-redirect-text" },
     events: { scroll: "wb-detail-events", focus: null },
     active: { scroll: "wb-detail-active", focus: null },
     verification: { scroll: "wb-detail-verification", focus: null },
@@ -131,6 +132,61 @@
     "inspect-artifacts": "artifacts",
     "review-profile": "profile",
   };
+  // Urgent-correction vocabulary. The stage strings mirror
+  // redirect_cli.STAGES; the phase grouping is this surface's own and it
+  // deliberately keeps acknowledgment apart from the cancellation that
+  // precedes it and the resumption that carries it, because a worker receipt
+  // is a different fact from either and collapsing the three would let a
+  // stopped turn read as an answered correction.
+  const REDIRECT_PHASES = [
+    "awaiting",
+    "cancelling",
+    "resuming",
+    "acknowledged",
+    "unresolved",
+    "settled",
+  ];
+  const REDIRECT_PHASE_LABELS = {
+    awaiting: "awaiting acceptance",
+    cancelling: "cancelling the turn",
+    resuming: "resuming with the correction",
+    acknowledged: "worker acknowledged",
+    unresolved: "unresolved",
+    settled: "settled without action",
+  };
+  const REDIRECT_STAGE_PHASES = {
+    submitted: "awaiting",
+    unaccepted: "awaiting",
+    interrupting: "cancelling",
+    stopped: "cancelling",
+    resuming: "resuming",
+    acknowledged: "acknowledged",
+    rejected: "settled",
+    blocked: "settled",
+    uncertain: "unresolved",
+  };
+  // Stages whose answer is still an operation id rather than a verdict. These
+  // are what a reconnecting browser has to reconcile rather than resubmit:
+  // the draft is gone with the tab, but the correction's fate is in the
+  // journal and the id is how to ask after it.
+  const REDIRECT_UNRESOLVED_STAGES = ["submitted", "uncertain"];
+  // Mirrors redirect_cli.RECONCILE_HINT.
+  const REDIRECT_RECONCILE_HINT =
+    "reconcile it by id with `asl control redirect-status` before resubmitting; " +
+    "a resubmission carrying the same --operation-id is the same request, a new " +
+    "one is a second correction";
+  // Mirrors intervention.ACTION_REDIRECT.
+  const REDIRECT_ACTION = "run.redirect";
+  // Mirrors redirect_store.REDIRECT_MAX_FEEDBACK_BYTES so the composer refuses
+  // a body the journal would refuse anyway.
+  const REDIRECT_MAX_FEEDBACK_BYTES = 65536;
+  // Mirrors redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS.
+  const REDIRECT_MAX_OPERATION_ID_CHARS = 64;
+  const REDIRECT_CONFIRM =
+    "Interrupt the in-flight turn now and resume the saved conversation with " +
+    "this correction first? The session stays pending, the interrupted " +
+    "attempt earns no completion, and the text is not retrievable from the UI " +
+    "afterward.";
   const REPLY_CONTEXT_ERROR_HINTS = {
     "no-paused-run": "No paused run is waiting for an operator reply.",
     "missing-question-context": "The paused turn no longer has readable question context.",
@@ -164,6 +220,30 @@
     detailPlan: null,
     detailRegistry: null,
     detailReplyContext: null,
+    // Urgent-correction composer state. `operationId` is the durable identity
+    // of the correction being composed: minted at the first submit and kept
+    // through every uncertain, refused, or failed answer so a retry is the
+    // same request rather than a second correction. Like the draft it names,
+    // it lives in memory only — never sessionStorage, never localStorage —
+    // which is exactly why a reload recovers operations from the journal
+    // instead of from this object.
+    redirect: {
+      // The draft's retry identity. Cleared once an answer is durable, because
+      // past that point there is nothing left to retry under it.
+      operationId: null,
+      // The ids this tab submitted, kept after their drafts are gone purely so
+      // the operator can find their own correction in a list that also holds
+      // corrections sent from the CLI or another tab. Attribution, not
+      // identity: it is never sent back to the server.
+      submittedIds: [],
+      inFlight: false,
+      actionToken: null,
+      permitted: false,
+      disabledReason: null,
+      target: null,
+      status: null,
+    },
+    conversationRecovery: null,
     detailHistoryByPlan: new Map(),
     shellMediaQuery: null,
     searchDebounceTimer: null,
@@ -190,6 +270,7 @@
     wireControls();
     wireProfileForm();
     wireReplyForm();
+    wireRedirectForm();
     wireShellViewport();
     wirePreviewOpen();
     wireSearchControl();
@@ -405,6 +486,13 @@
 
   function applyRoute() {
     const next = parseHashRoute();
+    const previousPlanDir = state.route ? state.route.planDir : null;
+    if (next.planDir !== previousPlanDir) {
+      // A correction's identity belongs to the plan it was written against.
+      // Carrying it across a route change would let the next submit reuse an
+      // id the journal already bound to a different run.
+      resetRedirectForPlan();
+    }
     state.route = next;
     applyShellLayout();
     const desktop = isDesktopShell();
@@ -2521,6 +2609,7 @@
       renderProfileForm(state.detailPlan, state.detailRegistry);
       const tasks = [
         loadAndRenderRecovery(planDir, state.detailPlan),
+        loadAndRenderRedirect(planDir),
         loadAndRenderState(planDir),
         loadAndRenderEvents(planDir),
         loadAndRenderProgress(planDir),
@@ -2638,6 +2727,186 @@
     } else {
       hideReplyPanel();
     }
+    if (renderedRecovery && renderedRecovery.kind === "conversation-recovery") {
+      await loadAndRenderConversationRecovery(planDir);
+    } else {
+      hideConversationRecoveryPanel();
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Conversation recovery — reported, never performed
+  //
+  // Both pauses this covers hand a decision to a person: one discards an
+  // agent's accumulated context under a one-use authorization, the other has
+  // no authorization at all. So this panel renders the decision, the commands
+  // to copy, and the corrections a fresh start would still carry — and offers
+  // no button that performs any of it.
+
+  async function loadAndRenderConversationRecovery(planDir) {
+    try {
+      const body = await apiRequest(
+        "/api/conversation-recovery?plan_dir=" + encodeURIComponent(planDir)
+      );
+      if (body && body.ok === true) {
+        state.conversationRecovery = body;
+        renderConversationRecovery(body);
+      } else {
+        renderConversationRecoveryError(
+          (body && body.error) || "conversation recovery unavailable"
+        );
+      }
+    } catch (err) {
+      renderConversationRecoveryError(describeError(err));
+    }
+  }
+
+  function hideConversationRecoveryPanel() {
+    const panel = document.getElementById("wb-conversation-recovery");
+    if (panel) panel.hidden = true;
+    state.conversationRecovery = null;
+  }
+
+  function renderConversationRecoveryError(message) {
+    state.conversationRecovery = null;
+    const panel = document.getElementById("wb-conversation-recovery");
+    if (panel) panel.hidden = false;
+    const facts = document.getElementById("wb-conversation-facts");
+    if (facts) {
+      facts.textContent = "";
+      facts.appendChild(
+        conversationFactRow("Recovery", String(message), "wb-conversation__fact-row")
+      );
+    }
+    const note = document.getElementById("wb-conversation-note");
+    if (note) {
+      note.hidden = true;
+      note.textContent = "";
+    }
+    const commands = document.getElementById("wb-conversation-commands");
+    if (commands) commands.textContent = "";
+    const retained = document.getElementById("wb-conversation-retained");
+    if (retained) {
+      retained.textContent = "";
+      retained.appendChild(emptyListItem("unknown while recovery is unreadable"));
+    }
+  }
+
+  function renderConversationRecovery(payload) {
+    const panel = document.getElementById("wb-conversation-recovery");
+    if (panel) panel.hidden = false;
+    const facts = document.getElementById("wb-conversation-facts");
+    if (facts) {
+      facts.textContent = "";
+      facts.appendChild(
+        conversationFactRow(
+          "Decision",
+          payload.decision || "none recorded",
+          "wb-conversation__fact-row"
+        )
+      );
+      facts.appendChild(
+        conversationFactRow(
+          "Pause reason",
+          payload.pause_reason || "not paused",
+          "wb-conversation__fact-row"
+        )
+      );
+      // Stated rather than implied: neither pause clears itself, so "paused"
+      // must never read here as "relaunch and see".
+      facts.appendChild(
+        conversationFactRow(
+          "Automatic resume",
+          payload.auto_resume === true ? "yes" : "no",
+          "wb-conversation__fact-row"
+        )
+      );
+      facts.appendChild(
+        conversationFactRow(
+          "Authorized by",
+          payload.authorized_by || "operator",
+          "wb-conversation__fact-row"
+        )
+      );
+    }
+    const note = document.getElementById("wb-conversation-note");
+    if (note) {
+      const text = payload.one_use === true ? payload.note || "" : "";
+      note.hidden = !text;
+      note.textContent = text;
+    }
+    renderRecoveryCommandRows(
+      document.getElementById("wb-conversation-commands"),
+      conversationRecoveryCommands(payload)
+    );
+    renderConversationRetained(payload.retained_operations);
+  }
+
+  function conversationRecoveryCommands(payload) {
+    const commands = [];
+    if (payload.inspect_command) {
+      commands.push({
+        label: "Inspect recovery",
+        command: payload.inspect_command,
+        description: "Read the recorded binding and journal; writes nothing.",
+      });
+    }
+    if (payload.authorization_command) {
+      commands.push({
+        label: "Authorize fresh conversation",
+        command: payload.authorization_command,
+        // The one-use warning is rendered once, above, where it applies to the
+        // decision rather than to the line an operator is about to paste.
+        description: "Discards the agent's saved context and starts over.",
+      });
+    }
+    return commands;
+  }
+
+  function renderConversationRetained(operations) {
+    const list = document.getElementById("wb-conversation-retained");
+    if (!list) return;
+    list.textContent = "";
+    const items = Array.isArray(operations) ? operations : [];
+    if (items.length === 0) {
+      list.appendChild(emptyListItem("no corrections outstanding"));
+      return;
+    }
+    items.forEach((operation) => {
+      const li = document.createElement("li");
+      li.className = "wb-conversation__retained-row";
+      li.setAttribute("data-stage", operation.stage || "unknown");
+      const id = document.createElement("span");
+      id.className = "wb-redirect__operation-id";
+      id.textContent = operation.operation_id || "(unknown id)";
+      const detail = document.createElement("span");
+      detail.className = "wb-redirect__operation-detail";
+      detail.textContent = redirectStageLine(operation);
+      li.appendChild(id);
+      li.appendChild(detail);
+      list.appendChild(li);
+    });
+  }
+
+  function conversationFactRow(label, value, className) {
+    const li = document.createElement("li");
+    li.className = className;
+    const labelEl = document.createElement("span");
+    labelEl.className = "wb-recovery__label";
+    labelEl.textContent = label;
+    const valueEl = document.createElement("span");
+    valueEl.className = "wb-recovery__value";
+    valueEl.textContent = String(value);
+    li.appendChild(labelEl);
+    li.appendChild(valueEl);
+    return li;
+  }
+
+  function emptyListItem(text) {
+    const li = document.createElement("li");
+    li.className = "wb-empty";
+    li.textContent = text;
+    return li;
   }
 
   // ---------------------------------------------------------------------
@@ -2861,6 +3130,14 @@
       return;
     }
     section.hidden = false;
+    renderRecoveryCommandRows(list, commands);
+  }
+
+  // Shared by the Recovery Center and the conversation-recovery group: both
+  // present a command to copy rather than a button that runs it.
+  function renderRecoveryCommandRows(list, commands) {
+    if (!list) return;
+    list.innerHTML = "";
     commands.forEach((command) => {
       const li = document.createElement("li");
       li.className = "wb-recovery__command-row";
@@ -4153,5 +4430,488 @@
         "submission failed: " + describeError(err)
       );
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Urgent correction (redirect) composer
+  //
+  // Three rules shape everything below.
+  //
+  // The draft is memory only. It is never written to sessionStorage, never
+  // echoed into the hash, and never restored after a reload — a correction is
+  // the most sensitive text this UI handles, and the panel promises in prose
+  // that it lives in this tab alone.
+  //
+  // The operation id outlives the answer. It is minted once per draft and kept
+  // through every uncertain, refused, or failed response, because the journal
+  // treats a resubmission carrying the same id as the same request. Minting a
+  // fresh id on retry is how one correction becomes two.
+  //
+  // Only a durable answer clears the textarea. "Durable" means the server said
+  // ok — a 202 that persisted, or a 200 replay that recognized an id already in
+  // the journal. Everything else keeps the text exactly where the operator left
+  // it.
+
+  function wireRedirectForm() {
+    const form = document.getElementById("wb-redirect-form");
+    if (!form) return;
+    form.addEventListener("submit", handleRedirectSubmit);
+    const clearBtn = document.getElementById("wb-redirect-clear");
+    if (clearBtn) {
+      clearBtn.addEventListener("click", () => {
+        // Discarding the body discards the request: an id with no text behind
+        // it would silently attach the next correction to this one's identity.
+        resetRedirectComposer();
+      });
+    }
+  }
+
+  function resetRedirectComposer() {
+    const textarea = document.getElementById("wb-redirect-text");
+    if (textarea) textarea.value = "";
+    state.redirect.operationId = null;
+    state.redirect.inFlight = false;
+    clearFormErrors("wb-redirect-form-errors");
+    renderRedirectOperationId();
+  }
+
+  // Leaving the plan drops the attribution too: a correction id means nothing
+  // against a different journal, and carrying one across would mark an
+  // unrelated operation as this tab's.
+  function resetRedirectForPlan() {
+    state.redirect.submittedIds = [];
+    state.redirect.status = null;
+    state.redirect.actionToken = null;
+    state.redirect.permitted = false;
+    resetRedirectComposer();
+  }
+
+  function rememberSubmittedRedirect(operationId) {
+    if (state.redirect.submittedIds.indexOf(operationId) === -1) {
+      state.redirect.submittedIds.push(operationId);
+    }
+  }
+
+  function isOwnRedirect(operationId) {
+    if (!operationId) return false;
+    return (
+      operationId === state.redirect.operationId ||
+      state.redirect.submittedIds.indexOf(operationId) !== -1
+    );
+  }
+
+  function mintRedirectOperationId() {
+    const random = window.crypto;
+    if (random && typeof random.randomUUID === "function") {
+      return random.randomUUID().replace(/-/g, "");
+    }
+    if (random && typeof random.getRandomValues === "function") {
+      const bytes = new Uint8Array(16);
+      random.getRandomValues(bytes);
+      return Array.prototype.map
+        .call(bytes, (byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+    }
+    // Last resort only. Collisions here cost correctness, so it is padded well
+    // inside REDIRECT_MAX_OPERATION_ID_CHARS rather than shortened.
+    return (
+      "wb" +
+      Math.random().toString(16).slice(2) +
+      Math.random().toString(16).slice(2)
+    ).slice(0, REDIRECT_MAX_OPERATION_ID_CHARS);
+  }
+
+  function currentRedirectOperationId() {
+    if (!state.redirect.operationId) {
+      state.redirect.operationId = mintRedirectOperationId();
+      renderRedirectOperationId();
+    }
+    return state.redirect.operationId;
+  }
+
+  async function loadAndRenderRedirect(planDir) {
+    try {
+      const body = await apiRequest(
+        "/api/redirect-status?plan_dir=" + encodeURIComponent(planDir)
+      );
+      if (body && body.ok === true) {
+        state.redirect.status = body;
+        state.redirect.actionToken = body.action_token || null;
+        // Availability is the server's answer, never this composer's guess. A
+        // freshness proof derived locally would be a proof of nothing.
+        const permitted = Array.isArray(body.permitted_actions)
+          ? body.permitted_actions
+          : [];
+        state.redirect.permitted = permitted.indexOf(REDIRECT_ACTION) !== -1;
+        const reasons = body.disabled_reasons || {};
+        state.redirect.disabledReason = state.redirect.permitted
+          ? null
+          : reasons[REDIRECT_ACTION] || "redirect is unavailable right now";
+        state.redirect.target = body.live_target || null;
+        renderRedirect(body);
+      } else {
+        renderRedirectUnavailable(
+          (body && body.error) || "redirect status unavailable"
+        );
+      }
+    } catch (err) {
+      renderRedirectUnavailable(describeError(err));
+    }
+  }
+
+  function renderRedirectUnavailable(message) {
+    state.redirect.status = null;
+    state.redirect.actionToken = null;
+    state.redirect.permitted = false;
+    state.redirect.disabledReason = message;
+    setRedirectAvailability("unreadable", "unreadable", message);
+    setRedirectSubmitDisabled(true);
+    const target = document.getElementById("wb-redirect-target");
+    if (target) target.textContent = "Cannot submit: " + message;
+    // The progress groups keep whatever they last showed rather than emptying:
+    // a failed poll is not evidence that a correction went away.
+    renderRedirectOperationId();
+  }
+
+  function renderRedirect(payload) {
+    if (state.redirect.permitted) {
+      setRedirectAvailability(
+        "available",
+        "ready",
+        "A turn is in flight and can be interrupted."
+      );
+    } else {
+      setRedirectAvailability(
+        "unavailable",
+        "unavailable",
+        state.redirect.disabledReason || ""
+      );
+    }
+    setRedirectSubmitDisabled(!state.redirect.permitted || state.redirect.inFlight);
+    renderRedirectTarget(payload.live_target, state.redirect.disabledReason);
+    renderRedirectOperationId();
+    const operations = Array.isArray(payload.operations) ? payload.operations : [];
+    renderRedirectPhases(operations);
+    renderRedirectOperations(operations);
+    renderRedirectUnresolved(operations);
+    renderRedirectTruncation(payload);
+  }
+
+  function setRedirectAvailability(stateName, label, title) {
+    const panel = document.getElementById("wb-redirect-panel");
+    if (panel) panel.setAttribute("data-available", stateName);
+    const badge = document.getElementById("wb-redirect-availability");
+    if (!badge) return;
+    badge.setAttribute("data-state", stateName);
+    badge.textContent = label;
+    badge.title = title || "";
+  }
+
+  function setRedirectSubmitDisabled(disabled) {
+    const button = document.getElementById("wb-redirect-submit");
+    if (button) button.disabled = disabled === true;
+  }
+
+  function renderRedirectTarget(target, disabledReason) {
+    const el = document.getElementById("wb-redirect-target");
+    if (!el) return;
+    // Why it is unavailable, in the line that otherwise says what a submission
+    // would do. Leaving that explanation in the badge's tooltip would hide the
+    // one thing an operator staring at a disabled button needs to read.
+    if (disabledReason) {
+      el.textContent = "Cannot submit: " + disabledReason;
+      return;
+    }
+    if (!target) {
+      el.textContent = "No live turn to interrupt.";
+      return;
+    }
+    const parts = [];
+    if (target.session_id) parts.push("session " + target.session_id);
+    if (target.attempt !== undefined && target.attempt !== null) {
+      parts.push("attempt " + target.attempt);
+    }
+    if (target.turn_id) parts.push("turn " + target.turn_id);
+    el.textContent =
+      "Would interrupt: " + (parts.length ? parts.join(" · ") : "the live turn");
+  }
+
+  function renderRedirectOperationId() {
+    const el = document.getElementById("wb-redirect-operation");
+    if (!el) return;
+    const id = state.redirect.operationId;
+    if (!id) {
+      el.textContent =
+        "An operation id is minted when you submit; a retry of the same draft " +
+        "reuses it, so a lost answer cannot become a second correction.";
+      return;
+    }
+    el.textContent = "Operation id " + id + " — a retry reuses this id.";
+  }
+
+  function redirectPhaseFor(stage) {
+    return REDIRECT_STAGE_PHASES[stage] || "unresolved";
+  }
+
+  function renderRedirectPhases(operations) {
+    const list = document.getElementById("wb-redirect-phases");
+    const section = document.getElementById("wb-redirect-progress-section");
+    if (!list) return;
+    if (section) section.hidden = operations.length === 0;
+    list.textContent = "";
+    // Acknowledgment is its own phase, deliberately not folded into resuming.
+    // "The turn was stopped" and "a worker receipted the correction" are
+    // different facts, and only the second one says the correction landed.
+    const active = {};
+    operations.forEach((operation) => {
+      active[redirectPhaseFor(operation.stage)] = true;
+    });
+    REDIRECT_PHASES.forEach((phase) => {
+      const li = document.createElement("li");
+      li.className = "wb-redirect__phase";
+      li.setAttribute("data-phase", phase);
+      li.setAttribute("data-active", active[phase] ? "true" : "false");
+      li.textContent = REDIRECT_PHASE_LABELS[phase];
+      list.appendChild(li);
+    });
+  }
+
+  function redirectStageLine(operation) {
+    const stage = operation.stage || "unknown";
+    const description = operation.stage_description || "";
+    return description ? stage + ": " + description : stage;
+  }
+
+  function renderRedirectOperations(operations) {
+    const list = document.getElementById("wb-redirect-operations");
+    if (!list) return;
+    list.textContent = "";
+    if (operations.length === 0) {
+      list.appendChild(emptyListItem("no corrections recorded for this plan"));
+      return;
+    }
+    operations
+      .slice()
+      .reverse()
+      .forEach((operation) => {
+        list.appendChild(redirectOperationRow(operation));
+      });
+  }
+
+  function redirectOperationRow(operation) {
+    const li = document.createElement("li");
+    li.className = "wb-redirect__operation-row";
+    const stage = operation.stage || "unknown";
+    li.setAttribute("data-stage", stage);
+    li.setAttribute("data-phase", redirectPhaseFor(stage));
+    if (isOwnRedirect(operation.operation_id)) {
+      li.setAttribute("data-mine", "true");
+    }
+
+    const id = document.createElement("span");
+    id.className = "wb-redirect__operation-id";
+    id.textContent = operation.operation_id || "(unknown id)";
+    li.appendChild(id);
+
+    const detail = document.createElement("span");
+    detail.className = "wb-redirect__operation-detail";
+    const phase = document.createElement("span");
+    phase.className = "wb-redirect__operation-phase";
+    phase.textContent = REDIRECT_PHASE_LABELS[redirectPhaseFor(stage)];
+    detail.appendChild(phase);
+    const line = document.createElement("span");
+    line.className = "wb-redirect__operation-stage";
+    line.textContent = redirectStageLine(operation);
+    detail.appendChild(line);
+    // The digest, never the text: the body is not stored by this UI, and
+    // showing it back would undo that.
+    const meta = redirectOperationMeta(operation);
+    if (meta) {
+      const metaEl = document.createElement("span");
+      metaEl.className = "wb-redirect__operation-meta";
+      metaEl.textContent = meta;
+      detail.appendChild(metaEl);
+    }
+    li.appendChild(detail);
+    return li;
+  }
+
+  function redirectOperationMeta(operation) {
+    const parts = [];
+    if (operation.feedback_digest) {
+      parts.push("digest " + String(operation.feedback_digest).slice(0, 12));
+    }
+    if (operation.feedback_bytes !== undefined && operation.feedback_bytes !== null) {
+      parts.push(operation.feedback_bytes + " bytes");
+    }
+    if (operation.continuation_recovered === true) {
+      parts.push("continuation recovered");
+    }
+    if (operation.reason) parts.push(String(operation.reason));
+    return parts.join(" · ");
+  }
+
+  function renderRedirectUnresolved(operations) {
+    const section = document.getElementById("wb-redirect-unresolved-section");
+    const list = document.getElementById("wb-redirect-unresolved");
+    if (!section || !list) return;
+    // This is what makes a reload survivable. The composer keeps nothing, so
+    // after a refresh the journal is the only record of what was submitted;
+    // anything still unanswered is surfaced by id, with the reconciliation the
+    // CLI would give, instead of being resubmitted blind.
+    const unresolved = operations.filter(
+      (operation) => REDIRECT_UNRESOLVED_STAGES.indexOf(operation.stage) !== -1
+    );
+    if (unresolved.length === 0) {
+      section.hidden = true;
+      list.textContent = "";
+      return;
+    }
+    section.hidden = false;
+    const hint = document.getElementById("wb-redirect-reconcile-hint");
+    if (hint) hint.textContent = REDIRECT_RECONCILE_HINT;
+    list.textContent = "";
+    unresolved.forEach((operation) => {
+      list.appendChild(redirectOperationRow(operation));
+    });
+  }
+
+  function renderRedirectTruncation(payload) {
+    const el = document.getElementById("wb-redirect-truncated");
+    if (!el) return;
+    const notes = [];
+    if (payload.truncated === true) {
+      notes.push("older corrections are not shown");
+    }
+    if (payload.journal_complete === false) {
+      notes.push(
+        "the journal is incomplete" +
+          (payload.torn_tail === true ? " (torn tail)" : "") +
+          "; a correction may be missing from this list"
+      );
+    }
+    el.hidden = notes.length === 0;
+    el.textContent = notes.join("; ");
+  }
+
+  async function handleRedirectSubmit(event) {
+    event.preventDefault();
+    clearFormErrors("wb-redirect-form-errors");
+    if (state.redirect.inFlight) {
+      // The double-click guard. The button is disabled below too, but a second
+      // submit can still arrive by keyboard before the first response lands.
+      showFormError(
+        "wb-redirect-form-errors",
+        "a submission is already in flight; wait for its answer"
+      );
+      return;
+    }
+    const planDir = state.route.planDir;
+    if (!planDir) return;
+    const textarea = document.getElementById("wb-redirect-text");
+    if (!textarea) return;
+    const text = textarea.value;
+    if (!text || !text.trim()) {
+      showFormError("wb-redirect-form-errors", "correction must not be empty");
+      return;
+    }
+    const bytes = redirectByteLength(text);
+    if (bytes > REDIRECT_MAX_FEEDBACK_BYTES) {
+      showFormError(
+        "wb-redirect-form-errors",
+        "correction is " +
+          bytes +
+          " bytes; the journal accepts at most " +
+          REDIRECT_MAX_FEEDBACK_BYTES
+      );
+      return;
+    }
+    if (!state.redirect.permitted) {
+      showFormError(
+        "wb-redirect-form-errors",
+        state.redirect.disabledReason || "redirect is unavailable right now"
+      );
+      return;
+    }
+    const token = state.redirect.actionToken;
+    if (!token) {
+      showFormError(
+        "wb-redirect-form-errors",
+        "no freshness proof yet; wait for the next refresh"
+      );
+      return;
+    }
+    if (!window.confirm(REDIRECT_CONFIRM)) return;
+
+    const operationId = currentRedirectOperationId();
+    state.redirect.inFlight = true;
+    setRedirectSubmitDisabled(true);
+    try {
+      const body = await apiRequest("/api/control/redirect", {
+        method: "POST",
+        body: {
+          plan_dir: planDir,
+          operation_id: operationId,
+          action_token: token,
+          text: text,
+        },
+      });
+      if (body && body.ok === true) {
+        // Durable: either this call persisted it, or the journal already held
+        // this id and the server replayed that record back.
+        const replayed = !!(body.redirect && body.redirect.replayed);
+        // Remembered before the draft is cleared: the retry identity ends here,
+        // the attribution has to outlive it or the operator loses their own
+        // correction in the progress list.
+        rememberSubmittedRedirect(operationId);
+        resetRedirectComposer();
+        showControlsFeedback(
+          "info",
+          replayed
+            ? "correction " + operationId + " was already recorded; nothing resubmitted"
+            : "correction " + operationId + " recorded; watch Progress for acknowledgment"
+        );
+      } else {
+        showFormError(
+          "wb-redirect-form-errors",
+          redirectFailureMessage(body, operationId)
+        );
+      }
+    } catch (err) {
+      showFormError(
+        "wb-redirect-form-errors",
+        "submission failed: " +
+          describeError(err) +
+          " — the draft is kept; retrying reuses operation id " +
+          operationId
+      );
+    } finally {
+      state.redirect.inFlight = false;
+      setRedirectSubmitDisabled(!state.redirect.permitted);
+    }
+    await loadAndRenderRedirect(planDir);
+  }
+
+  function redirectFailureMessage(body, operationId) {
+    const error = (body && body.error) || "redirect was refused";
+    const receipt = body && body.details ? body.details.redirect : null;
+    const persisted = receipt && receipt.operation_id;
+    if (persisted) {
+      // Refused but recorded. Resubmitting the same id is the same request, so
+      // the hint that stops a second correction belongs here.
+      return error + " — " + REDIRECT_RECONCILE_HINT;
+    }
+    return (
+      error +
+      " — nothing was recorded; the draft is kept and a retry reuses operation id " +
+      operationId
+    );
+  }
+
+  function redirectByteLength(text) {
+    if (typeof TextEncoder === "function") {
+      return new TextEncoder().encode(text).length;
+    }
+    return unescape(encodeURIComponent(text)).length;
   }
 })();

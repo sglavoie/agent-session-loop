@@ -1201,6 +1201,289 @@ a:hover {
   align-items: center;
 }
 
+/* -- Conversation recovery (reported, never performed) -- */
+
+.wb-recovery__conversation {
+  padding: 8px;
+  background: var(--wb-bg-row);
+  border: 1px solid var(--wb-warning);
+  border-radius: 3px;
+}
+
+.wb-conversation__hint,
+.wb-conversation__note {
+  margin: 0;
+  color: var(--wb-text-dim);
+  font-size: 12px;
+}
+
+.wb-conversation__note {
+  padding: 4px 8px;
+  background: var(--wb-warning-soft);
+  border-left: 2px solid var(--wb-warning);
+  color: var(--wb-warning);
+}
+
+.wb-conversation__facts,
+.wb-conversation__retained {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wb-conversation__fact-row,
+.wb-conversation__retained-row {
+  display: grid;
+  gap: 8px;
+  align-items: center;
+  grid-template-columns: minmax(100px, 160px) minmax(0, 1fr);
+  padding: 6px 8px;
+  background: var(--wb-bg);
+  border: 1px solid var(--wb-border);
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.wb-conversation__retained-title {
+  margin: 0;
+  color: var(--wb-text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* -- Urgent correction (redirect) composer -- */
+
+.wb-redirect__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wb-redirect__availability {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--wb-border);
+  color: var(--wb-text-dim);
+}
+
+.wb-redirect__availability[data-state="available"] {
+  border-color: var(--wb-accent);
+  color: var(--wb-accent);
+}
+
+.wb-redirect__availability[data-state="unavailable"] {
+  border-color: var(--wb-warning);
+  color: var(--wb-warning);
+}
+
+/* "unreadable" is the state the panel enters when the status poll itself
+   failed, which is not the same as a run that cannot be interrupted: the
+   composer knows nothing rather than knowing the action is closed. */
+.wb-redirect__availability[data-state="unreadable"] {
+  border-color: var(--wb-danger);
+  color: var(--wb-danger);
+}
+
+.wb-redirect__hint,
+.wb-redirect__target,
+.wb-redirect__operation,
+.wb-redirect__reconcile-hint,
+.wb-redirect__truncated {
+  margin: 0;
+  color: var(--wb-text-dim);
+  font-size: 12px;
+}
+
+.wb-redirect__operation {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.wb-redirect__form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wb-redirect__label {
+  font-size: 12px;
+  color: var(--wb-text-dim);
+}
+
+.wb-redirect__form textarea {
+  font: inherit;
+  font-family: inherit;
+  background: var(--wb-bg-row);
+  color: var(--wb-text);
+  border: 1px solid var(--wb-border);
+  border-radius: 3px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.wb-redirect__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* The disabled submit has to read as disabled. Everywhere else in this UI a
+   disabled button is a transient nicety; here it is the availability gate, and
+   an operator who cannot see that the action is closed reads the panel as
+   broken instead of as unavailable. */
+.wb-redirect__actions .wb-button:disabled {
+  background: var(--wb-bg-row);
+  border-color: var(--wb-border);
+  color: var(--wb-text-faint);
+  cursor: not-allowed;
+}
+
+.wb-redirect__actions .wb-button:disabled:hover {
+  background: var(--wb-bg-row);
+  border-color: var(--wb-border);
+  color: var(--wb-text-faint);
+}
+
+.wb-redirect__group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.wb-redirect__group-title {
+  margin: 0;
+  color: var(--wb-text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.wb-redirect__phases {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wb-redirect__phase {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--wb-border);
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--wb-text-faint);
+}
+
+.wb-redirect__phase[data-active="true"] {
+  color: var(--wb-text);
+  border-color: var(--wb-accent);
+}
+
+/* Acknowledgment is its own phase and reads like one: a worker receipt is a
+   different fact from the cancellation that preceded it or the resumption
+   that carried it. */
+.wb-redirect__phase[data-phase="acknowledged"][data-active="true"] {
+  border-color: var(--wb-success);
+  color: var(--wb-success);
+}
+
+.wb-redirect__phase[data-phase="unresolved"][data-active="true"] {
+  border-color: var(--wb-warning);
+  color: var(--wb-warning);
+}
+
+.wb-redirect__operations,
+.wb-redirect__unresolved {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wb-redirect__operation-row {
+  display: grid;
+  gap: 8px;
+  align-items: baseline;
+  grid-template-columns: minmax(100px, 220px) minmax(0, 1fr);
+  padding: 6px 8px;
+  background: var(--wb-bg-row);
+  border: 1px solid var(--wb-border);
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.wb-redirect__operation-row[data-phase="acknowledged"] {
+  border-color: var(--wb-success);
+}
+
+.wb-redirect__operation-row[data-phase="unresolved"],
+/* Every row in this group needs attention by virtue of being in it. A
+   `submitted` correction is awaiting acceptance, which is ordinary mid-run and
+   noteworthy after a reconnect, so the group decides the framing here rather
+   than the phase. */
+.wb-redirect__unresolved .wb-redirect__operation-row {
+  border-color: var(--wb-warning);
+}
+
+/* The correction composed in this tab, marked so an operator can find it in a
+   list that also holds corrections submitted from the CLI or another tab. */
+.wb-redirect__operation-row[data-mine="true"] {
+  border-left-width: 3px;
+  border-left-color: var(--wb-accent);
+}
+
+.wb-redirect__operation-id,
+.wb-redirect__operation-detail {
+  min-width: 0;
+  word-break: break-word;
+  color: var(--wb-text);
+}
+
+.wb-redirect__operation-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  white-space: pre-wrap;
+}
+
+.wb-redirect__operation-phase {
+  color: var(--wb-text);
+}
+
+.wb-redirect__operation-stage,
+.wb-redirect__operation-meta {
+  color: var(--wb-text-dim);
+  font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .wb-redirect__head {
+    flex-direction: column;
+  }
+
+  .wb-conversation__fact-row,
+  .wb-conversation__retained-row,
+  .wb-redirect__operation-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* -- Sessions list -- */
 
 .wb-session-list {

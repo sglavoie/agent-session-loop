@@ -335,6 +335,36 @@
           </form>
         </div>
         <div
+          class="wb-recovery__group wb-recovery__conversation wb-conversation"
+          id="wb-conversation-recovery"
+          hidden
+        >
+          <h3 class="wb-recovery__group-title">Conversation recovery</h3>
+          <p class="wb-conversation__hint">
+            This pause hands a decision to a person. The Workbench reports it
+            and never performs it — authorizing a fresh conversation discards
+            the agent's saved context, so it is typed deliberately into a
+            terminal rather than clicked here.
+          </p>
+          <ul class="wb-conversation__facts" id="wb-conversation-facts"></ul>
+          <p
+            class="wb-conversation__note"
+            id="wb-conversation-note"
+            hidden
+          ></p>
+          <ul
+            class="wb-recovery__commands"
+            id="wb-conversation-commands"
+          ></ul>
+          <h4 class="wb-conversation__retained-title">
+            Corrections a fresh start still carries
+          </h4>
+          <ul
+            class="wb-conversation__retained"
+            id="wb-conversation-retained"
+          ></ul>
+        </div>
+        <div
           class="wb-recovery__group"
           id="wb-recovery-evidence-section"
           hidden
@@ -357,6 +387,91 @@
         >
           <h3 class="wb-recovery__group-title">Related artifacts</h3>
           <ul class="wb-recovery__artifacts" id="wb-recovery-artifacts"></ul>
+        </div>
+      </section>
+
+      <section
+        class="wb-panel wb-redirect"
+        id="wb-redirect-panel"
+        data-available="unknown"
+      >
+        <div class="wb-redirect__head">
+          <h2 class="wb-panel__title">Urgent correction</h2>
+          <span
+            class="wb-redirect__availability"
+            id="wb-redirect-availability"
+            data-state="unknown"
+          >
+            checking…
+          </span>
+        </div>
+        <p class="wb-redirect__hint">
+          Submitting <strong>interrupts the in-flight turn now</strong> and
+          <strong>resumes the saved conversation</strong> with this correction
+          placed first. The session stays pending and the interrupted attempt
+          earns no completion. The draft lives in this tab only: it is never
+          written to disk or to browser storage, it is cleared only once the
+          correction is durably recorded, and it is kept when a submission
+          fails.
+        </p>
+        <p class="wb-redirect__target" id="wb-redirect-target"></p>
+        <form id="wb-redirect-form" class="wb-redirect__form" autocomplete="off">
+          <label for="wb-redirect-text" class="wb-redirect__label">
+            correction <abbr title="required">*</abbr>
+          </label>
+          <textarea
+            id="wb-redirect-text"
+            name="redirect_text"
+            rows="5"
+            required
+            aria-required="true"
+            autocomplete="off"
+            spellcheck="true"
+          ></textarea>
+          <p class="wb-redirect__operation" id="wb-redirect-operation"></p>
+          <p
+            id="wb-redirect-form-errors"
+            class="wb-form__errors"
+            role="alert"
+            hidden
+          ></p>
+          <div class="wb-redirect__actions">
+            <button
+              class="wb-button wb-button--danger"
+              type="submit"
+              id="wb-redirect-submit"
+              data-action="redirect-submit"
+              title="Interrupts the in-flight turn now, then resumes the saved conversation with this correction first. Confirms before submitting."
+            >
+              interrupt turn &amp; resume with this correction
+            </button>
+            <button
+              class="wb-button wb-button--ghost"
+              id="wb-redirect-clear"
+              type="button"
+              data-action="redirect-clear"
+            >
+              discard draft
+            </button>
+          </div>
+        </form>
+        <div class="wb-redirect__group" id="wb-redirect-unresolved-section" hidden>
+          <h3 class="wb-redirect__group-title">Unresolved after reconnect</h3>
+          <p
+            class="wb-redirect__reconcile-hint"
+            id="wb-redirect-reconcile-hint"
+          ></p>
+          <ul class="wb-redirect__unresolved" id="wb-redirect-unresolved"></ul>
+        </div>
+        <div class="wb-redirect__group" id="wb-redirect-progress-section" hidden>
+          <h3 class="wb-redirect__group-title">Progress</h3>
+          <ul class="wb-redirect__phases" id="wb-redirect-phases"></ul>
+          <ul class="wb-redirect__operations" id="wb-redirect-operations"></ul>
+          <p
+            class="wb-redirect__truncated"
+            id="wb-redirect-truncated"
+            hidden
+          ></p>
         </div>
       </section>
 
