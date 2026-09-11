@@ -168,6 +168,7 @@ module = [
     "agent_session_loop.progress_repair",
     "agent_session_loop.qna",
     "agent_session_loop.readiness_gate",
+    "agent_session_loop.redirect_ack",
     "agent_session_loop.redirect_admission",
     "agent_session_loop.redirect_continuation",
     "agent_session_loop.redirect_control",

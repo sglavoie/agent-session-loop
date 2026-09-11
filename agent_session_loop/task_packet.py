@@ -25,7 +25,10 @@ Four invariants survive the move out of ``runner.py`` unchanged:
 * **A continuation block never leaks forward.** An operator reply and an
   answerless supervisor resolution are mutually exclusive, each requires its
   own context, and both are supplied only on the turn that resumes, so
-  reply context cannot reappear on a later turn.
+  reply context cannot reappear on a later turn. The urgent-correction block is
+  a third, independent one — an operator may correct a turn that was itself
+  resuming from a pause — and it cannot repeat either, because the journal
+  records which attempt carried each correction.
 * **Resolution identity carries no body.** :func:`_resolution_source_metadata`
   returns a fixed-shape identity — ids, sequence numbers, and the note's
   *length* — so a durable record can name a resolution without copying
@@ -52,6 +55,7 @@ from . import (
     mailbox,
     plans,
     qna,
+    redirect_ack,
     review,
     run_prompts,
     workspaces,
@@ -116,11 +120,16 @@ class SessionTaskPacket:
     mailbox_ask_command: str | None = None
     mailbox_resume_ask_command: str | None = None
     pending_guidance: tuple[mailbox.MailboxMessage, ...] = ()
+    correction_block: tuple[str, ...] = field(default_factory=tuple)
     reply_block: tuple[str, ...] = field(default_factory=tuple)
     resolution_block: tuple[str, ...] = field(default_factory=tuple)
     workspace: workspaces.ResolvedWorkspace | None = None
     session_scope: plans.SessionScope | None = None
     session_kind: str = plans.SESSION_KIND_IMPLEMENTATION
+
+    @property
+    def has_correction_context(self) -> bool:
+        return bool(self.correction_block)
 
     @property
     def has_reply_context(self) -> bool:
@@ -155,6 +164,13 @@ class SessionTaskPacket:
                 "verification; you own focused validation during implementation."
             )
         lines.append("")
+
+        if self.correction_block:
+            # First among the packet's content sections, ahead of the session it
+            # is correcting: an operator who interrupts a turn is answered
+            # before the worker re-reads what it was already doing.
+            lines.extend(self.correction_block)
+            lines.append("")
 
         lines.append("## Selected session (fixed — do not reinterpret)")
         lines.append(f"- Session ID: {self.session_id}")
@@ -348,6 +364,7 @@ def build_task_packet(
     workspace: workspaces.ResolvedWorkspace | None = None,
     session_scope: plans.SessionScope | None = None,
     session_kind: str = plans.SESSION_KIND_IMPLEMENTATION,
+    corrections: redirect_ack.CarriedCorrections | None = None,
 ) -> SessionTaskPacket:
     """Build the compact autonomous-worker packet for one selected session.
 
@@ -372,6 +389,10 @@ def build_task_packet(
     - ``session_kind`` selects the worker role: a ``review`` session renders
       reviewer duties and read-only mutation rules instead of the
       implementation-worker text.
+    - ``corrections`` prepend the urgent-correction block an interrupted
+      attempt resumes with. Unlike a reply or a resolution it is not mutually
+      exclusive with either: an operator may correct a turn that was itself
+      resuming from a pause.
 
     The returned :class:`SessionTaskPacket` carries structured data and a
     :meth:`~SessionTaskPacket.render` method producing the prompt string.
@@ -397,6 +418,17 @@ def build_task_packet(
         predecessor_value = predecessor.value
         predecessor_path = str(canonical_dir / predecessor.filename)
 
+    correction_block: tuple[str, ...] = ()
+    if corrections:
+        correction_block = (
+            run_prompts.CORRECTION_CONTEXT_HEADING,
+            "",
+            *run_prompts._correction_context_body(
+                corrections,
+                plan_dir=canonical_dir,
+                state_dir=state_dir,
+            ),
+        )
     reply_block: tuple[str, ...] = ()
     resolution_block: tuple[str, ...] = ()
     if reply_context is not None or reply is not None:
@@ -471,6 +503,7 @@ def build_task_packet(
             else None
         ),
         pending_guidance=pending_guidance_tuple,
+        correction_block=correction_block,
         reply_block=reply_block,
         resolution_block=resolution_block,
         workspace=workspace,

@@ -26,6 +26,8 @@ from . import (
     mailbox,
     mailbox_rendering,
     plans,
+    redirect_ack,
+    redirect_store,
     responses,
     state,
     supervision_liveness,
@@ -35,6 +37,7 @@ COMMAND_INBOX_GUIDANCE = "inbox-guidance"
 COMMAND_INBOX_REPLY = "inbox-reply"
 COMMAND_INBOX_RESOLVE = "inbox-resolve"
 COMMAND_INBOX_READ = "inbox-read"
+COMMAND_INBOX_ACKNOWLEDGE = "inbox-acknowledge"
 COMMAND_ASK = "ask"
 COMMAND_NOTIFY = "notify"
 COMMAND_OUTBOX_WAIT = "outbox-wait"
@@ -2004,6 +2007,149 @@ def inbox_read_from_args(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
     return 0
+
+
+def _live_attempt(
+    context: cli_common.PlanCommandContext,
+) -> redirect_store.RedirectTarget | None:
+    """Return the attempt the run's own state says is running right now."""
+    ownership = _active_turn_ownership(context)
+    if ownership is None:
+        return None
+    run_id, session_id, turn_index = ownership
+    return redirect_store.RedirectTarget(
+        run_id=run_id,
+        session_id=session_id,
+        turn_index=turn_index,
+        harness=_active_turn_harness(context),
+    )
+
+
+def _redirect_refusal(
+    error: redirect_ack.RedirectAckError | redirect_store.RedirectStoreError,
+) -> dict[str, Any]:
+    payload = error.to_payload()
+    return {
+        "reason": payload["reason"],
+        "error": str(error),
+        "details": payload.get("details") or {},
+    }
+
+
+def inbox_acknowledge_from_args(args: argparse.Namespace) -> int:
+    """Receipt the corrections one attempt carried, naming that attempt.
+
+    The worker's own command. It writes one ``acknowledged`` record per
+    correction and reports what it wrote; nothing waits on the result, and a
+    refusal costs the worker nothing but the receipt -- the correction is
+    already in its prompt and durable in the journal.
+
+    Refusals are per correction, so a stale id cannot suppress the receipts
+    beside it, but a mismatched ``--attempt`` refuses every one of them: the
+    token is the claim being checked, and a claim that fails once fails for the
+    whole command.
+    """
+    context = _resolve(
+        args,
+        command_name=COMMAND_INBOX_ACKNOWLEDGE,
+        text_label="inbox acknowledge",
+    )
+    if context is None:
+        return 1
+    attempt = _live_attempt(context)
+    requested: list[str] = [
+        operation_id
+        for operation_id in (args.redirect_id or ())
+        if isinstance(operation_id, str) and operation_id
+    ]
+    if attempt is None and not requested:
+        # Nothing to enumerate and nothing to check it against. Reporting this
+        # as "no corrections are carried" would tell a worker whose run is gone
+        # that its receipt was unnecessary, when the truth is that no receipt
+        # could be verified at all.
+        cli_common.print_error(
+            args,
+            command_name=COMMAND_INBOX_ACKNOWLEDGE,
+            text_label="inbox acknowledge",
+            reason=redirect_ack.ERROR_NO_LIVE_ATTEMPT,
+            error=(
+                "no active turn owns this plan, so the attempt a receipt would "
+                "name cannot be identified"
+            ),
+            details={"attempt": args.attempt},
+        )
+        return 1
+    if attempt is not None and not requested:
+        # No explicit ids: receipt exactly what this attempt carries. A worker
+        # reading its prompt always has the ids, so this is the convenience
+        # path, and it can still only name corrections the journal already
+        # bound to this attempt.
+        try:
+            summary = redirect_ack.acknowledgment_summary(
+                context.snapshot.plan_dir,
+                attempt=attempt,
+                state_dir=args.state_dir,
+            )
+        except redirect_store.RedirectStoreError as error:
+            cli_common.print_error(
+                args,
+                command_name=COMMAND_INBOX_ACKNOWLEDGE,
+                text_label="inbox acknowledge",
+                reason=error.reason,
+                error=str(error),
+                details=_redirect_refusal(error)["details"],
+            )
+            return 1
+        requested = list(summary["carried"])
+
+    acknowledged: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    for operation_id in dict.fromkeys(requested):
+        try:
+            receipt = redirect_ack.acknowledge_correction(
+                context.snapshot.plan_dir,
+                operation_id,
+                token=args.attempt,
+                live_attempt=attempt,
+                state_dir=args.state_dir,
+            )
+        except (
+            redirect_ack.RedirectAckError,
+            redirect_store.RedirectStoreError,
+        ) as error:
+            refused.append(
+                {"operation_id": operation_id, **_redirect_refusal(error)},
+            )
+            continue
+        acknowledged.append(receipt.to_payload())
+
+    payload = responses.success_payload(
+        COMMAND_INBOX_ACKNOWLEDGE,
+        plan_dir=str(context.snapshot.plan_dir),
+        attempt=args.attempt,
+        live_attempt=(None if attempt is None else redirect_ack.attempt_token(attempt)),
+        requested=list(dict.fromkeys(requested)),
+        acknowledged=acknowledged,
+        refused=refused,
+    )
+    if args.json:
+        responses.print_json(payload)
+    elif not requested:
+        print("No corrections are carried by this attempt.")
+    else:
+        for record in acknowledged:
+            print(
+                f"Acknowledged correction {record['operation_id']} on attempt "
+                f"{record['attempt']}"
+                + (" (already receipted)" if record["repeated"] else "")
+            )
+        for refusal in refused:
+            print(
+                f"Refused correction {refusal['operation_id']}: "
+                f"{refusal['reason']} ({refusal['error']})",
+                file=sys.stderr,
+            )
+    return 1 if refused else 0
 
 
 def notify_from_args(args: argparse.Namespace) -> int:

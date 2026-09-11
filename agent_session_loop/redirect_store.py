@@ -19,7 +19,11 @@ Four properties are structural rather than incidental:
   ``accepted``, ``rejected``, and ``expired`` are terminal, and the reducer
   keeps the first terminal record it sees. A second acceptance appended by a
   racing writer is rejected as a line, not applied as a transition, which is
-  what stops two turns from being redirected by one request.
+  what stops two turns from being redirected by one request. ``continued`` and
+  ``acknowledged`` are annotations *on* an accepted request rather than states
+  of it: they record which continuation attempt carried the correction and that
+  a worker running that exact attempt receipted it, and neither may precede the
+  acceptance it annotates or repeat itself.
 - **The feedback text never leaves this module by accident.** No parsed object
   carries it: :class:`RedirectRequest` holds a byte count and a digest, and
   rejected lines are reported without their raw bytes because a malformed line
@@ -46,7 +50,7 @@ import json
 import os
 import uuid
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -87,16 +91,36 @@ REDIRECT_DEFAULT_TTL_SECONDS = 120
 REDIRECT_MIN_TTL_SECONDS = 1
 REDIRECT_MAX_TTL_SECONDS = 3600
 
-RecordKind = Literal["submitted", "accepted", "rejected", "expired"]
+RecordKind = Literal[
+    "submitted",
+    "accepted",
+    "rejected",
+    "expired",
+    "continued",
+    "acknowledged",
+]
 KIND_SUBMITTED: RecordKind = "submitted"
 KIND_ACCEPTED: RecordKind = "accepted"
 KIND_REJECTED: RecordKind = "rejected"
 KIND_EXPIRED: RecordKind = "expired"
+KIND_CONTINUED: RecordKind = "continued"
+KIND_ACKNOWLEDGED: RecordKind = "acknowledged"
 RECORD_KINDS: tuple[RecordKind, ...] = (
     KIND_SUBMITTED,
     KIND_ACCEPTED,
     KIND_REJECTED,
     KIND_EXPIRED,
+    KIND_CONTINUED,
+    KIND_ACKNOWLEDGED,
+)
+#: The kinds that describe what happened to an already-accepted request. They
+#: are named as a group because the reducer routes on the group rather than on
+#: each kind, and because they change no state: ``a request is settled once``
+#: holds no matter how many of these a request collects. The settlements are the
+#: remainder, which is how :meth:`_Replay._apply` reaches them.
+ANNOTATION_KINDS: tuple[RecordKind, ...] = (
+    KIND_CONTINUED,
+    KIND_ACKNOWLEDGED,
 )
 
 RequestState = Literal["submitted", "accepted", "rejected", "expired"]
@@ -158,6 +182,11 @@ ERROR_UNKNOWN_REQUEST = "unknown-redirect-request"
 ERROR_ALREADY_SETTLED = "redirect-already-settled"
 ERROR_TARGET_MISMATCH = "redirect-target-mismatch"
 ERROR_REQUEST_EXPIRED = "redirect-request-expired"
+ERROR_INVALID_CONTINUATION = "invalid-redirect-continuation"
+ERROR_NOT_ACCEPTED = "redirect-not-accepted"
+ERROR_ALREADY_CARRIED = "redirect-already-carried"
+ERROR_NOT_CARRIED = "redirect-not-carried"
+ERROR_CONTINUATION_MISMATCH = "redirect-continuation-mismatch"
 
 # Why one physical line was not applied. A rejected line is reported without
 # its bytes: a malformed submission still carries the operator's words.
@@ -174,6 +203,12 @@ REJECT_INVALID_TARGET = "invalid-target"
 REJECT_INVALID_FEEDBACK = "invalid-feedback"
 REJECT_INVALID_TIMESTAMP = "invalid-timestamp"
 REJECT_INVALID_REASON = "invalid-reason"
+REJECT_INVALID_CONTINUATION = "invalid-continuation"
+REJECT_NOT_ACCEPTED = "not-accepted"
+REJECT_ALREADY_CARRIED = "already-carried"
+REJECT_NOT_CARRIED = "not-carried"
+REJECT_CONTINUATION_MISMATCH = "continuation-mismatch"
+REJECT_ALREADY_ACKNOWLEDGED = "already-acknowledged"
 
 
 class RedirectStoreError(Exception):
@@ -242,6 +277,12 @@ class RedirectRequest:
     Carries no feedback text by construction. ``feedback_digest`` is what lets
     a projection, a receipt, or an operator prove *which* correction this is
     without any surface but :func:`read_feedback` ever holding the words.
+
+    ``continuation`` is the attempt that actually carried this correction into a
+    prompt, recorded when the run finalizes that prompt. It is what makes a
+    worker receipt checkable: acknowledging a correction means naming the
+    attempt it was delivered in, and an attempt that never carried it -- a stale
+    predecessor, a transcript echo of an older attempt -- names the wrong one.
     """
 
     operation_id: str
@@ -255,6 +296,11 @@ class RedirectRequest:
     settled_at: str | None = None
     settled_seq: int | None = None
     reason: SettlementReason | None = None
+    continuation: RedirectTarget | None = None
+    continued_at: str | None = None
+    continued_seq: int | None = None
+    acknowledged_at: str | None = None
+    acknowledged_seq: int | None = None
 
     @property
     def terminal(self) -> bool:
@@ -263,6 +309,22 @@ class RedirectRequest:
     @property
     def accepted(self) -> bool:
         return self.state == STATE_ACCEPTED
+
+    @property
+    def carried(self) -> bool:
+        """Whether a continuation attempt has taken delivery of this correction."""
+        return self.continuation is not None
+
+    @property
+    def acknowledged(self) -> bool:
+        """Whether a worker receipted this correction on its own attempt."""
+        return self.acknowledged_at is not None
+
+    def continues_attempt(self, attempt: RedirectTarget) -> bool:
+        """Whether ``attempt`` is the continuation this correction was carried in."""
+        return self.continuation is not None and self.continuation.identifies_same_turn(
+            attempt
+        )
 
     def is_expired_at(self, moment: datetime) -> bool:
         """Whether this request's acceptance window has closed by ``moment``.
@@ -288,6 +350,15 @@ class RedirectRequest:
             "settled_at": self.settled_at,
             "settled_seq": self.settled_seq,
             "reason": self.reason,
+            "continuation": (
+                self.continuation.to_payload()
+                if self.continuation is not None
+                else None
+            ),
+            "continued_at": self.continued_at,
+            "continued_seq": self.continued_seq,
+            "acknowledged_at": self.acknowledged_at,
+            "acknowledged_seq": self.acknowledged_seq,
             **self.target.to_payload(),
         }
 
@@ -337,6 +408,30 @@ class RedirectJournalView:
             request
             for request in self.pending()
             if request.target.identifies_same_turn(target)
+        )
+
+    def pending_before(
+        self,
+        continuation: RedirectTarget,
+    ) -> tuple[RedirectRequest, ...]:
+        """Unsettled requests ``continuation`` may still carry, oldest first.
+
+        The coalescing boundary, read rather than computed by a caller: a
+        correction aimed at an earlier attempt of this run's same session was
+        submitted before this prompt was finalized, so it belongs in it. One
+        aimed at this attempt is a redirect against a turn that is about to be
+        live and is left alone.
+        """
+        return tuple(
+            request
+            for request in self.pending()
+            if _precedes_continuation(request.target, continuation)
+        )
+
+    def carried_for(self, attempt: RedirectTarget) -> tuple[RedirectRequest, ...]:
+        """Requests this exact continuation attempt carried, oldest first."""
+        return tuple(
+            request for request in self.requests if request.continues_attempt(attempt)
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -409,6 +504,42 @@ def validate_target(target: RedirectTarget) -> RedirectTarget:
     return target
 
 
+def _precedes_continuation(
+    target: RedirectTarget,
+    continuation: RedirectTarget,
+) -> bool:
+    """Whether ``target`` names an earlier attempt of ``continuation``'s session.
+
+    The turn index has to be strictly lower. A correction is carried forward
+    into the attempt that *succeeds* the one it interrupted, so a continuation
+    that claimed the same index as the request's own target would be describing
+    the interrupted turn as its own successor.
+    """
+    return (
+        target.run_id == continuation.run_id
+        and target.session_id == continuation.session_id
+        and target.turn_index < continuation.turn_index
+    )
+
+
+def validate_continuation(
+    target: RedirectTarget,
+    continuation: RedirectTarget,
+) -> RedirectTarget:
+    """Return ``continuation`` if it may carry a correction aimed at ``target``."""
+    validate_target(continuation)
+    if not _precedes_continuation(target, continuation):
+        raise RedirectStoreError(
+            ERROR_INVALID_CONTINUATION,
+            "continuation must be a later attempt of the same run and session",
+            details={
+                "request_target": target.to_payload(),
+                "continuation": continuation.to_payload(),
+            },
+        )
+    return continuation
+
+
 def validate_feedback(feedback: str) -> str:
     """Return ``feedback`` if it is a correction this journal can carry."""
     if not isinstance(feedback, str) or not feedback.strip():
@@ -470,7 +601,15 @@ def _physical_lines(data: bytes) -> list[bytes]:
     return lines
 
 
-def _parse_target(payload: Mapping[str, Any]) -> RedirectTarget | None:
+def _parse_target(payload: object) -> RedirectTarget | None:
+    """Read one target out of a journal line's mapping, or ``None`` if malformed.
+
+    Accepts ``object`` rather than a mapping because two of its callers read a
+    nested value out of a line another process wrote: a ``continuation`` that is
+    absent, null, or not an object is a line to reject, not a crash to raise.
+    """
+    if not isinstance(payload, Mapping):
+        return None
     run_id = payload.get("run_id")
     session_id = payload.get("session_id")
     turn_index = payload.get("turn_index")
@@ -533,6 +672,9 @@ class _Replay:
         if kind == KIND_SUBMITTED:
             self._apply_submitted(seq, payload, operation_id, str(created_at))
             return
+        if kind in ANNOTATION_KINDS:
+            self._apply_annotation(seq, payload, operation_id, str(created_at), kind)
+            return
         self._apply_settlement(seq, payload, operation_id, str(created_at), kind)
 
     def _apply_submitted(
@@ -570,6 +712,68 @@ class _Replay:
             submitted_seq=seq,
         )
 
+    def _apply_annotation(
+        self,
+        seq: int,
+        payload: Mapping[str, Any],
+        operation_id: str,
+        created_at: str,
+        kind: str,
+    ) -> None:
+        """Apply a ``continued`` or ``acknowledged`` line to an accepted request.
+
+        Every condition the appenders check is re-checked here, because a replay
+        that trusted the file would let a hand-edited or racing line invent a
+        receipt for an attempt that never carried the correction — and a receipt
+        is the whole evidence that a worker read it.
+        """
+        existing = self.requests.get(operation_id)
+        if existing is None:
+            self.reject(seq, REJECT_UNKNOWN_REQUEST, operation_id)
+            return
+        continuation = _parse_target(payload.get("continuation"))
+        if continuation is None or not _precedes_continuation(
+            existing.target, continuation
+        ):
+            self.reject(seq, REJECT_INVALID_CONTINUATION, operation_id)
+            return
+        if kind == KIND_CONTINUED:
+            if not existing.accepted:
+                self.reject(
+                    seq,
+                    (
+                        REJECT_ALREADY_SETTLED
+                        if existing.terminal
+                        else REJECT_NOT_ACCEPTED
+                    ),
+                    operation_id,
+                )
+                return
+            if existing.carried:
+                self.reject(seq, REJECT_ALREADY_CARRIED, operation_id)
+                return
+            self.requests[operation_id] = replace(
+                existing,
+                continuation=continuation,
+                continued_at=created_at,
+                continued_seq=seq,
+            )
+            return
+        if not existing.carried:
+            self.reject(seq, REJECT_NOT_CARRIED, operation_id)
+            return
+        if not existing.continues_attempt(continuation):
+            self.reject(seq, REJECT_CONTINUATION_MISMATCH, operation_id)
+            return
+        if existing.acknowledged:
+            self.reject(seq, REJECT_ALREADY_ACKNOWLEDGED, operation_id)
+            return
+        self.requests[operation_id] = replace(
+            existing,
+            acknowledged_at=created_at,
+            acknowledged_seq=seq,
+        )
+
     def _apply_settlement(
         self,
         seq: int,
@@ -600,15 +804,9 @@ class _Replay:
                 return
         elif kind == KIND_EXPIRED:
             reason = REASON_EXPIRED
-        self.requests[operation_id] = RedirectRequest(
-            operation_id=existing.operation_id,
-            target=existing.target,
+        self.requests[operation_id] = replace(
+            existing,
             state=literals.as_literal(kind, REQUEST_STATES, "kind"),
-            created_at=existing.created_at,
-            expires_at=existing.expires_at,
-            feedback_bytes=existing.feedback_bytes,
-            feedback_digest=existing.feedback_digest,
-            submitted_seq=existing.submitted_seq,
             settled_at=created_at,
             settled_seq=seq,
             reason=reason,
@@ -931,15 +1129,9 @@ def _settle_locked(
         # the journal is what keeps a full journal from stranding a request.
         effective_max_bytes=REDIRECT_JOURNAL_MAX_BYTES,
     )
-    settled = RedirectRequest(
-        operation_id=existing.operation_id,
-        target=existing.target,
+    settled = replace(
+        existing,
         state=literals.as_literal(kind, REQUEST_STATES, "kind"),
-        created_at=existing.created_at,
-        expires_at=existing.expires_at,
-        feedback_bytes=existing.feedback_bytes,
-        feedback_digest=existing.feedback_digest,
-        submitted_seq=existing.submitted_seq,
         settled_at=str(record["created_at"]),
         settled_seq=seq,
         reason=REASON_EXPIRED if kind == KIND_EXPIRED else reason,
@@ -1053,6 +1245,256 @@ def accept_request(
             kind=KIND_ACCEPTED,
             reason=None,
             moment=moment,
+        )
+
+
+def _annotate_locked(
+    fd: int,
+    replay: _Replay,
+    *,
+    journal_path: Path,
+    existing: RedirectRequest,
+    kind: RecordKind,
+    continuation: RedirectTarget,
+    moment: datetime,
+) -> RedirectRequest:
+    """Append one annotation to an accepted request and return the new record.
+
+    Annotations are charged against the settlement reserve rather than the
+    submission tier. They are records *about* a request already in the journal,
+    at most one of each per accepted request, so they add no unbounded demand —
+    and refusing one would leave an accepted correction with no durable trace of
+    which attempt carried it, which is the only thing a receipt can be checked
+    against.
+    """
+    record = {
+        **_record(kind, existing.operation_id, clock.isoformat(moment)),
+        "continuation": continuation.to_payload(),
+    }
+    seq = _append_locked(
+        fd,
+        replay,
+        record,
+        journal_path=journal_path,
+        effective_max_bytes=REDIRECT_JOURNAL_MAX_BYTES,
+    )
+    created_at = str(record["created_at"])
+    if kind == KIND_CONTINUED:
+        annotated = replace(
+            existing,
+            continuation=continuation,
+            continued_at=created_at,
+            continued_seq=seq,
+        )
+    else:
+        annotated = replace(
+            existing,
+            acknowledged_at=created_at,
+            acknowledged_seq=seq,
+        )
+    # Keep the in-lock view equal to the file, so a caller carrying several
+    # corrections under one lock decides each one against the last.
+    replay.requests[existing.operation_id] = annotated
+    return annotated
+
+
+def carry_request(
+    plan_dir: str | Path,
+    operation_id: str,
+    *,
+    continuation: RedirectTarget,
+    state_dir: str | Path | None = None,
+    now: datetime | None = None,
+) -> RedirectRequest:
+    """Bind one correction to the continuation attempt that will deliver it.
+
+    Called by the runner at the moment the resumed prompt is finalized, which
+    is what makes this the coalescing boundary: a correction carried here is in
+    that prompt, and one submitted afterwards is a redirect against the attempt
+    the prompt is about to start rather than a late addition to it.
+
+    A still-submitted request is accepted and carried under the same lock, so a
+    correction the operator sent after the interrupted turn was already gone is
+    delivered rather than left to expire. An already-accepted request -- the
+    ordinary case, accepted mid-turn by the gate -- is only annotated.
+
+    Four refusals matter:
+
+    - carrying the same request into the same continuation again returns the
+      existing record and appends nothing, so a runner that retries after a
+      crash cannot deliver one correction as two;
+    - a request already carried by a *different* attempt is refused, because
+      that attempt's worker may already have receipted it;
+    - a request whose target is not an earlier attempt of this continuation's
+      own run and session is refused without being settled, since it is still a
+      valid correction for the turn it actually names;
+    - a submitted request past ``expires_at`` is expired in the journal and then
+      refused, exactly as :func:`accept_request` does it.
+    """
+    validate_target(continuation)
+    moment = _moment(now)
+    journal_path = journal_path_for_plan(plan_dir, state_dir)
+    with _locked_journal(journal_path) as (fd, replay):
+        existing = replay.requests.get(operation_id)
+        if existing is None:
+            raise RedirectStoreError(
+                ERROR_UNKNOWN_REQUEST,
+                f"no redirect request named {operation_id!r}",
+                path=journal_path,
+                details={"operation_id": operation_id},
+            )
+        if existing.carried:
+            if existing.continues_attempt(continuation):
+                return existing
+            raise RedirectStoreError(
+                ERROR_ALREADY_CARRIED,
+                f"redirect request {operation_id!r} was already carried by "
+                f"another continuation attempt",
+                path=journal_path,
+                details={
+                    "operation_id": operation_id,
+                    "continuation": existing.to_payload()["continuation"],
+                    "requested_continuation": continuation.to_payload(),
+                },
+            )
+        if existing.terminal and not existing.accepted:
+            raise RedirectStoreError(
+                (
+                    ERROR_REQUEST_EXPIRED
+                    if existing.state == STATE_EXPIRED
+                    else ERROR_ALREADY_SETTLED
+                ),
+                f"redirect request {operation_id!r} is already {existing.state}",
+                path=journal_path,
+                details={"operation_id": operation_id, "state": existing.state},
+            )
+        # Checked before any append: a correction aimed elsewhere keeps its
+        # pending state, so refusing to carry it here cannot retire it.
+        validate_continuation(existing.target, continuation)
+        if not existing.accepted:
+            if existing.is_expired_at(moment):
+                settled = _settle_locked(
+                    fd,
+                    replay,
+                    journal_path=journal_path,
+                    operation_id=operation_id,
+                    kind=KIND_EXPIRED,
+                    reason=REASON_EXPIRED,
+                    moment=moment,
+                )
+                raise RedirectStoreError(
+                    ERROR_REQUEST_EXPIRED,
+                    f"redirect request {operation_id!r} expired at "
+                    f"{existing.expires_at}",
+                    path=journal_path,
+                    details={
+                        "operation_id": operation_id,
+                        "expires_at": existing.expires_at,
+                        "state": settled.state,
+                    },
+                )
+            existing = _settle_locked(
+                fd,
+                replay,
+                journal_path=journal_path,
+                operation_id=operation_id,
+                kind=KIND_ACCEPTED,
+                reason=None,
+                moment=moment,
+            )
+        return _annotate_locked(
+            fd,
+            replay,
+            journal_path=journal_path,
+            existing=existing,
+            kind=KIND_CONTINUED,
+            continuation=continuation,
+            moment=moment,
+        )
+
+
+def acknowledge_request(
+    plan_dir: str | Path,
+    operation_id: str,
+    *,
+    attempt: RedirectTarget,
+    state_dir: str | Path | None = None,
+    now: datetime | None = None,
+) -> RedirectRequest:
+    """Record a worker's receipt for one correction on the attempt it ran.
+
+    The receipt is explicit and doubly identified: the worker names the
+    correction *and* the attempt it is running. Nothing else counts as
+    acknowledgment — a pipe write, a transcript replaying an older attempt's
+    prompt, or a harness accepting the prompt all happen without a worker having
+    read anything. Naming an attempt that did not carry this correction is
+    therefore refused rather than treated as close enough, which is what keeps a
+    stale predecessor and a transcript echo from settling it.
+
+    Repeating the receipt for the same attempt returns the existing record and
+    appends nothing: a worker that retries an interrupted command must not make
+    the journal claim it read the correction twice.
+    """
+    validate_target(attempt)
+    journal_path = journal_path_for_plan(plan_dir, state_dir)
+    with _locked_journal(journal_path) as (fd, replay):
+        existing = replay.requests.get(operation_id)
+        if existing is None:
+            raise RedirectStoreError(
+                ERROR_UNKNOWN_REQUEST,
+                f"no redirect request named {operation_id!r}",
+                path=journal_path,
+                details={"operation_id": operation_id},
+            )
+        if not existing.accepted:
+            raise RedirectStoreError(
+                (
+                    ERROR_REQUEST_EXPIRED
+                    if existing.state == STATE_EXPIRED
+                    else ERROR_ALREADY_SETTLED
+                    if existing.terminal
+                    else ERROR_NOT_ACCEPTED
+                ),
+                f"redirect request {operation_id!r} is {existing.state}, not accepted",
+                path=journal_path,
+                details={"operation_id": operation_id, "state": existing.state},
+            )
+        carried_into = existing.continuation
+        if carried_into is None:
+            raise RedirectStoreError(
+                ERROR_NOT_CARRIED,
+                f"redirect request {operation_id!r} has not been carried into a "
+                f"continuation attempt yet",
+                path=journal_path,
+                details={
+                    "operation_id": operation_id,
+                    "attempt": attempt.to_payload(),
+                },
+            )
+        if not existing.continues_attempt(attempt):
+            raise RedirectStoreError(
+                ERROR_CONTINUATION_MISMATCH,
+                f"redirect request {operation_id!r} was carried by a different "
+                f"attempt than the one acknowledging it",
+                path=journal_path,
+                details={
+                    "operation_id": operation_id,
+                    "continuation": existing.to_payload()["continuation"],
+                    "attempt": attempt.to_payload(),
+                },
+            )
+        if existing.acknowledged:
+            return existing
+        return _annotate_locked(
+            fd,
+            replay,
+            journal_path=journal_path,
+            existing=existing,
+            kind=KIND_ACKNOWLEDGED,
+            # The recorded continuation, not the caller's copy: they identify
+            # the same turn, and the journal should say what it already knows.
+            continuation=carried_into,
+            moment=_moment(now),
         )
 
 

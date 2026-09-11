@@ -84,6 +84,7 @@ from . import (
     preflight,
     qna,
     readiness_gate,
+    redirect_ack,
     redirect_continuation,
     redirect_store,
     review,
@@ -788,6 +789,81 @@ def _redirected_turn_harness(
         },
     )
     return pending.harness
+
+
+def _carried_corrections(
+    ctx: RunContext,
+    *,
+    plan_dir: Path,
+    state_dir_arg: str | Path | None,
+    pending: redirect_continuation.PendingRedirect | None,
+    session_id: str,
+    turn_index: int,
+    harness: str,
+) -> redirect_ack.CarriedCorrections | None:
+    """Bind every correction this attempt should carry, just before its prompt.
+
+    This call *is* the coalescing boundary. Corrections keep arriving while the
+    predecessor is collected and the resumed prompt is assembled, and all of
+    them are about the same situation, so everything unsettled against an
+    earlier attempt of this session is swept in here and ordered by submission.
+    A correction submitted after this point names the attempt that is about to
+    be live, which is the ordinary mid-turn redirect path rather than a late
+    edit to a prompt already written.
+
+    Gated on the same session match ``interrupted_operations`` uses: a
+    correction is never swept into a session the operator was not talking about.
+    A journal that cannot be carried at all degrades to session 11's behaviour —
+    the resumed worker is still told which operations were interrupted — and
+    the corrections stay accepted in the journal rather than being lost, so the
+    failure is recorded instead of silently changing what the worker reads.
+    """
+    if pending is None or pending.session_id != session_id:
+        return None
+    continuation = redirect_store.RedirectTarget(
+        run_id=ctx.run_id,
+        session_id=session_id,
+        turn_index=turn_index,
+        harness=harness,
+    )
+    try:
+        carried = redirect_ack.carry_corrections(
+            plan_dir,
+            continuation=continuation,
+            accepted_operation_ids=pending.operation_ids,
+            state_dir=state_dir_arg,
+        )
+    except redirect_store.RedirectStoreError as error:
+        ctx.persistence.append_event(
+            ctx.event_path,
+            events.REDIRECT_CONTINUATION_EVENT,
+            {
+                "run_id": ctx.run_id,
+                "turn_index": turn_index,
+                **plans.session_identity_payload(session_id),
+                "outcome": "carry-failed",
+                "redirect": pending.to_payload(),
+                "harness": harness,
+                "error": {"reason": error.reason, "message": str(error)},
+            },
+        )
+        return None
+    ctx.persistence.append_event(
+        ctx.event_path,
+        events.REDIRECT_CONTINUATION_EVENT,
+        {
+            "run_id": ctx.run_id,
+            "turn_index": turn_index,
+            **plans.session_identity_payload(session_id),
+            "outcome": "carried",
+            "redirect": pending.to_payload(),
+            "harness": harness,
+            # Digests, byte counts and operation ids. The words are in the
+            # journal and reach nothing but the prompt itself.
+            **carried.to_payload(),
+        },
+    )
+    return carried
 
 
 def run_locked(
@@ -1743,6 +1819,17 @@ def run_locked(
             turn_resolution = pending_resolution
             use_reply_prompt = turn_reply is not None
             use_resolution_prompt = turn_resolution is not None
+            # Immediately before the prompt is built, because the boundary the
+            # operator experiences is "did it make it into the prompt".
+            turn_corrections = _carried_corrections(
+                ctx,
+                plan_dir=before.plan_dir,
+                state_dir_arg=args.state_dir,
+                pending=pending_redirect,
+                session_id=session_id,
+                turn_index=turn_index,
+                harness=turn_harness,
+            )
             turn_prompt = turn_preparation.prepare_turn_prompt(
                 ctx,
                 snapshot=before,
@@ -1759,6 +1846,7 @@ def run_locked(
                 mailbox_enabled=mailbox_enabled,
                 reply=turn_reply,
                 resolution=turn_resolution,
+                corrections=turn_corrections,
             )
             if turn_prompt.paused:
                 break

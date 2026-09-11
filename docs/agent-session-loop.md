@@ -548,6 +548,7 @@ asl inbox guidance PLAN_DIR_OR_ID (--text TEXT | --text-stdin) [--wait-delivered
 asl inbox reply PLAN_DIR_OR_ID --to QUESTION_ID (--text TEXT | --text-stdin) [--wait-consumed] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl inbox resolve PLAN_DIR_OR_ID --to QUESTION_ID --action continue|pause [--note TEXT|--note-stdin] [--wait-consumed] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl inbox read PLAN_DIR_OR_ID [--peek] [--state-dir DIR] [--json]
+asl inbox acknowledge PLAN_DIR_OR_ID [--redirect-id OPERATION_ID ...] --attempt TOKEN [--state-dir DIR] [--json]
 asl ask PLAN_DIR_OR_ID (TEXT | --question-id QUESTION_ID) [--wait] [--wait-timeout SECONDS] [--state-dir DIR] [--json]
 asl notify PLAN_DIR_OR_ID (TEXT | --text-stdin) [--state-dir DIR] [--json]
 asl outbox wait PLAN_DIR_OR_ID [--include questions|notices|all] [--supervision-id UUID] [--since SEQ] [--timeout SECONDS] [--state-dir DIR] [--json]
@@ -1073,6 +1074,23 @@ The eight mailbox commands share normal plan-reference, `--state-dir`, and
   legacy cumulative acknowledgement, which remains honoured as read evidence
   but names no turn. With no authoritative active turn no receipts are written
   and `delivery_receipts` is empty; the acknowledgement still stands.
+- `asl inbox acknowledge` is the worker's receipt for the operator corrections
+  its own attempt carries. `--attempt TOKEN` is the token that attempt's prompt
+  rendered; `--redirect-id` may be repeated, and omitting it receipts exactly
+  what the journal records this attempt as carrying. Each correction is refused
+  or receipted on its own — an unknown id costs only itself — but a token that
+  does not name the live attempt refuses every one of them, because the token is
+  the claim being checked. The refusals are `redirect-attempt-mismatch` for a
+  token that names another attempt (a stale worker from the interrupted turn, or
+  a transcript replaying an older prompt), `redirect-no-live-attempt` when no
+  authoritative active turn exists to check the token against,
+  `redirect-not-carried` and `redirect-continuation-mismatch` when the journal
+  did not record this attempt as the correction's carrier, and the journal's own
+  `unknown-redirect-request`, `redirect-already-settled`,
+  `redirect-request-expired` and `redirect-not-accepted`. The command exits
+  non-zero when anything was refused. Repeating a receipt appends nothing and
+  reports `repeated: true`. No payload ever carries the correction's text, and
+  nothing waits on the result.
 - `asl ask` appends a worker question, or resumes an existing one with
   `--question-id`. `--wait` polls for the first reply or resolution for
   90 seconds by default;
@@ -3050,13 +3068,22 @@ What a redirect producer writes before it signals is `redirect-journal.jsonl`,
 an append-only 4 MiB-capped ledger in the same plan hash directory, with a
 512 KiB tail reserved so a journal too full to accept a new submission is never
 too full to record the settlement that closes an existing one. Each physical
-line is a versioned record of one of four kinds — `submitted`, `accepted`,
-`rejected`, `expired` — and a request's state is a reduction over those records
-rather than a field anything rewrites, so no line is edited in place and the
-file is never truncated. Identity is the producer's own `operation_id`:
-resubmitting it with the same target and the same feedback digest returns the
-existing request instead of appending a second one, while resubmitting it with
-a different target or digest fails with `invalid-operation-id` rather than
+line is a versioned record of one of six kinds, and they divide into two groups.
+Four are settlements — `submitted`, `accepted`, `rejected`, `expired` — and a
+request's state is a reduction over those records rather than a field anything
+rewrites, so no line is edited in place and the file is never truncated. Two are
+annotations — `continued` and `acknowledged` — which say which continuation
+attempt took delivery of an accepted correction and that its worker receipted
+it. An annotation changes no state, so `submitted` remains the only non-terminal
+one and a carried, receipted correction is still settled exactly once. At most
+one of each exists per request, and both are charged against the settlement
+reserve rather than the submission tier: refusing one would leave an accepted
+correction with no durable record of which attempt carried it, which is the only
+thing a receipt can be checked against. Identity is the producer's own
+`operation_id`: resubmitting it with the same target and the same feedback
+digest returns the existing request instead of appending a second one, while
+resubmitting it with a different target or digest fails with
+`invalid-operation-id` rather than
 silently replacing what was already promised. The first terminal record for a
 request wins and every later one is refused as `already-settled`, which is what
 makes a retry that races its own settlement safe. The whole read-decide-append
@@ -3192,8 +3219,71 @@ and the switch is deferred and recorded rather than silently taken. A stop or an
 abort queued after the correction still wins: the attempt is not started, and
 the withdrawal of the completion claim happens either way. Every one of these
 outcomes is published as a `redirect_continuation` event — `continued`,
-`blocked`, `stopped`, `harness-deferred`, `resumed` — carrying the digests and
-byte counts but never the bytes.
+`blocked`, `stopped`, `harness-deferred`, `resumed`, `carried`, `carry-failed` —
+carrying the digests and byte counts but never the bytes.
+
+An operator who interrupts a turn usually keeps typing, so what the resumed
+prompt carries is decided at one moment rather than filtered by a rule: the
+instant that prompt is finalized, every unsettled correction aimed at an earlier
+attempt of this session is swept in beside the ones the gate accepted mid-turn,
+ordered by submission sequence, and marked `continued` against the attempt about
+to start. A correction still `submitted` at that point is accepted as it is
+carried, because nothing else will ever accept one aimed at a turn that is
+already gone. A correction that arrives *after* the boundary names the attempt
+now going live and takes the ordinary mid-turn redirect path — it interrupts that
+attempt in turn and appears in the next prompt — so every message is delivered
+once, in the order it was sent, with no prompt rewritten after the fact. Carrying
+is idempotent: re-preparing the same attempt re-reads what it already carries
+rather than sweeping up whatever arrived since, a second attempt may not take
+delivery of a correction another one carried, and a correction an earlier
+continuation already delivered is not offered again to a later one — it is in the
+conversation both attempts share. A per-correction refusal (an expired one, one
+aimed at another session) costs only that correction and is reported in the
+event; a journal that cannot be read at all degrades to naming the interrupted
+operation ids, which is what the previous behaviour did, and records
+`carry-failed`.
+
+The corrections themselves are rendered first among the things the resumed
+worker reads — ahead of the session it is being asked to continue, in both the
+task packet and the legacy skill prompt — one escaped ASCII JSON object per
+correction between `BEGIN ASL OPERATOR CORRECTION JSONL` and `END ASL OPERATOR
+CORRECTION JSONL`, oldest first, with no record cap. Unlike pending guidance,
+which a worker can re-read with one command, a correction omitted from that block
+has no other surface. The prompt states what the correction may override — the
+earlier text of this prompt — and what it may not: the fixed session and its
+scope, the completion contract, safety requirements, and runner-owned files and
+mutation rules.
+
+Delivery is not receipt. The worker acknowledges explicitly, with
+`asl inbox acknowledge PLAN_DIR --redirect-id ID --attempt TOKEN`, whose exact
+form the prompt renders for it; the receipt happens while the worker continues
+and nothing waits on it. The claim is doubly identified and both halves are
+checked: the token must equal the token the *live* attempt mints — the run id,
+session id and turn index, compared whole and never parsed apart, with the
+harness deliberately excluded so a re-selected harness does not invalidate a
+receipt — and the journal must already record that attempt as the one which
+carried the correction. That is what makes the two cheap impostors fail. A stale
+worker still alive from the interrupted turn holds a token for the turn that was
+corrected, and a transcript replaying an older prompt holds one for an attempt
+that has moved on; both are refused with `redirect-attempt-mismatch`, and a
+worker naming an attempt that carried nothing is refused with
+`redirect-not-carried` or `redirect-continuation-mismatch`. A receipt that cannot
+be verified at all — no live attempt is recorded — is refused rather than
+trusted. Repeating a receipt appends nothing and reports `repeated`, so a worker
+retrying an interrupted command cannot make the journal claim it read the
+correction twice, and replay re-checks every one of these conditions, so a
+hand-added `acknowledged` line credits no one. Nothing cheaper counts: a
+successful pipe write, the prompt appearing in a transcript, a replay of that
+transcript, and a harness accepting a prompt all happen without a model having
+read anything.
+
+Waiting for a receipt is observational. The wait opens the journal read-only,
+consults and signals no cancellation, and returns a report that carries no
+failure — a timeout neither retracts the redirect nor triggers a second
+interruption. A worker can be busy applying a correction for far longer than any
+interesting wait, and treating silence as refusal would attack exactly the work
+the correction asked for. The correction survives a timeout either way: it is
+durable in the journal and already in the prompt.
 
 When the successor gate refuses, the run pauses with
 `redirect-successor-blocked` rather than starting a second worker beside a

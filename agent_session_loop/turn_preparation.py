@@ -89,6 +89,7 @@ from . import (
     plans,
     preflight,
     readiness_gate,
+    redirect_ack,
     repository_evidence,
     review_delta,
     review_guard,
@@ -674,16 +675,20 @@ def prepare_turn_prompt(
     mailbox_enabled: bool,
     reply: run_prompts._PendingReply | None,
     resolution: run_prompts._PendingResolution | None,
+    corrections: redirect_ack.CarriedCorrections | None = None,
 ) -> TurnPrompt:
     """Render the prompt this turn carries, then judge what it reaches.
 
     Three prompt shapes, each in two modes: a reply continuation, a
     resolution continuation, or a fresh session start, rendered as a task
     packet by default and through the legacy ``session-run`` skill under
-    ``ASL_WORKER_MODE=skill``. The repository-intent gate runs last because it
-    judges the rendered text rather than the plan the text came from, and only
-    for a legacy run — a registered workspace states its repositories in the
-    registry instead.
+    ``ASL_WORKER_MODE=skill``. ``corrections`` cuts across all three: an
+    operator may correct a turn that was itself resuming, so the correction
+    block is rendered ahead of whichever shape this turn has rather than being
+    a fourth one. The repository-intent gate runs last because it judges the
+    rendered text rather than the plan the text came from, and only for a
+    legacy run — a registered workspace states its repositories in the registry
+    instead.
     """
     if reply is not None and resolution is not None:
         raise RuntimeError("reply and resolution continuations are mutually exclusive")
@@ -701,6 +706,7 @@ def prepare_turn_prompt(
                 pending_guidance=inputs.pending_guidance,
                 workspace=workspace,
                 session_scope=session_scope,
+                corrections=corrections,
             )
         else:
             prompt = task_packet.build_task_packet(
@@ -719,6 +725,7 @@ def prepare_turn_prompt(
                 pending_guidance=inputs.pending_guidance,
                 workspace=workspace,
                 session_scope=session_scope,
+                corrections=corrections,
             ).render()
         prompt_kind = "reply"
         # Built as a plain mapping and only then narrowed to the optional the
@@ -755,6 +762,7 @@ def prepare_turn_prompt(
                 pending_guidance=inputs.pending_guidance,
                 workspace=workspace,
                 session_scope=session_scope,
+                corrections=corrections,
             )
         else:
             prompt = task_packet.build_task_packet(
@@ -774,6 +782,7 @@ def prepare_turn_prompt(
                 pending_guidance=inputs.pending_guidance,
                 workspace=workspace,
                 session_scope=session_scope,
+                corrections=corrections,
             ).render()
         prompt_kind = "resolution"
         reply_source = None
@@ -792,6 +801,7 @@ def prepare_turn_prompt(
                 pending_guidance=inputs.pending_guidance,
                 workspace=workspace,
                 session_scope=session_scope,
+                corrections=corrections,
             )
         else:
             prompt = task_packet.build_task_packet(
@@ -808,6 +818,7 @@ def prepare_turn_prompt(
                 pending_guidance=inputs.pending_guidance,
                 workspace=workspace,
                 session_scope=session_scope,
+                corrections=corrections,
             ).render()
         prompt_kind = "session"
         reply_source = None

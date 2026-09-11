@@ -2638,6 +2638,28 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="mailbox_cli:inbox_read_from_args",
     )
 
+    inbox_acknowledge_parser = inbox_sub.add_parser(
+        "acknowledge",
+        help="Receipt urgent corrections carried into the attempt you are running.",
+    )
+    _add_plan_reference_args(inbox_acknowledge_parser)
+    inbox_acknowledge_parser.add_argument(
+        "--redirect-id",
+        action="append",
+        default=None,
+        metavar="OPERATION_ID",
+        help="Correction to receipt; repeat to receipt several at once",
+    )
+    inbox_acknowledge_parser.add_argument(
+        "--attempt",
+        required=True,
+        metavar="TOKEN",
+        help="Attempt token from your prompt; it names this attempt only",
+    )
+    inbox_acknowledge_parser.set_defaults(
+        handler_ref="mailbox_cli:inbox_acknowledge_from_args",
+    )
+
     ask_parser = subparsers.add_parser(
         "ask",
         help=(

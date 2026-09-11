@@ -1330,14 +1330,24 @@ class RedirectedRunTests(unittest.TestCase):
 
         self.assertEqual(["codex", "codex"], self.harness_calls)
         continuations = self.events_named(events.REDIRECT_CONTINUATION_EVENT)
+        # `carried` falls between the two because binding a correction to the
+        # attempt that will deliver it happens while that attempt's prompt is
+        # being assembled — after the predecessor is settled, before the
+        # resumed turn is planned.
         self.assertEqual(
             [
                 turn_dispositions.REDIRECT_OUTCOME_CONTINUED,
+                "carried",
                 "resumed",
             ],
             [record["outcome"] for record in continuations],
         )
-        resumed = continuations[1]
+        carried = continuations[1]
+        self.assertEqual(
+            ["op-1"], [item["operation_id"] for item in carried["carried"]]
+        )
+        self.assertEqual(f"{RUN_ID}/{SESSION_ID}/2", carried["attempt"])
+        resumed = continuations[2]
         self.assertEqual(SESSION_ID, resumed["session_id"])
         self.assertEqual(2, resumed["turn_index"])
         self.assertEqual(["op-1"], resumed["interrupted_operations"])
