@@ -1,13 +1,29 @@
-"""Same-host wakeup between an ``asl`` producer and a live runner.
+"""Same-host wakeups between an ``asl`` producer and a live runner.
 
 The durable transport for external control is still ``control-queue.jsonl``:
 a producer appends a command and the runner applies it at its next drain
 checkpoint. This module only removes the latency between those two events by
 poking the runner so it drains now instead of at the end of its poll interval.
-Nothing here carries payload, so a lost or coalesced wakeup costs latency and
-never correctness — the runner's existing poll remains the backstop.
+Nothing here carries payload, so a lost or coalesced control wakeup costs
+latency and never correctness — the runner's existing poll remains the backstop.
 
-The wakeup is a byte written to a FIFO the runner creates and reads. That
+There are two endpoints, and the difference between them is what a failed
+delivery means rather than how delivery works:
+
+- ``control-wakeup.fifo`` (:func:`open_wakeup_endpoint`) is the latency
+  optimization described above. Non-delivery is reported and ignored.
+- ``redirect-wakeup.fifo`` (:func:`open_redirect_endpoint`) is the urgent
+  channel for redirect admission. It carries no payload either — the redirect
+  journal is the durable record — but a redirect is only worth admitting if it
+  can reach the running turn *before* that turn finishes, so
+  :mod:`agent_session_loop.redirect_admission` treats a non-delivery here as
+  grounds to refuse the submission rather than as latency to absorb. Ordinary
+  queue draining is deliberately not that path: draining happens at a poll
+  checkpoint, and a checkpoint is exactly what an urgent correction cannot wait
+  for.
+
+Both are served identically. A wakeup is a byte written to a FIFO the runner
+creates and reads, and that
 choice is what makes misdelivery survivable, and it is the whole design:
 
 - The endpoint is *owned*, not addressed. The runner makes the FIFO and opens
@@ -54,6 +70,7 @@ from typing import Any
 from . import plans, state
 
 ENDPOINT_FILENAME = "control-wakeup.fifo"
+REDIRECT_ENDPOINT_FILENAME = "redirect-wakeup.fifo"
 
 REASON_DELIVERED = "delivered"
 REASON_NO_RUNNER = "no-runner"
@@ -80,12 +97,17 @@ def endpoint_path_for_state_dir(state_dir: str | Path) -> Path:
     return Path(state_dir) / ENDPOINT_FILENAME
 
 
+def redirect_endpoint_path_for_state_dir(state_dir: str | Path) -> Path:
+    """Path of the urgent redirect FIFO for a run's ``state_dir``."""
+    return Path(state_dir) / REDIRECT_ENDPOINT_FILENAME
+
+
 @contextlib.contextmanager
 def open_wakeup_endpoint(
     state_dir: str | Path,
     event: threading.Event,
 ) -> Iterator[Path | None]:
-    """Serve wakeups on a FIFO, setting ``event`` for each one received.
+    """Serve control wakeups on a FIFO, setting ``event`` for each received.
 
     Yields the endpoint path to record in the lock, or ``None`` when no
     endpoint could be opened. ``None`` is a normal outcome, not an error: a
@@ -99,7 +121,45 @@ def open_wakeup_endpoint(
     finds a reader behind it, and one that arrives after this context exits
     gets ``ENXIO`` rather than a write into nowhere.
     """
-    path = endpoint_path_for_state_dir(state_dir)
+    with _serve_endpoint(
+        endpoint_path_for_state_dir(state_dir), event, "asl-wakeup-endpoint"
+    ) as path:
+        yield path
+
+
+@contextlib.contextmanager
+def open_redirect_endpoint(
+    state_dir: str | Path,
+    event: threading.Event,
+) -> Iterator[Path | None]:
+    """Serve urgent redirect wakeups on a dedicated FIFO.
+
+    Identical machinery to :func:`open_wakeup_endpoint` on a separate path, and
+    separate on purpose. Sharing one FIFO would make every ordinary control
+    command indistinguishable from an urgent correction at the read end, so the
+    runner could not arm a redirect's watchdog on the strength of the wakeup
+    alone — and a producer could not learn whether *the urgent channel*
+    specifically is being served, which is the fact redirect admission refuses
+    on.
+
+    Yields ``None`` on the same terms, and that ``None`` is likewise not an
+    error here: it publishes a lock with no urgent endpoint, and redirect
+    submissions against that run are then refused as unavailable rather than
+    accepted into a channel nothing reads.
+    """
+    with _serve_endpoint(
+        redirect_endpoint_path_for_state_dir(state_dir), event, "asl-redirect-endpoint"
+    ) as path:
+        yield path
+
+
+@contextlib.contextmanager
+def _serve_endpoint(
+    path: Path,
+    event: threading.Event,
+    thread_name: str,
+) -> Iterator[Path | None]:
+    """Create, serve, and tear down one wakeup FIFO."""
     try:
         read_fd = _create_endpoint(path)
     except OSError:
@@ -121,7 +181,7 @@ def open_wakeup_endpoint(
     reader = threading.Thread(
         target=_serve_wakeups,
         args=(read_fd, stop_fd_read, event),
-        name="asl-wakeup-endpoint",
+        name=thread_name,
         daemon=True,
     )
     reader.start()
@@ -202,6 +262,31 @@ def notify_runner(
     a byte to a FIFO does not act on a process: if the runner that published
     the endpoint is gone, its read end went with it and the open fails.
     """
+    return _notify_endpoint(plan_dir, state_dir=state_dir, urgent=False)
+
+
+def notify_redirect(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+) -> NotifyResult:
+    """Poke the runner's urgent redirect endpoint.
+
+    Same delivery vocabulary as :func:`notify_runner` and the same
+    never-raises contract, read by a caller with the opposite disposition: a
+    redirect producer treats anything but ``delivered`` as a reason not to
+    admit the submission, because the poll fallback that makes a missed control
+    wakeup harmless is precisely the latency an urgent correction cannot spend.
+    """
+    return _notify_endpoint(plan_dir, state_dir=state_dir, urgent=True)
+
+
+def _notify_endpoint(
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None,
+    urgent: bool,
+) -> NotifyResult:
     try:
         lock = state.inspect_lock_info(plan_dir, state_dir)
     except plans.PlanError, state.StateError, OSError:
@@ -214,7 +299,7 @@ def notify_runner(
     if lock.stale:
         return NotifyResult(False, REASON_STALE_LOCK)
 
-    endpoint = lock.wakeup_endpoint
+    endpoint = lock.redirect_endpoint if urgent else lock.wakeup_endpoint
     if endpoint is None:
         # A lock written before the endpoint existed, or by a runner whose
         # filesystem could not host a FIFO. Either way there is nothing to

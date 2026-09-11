@@ -6600,7 +6600,7 @@ class MarkRunAbandonedTests(unittest.TestCase):
 
         self.assertEqual(os.getpid(), lock_info.pid)
         self.assertEqual(socket.gethostname(), lock_info.raw["hostname"])
-        self.assertEqual(3, lock_info.raw["version"])
+        self.assertEqual(4, lock_info.raw["version"])
 
         persisted = self.persisted_state()
         self.assertEqual(state.ABANDONED_REASON, persisted["reason"])
@@ -6811,10 +6811,12 @@ class LockRepositoryClaimTests(unittest.TestCase):
         self.addCleanup(state.release_lock, self.plan_dir, self.state_dir)
 
         payload = self.read_payload()
-        # 3 adds `wakeup_endpoint` to 2's repository claim. The field is
-        # informational — readers never validate it — so the bump documents the
-        # shape rather than gating anything.
-        self.assertEqual(3, payload["version"])
+        # 3 adds `wakeup_endpoint` to 2's repository claim; 4 adds
+        # `redirect_endpoint` beside it. Both fields are informational —
+        # readers never validate them — so the bumps document the shape rather
+        # than gating anything.
+        self.assertEqual(4, payload["version"])
+        self.assertIsNone(payload["redirect_endpoint"])
         self.assertEqual(["/w/apple", "/w/zebra"], payload["repositories"])
         self.assertEqual(("/w/apple", "/w/zebra"), lock_info.repository_roots)
 

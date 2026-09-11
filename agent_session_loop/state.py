@@ -178,6 +178,20 @@ class LockInfo:
         return _nonempty_str(self.raw.get("wakeup_endpoint"))
 
     @property
+    def redirect_endpoint(self) -> str | None:
+        """FIFO this run reads urgent redirect wakeups from, or ``None``.
+
+        Published on the same terms as :attr:`wakeup_endpoint` and kept
+        separate from it so that "this run serves urgent redirects" is a fact a
+        producer can read, rather than an inference from the presence of the
+        control endpoint. ``None`` covers a lock below version 4 and a runner
+        whose state directory could not host a second FIFO — and unlike a
+        missing control endpoint it is not merely a latency cost, because
+        redirect admission refuses a submission it cannot deliver urgently.
+        """
+        return _nonempty_str(self.raw.get("redirect_endpoint"))
+
+    @property
     def foreign_host(self) -> bool:
         """Whether ``pid`` belongs to another host's process table.
 
@@ -720,6 +734,7 @@ def acquire_lock(
     owner: str = "agent-session-loop",
     repository_roots: Sequence[str] = (),
     wakeup_endpoint: str | Path | None = None,
+    redirect_endpoint: str | Path | None = None,
 ) -> LockInfo:
     """Create a lock for a plan, removing stale locks this host can judge.
 
@@ -738,12 +753,18 @@ def acquire_lock(
     from. It is recorded rather than derived so that a producer writes only to
     an endpoint the owner had open before this lock existed; ``None`` records
     no endpoint and leaves that run on its poll interval.
+
+    ``redirect_endpoint`` is the same arrangement for the urgent redirect
+    channel, on its own FIFO. ``None`` there is stronger than for the control
+    endpoint: it does not degrade a redirect to the poll interval, it makes
+    redirect submissions against this run refusable, because there is no
+    urgent path to deliver them on.
     """
     snapshot = plans.inspect_plan(plan_dir)
     lock_path = lock_path_for_plan(snapshot.plan_dir, state_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "version": 3,
+        "version": 4,
         "owner": owner,
         "pid": os.getpid(),
         # A pid only identifies a process on the host that recorded it, so
@@ -758,6 +779,12 @@ def acquire_lock(
         # by pid. `None` leaves that run on its durable queue poll.
         "wakeup_endpoint": (
             str(wakeup_endpoint) if wakeup_endpoint is not None else None
+        ),
+        # Separate endpoint for urgent redirects. A producer reads this to
+        # learn that the urgent channel exists at all, which is a different
+        # question from whether control wakeups are served.
+        "redirect_endpoint": (
+            str(redirect_endpoint) if redirect_endpoint is not None else None
         ),
         "plan_dir": str(snapshot.plan_dir),
         "plan_path_hash": snapshot.path_hash,

@@ -901,6 +901,7 @@ def _write_lock_file(
     hostname: str | None = None,
     process_start: str | None = None,
     wakeup_endpoint: Path | str | None = None,
+    redirect_endpoint: Path | str | None = None,
 ) -> Path:
     """Write a lock naming ``pid``, legacy-shaped unless a field is given.
 
@@ -908,6 +909,11 @@ def _write_lock_file(
     unwakeable: with no ``wakeup_endpoint`` a producer has nothing to write to
     and reports ``no-endpoint``. Tests that need a lock a producer really wakes
     pass an endpoint served by :func:`live_wakeup_endpoint`.
+
+    ``redirect_endpoint`` is the same for the urgent redirect channel, and its
+    absence is what makes a lock refuse redirects rather than merely delay
+    them; :func:`live_redirect_endpoint` serves one for tests that need
+    delivery to land.
     """
     plan_state = state.plan_state_dir(plan_dir, state_root)
     plan_state.mkdir(parents=True, exist_ok=True)
@@ -923,6 +929,8 @@ def _write_lock_file(
         payload["process_start"] = process_start
     if wakeup_endpoint is not None:
         payload["wakeup_endpoint"] = str(wakeup_endpoint)
+    if redirect_endpoint is not None:
+        payload["redirect_endpoint"] = str(redirect_endpoint)
     lock_path.write_text(
         json.dumps(payload, sort_keys=True),
         encoding="utf-8",
@@ -967,6 +975,23 @@ def live_wakeup_endpoint(plan_dir: Path, state_root: Path):
     ) as path:
         if path is None:
             raise unittest.SkipTest("this filesystem cannot host a wakeup FIFO")
+        yield path, event
+
+
+@contextmanager
+def live_redirect_endpoint(plan_dir: Path, state_root: Path):
+    """Serve a plan's urgent redirect FIFO from this process for the block.
+
+    The redirect counterpart of :func:`live_wakeup_endpoint`, and the reason a
+    test can distinguish "the run is live" from "the run serves redirects": a
+    lock may name one endpoint, both, or neither.
+    """
+    event = threading.Event()
+    with control_signal.open_redirect_endpoint(
+        state.plan_state_dir(plan_dir, state_root), event
+    ) as path:
+        if path is None:
+            raise unittest.SkipTest("this filesystem cannot host a redirect FIFO")
         yield path, event
 
 

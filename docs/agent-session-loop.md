@@ -3028,6 +3028,67 @@ A lock written before this field existed, or by a runner whose filesystem
 cannot host a FIFO, simply carries no `wakeup_endpoint`: that run reports
 `no-endpoint` to producers and applies control commands at its ordinary poll.
 
+A redirect — a correction aimed at the turn that is running *right now* — uses
+a second, dedicated endpoint rather than this one. `redirect-wakeup.fifo` is
+created beside `control-wakeup.fifo`, opened for reading before the same
+`lock.json` is published, and recorded there as `redirect_endpoint`; the lock
+payload moved to `version: 4` to carry it, and like `wakeup_endpoint` the field
+is informational — no reader validates it. The separation is deliberate and it
+inverts the relationship described above. For a stop or an abort the wakeup is
+a latency optimization over a durable queue that would apply the command a poll
+later anyway; for a redirect the `5.0`-second poll is already too late, so the
+urgent endpoint **is** the correctness path and ordinary queue draining is not
+a fallback for it. Delivery is reported with the same seven reasons the control
+wakeup reports, because the transport is byte-for-byte the same and a parallel
+vocabulary for the same seven facts would only be a second thing to keep in
+sync. A lock naming no `redirect_endpoint` — written before the field existed,
+or by a runner whose filesystem cannot host a FIFO — makes the plan refuse
+redirects outright with `urgent-channel-unavailable`, rather than deferring
+them to a poll that would deliver them after the turn they were meant to steer.
+
+What a redirect producer writes before it signals is `redirect-journal.jsonl`,
+an append-only 4 MiB-capped ledger in the same plan hash directory, with a
+512 KiB tail reserved so a journal too full to accept a new submission is never
+too full to record the settlement that closes an existing one. Each physical
+line is a versioned record of one of four kinds — `submitted`, `accepted`,
+`rejected`, `expired` — and a request's state is a reduction over those records
+rather than a field anything rewrites, so no line is edited in place and the
+file is never truncated. Identity is the producer's own `operation_id`:
+resubmitting it with the same target and the same feedback digest returns the
+existing request instead of appending a second one, while resubmitting it with
+a different target or digest fails with `invalid-operation-id` rather than
+silently replacing what was already promised. The first terminal record for a
+request wins and every later one is refused as `already-settled`, which is what
+makes a retry that races its own settlement safe. The whole read-decide-append
+sequence holds an exclusive lock on the journal and fullsyncs before releasing
+it, and a short write is rolled back to the file's previous size, so a
+concurrent producer sees a whole record or none of one. Feedback text lives
+only in the journal: every projected object names its byte count and its digest
+and none of them carries its bytes, so a correction cannot leak into an event,
+a status payload, or a log line meant only to say that a redirect exists.
+
+Submission and acceptance are separate facts, and keeping them separate is the
+whole of what admission does. A submission that is refused before anything is
+persisted — the plan is invalid, no run is active, the run is paused, there is
+no active turn, the target names a different turn than the one in flight, the
+active turn is a terminal audit, the lock is owned by another host, the lock is
+stale, or the lock names no urgent endpoint — leaves the correction with its
+author, who still has it to resend. Past those checks the order is: append the
+`submitted` record, send the urgent wakeup, wait a bounded `2.0` seconds for a
+terminal record, then report. `accepted` means a runner appended the acceptance
+itself. `unavailable` means the wakeup did not land, and the request is durably
+settled as `rejected` with reason `urgent-channel-unavailable` before the
+answer returns, so no later runner can accept a correction bound to a channel
+already known to be dead — the operation id comes back regardless, because the
+producer needs to know what was written. `uncertain` means the wait elapsed
+with the request deliberately left unsettled, since settling it there would
+race an acceptance already in flight; the honest answer is to name the
+operation id and let the journal be re-read. Run facts are read before the
+lock and the two reads are not atomic, so the lock checks fail closed and are
+ordered most-specific-first: a correction admitted against a lock that went
+stale or foreign in between would have no reachable reader, and its author
+would have been told it was on its way.
+
 All four subcommands accept `--wait` and `--timeout SECONDS`, which turn the
 fire-and-forget append into a receipt. Without `--wait`, nothing changes: the
 command is appended, a best-effort wakeup is sent, and the handler returns 0
@@ -5154,6 +5215,9 @@ The remaining runtime files live under a plan's hash directory:
 - `state.json`: latest run payload.
 - `events.jsonl`: append-only run, pause, turn, and commit events.
 - `lock.json`: active per-plan runner lock.
+- `redirect-journal.jsonl`: optional 4 MiB-capped redirect request journal;
+  physical lines are durable sequences, the last 512 KiB are reserved for
+  settlement records, and the file is never truncated in v1.
 - `mailbox.jsonl`: optional 4 MiB-capped mailbox log; physical lines are durable
   sequences and the file is never truncated in v1.
 - `mailbox-lease.json`: optional fixed-size supervisor activity lease, fresh for

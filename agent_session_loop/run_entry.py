@@ -561,17 +561,30 @@ def run_from_args(
     # producer skip authenticating an owner: it writes to a descriptor rather
     # than acting on a pid, and an endpoint outliving its reader refuses the
     # write instead of reaching whatever took the pid over.
+    #
+    # The urgent redirect endpoint opens on the same terms and inside the same
+    # window, on its own FIFO and its own event. Publishing it is what makes
+    # `redirect_admission` able to admit a submission at all: that module
+    # refuses anything it cannot deliver urgently, so a lock without this path
+    # means redirects against this run are declined rather than queued behind a
+    # drain checkpoint. `redirect_wakeup` is served by the endpoint's reader
+    # thread and is the entry point for the urgent controller.
     wakeup = threading.Event()
-    with control_signal.open_wakeup_endpoint(
-        state.plan_state_dir(initial_snapshot.plan_dir, args.state_dir),
-        wakeup,
-    ) as wakeup_endpoint:
+    redirect_wakeup = threading.Event()
+    plan_state_dir = state.plan_state_dir(initial_snapshot.plan_dir, args.state_dir)
+    with (
+        control_signal.open_wakeup_endpoint(plan_state_dir, wakeup) as wakeup_endpoint,
+        control_signal.open_redirect_endpoint(
+            plan_state_dir, redirect_wakeup
+        ) as redirect_endpoint,
+    ):
         try:
             lock_info = state.acquire_lock(
                 initial_snapshot.plan_dir,
                 args.state_dir,
                 repository_roots=claimed_repository_roots,
                 wakeup_endpoint=wakeup_endpoint,
+                redirect_endpoint=redirect_endpoint,
             )
         except state.StateError as error:
             reason, paused = run_outcome._state_error_reason(error)
