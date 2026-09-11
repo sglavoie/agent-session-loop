@@ -25,6 +25,9 @@ something is already running. :meth:`UrgentController.arm` is deliberately
 cheap and revocable — a timer and a background sample, nothing anyone can
 observe — so it can precede the append without committing to anything, and
 :meth:`UrgentController.abandon` stands it down if the append is refused.
+Revocable also means repeatable: a refusal costs the *request* its escalation,
+never the turn its urgent channel, so an arming that was stood down can be
+armed again for the next correction aimed at the same live worker.
 
 **It initiates native cancellation immediately.** The moment acceptance is
 durable, the harness is told to stop over its own protocol and the abort signal
@@ -429,17 +432,42 @@ class UrgentController:
         second correction against a turn already escalating does not get a fresh
         two seconds; it rides the deadline already running, because the operator
         who sent the first one was promised that one.
+
+        An *abandoned* arming is the one state that does re-base, and it is the
+        exact complement of that rule: nothing was accepted, so there is no
+        promised deadline to preserve and no acceptance left counting down. The
+        alternative — a controller that stays abandoned for the rest of the turn
+        — is worse than a missed deadline, because the journal would still
+        accept the next correction against this turn while nothing at all was
+        armed behind it. Rearming keeps the first arming's descendant sample:
+        it was taken of this same worker while it was alive, which is the only
+        moment it can be taken, and discarding a sample already in hand to start
+        another could leave the escalation with no evidence at its deadline.
         """
         with self._lock:
-            if self._phase != PHASE_IDLE:
+            if self._phase not in (PHASE_IDLE, PHASE_ABANDONED):
                 return self._deadline
+            rearming = self._phase == PHASE_ABANDONED
             self._phase = PHASE_ARMED
             self._operation_id = operation_id
             self._reason = reason or REASON_REDIRECT
             self._deadline = self._monotonic() + self._window
             deadline = self._deadline
-        self._spawn(self._collect_evidence, "asl-redirect-evidence")
-        self._spawn(self._watch, "asl-redirect-watchdog")
+            if rearming:
+                self._skipped = None
+                # Bumped and cleared under one hold of the lock, which is what
+                # stops the stood-down watchdog publishing over this arming:
+                # it re-reads the epoch under the same lock before it sets
+                # ``_finished`` or records anything.
+                self._escalation_epoch += 1
+                self._decided.clear()
+                self._finished.clear()
+                self._stand_down.clear()
+                self._wake.clear()
+            epoch = self._escalation_epoch
+        if not rearming:
+            self._spawn(self._collect_evidence, "asl-redirect-evidence")
+        self._spawn(lambda: self._watch(epoch), "asl-redirect-watchdog")
         return deadline
 
     def confirm(self, *, operation_id: str | None = None) -> None:
@@ -472,10 +500,10 @@ class UrgentController:
                 self._skipped = None
                 self._escalation_epoch += 1
                 epoch = self._escalation_epoch
+                self._finished.clear()
         self._decided.set()
         self._initiate_cancellation(reason, remaining)
         if overdue:
-            self._finished.clear()
             self._spawn(lambda: self._escalate_once(epoch), "asl-redirect-escalation")
 
     def abandon(self, reason: str = SKIP_ABANDONED) -> None:
@@ -485,6 +513,11 @@ class UrgentController:
         arming nobody was told about can be taken back; an acceptance in the
         journal has already promised an operator that their correction reached a
         live turn, and no later refusal may quietly leave that turn running.
+
+        Taking one arming back is not retiring the controller. The worker is
+        still alive and the turn still owns it, so :meth:`arm` may start a fresh
+        window here for the next correction; only :meth:`release` ends the
+        controller with its turn.
         """
         with self._lock:
             if self._phase != PHASE_ARMED:
@@ -506,10 +539,16 @@ class UrgentController:
         mattering the moment the turn is over, but the report does not, because
         a successor still has to be told whether anything of that turn is left
         running. It records ``turn-already-ended``, kills nothing, and confirms.
+
+        An abandoned arming is stood down here too, and that is what separates
+        the two ways an arming can end: :meth:`abandon` leaves the controller
+        rearmable because its worker is still alive, while this leaves nothing
+        rearmable at all, because the pid the next ``arm`` would aim at no
+        longer belongs to this turn.
         """
         self._turn_over.set()
         with self._lock:
-            if self._phase in (PHASE_IDLE, PHASE_ARMED):
+            if self._phase in (PHASE_IDLE, PHASE_ARMED, PHASE_ABANDONED):
                 self._phase = PHASE_RELEASED
                 if self._skipped is None:
                     self._skipped = SKIP_DISARMED
@@ -661,10 +700,14 @@ class UrgentController:
         self._evidence = evidence
         self._evidence_ready.set()
 
-    def _watch(self) -> None:
-        """Wait out the window on a monotonic clock, then escalate once."""
-        with self._lock:
-            epoch = self._escalation_epoch
+    def _watch(self, epoch: int) -> None:
+        """Wait out the window on a monotonic clock, then escalate once.
+
+        ``epoch`` is the arming this watchdog belongs to, passed in rather than
+        read here: a rearming clears the very events this loop is waiting on, so
+        a watchdog that read the current epoch after waking would adopt the
+        arming that replaced it.
+        """
         while not self._wake.is_set():
             remaining = self.deadline - self._monotonic()
             if remaining <= 0.0:
@@ -678,25 +721,28 @@ class UrgentController:
     def _escalate_once(self, epoch: int) -> None:
         """Run one escalation to completion, finished either way."""
         try:
-            self._escalate()
+            self._escalate(epoch)
         finally:
             self._mark_finished(epoch)
 
     def _mark_finished(self, epoch: int) -> None:
         """Publish completion unless a later escalation has superseded this one.
 
-        A watchdog that gave up undecided and a late acceptance that restarts it
+        A watchdog that gave up undecided and a late acceptance that restarts
+        it — or one stood down by a refusal and a rearming that replaces it —
         race by construction: the first can still be unwinding when the second
         clears the flag. Without the epoch the stale ``set`` lands after that
         clear and a caller waiting on the restarted escalation is told it
-        finished before it began.
+        finished before it began. The check and the ``set`` share one hold of
+        the lock, which is the same hold the bump and the clear share, so
+        there is no ordering in which the stale watchdog can slip between them.
         """
         with self._lock:
-            superseded = epoch != self._escalation_epoch
-        if not superseded:
+            if epoch != self._escalation_epoch:
+                return
             self._finished.set()
 
-    def _escalate(self) -> None:
+    def _escalate(self, epoch: int) -> None:
         """The deadline path. Everything slow happens after the kill."""
         if not self._decided.is_set():
             # Only reachable when the acceptance append is itself stalled. The
@@ -708,6 +754,13 @@ class UrgentController:
         cancellation = self._cancellation
         already_done = cancellation is not None and cancellation.completed
         with self._lock:
+            if epoch != self._escalation_epoch:
+                # A rearming replaced this watchdog while it was waiting out a
+                # deadline that is no longer anyone's. It must record nothing:
+                # the ``skipped`` it would write is the *previous* arming's
+                # verdict, and the live arming reads that field to decide
+                # whether its own acceptance arrived overdue.
+                return
             phase = self._phase
             skipped: str | None = None
             if phase != PHASE_CONFIRMED:

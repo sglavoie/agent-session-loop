@@ -39,6 +39,7 @@ import os
 import tempfile
 import threading
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -77,6 +78,7 @@ from .support import (
     wait_until,
     write_plan,
 )
+from .test_asl_redirect_control import _FakeCancellation, _Tools
 from .test_asl_turn_dispositions import FakeRunContext
 
 RUN_ID = "run-redirect-1"
@@ -383,6 +385,73 @@ class SerializationTests(JournalTestCase):
                 }
             ],
             turn_redirect.to_payload()["refused"],
+        )
+
+    def test_a_refused_correction_leaves_the_next_one_a_live_channel(self) -> None:
+        """The gate keeps one controller per turn, so a refusal may not spend it.
+
+        Driven against the real
+        :class:`~agent_session_loop.redirect_control.UrgentController` rather
+        than :class:`FakeController`, because this is exactly the seam a
+        stand-in cannot hold: a fake would record both ``accept`` calls and
+        report the second correction accepted while nothing at all counted down
+        behind the journal record.
+        """
+        expired = redirect_store.submit_request(
+            self.plan_dir,
+            target=target(),
+            feedback=FEEDBACK,
+            state_dir=self.state_dir,
+            operation_id="op-expired",
+            ttl_seconds=1,
+            now=clock.utc_now() - timedelta(seconds=2),
+        )
+        valid = self.submit("op-valid")
+        tools = _Tools()
+        cancellation = _FakeCancellation()
+        controllers: list[redirect_control.UrgentController] = []
+
+        def build(worker):
+            controller = redirect_control.UrgentController(
+                worker=worker,
+                cancellation=cancellation,
+                tools=tools.bundle(),
+                window_seconds=0.02,
+                collection_wait_seconds=0.0,
+                environ={},
+            )
+            controllers.append(controller)
+            # LIFO: the join is registered first so it runs after the release.
+            self.addCleanup(controller.join, 10.0)
+            self.addCleanup(controller.release)
+            return controller
+
+        turn_redirect = redirect_continuation.TurnRedirect(
+            plan_dir=self.plan_dir,
+            target=target(),
+            state_dir=self.state_dir,
+            build_controller=build,
+            poll_seconds=0.01,
+            bind_wait_seconds=0.5,
+            report_wait_seconds=1.0,
+        )
+        self.addCleanup(turn_redirect.close)
+        turn_redirect.bind_worker(WORKER_PID)
+
+        self.assertIsNone(turn_redirect.accept(expired))
+        accepted = turn_redirect.accept(valid)
+
+        self.assertIsNotNone(accepted)
+        self.assertEqual("op-valid", accepted.operation_id)
+        self.assertEqual(
+            redirect_store.STATE_ACCEPTED, self.journal().request("op-valid").state
+        )
+        self.assertEqual(1, len(cancellation.armed))
+        self.assertTrue(controllers[0].wait_escalated(10.0))
+        self.assertEqual([WORKER_PID], tools.force_stopped)
+        self.assertEqual(
+            redirect_store.ERROR_REQUEST_EXPIRED,
+            turn_redirect.to_payload()["refused"][0]["reason"],
         )
 
 
