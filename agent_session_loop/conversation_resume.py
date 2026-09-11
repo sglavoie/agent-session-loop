@@ -101,6 +101,11 @@ CONTINUATION_UNAVAILABLE = "unavailable"
 #: is the other half of the same story: the last thing that happens to a
 #: conversation is that it stops being one.
 CONTINUATION_RETIRED = "retired"
+#: Also not a turn's decision: the provider's. The turn asked to continue a
+#: conversation and was told that history no longer exists, which retires the
+#: record for the same reason a completed session does -- nothing can continue
+#: from it again.
+CONTINUATION_RESTORE_REFUSED = "restore-refused"
 
 CONTINUATION_DISPOSITIONS: tuple[str, ...] = (
     CONTINUATION_RESUMED,
@@ -109,7 +114,12 @@ CONTINUATION_DISPOSITIONS: tuple[str, ...] = (
     CONTINUATION_RECOVERY_REQUIRED,
     CONTINUATION_UNAVAILABLE,
     CONTINUATION_RETIRED,
+    CONTINUATION_RESTORE_REFUSED,
 )
+
+#: Why a refused-restore retirement is written. The ledger's own word for a
+#: conversation that exists as a record and not as a history.
+RESTORE_REFUSED_RETIREMENT_REASON = "unusable"
 
 #: Cancellation stages at which the harness submitted nothing at all, so the
 #: conversation it may have opened holds no work and must not be confirmed.
@@ -645,6 +655,100 @@ def record_turn_outcome(
         )
     return TurnOutcomeRecord(
         confirmed=True, attempt=attempt, conversation=reference.locator
+    )
+
+
+@dataclass(frozen=True)
+class RestoreRefusal:
+    """What was done about a conversation the provider would not restore."""
+
+    #: The conversation the turn asked to continue, when one was named.
+    conversation: str | None = None
+    #: The provider's own words, carried into the pause so an operator reading
+    #: it sees why the history is gone rather than only that it is.
+    detail: str = ""
+    #: Whether the ledger now says this conversation may never be selected
+    #: again. ``False`` means the block did not become durable and the next
+    #: launch would try the same dead conversation.
+    retired: bool = False
+    error: str | None = None
+
+    def describe(self) -> dict[str, Any]:
+        """An observable projection for the pause detail and the run event."""
+        payload: dict[str, Any] = {
+            "disposition": CONTINUATION_RESTORE_REFUSED,
+            "conversation": self.conversation,
+            "detail": self.detail,
+            "retired": self.retired,
+        }
+        if self.error is not None:
+            payload["error"] = self.error
+        return payload
+
+
+def refuse_unrestorable_conversation(
+    plan_state: Path,
+    *,
+    binding: conversations.ConversationBinding,
+    conversation: str | None,
+    detail: str,
+) -> RestoreRefusal:
+    """Block a conversation whose native history the provider no longer holds.
+
+    Retirement rather than a flag, because retirement is what the ledger already
+    means by "this record may never be selected again", and because it makes the
+    two behaviours the operator needs fall out of machinery that already exists:
+    an ordinary launch selects ``retired`` and stops for recovery, and an
+    authorized fresh start supersedes nothing (there is nothing live left to
+    supersede) and opens a new conversation with no resume id.
+
+    The reason is ``unusable`` and not ``superseded``: nothing replaced this
+    conversation. It stopped being one.
+
+    Non-raising, like every other ledger write on a turn's way out. The turn has
+    already failed and its pause is already owed to the operator; a ledger error
+    here costs the block its durability, which is reported, not the pause.
+    """
+    if conversation is None:
+        # Nothing to block. A refusal names the conversation it refused, so this
+        # is a caller that reached here without one rather than a live ledger
+        # state -- say so instead of writing an invented record.
+        return RestoreRefusal(
+            detail=detail,
+            error="restore was refused but the turn named no conversation to block",
+        )
+    reference = conversations.ConversationReference(
+        binding=binding, native_id=conversation
+    )
+    try:
+        conversations.retire_conversation(
+            plan_state, reference, reason=RESTORE_REFUSED_RETIREMENT_REASON
+        )
+    except (conversations.ConversationError, OSError) as error:
+        return RestoreRefusal(
+            conversation=reference.locator,
+            detail=detail,
+            error=f"could not retire {reference.locator}: {error}",
+        )
+    return RestoreRefusal(conversation=reference.locator, detail=detail, retired=True)
+
+
+def restore_refusal_message(refusal: RestoreRefusal) -> str:
+    """The operator-facing sentence a refused-restore pause carries.
+
+    Deliberately shaped like :func:`recovery_message`, because the operator is
+    at the same fork -- continue or start over -- but the left branch is
+    different: there is no re-running this one into the same conversation, so
+    the only ways forward are a different workspace's history or an explicit
+    fresh start.
+    """
+    detail = refusal.detail or "the saved conversation could not be restored"
+    suffix = "" if refusal.retired else " (the block could not be made durable)"
+    return (
+        f"{detail}. The provider no longer holds this history, so no later "
+        "launch can continue it; re-run with --fresh-conversation to authorize "
+        "one fresh start (retained files and outstanding feedback are kept; the "
+        f"agent's accumulated context is not){suffix}"
     )
 
 

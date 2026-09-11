@@ -5949,6 +5949,62 @@ raising: the turn has already run, and a bookkeeping error must not be what
 loses it. A lost confirmation fails closed — the next attempt reads
 `unconfirmed` and asks the operator.
 
+#### A restore the provider refuses
+
+Everything above assumes the ledger's answer is the binding one. It is not: a
+confirmed record can outlive the history it names, and the only party that
+knows is the provider, in the handshake of a turn that asked to continue it.
+That answer arrives as a nonzero exit with a message in it, which is unroutable
+— classified as an ordinary harness failure the turn pauses under whatever
+`harness_failures` makes of the provider's complaint, and, worse, the ledger
+entry stays resumable, so every later launch asks for the same dead
+conversation and fails the same way. The operator's documented recovery
+controls cannot reach it, because those controls act on the ledger and nothing
+told the ledger anything.
+
+So the refusal is a structural field. `HarnessResult.conversation_restore_refused`
+carries the provider's own words, and it is set only when the provider itself
+rejected the restore *request*: the codex app-server answering `thread/resume`
+with an error response, or an ACP agent answering `session/load` with one. Both
+transports distinguish that from a transport failure by raising `RestoreRefused`
+only from the narrow `_RequestRejected` a rejected request produces — a dead
+process, a closed pipe, or a timeout is still an ordinary failure, because none
+of them is the provider saying the history is gone. The near misses are excluded
+for the same reason, and each would cost a live history if it were not: settings
+drift on a restore, a thread or session the provider substituted for the one
+asked for, an agent that never advertised `loadSession`, and a replay that could
+not be read all leave the conversation intact.
+
+Claude has no restore handshake to refuse, since `--resume` goes on argv and the
+CLI either continues the conversation or complains and exits, so the refusal is
+recognized after the fact and gated three ways rather than one: the turn asked
+to resume something; the CLI never announced a session of its own, which every
+turn it actually started does before running anything; and the complaint names
+the very conversation that was asked for. A stopped turn — timed out, aborted,
+interrupted — is excluded outright, because none of those says whether the
+history exists and all of them can leave the CLI having printed nothing.
+
+`handoff_guards._terminating_result_disposition` names the branch
+`restore-refused`, placed after the three stopped-turn dispositions and ahead of
+the unreadable-plan one: an operator who stopped the turn owns it, but a plan
+that could not be re-read is a condition that predates the turn and the ledger
+still has to be told. `turn_dispositions.settle_restore_refused` does the one
+durable thing the refusal implies — retires the record with reason `unusable`,
+the ledger's word for a conversation that is no longer a history, rather than
+`superseded`, since nothing replaced it. That single write buys both remaining
+behaviours out of machinery that already exists: an ordinary launch afterwards
+selects `retired`, which is already outside the states that may proceed, and
+stops for recovery; and a launch carrying `--fresh-conversation` spends its
+one-use authorization, supersedes nothing because nothing live is left to
+supersede, and opens a new conversation with no resume identifier. The pause is
+`conversation-recovery-required` and its message names the fresh-start
+authorization as the way forward, appending "(the block could not be made
+durable)" when the ledger write itself failed, since in that case the next
+launch would try the same dead conversation. The turn record's status is that
+same pause reason rather than a harness-failure classification, so the turn and
+the pause tell one story. Nothing ran, so there is no completion claim to
+reconcile: the refusal happens in the handshake, before any work is submitted.
+
 Durable mailbox, event, and state-ledger writes issue `fcntl(F_FULLFSYNC)` on
 Darwin so completed records cross the device cache. Filesystems that reject
 that device barrier as unsupported fall back to `fsync`; other platforms use

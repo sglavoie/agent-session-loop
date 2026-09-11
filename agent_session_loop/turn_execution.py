@@ -553,6 +553,13 @@ def turn_status_result(
         return "interrupted"
     if result.timed_out:
         return "timeout"
+    if result.conversation_restore_refused is not None:
+        # The same name the run pauses under, so the turn record and the pause
+        # tell one story. Classified from the exit code instead, this turn would
+        # be filed as a harness that failed -- which is what it looks like and
+        # not what happened: the provider would not restore the conversation,
+        # and nothing ran.
+        return events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED
     if plan_error is not None:
         return "malformed-plan"
     runner_pause = runner_signals.get("runner_pause")

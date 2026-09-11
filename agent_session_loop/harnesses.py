@@ -716,6 +716,13 @@ class HarnessResult:
     #: Why the turn refused to submit work, when a conversation could not be
     #: recorded. Present only on a turn abandoned by that failure.
     conversation_error: str | None = None
+    #: Why the provider would not restore the native conversation this turn was
+    #: told to continue. Set only when the provider itself refused the restore
+    #: request -- the history is gone on its side, so no later launch can
+    #: continue it either. Settings drift, a substituted conversation, and a
+    #: transport that cannot restore are all excluded: those leave the history
+    #: intact and are ordinary failures of this turn.
+    conversation_restore_refused: str | None = None
 
 
 class _OutputProcessor:
@@ -2532,6 +2539,9 @@ class CodexAdapter(HarnessAdapter):
         error = session.protocol_error
         if error is not None:
             result = self._with_stderr_note(result, f"codex app-server: {error}")
+        refused = session.restore_refused
+        if refused is not None:
+            result = dataclasses.replace(result, conversation_restore_refused=refused)
         if result.timed_out or result.aborted or result.interrupted:
             return result
         if (
@@ -2573,6 +2583,21 @@ class _ClaudeStreamTransport(HarnessTransport):
         # could never be correlated and would have nothing left to stop. The
         # execution window sends it, where a reader is still there to answer.
         self.session.shutdown()
+
+
+#: What the claude CLI says when it will not continue the conversation named on
+#: ``--resume``. Every alternative is a statement about that conversation's
+#: existence rather than about this machine or this turn, which is what makes it
+#: safe to act on durably; "could not read", "permission denied" and the like
+#: are deliberately absent, because a history that cannot be reached right now
+#: is not a history that is gone.
+_CLAUDE_RESTORE_REFUSED_RE = re.compile(
+    r"(?:no (?:such|conversation|session)\b"
+    r"|(?:conversation|session)\s+(?:was\s+)?not\s+found"
+    r"|(?:conversation|session)\b[^\n]*\bdoes not exist"
+    r"|(?:unknown|invalid|expired)\s+(?:conversation|session))",
+    re.IGNORECASE,
+)
 
 
 class ClaudeAdapter(HarnessAdapter):
@@ -2926,7 +2951,52 @@ class ClaudeAdapter(HarnessAdapter):
                 dataclasses.replace(result, continuity_unavailable=note),
                 note,
             )
+        refused = self._restore_refusal(result, session=session, invocation=invocation)
+        if refused is not None:
+            return dataclasses.replace(result, conversation_restore_refused=refused)
         return result
+
+    def _restore_refusal(
+        self,
+        result: HarnessResult,
+        *,
+        session: claude_stream.ClaudeStreamSession | None,
+        invocation: HarnessInvocation,
+    ) -> str | None:
+        """Read a ``--resume`` the CLI would not honour out of its own output.
+
+        Claude has no restore handshake to fail: ``--resume`` goes on argv and
+        the CLI either continues the conversation or complains and exits. So the
+        refusal has to be recognized after the fact, and the recognition is
+        gated three ways rather than one, because the cost of a false positive
+        is a conversation retired while the CLI still holds it:
+
+        - the turn asked to resume something, so there is a restore to refuse;
+        - the CLI never announced a session of its own, which every turn it
+          actually started does before it runs anything -- this is what
+          separates a refused restore from a resumed conversation that then
+          failed;
+        - the complaint names the very conversation that was asked for, so a
+          generic startup error about something else cannot be read as one.
+
+        A stopped turn is excluded outright. A timeout or an abort says nothing
+        about whether the history exists, and both can leave the CLI having
+        printed nothing at all.
+        """
+        resume = invocation.resume_conversation_id
+        if resume is None or result.returncode == 0:
+            return None
+        if result.timed_out or result.aborted or result.interrupted:
+            return None
+        if session is not None and session.session_observed:
+            return None
+        text = f"{result.stderr}\n{result.stdout}"
+        for line in text.splitlines():
+            if resume not in line:
+                continue
+            if _CLAUDE_RESTORE_REFUSED_RE.search(line):
+                return f"could not restore conversation {resume}: {line.strip()}"
+        return None
 
 
 def _decline_active_steer(
@@ -3363,6 +3433,9 @@ class CopilotAdapter(HarnessAdapter):
             )
         for note in self._acp_notes(session):
             result = self._with_stderr_note(result, note)
+        refused = session.restore_refused
+        if refused is not None:
+            result = dataclasses.replace(result, conversation_restore_refused=refused)
         if result.timed_out or result.aborted or result.interrupted:
             # The turn was stopped rather than failed, and the operator asked
             # for it, so these codes stand exactly as the base run reported.

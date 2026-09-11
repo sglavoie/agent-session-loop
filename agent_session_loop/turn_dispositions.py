@@ -1,11 +1,11 @@
 """What the run does with a turn that ended in something other than progress.
 
 ``turn_postflight`` names the disposition; this boundary is what that name
-selects. It owns the seven terminating branches of the session loop -- the ways
+selects. It owns the eight terminating branches of the session loop -- the ways
 a turn can end that are not "the session advanced" -- and the retry paths
 hidden among them.
 
-Seven branches, in the order the loop tests them, which is the whole of what
+Eight branches, in the order the loop tests them, which is the whole of what
 this module owns:
 
 * **interrupted** and **timeout** end a turn the plan could not be re-inspected
@@ -19,6 +19,11 @@ this module owns:
   flags cannot tell them apart; only the acceptance can.
 * **aborted** sits beside them and is deliberately *not* a pause: an operator
   asked for the stop, so it is recorded as one.
+* **restore-refused** runs next, ahead of the plan snapshot and the exit code,
+  because it is the only branch whose fact outlives the turn: the provider said
+  the conversation this turn was told to continue no longer exists. It retires
+  that ledger entry, which is what makes the refusal recoverable instead of
+  merely repeated, and pauses for ``conversation-recovery-required``.
 * **malformed-plan** is the only branch that may retry. It is the sole owner of
   the ``after is None`` turn, which is why it runs ahead of the status guards
   the rest of the loop depends on an after-image for.
@@ -65,7 +70,7 @@ Four invariants survive the move:
   claim in either after-image is withdrawn through the same reverter every
   guard refusal uses, leaving the work on disk untouched and only the claim
   taken back.
-* **The loop still names its own branch.** The seven ``if
+* **The loop still names its own branch.** The eight ``if
   terminating_disposition == ...`` tests stay in the loop, each delegating its
   body here and then taking its own edge. The dispatch is the loop's contract
   with the disposition; only the work behind it moved.
@@ -89,6 +94,7 @@ from typing import Any, Protocol
 
 from . import (
     clock,
+    conversation_resume,
     durability,
     events,
     handoff_correction,
@@ -952,6 +958,97 @@ def _reconcile_unsettled_completion(
                 },
             )
     return snapshot_after, record
+
+
+def settle_restore_refused(
+    ctx: RunContext,
+    *,
+    plan_state: Path,
+    before: plans.PlanSnapshot,
+    after: plans.PlanSnapshot | None,
+    result: harnesses.HarnessResult,
+    continuation: conversation_resume.TurnContinuation,
+    session_id: str,
+    session_label: str,
+    turn_index: int,
+    turn_payload: dict[str, Any],
+    session_details: dict[str, Any],
+    paths: dict[str, Path],
+) -> None:
+    """Block a conversation the provider will not restore, and pause for recovery.
+
+    The turn asked to continue a native conversation and was told that history
+    is gone. Classified as an ordinary failure this would pause with whatever
+    :mod:`harness_failures` made of the provider's complaint, and -- worse --
+    leave the ledger entry resumable, so every later launch would ask for the
+    same dead conversation and fail the same way. The operator's documented
+    recovery controls could not reach it, because those controls act on the
+    ledger and nothing had told the ledger anything.
+
+    So this does the one durable thing the refusal implies: retires the record
+    as ``unusable``, which is the ledger's word for a conversation that is no
+    longer a history. That single write buys both behaviours the operator needs.
+    An ordinary launch afterwards selects ``retired``, which is already outside
+    the states that may proceed, and stops for recovery. A launch carrying
+    ``--fresh-conversation`` spends its one-use authorization, supersedes
+    nothing -- there is nothing live left to supersede -- and opens a new
+    conversation with no resume id, keeping the session's retained files and
+    outstanding feedback and losing only the agent's accumulated context, which
+    was already lost.
+
+    Nothing ran on this turn, so there is no completion claim to reconcile: the
+    refusal happens in the handshake, before any work is submitted.
+    """
+    detail = result.conversation_restore_refused or "the conversation was not restored"
+    binding = continuation.binding
+    if binding is None:
+        # A turn that resumed something always has the binding it resumed
+        # against, so this is a caller that reached here without one. Report it
+        # rather than invent a binding to write a ledger record under.
+        refusal = conversation_resume.RestoreRefusal(
+            conversation=continuation.resume_conversation_id,
+            detail=detail,
+            error="restore was refused but the turn carried no conversation binding",
+        )
+    else:
+        refusal = conversation_resume.refuse_unrestorable_conversation(
+            plan_state,
+            binding=binding,
+            conversation=(
+                continuation.resume_conversation_id or result.conversation_id
+            ),
+            detail=detail,
+        )
+    record = refusal.describe()
+    with ctx.persistence.lock:
+        turn_payload["conversation_restore_refused"] = record
+        durability.write_json_file(paths["result"], turn_payload)
+        ctx.persistence.append_event(
+            ctx.event_path,
+            events.CONVERSATION_CONTINUATION_EVENT,
+            {
+                "run_id": ctx.run_id,
+                "turn_index": turn_index,
+                **plans.session_identity_payload(session_id),
+                **record,
+            },
+        )
+    # The before-image when the plan could not be re-read: nothing ran, so it is
+    # also the after-image in every case that matters, and publishing a
+    # half-known one would say the turn changed something it never started.
+    ctx.record_final_snapshot(after if after is not None else before)
+    ctx.pause(
+        reason=conversation_resume.RECOVERY_PAUSE_REASON,
+        message=(
+            f"{session_label}: {conversation_resume.restore_refusal_message(refusal)}"
+        ),
+        details={
+            **session_details,
+            "returncode": result.returncode,
+            "conversation_restore_refused": record,
+            "conversation_continuation": continuation.describe(),
+        },
+    )
 
 
 def settle_nonzero_exit(

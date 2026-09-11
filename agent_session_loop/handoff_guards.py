@@ -558,6 +558,14 @@ def _terminating_result_disposition(
         return "timeout"
     if result.aborted:
         return "aborted"
+    if result.conversation_restore_refused is not None:
+        # Ahead of the plan snapshot and the exit code, because this says
+        # something the ledger has to be told whatever else is wrong: the
+        # conversation this turn was pointed at no longer exists on the
+        # provider's side. Read as a plain nonzero exit it would be diagnosed as
+        # a harness that failed, and the dead conversation would stay resumable
+        # for every launch after this one.
+        return "restore-refused"
     if after is None:
         return "malformed-plan"
     if turn_payload.get("runner_pause") is not None:

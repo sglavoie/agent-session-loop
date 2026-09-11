@@ -2724,6 +2724,23 @@ def run_locked(
                     turn_payload=turn_payload,
                 )
                 break
+            if terminating_disposition == "restore-refused":
+                turn_dispositions.settle_restore_refused(
+                    ctx,
+                    plan_state=state.plan_state_dir(before.plan_dir, args.state_dir),
+                    before=before,
+                    after=after,
+                    result=result,
+                    continuation=continuation,
+                    session_id=session_id,
+                    session_label=session_label,
+                    turn_index=turn_index,
+                    turn_payload=turn_payload,
+                    session_details=session_details,
+                    paths=paths,
+                )
+                break
+
             if terminating_disposition == "malformed-plan":
                 corrected = turn_dispositions.settle_malformed_plan(
                     ctx,

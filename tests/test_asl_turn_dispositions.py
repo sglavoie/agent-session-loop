@@ -1,11 +1,12 @@
-"""The seven terminating branches, exercised without the run loop.
+"""The eight terminating branches, exercised without the run loop.
 
 ``turn_dispositions`` owns what a turn that did not advance the session does
 next: two pauses for a plan that could not be re-inspected, an operator abort
 that is recorded rather than paused, a malformed plan that may repair itself, a
-worker pause that may be answered out of, a failed harness exit that may retry
-off Spark, and a turn an operator corrected mid-flight, which earns the same
-session another attempt. These tests drive each branch through a stand-in run
+restore the provider refused, a worker pause that may be answered out of, a
+failed harness exit that may retry off Spark, and a turn an operator corrected
+mid-flight, which earns the same session another attempt. These tests drive each
+branch through a stand-in run
 context defined here rather than through ``runner``, which is the point of the
 boundary, and every collaborator is replaced by a recorder so what is asserted
 is the decision and the record rather than any collaborator's own behaviour.
@@ -30,6 +31,10 @@ than as a walk through one happy path:
 * a nonzero exit that pauses takes back a completion claim the turn never
   settled, publishes the reconciled plan image rather than the claimed one,
   and says so in the pause when the reversion itself could not be written;
+* the refused-restore branch retires the conversation the provider would not
+  restore and pauses for recovery, and is argued in
+  ``tests/test_asl_native_restore_recovery.py`` alongside the adapter refusals
+  that are the only thing that can select it;
 * the module owns no loop statement, because the loop is not its to break;
 * the redirected branch is dispatched from the same table, and is argued in
   ``tests/test_asl_redirect_continuation.py`` alongside the gate whose
@@ -74,12 +79,13 @@ STATE_DIR_ARG = "/tmp/asl-state-does-not-exist"
 
 #: The entry points the run loop is allowed to reach here: one per terminating
 #: branch. The loop keeps the ``if terminating_disposition == ...`` dispatch
-#: itself, so an eighth name would be a branch that was never dispatched.
+#: itself, so a ninth name would be a branch that was never dispatched.
 ENTRY_POINTS = (
     "turn_dispositions.pause_interrupted_run",
     "turn_dispositions.pause_timed_out_turn",
     "turn_dispositions.record_aborted_turn",
     "turn_dispositions.settle_malformed_plan",
+    "turn_dispositions.settle_restore_refused",
     "turn_dispositions.settle_runner_pause",
     "turn_dispositions.settle_nonzero_exit",
     "turn_dispositions.settle_redirected_turn",

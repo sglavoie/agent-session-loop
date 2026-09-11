@@ -390,6 +390,7 @@ class ClaudeStreamSession:
         self._stdin_closed = False
         self._prompt_error: str | None = None
         self._session_mismatch: str | None = None
+        self._session_observed = False
 
         self._pending_control: dict[str, _PendingControl] = {}
         self._control_seq = 0
@@ -419,6 +420,17 @@ class ClaudeStreamSession:
         """The conversation this turn was launched under, if it was told one."""
         with self._state_lock:
             return self._session_id
+
+    @property
+    def session_observed(self) -> bool:
+        """Whether the CLI ever named a session of its own on this turn.
+
+        ``False`` means the CLI never got as far as announcing a conversation,
+        which is what separates a ``--resume`` the CLI *refused* from one it
+        honoured and then failed inside: the second announced its session first.
+        """
+        with self._state_lock:
+            return self._session_observed
 
     @property
     def session_mismatch(self) -> str | None:
@@ -564,6 +576,8 @@ class ClaudeStreamSession:
         it, and nothing continues from a conversation the work did not go into.
         """
         with self._state_lock:
+            if reported:
+                self._session_observed = True
             expected = self._session_id
             if expected is None or not reported or reported == expected:
                 return None

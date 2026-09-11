@@ -163,6 +163,32 @@ class AcpError(Exception):
     """
 
 
+class _RequestRejected(AcpError):
+    """The agent answered a request with an error response.
+
+    Distinct from the transport failures that share :class:`AcpError` -- a dead
+    process, a closed pipe, a request that never answered -- because only this
+    one is the agent *stating* something. What it states can outlive the turn; a
+    broken pipe says nothing about the conversation behind it.
+    """
+
+
+class RestoreRefused(AcpError):
+    """The agent would not restore the session this turn was told to continue.
+
+    A subclass because every ``AcpError`` handler should keep treating it as
+    one: nothing was submitted, the turn is over. What the separate type adds is
+    durability -- the agent no longer holds this history, so retrying the same
+    ``session/load`` later cannot succeed either.
+
+    Only a rejected ``session/load`` raises it. The other three restore refusals
+    are about a session the agent may still have: an unadvertised ``loadSession``
+    capability is this client being unable to ask, a substituted session id is a
+    disagreement about which conversation came back, and an unreadable replay is
+    this client being unable to trust what did.
+    """
+
+
 class _SubmissionRefused(Exception):
     """The turn was cancelled before ``session/prompt``, so nothing was sent.
 
@@ -341,6 +367,7 @@ class CopilotAcpSession:
         self._prompt_submitted = False
         self._cancel_requested = False
         self._protocol_error: str | None = None
+        self._restore_refused: str | None = None
         self._submission_refused: str | None = None
         self._conversation_error: str | None = None
         self._permission_decisions: list[PermissionDecision] = []
@@ -445,6 +472,18 @@ class CopilotAcpSession:
     def protocol_error(self) -> str | None:
         with self._state_lock:
             return self._protocol_error
+
+    @property
+    def restore_refused(self) -> str | None:
+        """Why the agent would not load the session that was asked for.
+
+        Set only by :class:`RestoreRefused`, so it means the agent no longer
+        offers this history -- not that this turn happened to fail while
+        restoring. Also reported as ``protocol_error``, because for everything
+        that only needs to know the turn failed, it is one.
+        """
+        with self._state_lock:
+            return self._restore_refused
 
     @property
     def cancelled_before_submission(self) -> str | None:
@@ -696,6 +735,12 @@ class CopilotAcpSession:
             if self._protocol_error is None:
                 self._protocol_error = detail
 
+    def _note_restore_refused(self, detail: str) -> None:
+        with self._state_lock:
+            if self._restore_refused is None:
+                self._restore_refused = detail
+        self._note_protocol_error(detail)
+
     # -- driving: the handshake, the submission, the orderly shutdown -------
 
     def start(self) -> None:
@@ -719,6 +764,11 @@ class CopilotAcpSession:
             return
         except _SubmissionRefused as error:
             self._abandon_before_submission(submission_refused=str(error))
+            return
+        except RestoreRefused as error:
+            self._note_restore_refused(str(error))
+            self._turn_finished.set()
+            self._close_stdin()
             return
         except AcpError as error:
             self._note_protocol_error(str(error))
@@ -798,6 +848,12 @@ class CopilotAcpSession:
         try:
             try:
                 response = self._request("session/load", params)
+            except _RequestRejected as error:
+                # The agent answered, and its answer was that it will not load
+                # this session. Nothing a later launch does changes that.
+                raise RestoreRefused(
+                    f"could not restore conversation {session_id}: {error}"
+                ) from error
             except AcpError as error:
                 raise AcpError(
                     f"could not restore conversation {session_id}: {error}"
@@ -1095,7 +1151,7 @@ class CopilotAcpSession:
                     self._pending.pop(request_id, None)
                 raise AcpError(f"{method} timed out")
         if pending.error is not None:
-            raise AcpError(f"{method} failed: {pending.error}")
+            raise _RequestRejected(f"{method} failed: {pending.error}")
         return pending.result
 
     def _notify(self, method: str, params: Mapping[str, Any] | None) -> None:

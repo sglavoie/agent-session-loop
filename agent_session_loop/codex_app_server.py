@@ -143,6 +143,33 @@ class AppServerError(Exception):
     """
 
 
+class _RequestRejected(AppServerError):
+    """The app-server answered a request with an error response.
+
+    Distinct from the transport failures that share :class:`AppServerError` --
+    a dead process, a closed pipe, a request that never answered -- because only
+    this one is the app-server *stating* something. What it states can outlive
+    the turn; a broken pipe says nothing about the conversation behind it.
+    """
+
+
+class RestoreRefused(AppServerError):
+    """The app-server would not restore the thread this turn was told to resume.
+
+    A subclass because every ``AppServerError`` handler should keep treating it
+    as one: nothing ran, the turn is over, and the fallback stays shut. What the
+    separate type adds is durability -- this failure is a statement about the
+    provider's own history, not about this turn, so retrying the same resume
+    later cannot succeed either.
+
+    Deliberately narrow. Only the ``thread/resume`` request itself answering
+    with an error raises it. A thread that came back under a different id, a
+    widened sandbox, and drifted settings are all thread-level disagreements
+    about a conversation the provider still holds, and discarding that history
+    because this turn could not use it would throw away recoverable work.
+    """
+
+
 class _ConversationNotRecorded(Exception):
     """The thread identifier could not be made durable, so nothing was sent.
 
@@ -279,6 +306,7 @@ class CodexAppServerSession:
         self._work_observed = False
         self._turn_accepted = False
         self._protocol_error: str | None = None
+        self._restore_refused: str | None = None
         self._conversation_error: str | None = None
         self._submission_refused: str | None = None
         self._interrupt_requested = False
@@ -358,6 +386,18 @@ class CodexAppServerSession:
     def protocol_error(self) -> str | None:
         with self._state_lock:
             return self._protocol_error
+
+    @property
+    def restore_refused(self) -> str | None:
+        """Why the app-server would not restore the thread that was asked for.
+
+        Set only by :class:`RestoreRefused`, so it means the provider no longer
+        offers this history -- not that this turn happened to fail while
+        resuming. Also reported as ``protocol_error``, because for everything
+        that only needs to know the turn failed, it is one.
+        """
+        with self._state_lock:
+            return self._restore_refused
 
     @property
     def fallback_reason(self) -> str | None:
@@ -545,6 +585,12 @@ class CodexAppServerSession:
             if self._protocol_error is None:
                 self._protocol_error = detail
 
+    def _note_restore_refused(self, detail: str) -> None:
+        with self._state_lock:
+            if self._restore_refused is None:
+                self._restore_refused = detail
+        self._note_protocol_error(detail)
+
     # -- driving: the handshake and the orderly shutdown --------------------
 
     def start(self) -> None:
@@ -571,6 +617,11 @@ class CodexAppServerSession:
             return
         except _SubmissionRefused as error:
             self._abandon_before_submission(submission_refused=str(error))
+            return
+        except RestoreRefused as error:
+            self._note_restore_refused(str(error))
+            self._turn_finished.set()
+            self._close_stdin()
             return
         except AppServerError as error:
             self._note_protocol_error(str(error))
@@ -619,7 +670,15 @@ class CodexAppServerSession:
             self._adopt_thread(self._request("thread/start", params), resumed=False)
             return
         params["threadId"] = resume
-        self._adopt_thread(self._request("thread/resume", params), resumed=True)
+        try:
+            response = self._request("thread/resume", params)
+        except _RequestRejected as error:
+            # The app-server answered, and its answer was that it will not
+            # restore this thread. Nothing a later launch does changes that.
+            raise RestoreRefused(
+                f"could not restore conversation {resume}: {error}"
+            ) from error
+        self._adopt_thread(response, resumed=True)
 
     def _adopt_thread(self, response: Any, *, resumed: bool) -> None:
         method = "thread/resume" if resumed else "thread/start"
@@ -855,7 +914,7 @@ class CodexAppServerSession:
                     self._pending.pop(request_id, None)
                 raise AppServerError(f"{method} timed out")
         if pending.error is not None:
-            raise AppServerError(f"{method} failed: {pending.error}")
+            raise _RequestRejected(f"{method} failed: {pending.error}")
         return pending.result
 
     def _notify(self, method: str, params: Mapping[str, Any] | None) -> None:
