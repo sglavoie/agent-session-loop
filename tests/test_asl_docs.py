@@ -2585,6 +2585,93 @@ class LiveMailboxDocsRegressionTests(unittest.TestCase):
             normalized,
         )
 
+    def test_docs_describe_the_workbench_redirect_endpoint(self) -> None:
+        """The HTTP correction path, including what its status codes promise."""
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        for marker in (
+            "`POST /api/control/redirect` — submit one urgent correction "
+            "against the turn the run is on now",
+            "`202` with `accepted` and a `redirect` receipt when anything was "
+            "persisted",
+            "`409` when nothing was persisted",
+            "The response carries `feedback_digest` and `feedback_bytes`, "
+            "never the correction text.",
+            "A redirect is deliberately not a checkpoint command",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"docs omit workbench redirect marker: {marker!r}",
+            )
+
+    def test_docs_describe_the_workbench_redirect_reads(self) -> None:
+        """The two reads, and that the recovery one performs no recovery."""
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        for marker in (
+            "`GET /api/redirect-status?plan_dir=<path>` — durable redirect "
+            "operations for one plan",
+            "`GET /api/conversation-recovery?plan_dir=<path>` — which "
+            "recovery an unresumable conversation is waiting on",
+            "The endpoint performs no recovery: doing so would persist a "
+            "one-use operator authorization in a request a browser can "
+            "replay",
+            "`/api/redirect-status`, `/api/conversation-recovery`) are "
+            "**not** authenticated",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"docs omit workbench redirect-read marker: {marker!r}",
+            )
+
+    def test_docs_describe_the_workbench_launch_idempotency_key(self) -> None:
+        """``launch_id`` and the limits of an in-process receipt table."""
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        for marker in (
+            "accept an optional `launch_id` bounded by "
+            "`redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS`",
+            "it makes a *retry to the same process* idempotent, and what "
+            "stops two runs across two Workbench processes remains the plan "
+            "lock",
+            '`reason: "launch-already-in-flight"` while a process this '
+            "server started for the plan is still alive",
+            "A paused run is not a conflict: resuming one is what `/api/reply` is for.",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"docs omit launch idempotency marker: {marker!r}",
+            )
+
+    def test_docs_describe_the_conversation_recovery_card(self) -> None:
+        """The new recovery kind, and why it offers no endpoint action."""
+        docs = self._read("docs/agent-session-loop.md")
+        normalized = " ".join(docs.split())
+
+        self.assertIn(
+            "`commit-preflight`, `commit-failed`, `conversation-recovery`, "
+            "and `generic`",
+            normalized,
+        )
+        for marker in (
+            "`conversation-recovery` covers both pauses that hand a decision "
+            "to a person rather than to a retry",
+            "It is a read-only card by construction",
+            "The two reasons previously fell back to `generic`, whose advice "
+            "— inspect, then relaunch — is actively wrong here",
+        ):
+            self.assertIn(
+                marker,
+                normalized,
+                msg=f"docs omit conversation-recovery marker: {marker!r}",
+            )
+
     def test_docs_enumerate_waiting_for_reply_statuses(self) -> None:
         docs = self._read("docs/agent-session-loop.md")
         status_docs = docs.split("## JSON Output", 1)[1].split(

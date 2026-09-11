@@ -12,7 +12,9 @@ from unittest import mock
 
 from agent_session_loop import (
     events,
+    intervention,
     preflight,
+    redirect_cli,
     review_repair,
     run_inputs,
     state,
@@ -550,6 +552,36 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                     },
                     {},
                 ),
+                # Both recovery-decision pauses reach the same kind, and both are
+                # enumerated: the kind is only useful if it carries the decision
+                # apart, and a single case would let the second pause regress to
+                # whichever card the first one happens to build.
+                (
+                    "conversation-recovery",
+                    {
+                        "ok": False,
+                        "paused": True,
+                        "reason": events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
+                        "pause_reason": (
+                            events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED
+                        ),
+                        "pause_message": "recorded conversation cannot be resumed",
+                        "run_id": "run-fresh-conversation",
+                    },
+                    {},
+                ),
+                (
+                    "conversation-recovery",
+                    {
+                        "ok": False,
+                        "paused": True,
+                        "reason": events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
+                        "pause_reason": events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
+                        "pause_message": "predecessor run could not be shown stopped",
+                        "run_id": "run-successor-blocked",
+                    },
+                    {},
+                ),
                 (
                     "generic",
                     {
@@ -571,12 +603,15 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 ),
             )
             observed: set[str] = set()
-            for expected_kind, payload, options in cases:
-                with self.subTest(kind=expected_kind):
+            # Indexed rather than named by kind: more than one pause reaches the
+            # same kind, and two cases sharing a plan directory would have the
+            # second silently overwrite the first one's seeded state.
+            for index, (expected_kind, payload, options) in enumerate(cases):
+                with self.subTest(case=index, kind=expected_kind):
                     recovery = self._recovery_for_payload(
                         tmp_path,
                         payload,
-                        plan_name=f"kind-{expected_kind}",
+                        plan_name=f"kind-{index:02d}-{expected_kind}",
                         **options,
                     )
                     self.assertEqual(expected_kind, recovery.kind)
@@ -605,6 +640,80 @@ class WorkbenchRecoveryTests(unittest.TestCase):
             observed.add(continuation.kind)
 
             self.assertEqual(set(workbench.RECOVERY_KINDS), observed)
+
+    def test_conversation_recovery_reports_the_decision_and_its_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_root = tmp_path / "state"
+            recovery = self._recovery_for_payload(
+                tmp_path,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
+                    "pause_reason": (
+                        events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED
+                    ),
+                    "pause_message": "recorded conversation cannot be resumed",
+                    "run_id": "run-fresh",
+                },
+                plan_name="fresh-conversation",
+            )
+
+            self.assertEqual("conversation-recovery", recovery.kind)
+            self.assertTrue(recovery.recoverable)
+            expected = redirect_cli.recovery_commands(
+                recovery.plan_dir,
+                str(state_root),
+                decision=intervention.RECOVERY_DECISION_FRESH_CONVERSATION,
+            )
+            self.assertEqual(
+                [expected["inspect_command"], expected["authorization_command"]],
+                [command.command for command in recovery.commands],
+            )
+            # The card never performs the recovery: consuming a one-use
+            # authorization has to be a deliberate command, not a POST the
+            # browser can repeat.
+            self.assertNotIn("endpoint", {action.kind for action in recovery.actions})
+            self.assertIn(
+                redirect_cli.FRESH_CONVERSATION_NOTE,
+                [row.detail for row in recovery.evidence],
+            )
+            self.assertIn(
+                intervention.RECOVERY_DECISION_FRESH_CONVERSATION,
+                [row.value for row in recovery.evidence],
+            )
+
+    def test_blocked_successor_recovery_offers_no_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            recovery = self._recovery_for_payload(
+                tmp_path,
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
+                    "pause_reason": events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
+                    "pause_message": "predecessor run could not be shown stopped",
+                    "run_id": "run-blocked",
+                },
+                plan_name="successor-blocked",
+            )
+
+            self.assertEqual("conversation-recovery", recovery.kind)
+            self.assertEqual("error", recovery.severity)
+            # One command, and it is the read. Offering a second would imply an
+            # authorization exists for a pause that has none.
+            self.assertEqual(1, len(recovery.commands))
+            self.assertIn("redirect-status", recovery.commands[0].command)
+            self.assertNotIn(
+                redirect_cli.FRESH_CONVERSATION_NOTE,
+                [row.detail for row in recovery.evidence],
+            )
+            self.assertIn(
+                intervention.RECOVERY_DECISION_PREDECESSOR_ALIVE,
+                [row.value for row in recovery.evidence],
+            )
 
     def test_registered_pause_reasons_have_explicit_recovery_mapping(self) -> None:
         mapped_reasons = set(workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON)

@@ -7587,7 +7587,8 @@ after a restart.
   `/api/events`, `/api/logs`, `/api/last-message`, `/api/result`,
   `/api/verification`, `/api/commits`, `/api/progress`,
   `/api/final-review`, `/api/questions`, `/api/registry`,
-  `/api/archive`, `/api/artifacts`) are **not** authenticated. They are
+  `/api/archive`, `/api/artifacts`, `/api/redirect-status`,
+  `/api/conversation-recovery`) are **not** authenticated. They are
   loopback-only by construction. If
   the Workbench is ever exposed beyond the local machine (e.g., SSH port
   forwarding, a reverse proxy), plan inventory and resolver prompts —
@@ -7858,6 +7859,31 @@ Read endpoints (loopback-open, no token required):
   content (default 256 KiB).
 - `GET /api/questions?plan_dir=<path>` — resolver prompt and Q&A
   context for the paused turn (mirrors `asl questions --json`).
+- `GET /api/redirect-status?plan_dir=<path>` — durable redirect
+  operations for one plan, projected through `redirect_cli` so the stage
+  a browser renders and the stage `asl control redirect-status` prints
+  are one derivation of the same journal. Returns `journal_path`,
+  `owner`, `owner_run_id`, `live_target`, `operations` (each with both
+  the durable `status` and the presentation-only `stage`),
+  `uncertain_operation_ids`, the `journal_complete` / `torn_tail` /
+  `unreadable_lines` honesty fields, `truncated`, `checked_at`,
+  `conversations`, and the `action_token`, `permitted_actions`, and
+  `disabled_reasons` a composer needs to submit a correction without
+  deriving its own freshness proof. A repeatable `operation_id=<id>`
+  filters the window, which is capped at
+  `workbench_server.MAX_REDIRECT_OPERATIONS` (64) and truncated from the
+  oldest end. No field carries the operator's words — only
+  `feedback_digest` and `feedback_bytes`.
+- `GET /api/conversation-recovery?plan_dir=<path>` — which recovery an
+  unresumable conversation is waiting on, and nothing more. Returns
+  `recovery_required`, `pause_reason`, `decision`
+  (`fresh-conversation` or `predecessor-not-stopped`), `auto_resume`
+  (always `false`), `authorized_by`, `inspect_command`,
+  `authorization_command`, `one_use`, `note`, `conversations`, and the
+  `retained_operations` a fresh start would still carry. The endpoint
+  performs no recovery: doing so would persist a one-use operator
+  authorization in a request a browser can replay, and
+  `predecessor-not-stopped` has no authorization at all.
 - `GET /api/artifacts?plan_dir=<path>` — artifact paths and metadata
   for the latest run.
 - `GET /api/archive` — archive entries plus the current
@@ -7899,11 +7925,12 @@ Mutating endpoints (bearer-token required):
 - `POST /api/launch` — spawn `asl run` for a plan. Payload:
   `{"plan_dir": "...", "profile": {...}}`. Returns `pid`, `argv`
   (with reply prompts redacted), `plan_dir`, `profile`, `reply_provided`,
-  `reply_length`, `reply_origin`, and `state_dir`.
+  `reply_length`, `reply_origin`, and `state_dir`. An optional
+  `launch_id` makes a resend idempotent; see the resend notes below.
 - `POST /api/reply` — resume a paused run with a verbatim reply.
   Payload: `{"plan_dir": "...", "reply_text": "..."}`. The `reply_text`
   body is streamed to the child via `--reply-stdin`; only `reply_length`
-  survives in the response.
+  survives in the response. It accepts the same optional `launch_id`.
 - `POST /api/control/stop-after-current` — enqueue a
   `request-stop-after-current` command on the per-plan control queue.
   The runner consumes it at the next checkpoint.
@@ -7922,17 +7949,67 @@ Mutating endpoints (bearer-token required):
   `select-future-harness` command. Payload:
   `{"plan_dir": "...", "harness": "codex|claude|copilot"}`. The active
   turn is never interrupted; the request takes effect at the next turn.
+- `POST /api/control/redirect` — submit one urgent correction against the
+  turn the run is on now, through the same `intervention` /
+  `redirect_admission` path `asl control redirect` and the bridge use.
+  Payload: `{"plan_dir": "...", "operation_id": "...",
+  "action_token": "...", "text": "...", "expected_target": {...},
+  "wait_seconds": N, "run_id": "..."}`. `operation_id` is required and is
+  the idempotency key; `action_token` comes from
+  `GET /api/redirect-status`; `expected_target` is optional and turns "the
+  turn ended while the operator was typing" into a `stale-target` refusal
+  instead of a correction delivered to whatever the runner moved on to;
+  `wait_seconds` is bounded by
+  `redirect_admission.MAX_ACCEPTANCE_WAIT_SECONDS`. Unlike the other
+  control endpoints this one is not a queue append — it writes to the
+  redirect journal and rings the urgent channel — so its status codes
+  report what became durable: `202` with `accepted` and a `redirect`
+  receipt when anything was persisted, `200` with `redirect.replayed:
+  true` when the `operation_id` was already submitted, `409` when nothing
+  was persisted (a stale action token, an action the run does not permit,
+  or an admission refusal such as `stale-target`), `400` for a malformed
+  or oversized body, and `503` with `reason: "redirect-unavailable"` when
+  the journal itself cannot be read. The response carries
+  `feedback_digest` and `feedback_bytes`, never the correction text.
 - `POST /api/unlock` — remove an operational lock. Active locks return
   409 unless the payload includes `"force": true`; idempotent missing
   locks return 200 with `had_lock: false`.
 
-All control mutations enqueue records onto
-`<state-dir>/<plan-hash>/control-queue.jsonl` rather than touching
+All control mutations except `POST /api/control/redirect` enqueue records
+onto `<state-dir>/<plan-hash>/control-queue.jsonl` rather than touching
 `state.json` directly. The active runner drains the queue between
 lifecycle checkpoints and translates each accepted command into the
 same `RunControlAction` transitions that the in-process keyboard
 listener already emits, so `run_control` events look identical
-regardless of source.
+regardless of source. A redirect is deliberately not a checkpoint
+command: it appends to the plan's redirect journal and rings the urgent
+channel, because a correction that waits for the next checkpoint is a
+correction the turn it was aimed at has already outlived.
+
+Three mutating endpoints are safe for a browser to resend, and each one
+says so with a different mechanism because they have different durable
+records to appeal to:
+
+- `POST /api/control/redirect` answers a resent request from the redirect
+  journal. Replay is checked by `operation_id` *before* the action token
+  is validated, because the correction that landed is exactly what made
+  the token the client still holds stale; checking the token first would
+  turn every lost response into a refused retry.
+- `POST /api/launch` and `POST /api/reply` accept an optional `launch_id`
+  bounded by `redirect_store.REDIRECT_MAX_OPERATION_ID_CHARS`, and return
+  the original launch result with `replayed: true` for a repeat of an id
+  this server already spawned for. Nothing durable records a launch, so
+  the receipt table is this server's own memory: it makes a *retry to the
+  same process* idempotent, and what stops two runs across two Workbench
+  processes remains the plan lock.
+- Both spawning endpoints also refuse outright, with `409` and
+  `reason: "run-already-active"`, while `intervention.inspect_run`
+  reports a run holding the plan, and with
+  `reason: "launch-already-in-flight"` while a process this server
+  started for the plan is still alive. The second check covers the window
+  a reconnecting browser actually lands in — spawned, but not yet holding
+  the lock — where nothing durable says a launch is under way. A paused
+  run is not a conflict: resuming one is what `/api/reply` is for.
 
 All responses use the `responses.success_payload`/`error_payload`
 envelopes with `command: "workbench"`. Stable error reasons reused
@@ -8026,9 +8103,25 @@ is called to summarize failures, and no recovery state is persisted.
 `workbench.RECOVERY_KINDS` is the source-of-truth vocabulary:
 `none`, `review-continuation`, `reply-needed`, `not-loop-ready`, `verify-failed`,
 `no-contract`, `malformed-contract`, `stale-lock`, `stale-state`,
-`commit-preflight`, `commit-failed`, and `generic`. V1 maps common
-structured blockers to concrete cards and falls back to `generic` for
-unknown failures.
+`commit-preflight`, `commit-failed`, `conversation-recovery`, and
+`generic`. V1 maps common structured blockers to concrete cards and falls
+back to `generic` for unknown failures.
+
+`conversation-recovery` covers both pauses that hand a decision to a
+person rather than to a retry — `conversation-recovery-required` and
+`redirect-successor-blocked` — and it is keyed on the decision
+`intervention.recovery_decision` returns rather than on the pause reason,
+so a later pause mapping to an existing decision needs no new card. It is
+a read-only card by construction: every affordance it offers is an
+inspect or a copyable command, and it carries no `endpoint` action. That
+is not a gap. `fresh-conversation`'s authorization is one-use and
+discards the agent's accumulated context, and
+`predecessor-not-stopped` has no authorization at all, so a button that
+performed either would be the wrong shape for the decision. The two
+reasons previously fell back to `generic`, whose advice — inspect, then
+relaunch — is actively wrong here: relaunching without the one-use
+authorization re-derives the same pause, and relaunching beside an
+unstopped predecessor is the thing the second pause exists to prevent.
 
 The full `/api/recovery` payload's `recovery` object contains:
 
@@ -8310,6 +8403,49 @@ above, plus nullable IDs such as `run_id`, `session_id`, `turn_index`, or
   ]
 }
 ```
+
+`conversation-recovery`, on `conversation-recovery-required`. Note that
+`recoverable` is `true` while `actions` carries no `endpoint`: the
+recovery exists, and a person performs it.
+
+```json
+{
+  "kind": "conversation-recovery",
+  "severity": "warning",
+  "recoverable": true,
+  "evidence": [
+    {
+      "label": "Decision",
+      "value": "fresh-conversation",
+      "detail": "authorized by operator"
+    },
+    {
+      "label": "Automatic resume",
+      "value": "no",
+      "detail": "the run loop cannot clear this pause on its own"
+    },
+    { "label": "Authorization", "value": "one-use" }
+  ],
+  "actions": [
+    { "id": "inspect-artifacts", "kind": "inspect", "target": "artifacts" }
+  ],
+  "commands": [
+    {
+      "label": "Inspect recovery",
+      "command": "asl control recover-conversation <plan-dir> --json"
+    },
+    {
+      "label": "Authorize fresh conversation",
+      "command": "asl run <plan-dir> --resume --fresh-conversation"
+    }
+  ]
+}
+```
+
+The same kind on `redirect-successor-blocked` reports
+`"value": "none exists"` for its `Authorization` row, `severity: "error"`,
+and a single `redirect-status` command — there is no second command,
+because there is no authorization.
 
 `generic`:
 
