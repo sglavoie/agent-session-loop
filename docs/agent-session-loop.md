@@ -5353,6 +5353,56 @@ blocker — a yellow warning would refuse every run against any harness release
 newer than the pinned window, which is precisely the case that must stay
 runnable.
 
+### Live Harness Acceptance
+
+Version compatibility says a harness is *installed and inside the window*. It
+says nothing about whether that harness actually interrupts, resumes, and
+carries corrections the way the redirect subsystem assumes. Those are behavioural
+claims, and the only thing that can settle them is a real turn against the real
+CLI. `tests/asl_live_redirect_acceptance.py` is where that happens, and it is the
+only module in the tree permitted to spend provider quota.
+
+```sh
+python3 -m tests.asl_live_redirect_acceptance --all-harnesses            # probes only
+python3 -m tests.asl_live_redirect_acceptance --all-harnesses --live     # spends quota
+python3 -m tests.asl_live_redirect_acceptance --harness codex --live --json
+```
+
+It is opt-in and off by default. Without `--live` or `ASL_LIVE_ACCEPTANCE=1` it
+launches no harness turn at all: it runs the same model-free `--version` probe
+described above, reports every scenario as `skipped`, and exits 0. That default
+is what lets a scheduled lane invoke it on the same footing as `harness-compat`.
+It is deliberately absent from every shard list in `tests/run_suite.py` and named
+so that `unittest discover` cannot pick it up; its deterministic behaviour — the
+opt-in guarantee, the report shape, the refusal to generalise — is tested from
+`tests/test_asl_harness_compatibility.py`, which is in the fast lane.
+
+Each harness runs in a disposable git repository created and deleted per
+sequence, against synthetic prompts, and each of the seven rows names one claim:
+
+| Scenario | What a pass means |
+| --- | --- |
+| `earlier-context-survives` | A resumed turn recalled a passphrase held only in the prior turn's conversation. The prompt forbids writing it to disk and forbids searching for it, so the row cannot be satisfied by looking around. |
+| `existing-edits-remain` | A file written before the interruption is still there, with the nonce it recorded. |
+| `active-work-stops` | Arming the turn's `AbortSignal` during a long-running shell tool ended the turn in the `execution` window with returncode 137. |
+| `native-cancellation` | `HarnessTransport.interrupt()` alone ended the turn — no kill, no timeout. The forced kill is held back as a safety net so a harness that ignores its own protocol fails the row instead of hanging the check. |
+| `forced-termination` | `process_tree.confirm_termination` reports `complete` for the worker group and every descendant tracked while it was alive. "Killed" and "collected" are separate claims; this is the second. |
+| `correction-reaches-continuation` | A correction went through the real journal — `submit_request`, `accept_request`, `carry_corrections` — was rendered by the real `run_prompts._correction_context_body`, and the resumed worker echoed back the exact `--attempt` token and `--redirect-id` it was given, which `redirect_ack.acknowledge_correction` then accepted. |
+| `unavailable-history-requires-user` | The real binary refused a conversation it has never seen, and blamed the conversation for the refusal. A setup error that stops the same turn is reported as a failure, not a pass. |
+
+The report records the exact versions it exercised under `verified_versions`, and
+a version only appears there when a scenario actually passed against it —
+installed-and-probed is inventory, not evidence. The document carries its own
+disclaimer saying so, because the pinned window in `harness_compatibility.py` is
+a support *policy* and this report is the *evidence*, and conflating them would
+let a release claim verification it never earned.
+
+Only the harness half of `unavailable-history-requires-user` is observable live.
+What ASL does about missing history is decided by the run loop, not the harness:
+`conversation-recovery-required` classifies as `requires_user` with
+`user_action: inspect` and zero retries, which is pinned deterministically
+alongside the opt-in tests.
+
 ## Safety Modes
 
 By default, `run` and `doctor` use harness-specific bypass modes for every
