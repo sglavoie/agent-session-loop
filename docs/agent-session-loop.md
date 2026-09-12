@@ -1689,6 +1689,30 @@ explanation and the failure belongs to that group, so the child investigates
 further only when what it observes contradicts the supplied evidence, and
 records the contradiction in its Handoff when it does.
 
+Whether a live worker *behaves* that way is a different question from whether
+the surfaces say so, and prompt tests cannot answer it. The evidence lives in
+`tests/fixtures/asl_worker_verification/`, opt in and outside ordinary test
+execution. Its `evaluate.py run` drives the candidate checkout's own
+`agent-session-loop` wrapper against a disposable repository, plan directory
+and state directory across three scenarios — a small repair with focused
+validation available, a defect a focused check has to reveal, and a repair
+beside a documented failure another group owns — twice each, in fresh
+conversations on the harness the sampled history is dominated by. Its
+`evaluate.py check` is read-only, needs no credentials, and re-derives every
+verdict from what the runs left behind: the invocations the check scripts
+recorded as they ran, the run's own `verification_check_finished` events, the
+handoff, and the repository's final state. A receipt that says "passed" is
+metadata, never a verdict. Worker and runner are told apart by stripping the
+surrounding harness's environment markers before the run, then reconciling that
+derivation against the run's own gate events, so a mis-derivation reports as
+contradictory evidence rather than as a quiet pass. Trial session files state
+the task and nothing about verification ownership — a fixture that coached the
+worker would be measuring itself — and `check` refuses evidence that is
+missing, incomplete, contradictory, stale against the current policy or fixture
+digest, driven by an injected harness, or reused across conversations.
+`tests/test_asl_worker_verification.py` covers all of that with fake harnesses
+and synthetic receipts, and launches no model.
+
 Autonomous `asl run` turns prompt the harness with a Python-built session task
 packet (`task_packet.build_task_packet`): a harness-neutral prompt that references
 the session file, `context.md`, `progress.md`, expansion notes, and the

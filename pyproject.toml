@@ -24,6 +24,12 @@ files = [
     "skills/asl/scripts",
     "skills/session-resplit/scripts",
 ]
+# Disposable repositories written by the opt-in live-worker evaluator. Each
+# trial is a copy of the same fixture repository, so leaving them in scope
+# makes every module in it a duplicate of itself once a second trial exists.
+# The originals under `tests/fixtures/asl_worker_verification/repo` stay
+# checked; only the runtime copies are excluded.
+exclude = "^tests/fixtures/asl_worker_verification/cache/"
 ignore_missing_imports = true
 # Retained checks are the correctness classes: name-defined, attr-defined,
 # call-arg, return-value and func-returns-value are all clean in the code and

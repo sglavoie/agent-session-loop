@@ -267,6 +267,7 @@ INTEGRATION_MODULES = (
     "tests.test_asl_guards",
     "tests.test_asl_reply_flows",
     "tests.test_asl_e2e",
+    "tests.test_asl_worker_verification",
     "tests.test_asl_review",
     "tests.test_asl_workbench_launch",
     "tests.test_asl_pause_ux",
