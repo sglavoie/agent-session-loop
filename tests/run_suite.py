@@ -257,6 +257,7 @@ INTEGRATION_MODULES = (
     "tests.test_asl_copilot_acp",
     "tests.test_asl_copilot_resume",
     "tests.test_asl_native_restore_recovery",
+    "tests.test_asl_lost_submission_response",
     "tests.test_asl_workbench_server",
     "tests.test_asl_workbench_redirect",
     "tests.test_asl_review_lifecycle",

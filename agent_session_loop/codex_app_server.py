@@ -138,6 +138,12 @@ SubmissionGate = Callable[[], None]
 #: already running -- so a failure is swallowed by the caller's own seam.
 SubmissionSink = Callable[[], None]
 
+#: What a session calls in the instant before ``turn/start`` goes out, which is
+#: the last moment this process can still say the prompt has not left it. The
+#: acceptance that follows may never arrive, so this is what keeps the silence
+#: after it from reading as a turn that submitted nothing.
+SubmissionInFlightSink = Callable[[], None]
+
 
 class AppServerError(Exception):
     """The app-server conversation cannot continue.
@@ -313,6 +319,7 @@ class CodexAppServerSession:
         on_conversation: ConversationSink | None = None,
         before_submit: SubmissionGate | None = None,
         on_submitted: SubmissionSink | None = None,
+        on_submission_in_flight: SubmissionInFlightSink | None = None,
         request_timeout: float = REQUEST_TIMEOUT_SECONDS,
         steer_timeout: float = STEER_TIMEOUT_SECONDS,
         shutdown_grace: float = SHUTDOWN_GRACE_SECONDS,
@@ -325,6 +332,7 @@ class CodexAppServerSession:
         self._on_conversation = on_conversation
         self._before_submit = before_submit
         self._on_submitted = on_submitted
+        self._on_submission_in_flight = on_submission_in_flight
         self._request_timeout = request_timeout
         self._steer_timeout = steer_timeout
         self._shutdown_grace = shutdown_grace
@@ -344,6 +352,7 @@ class CodexAppServerSession:
         self._turn_status: str | None = None
         self._work_observed = False
         self._turn_accepted = False
+        self._turn_dispatched = False
         self._protocol_error: str | None = None
         self._restore_refused: str | None = None
         self._conversation_error: str | None = None
@@ -416,6 +425,18 @@ class CodexAppServerSession:
             return self._turn_accepted
 
     @property
+    def turn_dispatched(self) -> bool:
+        """Whether ``turn/start`` was put on the wire, answered or not.
+
+        The weaker half of :attr:`turn_accepted`, and the one that matters when
+        the answer never comes. Acceptance says the app-server took the turn;
+        this says only that the prompt left here -- which is enough to stop
+        anything from re-running it or from reporting that it was never sent.
+        """
+        with self._state_lock:
+            return self._turn_dispatched
+
+    @property
     def work_observed(self) -> bool:
         """Whether the app-server has emitted anything the turn itself did."""
         with self._state_lock:
@@ -443,9 +464,15 @@ class CodexAppServerSession:
         """Why the legacy transport may be run instead, or ``None``.
 
         Non-``None`` is a promise, not a suggestion: it is only ever set when
-        the conversation failed *before* ``turn/start`` was accepted and
-        before the app-server emitted any work. Replaying a turn after either
-        of those would execute it twice.
+        the conversation failed *before* ``turn/start`` went out, before it was
+        accepted, and before the app-server emitted any work. Replaying a turn
+        after any of those would execute it twice.
+
+        Dispatch is the first of the three and the one that holds when the
+        others cannot be read. An app-server that took the prompt and then died
+        without answering leaves no acceptance and no emitted work, so a rule
+        written from those two alone would offer a fallback for a turn the
+        provider may well be running.
 
         A resumption request forecloses it outright. The legacy transport
         starts a fresh conversation, so falling back would answer "continue
@@ -455,7 +482,7 @@ class CodexAppServerSession:
         error, and re-running either one would defeat what it refused.
         """
         with self._state_lock:
-            if self._turn_accepted or self._work_observed:
+            if self._turn_dispatched or self._turn_accepted or self._work_observed:
                 return None
             if self._resume_conversation_id is not None:
                 return None
@@ -697,13 +724,19 @@ class CodexAppServerSession:
         turn_params = dict(self._plan.turn_params)
         turn_params["threadId"] = self._require_thread_id()
         turn_params["input"] = [{"type": "text", "text": self._prompt}]
-        turn = self._request("turn/start", turn_params)
+        # Two reports, because the request has two edges and a process can be
+        # lost between them. The first fires as the prompt goes out and says
+        # only that it did; the second fires on the answer and says the
+        # app-server has it. Everything above this line is a conversation that
+        # can still be declined -- a refused ``thread/resume`` most of all --
+        # and a caller told the prompt was submitted there would have consumed
+        # words this process is still holding.
+        turn = self._request(
+            "turn/start",
+            turn_params,
+            on_sending=self._note_submission_in_flight,
+        )
         self._adopt_turn(turn)
-        # Reported only once the server has answered with a turn. Everything
-        # above this line is a conversation that can still be declined -- a
-        # refused ``thread/resume`` most of all -- and a caller told the prompt
-        # was submitted there would have consumed words this process is still
-        # holding.
         self._note_submitted()
 
     def _open_thread(self) -> None:
@@ -810,6 +843,27 @@ class CodexAppServerSession:
             gate()
         except Exception as error:  # noqa: BLE001 - any failure is a refusal
             raise _SubmissionRefused(str(error) or type(error).__name__) from error
+
+    def _note_submission_in_flight(self) -> None:
+        """Record that ``turn/start`` is going out, before it can be seen to.
+
+        Runs from inside the write, after the pipe has been found open and
+        before a byte of the prompt is handed to it, which is the last instant
+        at which "nothing was sent" is still true. Placing it after the write
+        would leave the partial write -- prompt on the wire, exception here --
+        looking exactly like a turn that never sent anything.
+
+        Never raises, for the same reason :meth:`_note_submitted` does not: it
+        would surface as a protocol error the app-server never made, and it
+        would do so while the prompt is already leaving.
+        """
+        with self._state_lock:
+            self._turn_dispatched = True
+        sink = self._on_submission_in_flight
+        if sink is None:
+            return
+        with contextlib.suppress(Exception):
+            sink()
 
     def _note_submitted(self) -> None:
         """Tell the caller the prompt is the worker's now.
@@ -948,7 +1002,15 @@ class CodexAppServerSession:
         params: Mapping[str, Any] | None,
         *,
         timeout: float | None = None,
+        on_sending: Callable[[], None] | None = None,
     ) -> Any:
+        """Send one request and wait for its answer.
+
+        ``on_sending`` runs inside the write, in the instant before the payload
+        reaches the pipe, for the one caller whose request cannot be un-sent:
+        ``turn/start`` carries the prompt, so what this request does is settled
+        by the write rather than by the answer it may never get.
+        """
         pending = _Pending()
         with self._state_lock:
             if self._closed_reason is not None:
@@ -964,7 +1026,7 @@ class CodexAppServerSession:
         if params is not None:
             payload["params"] = dict(params)
         try:
-            self._write(payload)
+            self._write(payload, on_sending=on_sending)
         except AppServerError:
             with self._state_lock:
                 self._pending.pop(request_id, None)
@@ -999,7 +1061,19 @@ class CodexAppServerSession:
             payload["params"] = dict(params)
         self._write(payload)
 
-    def _write(self, payload: Mapping[str, Any]) -> None:
+    def _write(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        on_sending: Callable[[], None] | None = None,
+    ) -> None:
+        """Put one payload on the app-server's stdin.
+
+        ``on_sending`` is called after the pipe has been found open and before
+        anything is written to it: the two refusals above it prove nothing left
+        this process, while everything from the write down is ambiguous, and a
+        caller that has to tell those apart can only be told here.
+        """
         stdin = self._process.stdin
         if stdin is None:
             raise AppServerError("app-server was spawned without a stdin pipe")
@@ -1008,6 +1082,8 @@ class CodexAppServerSession:
             with self._state_lock:
                 if self._stdin_closed:
                     raise AppServerError("app-server stdin is closed")
+            if on_sending is not None:
+                on_sending()
             try:
                 stdin.write(line)
                 stdin.flush()

@@ -216,6 +216,24 @@ def main() -> int:
         elif method == "turn/start":
             record["prompt"] = _text_of(params.get("input"))
             _save()
+            if MODE == "die-before-turn-response":
+                # Read the prompt, then died with the answer unsent. The three
+                # modes here are one situation seen from three angles: the
+                # server has the words and the client will never be told it
+                # does, whether because no answer came, because the answer
+                # refused the turn, or because the answer made no sense.
+                return 9
+            if MODE == "reject-turn":
+                _send(
+                    {
+                        "id": request_id,
+                        "error": {"code": -32602, "message": "turn/start refused"},
+                    }
+                )
+                continue
+            if MODE == "unidentified-turn":
+                _send({"id": request_id, "result": {"turn": {}}})
+                continue
             _send({"id": request_id, "result": {"turn": {"id": "turn-1"}}})
             _send({"method": "turn/started", "params": {"turnId": "turn-1"}})
             if MODE == "die-after-accept":

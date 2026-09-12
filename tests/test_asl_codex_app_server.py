@@ -10,8 +10,10 @@ asserted against an actual pipe.
 
 The invariant that gets the most attention here is the one with the sharpest
 consequence: a turn is never executed twice. The client may fall back to
-``codex exec`` only while ``turn/start`` has not been accepted and no work has
-been emitted, and the tests below hold both sides of that line.
+``codex exec`` only while ``turn/start`` has not *gone out*, and the tests below
+hold both sides of that line -- including the case that separates going out from
+being accepted, an app-server that reads the prompt and then dies with its
+answer unsent.
 """
 
 from __future__ import annotations
@@ -153,6 +155,8 @@ def scripted_responder(
     applied_model: str = "fake-model-1",
     thread_error: dict[str, Any] | None = None,
     resume_error: dict[str, Any] | None = None,
+    turn_error: dict[str, Any] | None = None,
+    turn_result: dict[str, Any] | None = None,
     restored_thread_id: str | None = None,
     answer_steer: bool = True,
     steer_error: dict[str, Any] | None = None,
@@ -207,7 +211,16 @@ def scripted_responder(
                 _line({"id": request_id, "result": thread_result(params, restored)})
             ]
         if method == "turn/start":
-            return [_line({"id": request_id, "result": {"turn": {"id": "turn-1"}}})]
+            if turn_error is not None:
+                return [_line({"id": request_id, "error": turn_error})]
+            return [
+                _line(
+                    {
+                        "id": request_id,
+                        "result": turn_result or {"turn": {"id": "turn-1"}},
+                    }
+                )
+            ]
         if method == "turn/steer":
             if not answer_steer:
                 return []
@@ -252,6 +265,50 @@ def start_session(
     wait_until(
         lambda: session.turn_accepted or session.protocol_error is not None,
         "the handshake neither completed nor failed",
+    )
+    return session
+
+
+def lost_turn_response(**overrides: Any):
+    """The happy path up to ``turn/start``, which is read and never answered.
+
+    The app-server exits as it reads the prompt, which is how the real one loses
+    an answer: the request is gone from this side, the reply never exists, and
+    the client learns only that the process is no longer there.
+    """
+    scripted = scripted_responder(**overrides)
+
+    def respond(process: _FakeProcess, message: dict[str, Any]) -> list[str]:
+        if message.get("method") == "turn/start":
+            process.returncode = 9
+            return []
+        return scripted(process, message)
+
+    return respond
+
+
+def start_lost_session(
+    process: _FakeProcess,
+    **kwargs: Any,
+) -> codex_app_server.CodexAppServerSession:
+    """Start a session whose turn is expected to fail after its prompt went out.
+
+    Neither :func:`start_session` nor :func:`start_refused_session` waits for
+    this: there is no acceptance coming, and the refusal waiter would return the
+    moment the protocol error is recorded, which is before the driver has
+    finished saying what became of the turn.
+    """
+    session = codex_app_server.CodexAppServerSession(
+        process=process,  # type: ignore[arg-type]
+        plan=kwargs.pop("plan", None) or worker_plan(),
+        prompt=kwargs.pop("prompt", PROMPT),
+        **kwargs,
+    )
+    process.session = session
+    session.start()
+    wait_until(
+        lambda: session.protocol_error is not None,
+        "the turn neither failed nor was accepted",
     )
     return session
 
@@ -719,6 +776,141 @@ class FallbackBoundaryTests(unittest.TestCase):
 
         self.assertTrue(session.work_observed)
         self.assertIsNone(session.fallback_reason)
+
+    def test_a_dispatched_prompt_forecloses_the_fallback_without_an_answer(
+        self,
+    ) -> None:
+        """The gap the other two miss: sent, never accepted, no work seen.
+
+        An app-server that read ``turn/start`` and died before answering leaves
+        no acceptance and no emitted work, so the two checks above both pass it
+        -- and the fallback would re-run, on ``codex exec``, a prompt the
+        provider may already be working on.
+        """
+        process = _FakeProcess(lost_turn_response())
+
+        session = start_lost_session(process)
+
+        self.assertTrue(session.turn_dispatched)
+        self.assertFalse(session.turn_accepted)
+        self.assertFalse(session.work_observed)
+        self.assertIsNone(session.fallback_reason)
+
+
+class LostSubmissionResponseTests(unittest.TestCase):
+    """``turn/start`` left this process and nothing came back.
+
+    The request that carries the prompt is the one request whose *write* decides
+    what happened, because its answer can be lost in every way a protocol can
+    lose one: never sent, refused, unintelligible. What the session owes a
+    caller in all of those is the same, and it is not "nothing was submitted" --
+    a caller holding an operator's correction acts on that by handing the words
+    to somebody else.
+    """
+
+    def _session(self, process: _FakeProcess, **kwargs: Any) -> Any:
+        return start_lost_session(process, **kwargs)
+
+    def test_the_prompt_is_reported_out_before_it_is_written(self) -> None:
+        order: list[str] = []
+        scripted = scripted_responder()
+
+        def responder(process: _FakeProcess, message: dict[str, Any]) -> list[str]:
+            if message.get("method") == "turn/start":
+                order.append("written")
+                process.returncode = 9
+                return []
+            return scripted(process, message)
+
+        self._session(
+            _FakeProcess(responder),
+            on_submission_in_flight=lambda: order.append("in-flight"),
+        )
+
+        # Strictly before, not merely "also": the report has to be true even of
+        # a write that fails halfway through, and a report made afterwards
+        # cannot be.
+        self.assertEqual(["in-flight", "written"], order)
+
+    def test_a_lost_answer_is_not_a_prompt_that_stayed_home(self) -> None:
+        submitted: list[str] = []
+        in_flight: list[str] = []
+
+        session = self._session(
+            _FakeProcess(lost_turn_response()),
+            on_submitted=lambda: submitted.append("submitted"),
+            on_submission_in_flight=lambda: in_flight.append("in-flight"),
+        )
+
+        # The turn failed -- there is no acceptance to report -- but the failure
+        # is silence about a prompt that left, which is what the first sink says
+        # and the second one must not be made to say.
+        self.assertIsNotNone(session.protocol_error)
+        self.assertEqual(["in-flight"], in_flight)
+        self.assertEqual([], submitted)
+        self.assertTrue(session.turn_dispatched)
+
+    def test_a_refused_turn_is_still_a_prompt_the_server_read(self) -> None:
+        process = _FakeProcess(
+            scripted_responder(
+                turn_error={"code": -32602, "message": "turn/start refused"}
+            )
+        )
+
+        session = self._session(process)
+
+        # The server answered, and what it answered is "no" -- but it answered
+        # *after* reading the prompt off the wire. Whether anything was done
+        # with the words is the server's business and unknowable here.
+        self.assertIsNotNone(session.protocol_error)
+        self.assertTrue(session.turn_dispatched)
+        self.assertFalse(session.turn_accepted)
+
+    def test_an_unintelligible_answer_is_still_a_prompt_the_server_read(self) -> None:
+        process = _FakeProcess(scripted_responder(turn_result={"turn": {}}))
+
+        session = self._session(process)
+
+        self.assertIsNotNone(session.protocol_error)
+        self.assertTrue(session.turn_dispatched)
+        self.assertFalse(session.turn_accepted)
+
+    def test_a_write_that_broke_partway_counts_as_a_prompt_that_left(self) -> None:
+        """Why the report is made before the write rather than after it.
+
+        A pipe that breaks during the write has already carried some of the
+        prompt, and nothing on this side knows how much. The only reading that
+        is never wrong is the one this makes: the words may be out there.
+        """
+        process = _FakeProcess(scripted_responder())
+        original = process.stdin.write
+
+        def write(line: str) -> int:
+            if '"turn/start"' in line:
+                process.returncode = 9
+                raise BrokenPipeError("the app-server is gone")
+            return original(line)
+
+        process.stdin.write = write  # type: ignore[method-assign]
+
+        session = self._session(process)
+
+        self.assertIsNotNone(session.protocol_error)
+        self.assertTrue(session.turn_dispatched)
+        self.assertIsNone(session.fallback_reason)
+
+    def test_a_handshake_that_never_reached_the_turn_dispatched_nothing(self) -> None:
+        process = _FakeProcess(
+            scripted_responder(thread_error={"code": -1, "message": "boom"})
+        )
+
+        session = start_session(process)
+
+        # The other end of the same rule. Nothing about the prompt was written,
+        # so this turn is free to be run again -- which is what keeps a failed
+        # handshake cheap.
+        self.assertFalse(session.turn_dispatched)
+        self.assertIsNotNone(session.fallback_reason)
 
 
 class ResumeTests(unittest.TestCase):
@@ -1279,6 +1471,52 @@ class AdapterTransportTests(unittest.TestCase):
         # so the turn that never ran still knows where it would have run.
         self.assertEqual("thread-1", result.conversation_id)
 
+    def test_a_prompt_the_server_read_is_never_reported_as_unsubmitted(self) -> None:
+        """Every way a ``turn/start`` answer can be lost, over a real pipe.
+
+        The prompt is in the app-server's own record in all three, which is the
+        fact that matters: the words are on the far side of the wire. What the
+        client does not have is anything to say about them, and the result has
+        to carry that absence rather than the ``False`` a caller would act on by
+        handing the same words to the next worker.
+        """
+        for mode in ("die-before-turn-response", "reject-turn", "unidentified-turn"):
+            with self.subTest(mode=mode):
+                self.launch_log.unlink(missing_ok=True)
+
+                result = self._run(self._adapter(mode))
+
+                self.assertEqual(PROMPT, self._recorded()["prompt"])
+                self.assertNotEqual(0, result.returncode)
+                self.assertIsNone(result.prompt_submitted)
+                self.assertFalse(harnesses.prompt_provably_unsubmitted(result))
+                # No second launch either: the same silence that must not read
+                # as "never sent" must not read as "safe to run again".
+                self.assertEqual(harnesses.TRANSPORT_APP_SERVER, result.transport)
+                self.assertEqual(
+                    ["app-server"], self.launch_log.read_text(encoding="utf-8").split()
+                )
+
+    def test_a_turn_the_server_never_saw_still_proves_its_prompt_stayed_home(
+        self,
+    ) -> None:
+        submitted: list[str] = []
+        adapter = self._adapter("resume-unknown")
+
+        refused = self._run(
+            adapter,
+            invocation=self._resume_invocation(adapter, "thread-77"),
+            on_prompt_submitted=lambda: submitted.append("submitted"),
+        )
+
+        # The counterweight to the test above: the refusal is answered before
+        # ``turn/start`` is written, so this one *is* proof, and the run that
+        # was carrying a correction gets it back.
+        self.assertIsNone(self._recorded()["prompt"])
+        self.assertEqual([], submitted)
+        self.assertIs(False, refused.prompt_submitted)
+        self.assertTrue(harnesses.prompt_provably_unsubmitted(refused))
+
     def test_guidance_reaches_the_running_turn_and_stays_out_of_the_log(self) -> None:
         adapter = self._adapter("await-steer")
         turn = turn_identity()
@@ -1330,9 +1568,39 @@ class AdapterFallbackTests(unittest.TestCase):
         self.plan_dir = self.tmp / "plan"
         self.plan_dir.mkdir()
         self.last_message = self.tmp / "last-message.txt"
+        self.launch_log = self.tmp / "launches.log"
         sweep = mock.patch.object(harnesses, "sweep_enabled", return_value=False)
         sweep.start()
         self.addCleanup(sweep.stop)
+
+    def _dual_mode_codex(self, mode: str) -> Path:
+        """One binary that answers both call shapes and logs every launch.
+
+        The ``app-server`` half runs the real fixture under ``mode``; the
+        ``exec`` half does nothing at all, so a turn that was run twice shows up
+        as a second line in the log rather than as a difference in the output.
+        """
+        executable = self.tmp / "codex"
+        executable.write_text(
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import os, sys",
+                    "from pathlib import Path",
+                    f"log = Path({str(self.launch_log)!r})",
+                    "with log.open('a', encoding='utf-8') as handle:",
+                    "    handle.write(sys.argv[1] + '\\n')",
+                    "if sys.argv[1] != 'app-server':",
+                    "    raise SystemExit(0)",
+                    f"os.environ['FAKE_APP_SERVER_MODE'] = {mode!r}",
+                    f"exec(open({str(FAKE_APP_SERVER_FIXTURE)!r}).read())",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+        return executable
 
     def test_a_harness_without_an_app_server_runs_the_legacy_turn(self) -> None:
         executable = install_fake_codex(self.tmp)
@@ -1373,30 +1641,9 @@ class AdapterFallbackTests(unittest.TestCase):
         self.assertEqual(len(result.stderr), result.stream_io["stderr_chars"])
 
     def test_a_turn_that_died_after_acceptance_is_never_run_again(self) -> None:
-        executable = self.tmp / "codex"
-        launch_log = self.tmp / "launches.log"
-        # One binary that answers both call shapes: the app-server dies after
-        # accepting the turn, and `exec` would run it a second time if the
-        # adapter let it.
-        executable.write_text(
-            "\n".join(
-                [
-                    "#!/usr/bin/env python3",
-                    "import os, sys",
-                    "from pathlib import Path",
-                    f"log = Path({str(launch_log)!r})",
-                    "with log.open('a', encoding='utf-8') as handle:",
-                    "    handle.write(sys.argv[1] + '\\n')",
-                    "if sys.argv[1] != 'app-server':",
-                    "    raise SystemExit(0)",
-                    "os.environ['FAKE_APP_SERVER_MODE'] = 'die-after-accept'",
-                    f"exec(open({str(FAKE_APP_SERVER_FIXTURE)!r}).read())",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+        # The app-server dies after accepting the turn, and `exec` would run it
+        # a second time if the adapter let it.
+        executable = self._dual_mode_codex("die-after-accept")
         adapter = harnesses.CodexAdapter(executable=str(executable))
 
         result = adapter.run(
@@ -1407,7 +1654,34 @@ class AdapterFallbackTests(unittest.TestCase):
             timeout=WAIT_SECONDS,
         )
 
-        self.assertEqual(["app-server"], launch_log.read_text(encoding="utf-8").split())
+        self.assertEqual(
+            ["app-server"], self.launch_log.read_text(encoding="utf-8").split()
+        )
+        self.assertEqual(harnesses.TRANSPORT_APP_SERVER, result.transport)
+        self.assertNotEqual(0, result.returncode)
+
+    def test_a_turn_whose_answer_was_lost_is_never_run_again(self) -> None:
+        """The same promise as above, for the death that leaves no acceptance.
+
+        The app-server here reads the prompt and dies without answering, so
+        nothing on this side was ever told the turn started. A fallback written
+        from acceptance alone hands the identical prompt to ``codex exec``,
+        which is a second execution of work the provider may already be doing.
+        """
+        executable = self._dual_mode_codex("die-before-turn-response")
+        adapter = harnesses.CodexAdapter(executable=str(executable))
+
+        result = adapter.run(
+            cwd=self.tmp,
+            plan_dir=self.plan_dir,
+            prompt=PROMPT,
+            last_message_path=self.last_message,
+            timeout=WAIT_SECONDS,
+        )
+
+        self.assertEqual(
+            ["app-server"], self.launch_log.read_text(encoding="utf-8").split()
+        )
         self.assertEqual(harnesses.TRANSPORT_APP_SERVER, result.transport)
         self.assertNotEqual(0, result.returncode)
 

@@ -521,12 +521,18 @@ class TurnSubmission:
     notification is still running and none can start after it returns. A
     straggling protocol thread therefore cannot report a submission for a turn
     that is already over.
+
+    The seam has three states rather than two, because a prompt on its way out
+    is neither. A transport that has begun handing the words over cannot take
+    them back and cannot yet say they arrived, and that window is long enough to
+    lose a process in: see :attr:`verdict`.
     """
 
     def __init__(self, sink: SubmissionCallback | None = None) -> None:
         self._sink = sink
         self._lock = threading.Lock()
         self._submitted = False
+        self._in_flight = False
         self._closed = False
 
     @property
@@ -534,6 +540,38 @@ class TurnSubmission:
         """Whether this turn's prompt reached the worker."""
         with self._lock:
             return self._submitted
+
+    @property
+    def verdict(self) -> bool | None:
+        """What this seam is willing to say about the prompt: sent, not, unknown.
+
+        ``True`` and ``False`` are both statements about the turn. ``None`` is
+        the refusal to make one, and it is reached the moment a transport says
+        the words are on the wire: from there a silence has two readings -- the
+        server never got them, or it got them and whatever would have said so
+        did not survive -- and the seam has no way to choose between them.
+
+        Closing does not resolve it. That is the point: a turn that ends in this
+        window ends unanswered, so nothing downstream can read the end of the
+        turn as proof the prompt never went out.
+        """
+        with self._lock:
+            if self._submitted:
+                return True
+            return None if self._in_flight else False
+
+    def note_submission_in_flight(self) -> None:
+        """Record that the prompt is going out and can no longer be recalled.
+
+        No sink fires here, because nothing has been received: a caller told
+        "delivered" on this would be claiming a worker holds words that may
+        still be sitting in a pipe. What changes is only what this seam will
+        claim afterwards, which is nothing at all.
+        """
+        with self._lock:
+            if self._closed or self._submitted:
+                return
+            self._in_flight = True
 
     def note_submitted(self) -> None:
         """Report that the prompt is the worker's now, at most once.
@@ -651,9 +689,25 @@ class TurnLifecycle:
         self.conversation.capture(native_id)
 
     @property
-    def prompt_submitted(self) -> bool:
-        """Whether this turn's prompt was actually handed to the worker."""
-        return self.submission.submitted
+    def prompt_submitted(self) -> bool | None:
+        """What this turn can prove about its prompt: sent, not sent, unknown.
+
+        Three-valued because :class:`TurnSubmission` is: a turn stopped while
+        its prompt was crossing the wire answers ``None``, which is the only
+        honest answer and the one a caller holding an operator's words has to be
+        given rather than a ``False`` it would act on.
+        """
+        return self.submission.verdict
+
+    def note_submission_in_flight(self) -> None:
+        """Report that the prompt is going out, before it can be observed to.
+
+        Called by a transport at the last instant it can still say nothing has
+        been sent -- immediately before the write, not after it, because a write
+        that fails partway through has already put some of the prompt on the
+        wire. From here the turn proves nothing about its prompt either way.
+        """
+        self.submission.note_submission_in_flight()
 
     def note_prompt_submitted(self) -> None:
         """Report that the prompt has been submitted, and is now the worker's.
@@ -845,12 +899,13 @@ class HarnessResult:
     conversation_restore_refused: str | None = None
     #: What the turn's own submission seam says about whether its prompt went
     #: out: ``True`` submitted, ``False`` ended without submitting, ``None`` no
-    #: statement at all. The three values are not two -- the seam is closed by
-    #: the boundary that owns the process, so a turn that returned a result has
-    #: an answer, while a turn whose process died on the way to one leaves the
-    #: field where it started. Only a run that *observed* the seam close may
-    #: read ``False`` as proof, which is why the absence of a statement is its
-    #: own value rather than a default of ``False``.
+    #: statement either way. The three values are not two, and ``None`` is
+    #: reached from both ends: a turn whose process died before a result could
+    #: be assembled leaves the field where it started, and a turn stopped while
+    #: its prompt was crossing the wire has a seam that deliberately refuses to
+    #: answer. Only a turn that *declined* reads ``False``, which is why the
+    #: absence of a statement is its own value rather than a default of
+    #: ``False``.
     prompt_submitted: bool | None = None
 
 
@@ -871,10 +926,15 @@ def prompt_provably_unsubmitted(result: HarnessResult) -> bool:
     both directions -- it covers the protocol handshakes that fail without a
     refusal field of their own, a provider that was merely unreachable most of
     all, and it is the only field that knows a one-shot turn submitted its
-    prompt on argv before the window its cancellation was named for.
+    prompt on argv before the window its cancellation was named for. A seam that
+    answers ``None`` has answered: a turn stopped with its prompt on the wire
+    proves nothing, and that is the answer, not a missing one.
 
     A result nothing stamped falls back to what a turn sets when it *declines*,
-    each written on a path that has not sent a prompt:
+    each written on a path that has not sent a prompt -- and each, for that
+    reason, unreachable once a transport has begun writing the prompt out, so
+    reading them under a ``None`` seam cannot resurrect the proof the seam
+    withheld:
 
     - a cancellation acted on in the ``unstarted`` or ``handshake`` window, the
       two windows :data:`CancelStage` documents as costing nothing;
@@ -2504,6 +2564,13 @@ class CodexAdapter(HarnessAdapter):
             # turn stops being one this process could still decline. A restore
             # the server refuses never reaches it.
             on_submitted=None if lifecycle is None else lifecycle.note_prompt_submitted,
+            # And the boundary between the two, which is the one an app-server
+            # that dies mid-turn leaves behind: the prompt went out, the answer
+            # never came, and the turn must end saying it cannot tell rather
+            # than saying it sent nothing.
+            on_submission_in_flight=(
+                None if lifecycle is None else lifecycle.note_submission_in_flight
+            ),
         )
         # The last checkpoint before the thread and the turn are created. A
         # cancellation seen here costs an app-server spawn; the same

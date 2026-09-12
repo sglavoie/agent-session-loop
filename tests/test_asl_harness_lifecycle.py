@@ -291,6 +291,66 @@ class TurnSubmissionTests(unittest.TestCase):
         self.assertEqual([], recorded)
         self.assertFalse(submission.submitted)
 
+    def test_a_seam_that_said_nothing_denies_the_submission(self) -> None:
+        submission = harnesses.TurnSubmission(lambda: None)
+
+        self.assertIs(False, submission.verdict)
+
+    def test_a_prompt_on_the_wire_is_neither_sent_nor_unsent(self) -> None:
+        """The third state, and the only honest one while a write is happening.
+
+        A transport says this at the last instant it could still have said
+        "nothing left here". If the answer never comes, the turn ends in this
+        state -- and the whole point is that ending here says nothing, because a
+        turn that claimed non-submission would hand the same operator's words to
+        the next worker.
+        """
+        recorded: list[str] = []
+        submission = harnesses.TurnSubmission(lambda: recorded.append("submitted"))
+
+        submission.note_submission_in_flight()
+
+        self.assertIsNone(submission.verdict)
+        # Nothing has been received, so nobody is told anything: the report is
+        # what makes a correction *delivered*, and delivery is not this.
+        self.assertEqual([], recorded)
+        self.assertFalse(submission.submitted)
+
+    def test_closing_a_turn_does_not_resolve_a_prompt_in_flight(self) -> None:
+        submission = harnesses.TurnSubmission(lambda: None)
+        submission.note_submission_in_flight()
+
+        submission.close()
+
+        self.assertIsNone(submission.verdict)
+
+    def test_an_answered_submission_settles_what_was_in_flight(self) -> None:
+        recorded: list[str] = []
+        submission = harnesses.TurnSubmission(lambda: recorded.append("submitted"))
+        submission.note_submission_in_flight()
+
+        submission.note_submitted()
+
+        self.assertIs(True, submission.verdict)
+        self.assertEqual(["submitted"], recorded)
+
+    def test_a_late_in_flight_mark_cannot_unsay_a_submission(self) -> None:
+        submission = harnesses.TurnSubmission(lambda: None)
+        submission.note_submitted()
+
+        submission.note_submission_in_flight()
+
+        self.assertIs(True, submission.verdict)
+
+    def test_a_lifecycle_reports_the_seam_it_owns(self) -> None:
+        lifecycle = harnesses.TurnLifecycle(conversation=harnesses.TurnConversation())
+
+        self.assertIs(False, lifecycle.prompt_submitted)
+        lifecycle.note_submission_in_flight()
+        self.assertIsNone(lifecycle.prompt_submitted)
+        lifecycle.note_prompt_submitted()
+        self.assertIs(True, lifecycle.prompt_submitted)
+
 
 class TurnLifecycleTests(unittest.TestCase):
     def test_a_pending_cancellation_stops_the_next_checkpoint(self) -> None:
