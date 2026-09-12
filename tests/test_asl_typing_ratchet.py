@@ -136,6 +136,7 @@ REQUIRED_RATCHETED_MODULES = frozenset(
         "agent_session_loop.diagnostics_export",
         "agent_session_loop.durability",
         "agent_session_loop.events",
+        "agent_session_loop.execution_timing",
         "agent_session_loop.external_write_evidence",
         "agent_session_loop.formatting",
         "agent_session_loop.guard_pretool_hook",
