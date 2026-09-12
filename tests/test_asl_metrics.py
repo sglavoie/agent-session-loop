@@ -18,6 +18,7 @@ from agent_session_loop import (
     cli,
     cli_trace,
     events,
+    execution_timing,
     metrics,
     plans,
     review,
@@ -2220,6 +2221,101 @@ class ExecutionTimingMetricsSectionTests(unittest.TestCase):
         text = self._text()
         self.assertLess(text.index("Execution timing:"), text.index("First-pass"))
         self.assertIn("Supervisor audit:", text)
+
+    def test_timing_reuses_the_corpus_reads_instead_of_adding_a_traversal(
+        self,
+    ) -> None:
+        """Measuring must not cost what it measures.
+
+        Equality of contents cannot catch a second traversal, because a second
+        read of an unchanged corpus returns equal records. Identity can: the
+        evidence handed to the collector has to be the very list object the
+        windowed sections were already given, and each file has to be opened
+        once for the whole report.
+        """
+        plans_written = ("plan-reuse-one", "plan-reuse-two")
+        for index, name in enumerate(plans_written, start=1):
+            state_dir = self._plan(name)
+            run_id = f"run-{index}"
+            _timing_run(state_dir, self.now, run_id=run_id, started=4, finished=1)
+            for turn_index in (1, 2):
+                _timing_turn(
+                    state_dir,
+                    self.now,
+                    run_id=run_id,
+                    turn_index=turn_index,
+                    session_id=str(turn_index),
+                    started=4 - turn_index,
+                    finished=4 - turn_index - 0.5,
+                )
+                _write_turn_result(
+                    state_dir,
+                    run_id=run_id,
+                    turn_index=turn_index,
+                    session_id=str(turn_index),
+                    started_at=_iso(self.now, hours_ago=4 - turn_index),
+                    finished_at=_iso(self.now, hours_ago=4 - turn_index - 0.5),
+                )
+
+        event_reads: list[Path] = []
+        result_reads: list[Path] = []
+        read_events_by_plan: dict[str, list] = {}
+        read_results_by_plan: dict[str, list] = {}
+        collected_by_plan: dict[str, tuple[object, object]] = {}
+        real_read_events = metrics._read_event_records
+        real_read_result = metrics._read_result_payload
+        real_iter_results = metrics._iter_turn_results
+        real_collect = execution_timing.collect_execution_timing
+
+        def read_events(path: Path):
+            event_reads.append(path)
+            records = real_read_events(path)
+            read_events_by_plan[path.parent.name] = records
+            return records
+
+        def read_result(path: Path):
+            result_reads.append(path)
+            return real_read_result(path)
+
+        def iter_results(state_dir: Path):
+            payloads = real_iter_results(state_dir)
+            read_results_by_plan[state_dir.name] = payloads
+            return payloads
+
+        def collect(evidence, **kwargs):
+            for item in evidence:
+                collected_by_plan[item.plan_key] = (
+                    item.event_records,
+                    item.turn_results,
+                )
+            return real_collect(evidence, **kwargs)
+
+        with (
+            mock.patch.object(metrics, "_read_event_records", read_events),
+            mock.patch.object(metrics, "_read_result_payload", read_result),
+            mock.patch.object(metrics, "_iter_turn_results", iter_results),
+            mock.patch.object(execution_timing, "collect_execution_timing", collect),
+        ):
+            report = metrics.collect_metrics(
+                state_dir=self.state_root, since_days=7, now=self.now
+            )
+
+        self.assertEqual(2, report.execution_timing["coverage"]["runs_included"])
+        # This module reads each plan's events file once and each turn result
+        # once, however many of its sections consume them. Other modules the
+        # report calls into (materialization reconciliation, the compaction
+        # dry-run) do their own reads; what is asserted here is that timing
+        # added none.
+        self.assertEqual(len(event_reads), len(set(event_reads)))
+        self.assertEqual(len(plans_written), len(event_reads))
+        self.assertEqual(len(result_reads), len(set(result_reads)))
+        self.assertEqual(2 * len(plans_written), len(result_reads))
+        # And the collector was handed those same reads rather than its own.
+        self.assertEqual(sorted(read_events_by_plan), sorted(collected_by_plan))
+        self.assertEqual(sorted(read_results_by_plan), sorted(collected_by_plan))
+        for plan_key, (records, payloads) in collected_by_plan.items():
+            self.assertIs(read_events_by_plan[plan_key], records)
+            self.assertIs(read_results_by_plan[plan_key], payloads)
 
 
 if __name__ == "__main__":

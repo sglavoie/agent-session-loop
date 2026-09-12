@@ -5346,6 +5346,60 @@ collector cannot attribute to a run are counted in `unattributable_records` and
 evidence went unread; plan-scoped events such as `preflight_skipped` carry no
 `run_id` and land there legitimately.
 
+### Comparing timing across later natural runs
+
+Timing is observational: it re-reads the evidence the loop already writes and
+adds no traversal, no clock, and no run of its own. That makes a comparison
+between two reports cheap, and also makes it easy to compare two things that
+were never the same measurement. The procedure below is the one to repeat when
+asking whether a later batch of natural runs actually moved.
+
+Take the baseline and each later reading the same way: `asl metrics
+--since-days <n> --json`, keeping `execution_timing.window_start`,
+`execution_timing.coverage`, `execution_timing.phases`, and
+`execution_timing.review_scope`. The window always ends at the moment of the
+call — `window_end` is `null` for a rolling window — so two readings never
+cover the same interval, and a run enters a window by its *finish* time and
+then contributes its whole duration, including any part that elapsed before
+`window_start`. Neither figure is wrong; they answer "what finished in this
+window", not "what elapsed in this window".
+
+Read coverage before reading any number it qualifies. `runs_included`,
+`runs_outside_share_basis`, `exclusions`, and
+`included_runs_by_classification` say which runs the seconds and the shares
+were computed over. A share that moved because the share basis gained or lost
+runs is not the workflow moving, and `seconds` totals across windows of
+different sizes are not comparable at all — compare `phases.shares` and
+per-plan rows in `execution_timing.plans`, not corpus totals.
+
+Then compare like with like. The split between `implementation` and
+`generated_repair` is what a change to the repair lifecycle is expected to
+move; `review_scope.by_scope` and `review_scope.fallback_reasons` say whether
+rereviews are narrowing to a recorded base or falling back to full scope, which
+is the mechanism behind that split. Cumulative verification check work lives in
+`verification_checks.cumulative_seconds` and is reported beside, never inside,
+the `verification` phase, so compare it against the earlier check work figure
+rather than against a phase.
+
+An independent recomputation is worth doing once per release rather than per
+reading: sum `turn_execution_finished`, `verification_finished`,
+`commit_finished`, and `verification_check_finished` durations straight out of
+`events.jsonl` for a fixed set of run IDs, and reconcile against the same runs
+in the report. Differences that are expected and not defects: runs whose
+evidence predates a field, run directories that hold only a supervisor audit
+and never emitted `run_started`, and the pre-window portion of a run that
+straddles `window_start`.
+
+Rollback is a plain revert. The code can be reverted without rewriting any
+historical state, because every change to persisted data is additive: reopen
+records gained baseline fields that older readers ignore, and the
+`execution_timing` section is a new key that a reverted `asl metrics` simply
+stops emitting. No migration, backfill, or state rewrite is involved in either
+direction, and the reader-side recovery that reconstructs a missing reopen
+baseline works in memory and never edits an event. If a revert also takes the
+skill text with it, resync the installed copies with `just sync-skills` and
+confirm with `just verify-asl-install`.
+
 ## Harness Commands
 
 The built-in adapters construct argv lists directly and never use shell

@@ -4438,5 +4438,73 @@ class AssuranceDocsRegressionTests(unittest.TestCase):
             self.assertIn(phrase, self.docs)
 
 
+class TimingComparisonDocsRegressionTests(unittest.TestCase):
+    """The procedure for comparing two timing reports, and the rollback."""
+
+    docs: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.docs = (REPO_ROOT / "docs" / "agent-session-loop.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_docs_name_the_json_paths_a_comparison_reads(self) -> None:
+        # A comparison procedure that names a path the report does not emit is
+        # worse than none, so every path it tells an operator to keep is
+        # checked against the section the collector's consumer actually builds.
+        for path in (
+            "`execution_timing.window_start`",
+            "`execution_timing.coverage`",
+            "`execution_timing.phases`",
+            "`execution_timing.review_scope`",
+            "`execution_timing.plans`",
+            "`verification_checks.cumulative_seconds`",
+        ):
+            self.assertIn(path, self.docs)
+
+    def test_docs_warn_that_two_rolling_windows_are_not_the_same_interval(
+        self,
+    ) -> None:
+        for phrase in (
+            "`window_end` is `null` for a rolling window",
+            "two readings never\ncover the same interval",
+            "a run enters a window by its *finish*",
+            "compare `phases.shares`",
+            "not corpus totals",
+        ):
+            self.assertIn(phrase, self.docs)
+
+    def test_docs_state_the_coverage_check_that_qualifies_a_moved_share(
+        self,
+    ) -> None:
+        for phrase in (
+            "`runs_outside_share_basis`",
+            "share basis gained or lost",
+            "is not the workflow moving",
+        ):
+            self.assertIn(phrase, self.docs)
+
+    def test_docs_name_the_expected_reconciliation_differences(self) -> None:
+        for phrase in (
+            "evidence predates a field",
+            "only a supervisor audit\nand never emitted `run_started`",
+            "pre-window portion of a run that\nstraddles `window_start`",
+        ):
+            self.assertIn(phrase, self.docs)
+
+    def test_docs_document_rollback_as_a_plain_revert(self) -> None:
+        for phrase in (
+            "Rollback is a plain revert",
+            "without rewriting any\nhistorical state",
+            "older readers ignore",
+            "stops emitting",
+            "never edits an event",
+            "`just sync-skills`",
+            "`just verify-asl-install`",
+        ):
+            self.assertIn(phrase, self.docs)
+
+
 if __name__ == "__main__":
     unittest.main()
