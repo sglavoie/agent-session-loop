@@ -559,6 +559,46 @@ class TurnSubmission:
             self._sink = None
 
 
+class _SubmissionOnce:
+    """A caller's submission callback, reached from both sides of a turn.
+
+    An adapter that cannot state the submission from inside the turn has to be
+    able to state it after -- past the point where :class:`TurnSubmission` has
+    closed itself against exactly that. Two reporters means the same callback
+    can be reached twice, and a caller's callback is a durable write, so the
+    deduplication belongs here rather than in each caller.
+
+    :attr:`reported` is what the late reporter reads: not "did this turn
+    submit", which the result answers, but "has the caller already been told",
+    which is the only question a second report has to ask.
+    """
+
+    def __init__(self, sink: SubmissionCallback | None) -> None:
+        self._sink = sink
+        self._lock = threading.Lock()
+        self._reported = False
+
+    @property
+    def reported(self) -> bool:
+        """Whether the caller has been told this turn's prompt went out."""
+        with self._lock:
+            return self._reported
+
+    def __call__(self) -> None:
+        with self._lock:
+            if self._reported:
+                return
+            self._reported = True
+            sink = self._sink
+        if sink is None:
+            return
+        # Swallowed for the reason :meth:`TurnSubmission.note_submitted` gives:
+        # the prompt is out, and a caller told otherwise withdraws words a
+        # worker is already reading.
+        with contextlib.suppress(Exception):
+            sink()
+
+
 @dataclass(frozen=True)
 class TurnLifecycle:
     """What a transport may say and ask about the turn it is opening.
@@ -2928,12 +2968,33 @@ class ClaudeAdapter(HarnessAdapter):
         if invocation.overlay_dir is not None:
             spool = claude_stream.ClaudeGuidanceSpool(invocation.overlay_dir / "spool")
         assigned = invocation.assigned_conversation_id
+        # A turn that asked to continue a conversation holds its submission
+        # report until the CLI announces a session: see
+        # :meth:`_restore_refusal` for why that record, and only that record,
+        # separates a ``--resume`` the CLI honoured from one it threw out.
+        restorable = invocation.resume_conversation_id is not None
+        opened: list[claude_stream.ClaudeStreamSession] = []
+
+        def announce_submission() -> None:
+            """The CLI took the conversation up, so the prompt is its now.
+
+            Both halves have to hold. The write below put the words in the
+            pipe, and this record says the CLI got past the ``--resume`` it
+            could have thrown them out over; a turn missing either half has not
+            handed anything to anybody.
+            """
+            if lifecycle is None or not opened or opened[0].prompt_error is not None:
+                return
+            lifecycle.note_prompt_submitted()
+
         session = claude_stream.ClaudeStreamSession(
             process=process,
             prompt=prompt,
             spool=spool,
             session_id=assigned,
+            on_session_observed=announce_submission if restorable else None,
         )
+        opened.append(session)
         if lifecycle is not None and assigned is not None:
             # Before the prompt, which is the submission: the identifier was
             # settled on argv, so unlike a handshake transport this turn has
@@ -2950,11 +3011,20 @@ class ClaudeAdapter(HarnessAdapter):
         # do from its first byte. A write failure here is not raised: the
         # process exists and has to be collected like any other failed turn,
         # with ``prompt_error`` explaining the empty output.
-        if session.send_prompt() and lifecycle is not None:
+        if session.send_prompt() and lifecycle is not None and not restorable:
             # Only on the write that succeeded. A prompt the pipe refused is one
             # the CLI never saw, and the turn that follows it is a spawned
             # process sitting on a closed stdin -- not a worker holding the
             # operator's words.
+            #
+            # And only where nothing can still refuse the prompt this write put
+            # in flight. A CLI that will not honour a ``--resume`` exits without
+            # ever reading its stdin, so the write succeeds against a pipe whose
+            # reader is on its way out: the bytes left this process and reached
+            # nobody. Such a turn reports its submission from the session
+            # announcement above, or from :meth:`_settle_deferred_submission`
+            # once the turn is over and the refusal it would have shown is not
+            # there.
             lifecycle.note_prompt_submitted()
         return _ClaudeStreamTransport(session)
 
@@ -3032,6 +3102,10 @@ class ClaudeAdapter(HarnessAdapter):
             if on_transport is not None:
                 on_transport(transport)
 
+        # Wrapped because a resumed turn can report its submission from either
+        # side of the turn boundary: from the session announcement while it
+        # runs, or from the settlement below once it is over.
+        submission = _SubmissionOnce(on_prompt_submitted)
         try:
             result = super().run(
                 cwd=cwd,
@@ -3053,7 +3127,7 @@ class ClaudeAdapter(HarnessAdapter):
                 invocation=invocation,
                 on_transport=capture,
                 on_conversation=on_conversation,
-                on_prompt_submitted=on_prompt_submitted,
+                on_prompt_submitted=submission,
                 resume_conversation_id=invocation.resume_conversation_id,
             )
         finally:
@@ -3077,6 +3151,7 @@ class ClaudeAdapter(HarnessAdapter):
             invocation=invocation,
             access=access,
             on_conversation=on_conversation,
+            submission=submission,
         )
 
     def _with_continuity_note(
@@ -3087,6 +3162,7 @@ class ClaudeAdapter(HarnessAdapter):
         invocation: HarnessInvocation,
         access: AccessProfile,
         on_conversation: ConversationCallback | None,
+        submission: _SubmissionOnce | None = None,
     ) -> HarnessResult:
         """Report a turn whose conversation is not the one it was promised.
 
@@ -3123,8 +3199,64 @@ class ClaudeAdapter(HarnessAdapter):
             )
         refused = self._restore_refusal(result, session=session, invocation=invocation)
         if refused is not None:
-            return dataclasses.replace(result, conversation_restore_refused=refused)
-        return result
+            # The refusal is also the answer to "did this prompt go out": the
+            # gates it passed include the CLI never announcing a session, so
+            # nothing on the other side of the pipe ever took the words up. A
+            # write into a pipe whose reader is leaving must not read as a
+            # worker holding an operator's correction.
+            return dataclasses.replace(
+                result,
+                conversation_restore_refused=refused,
+                prompt_submitted=False,
+            )
+        return self._settle_deferred_submission(
+            result,
+            session=session,
+            invocation=invocation,
+            submission=submission,
+        )
+
+    def _settle_deferred_submission(
+        self,
+        result: HarnessResult,
+        *,
+        session: claude_stream.ClaudeStreamSession | None,
+        invocation: HarnessInvocation,
+        submission: _SubmissionOnce | None,
+    ) -> HarnessResult:
+        """Close a resumed turn's held-back submission report, fail-closed.
+
+        A resumed claude turn writes its prompt and then waits to see whether the
+        CLI takes the conversation up, because only the CLI can say. It says so
+        by announcing a session, and that announcement reports the submission
+        while the turn is still running -- so this settles the turns where it
+        never came.
+
+        Exactly one of those is proof of anything: the turn whose own output
+        diagnoses a refused restore, which is handled by the caller and reports
+        nothing. Every other silence is ambiguous -- a timeout, a kill, a CLI
+        that died before its first record, a reader that stopped reading -- and
+        the prompt was written into that silence. So each of them reports the
+        submission here rather than leaving it unreported: an unproven turn that
+        claimed non-submission would hand the same words to a second worker,
+        which is the one outcome this seam exists to prevent.
+
+        The caller is told directly rather than through the turn's lifecycle,
+        which is closed by now precisely so a straggling thread cannot reach it.
+        This is not a straggler: the turn is over, its process is collected, and
+        this is the boundary that owned it stating what it did.
+        """
+        if session is None or invocation.resume_conversation_id is None:
+            return result
+        if result.prompt_submitted:
+            return result
+        if session.prompt_error is not None:
+            # The write itself failed, so there is nothing to settle: no bytes
+            # left this process and the result already says so.
+            return result
+        if submission is not None:
+            submission()
+        return dataclasses.replace(result, prompt_submitted=True)
 
     def _restore_refusal(
         self,

@@ -61,6 +61,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -373,12 +374,18 @@ class ClaudeStreamSession:
         spool: ClaudeGuidanceSpool | None = None,
         session_id: str | None = None,
         interrupt_timeout: float = INTERRUPT_TIMEOUT_SECONDS,
+        on_session_observed: Callable[[], None] | None = None,
     ) -> None:
         self._process = process
         self._prompt = prompt
         self._spool = spool
         self._session_id = session_id
         self._interrupt_timeout = interrupt_timeout
+        #: Called once, the first time the CLI names a session of its own. That
+        #: record is the CLI saying it got past its own startup -- including the
+        #: ``--resume`` it could still have rejected -- so it is the earliest
+        #: point anything may treat this turn as one the CLI took up.
+        self._on_session_observed = on_session_observed
 
         self._state_lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -575,18 +582,41 @@ class ClaudeStreamSession:
         mismatch does is disqualify the recorded identifier: the result reports
         it, and nothing continues from a conversation the work did not go into.
         """
+        announced = False
         with self._state_lock:
-            if reported:
+            if reported and not self._session_observed:
                 self._session_observed = True
+                announced = True
             expected = self._session_id
-            if expected is None or not reported or reported == expected:
-                return None
-            if self._session_mismatch is None:
-                self._session_mismatch = (
-                    f"launched under session {expected} "
-                    f"but the CLI reported session {reported}"
-                )
-            return self._session_mismatch
+            mismatch: str | None = None
+            if not (expected is None or not reported or reported == expected):
+                if self._session_mismatch is None:
+                    self._session_mismatch = (
+                        f"launched under session {expected} "
+                        f"but the CLI reported session {reported}"
+                    )
+                mismatch = self._session_mismatch
+        if announced:
+            # Outside the state lock, and before the mismatch is returned: a
+            # sink that blocks would otherwise block every other reader of this
+            # session's state, and a turn the CLI took up is one it took up
+            # whatever it then says about the identifier.
+            self._announce_session()
+        return mismatch
+
+    def _announce_session(self) -> None:
+        """Tell the turn's owner the CLI named a session, at most once.
+
+        The sink's failure is swallowed: this reports something the CLI already
+        did, and an exception raised here would be raised on the output reader's
+        thread, where it would cost the turn its remaining output.
+        """
+        sink = self._on_session_observed
+        self._on_session_observed = None
+        if sink is None:
+            return
+        with contextlib.suppress(Exception):
+            sink()
 
     def note_control_response(self, response: object) -> None:
         """Resolve the control request this response names, if it names one.
