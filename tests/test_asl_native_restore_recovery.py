@@ -98,15 +98,30 @@ UNRELATED_NO_SUCH_ERROR: dict[str, Any] = {
 }
 
 
+#: A misconfigured provider install, reported in the one shape that reads most
+#: like a disowned history and is not one: the noun "session" followed by "not
+#: found". What is missing is a file on disk that an operator puts back, and the
+#: conversation the restore asked for is untouched by its absence.
+SESSION_FILE_ERROR: dict[str, Any] = {
+    "code": -32000,
+    "message": "session file not found: /etc/provider/session-config.json",
+}
+
+
 #: Error responses a provider can answer a restore request with that say
 #: nothing about whether the history exists. The internal-error code is the one
 #: that matters most -- it is what a server wraps any unhandled failure in, so
 #: every transient backend fault arrives wearing it -- and the rest are the
 #: refusals an operator repairs rather than starts over from: a service that is
 #: down, a credential that expired, and a workspace this launch may not read.
-#: The last three are the ones no vocabulary of transient words could have
+#: The middle three are the ones no vocabulary of transient words could have
 #: rescued -- a name lookup, a model, and a workspace that are absent say
 #: nothing temporary and nothing at all about whether the history exists.
+#: The last four go one step further: each one *does* contain a history noun,
+#: and in each one that noun is an adjective in front of the thing the provider
+#: is really talking about -- a configuration file, a worker pool, an RPC
+#: method, a storage backend. An operator repairs every one of them in a minute,
+#: and the conversation was never in question.
 NOT_A_MISSING_HISTORY: tuple[dict[str, Any], ...] = (
     {"code": -32603, "message": "internal error"},
     {"code": -32603, "message": "temporary service unavailable; retry later"},
@@ -115,6 +130,10 @@ NOT_A_MISSING_HISTORY: tuple[dict[str, Any], ...] = (
     {"code": -32000, "message": UNRELATED_NO_SUCH_ERROR["message"]},
     {"code": -32000, "message": "no such model: missing-model-id"},
     {"code": -32000, "message": "no such workspace: /workspace"},
+    SESSION_FILE_ERROR,
+    {"code": -32000, "message": "thread pool not found"},
+    {"code": -32000, "message": "no such session/load method"},
+    {"code": -32000, "message": "unknown session storage backend"},
 )
 
 
@@ -722,6 +741,24 @@ class RestoreDiagnosisTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertFalse(restore_diagnosis.text_diagnoses_missing_history(line))
 
+    def test_a_history_noun_used_as_an_adjective_is_not_the_history(self) -> None:
+        # The same trap with no clause boundary to give it away. English builds
+        # compounds by stacking nouns, so every one of these puts "session" or
+        # "thread" directly in front of the thing it is actually about -- a
+        # config file, a worker pool, an RPC method, a storage backend. Naming
+        # the history noun cannot be enough; it has to hold the subject position.
+        for line in (
+            SESSION_FILE_ERROR["message"],
+            "thread pool not found",
+            "no such session/load method",
+            "unknown session storage backend",
+            "session cache directory does not exist",
+            "no such thread scheduler",
+            "invalid conversation log format",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(restore_diagnosis.text_diagnoses_missing_history(line))
+
     def test_the_ways_a_provider_says_the_history_itself_is_gone(self) -> None:
         # The other direction of the same rule: insisting on the subject may not
         # cost a genuine diagnosis. Each of these names the history and then
@@ -738,6 +775,12 @@ class RestoreDiagnosisTests(unittest.TestCase):
             "unknown session",
             f"invalid thread {THREAD_ID}",
             "expired conversation",
+            # The subject requirement is about what follows the noun, so these
+            # pin the endings it has to keep accepting: punctuation that closes
+            # the clause, a parenthesized identifier, and a predicate.
+            "no such session.",
+            f"no such conversation ({THREAD_ID})",
+            "no such thread is available",
         ):
             with self.subTest(line=line):
                 self.assertTrue(restore_diagnosis.text_diagnoses_missing_history(line))
@@ -1622,6 +1665,30 @@ class UnrelatedAbsenceRestoreFailureRunTests(TransientRestoreFailureRunTests):
     FAILURE_DIR = "app-server-unrelated-absence"
 
     REPORTED_WORDS = "no such host"
+
+
+class SessionFileRestoreFailureRunTests(TransientRestoreFailureRunTests):
+    """The same whole loop, when what the provider could not find was a file.
+
+    The nearest miss of all of them. This sentence does not merely contain "no
+    such" somewhere -- it names a session and then says "not found", which is
+    the exact shape of a disowned history. What it is about is a configuration
+    file on the provider's disk, and an operator who puts that file back has a
+    provider that continues the conversation it was holding all along.
+
+    So the claim is the one the classifier exists for: a history noun standing in
+    front of a piece of infrastructure is not evidence about the history, and
+    reading it as evidence costs an operator their accumulated context and makes
+    them authorize a fresh conversation to get moving again.
+    """
+
+    REPAIRED_RUN_ID = "run-restore-5"
+
+    RESUME_ERROR = SESSION_FILE_ERROR
+
+    FAILURE_DIR = "app-server-session-file"
+
+    REPORTED_WORDS = "session file not found"
 
 
 if __name__ == "__main__":

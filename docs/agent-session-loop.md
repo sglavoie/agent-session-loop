@@ -6097,6 +6097,25 @@ identifier a provider may name it by and no further: "session `s-1` does not
 exist" is a disowned history, and "session/load failed: the settings file does
 not exist" is a missing file in a sentence that happens to mention a session.
 
+Naming the subject is itself two requirements, because English builds compound
+nouns by stacking them and the history words are ordinary ones. "Session file
+not found", "thread pool not found", "no such session/load method" and "unknown
+session storage backend" each name a history noun and each is about something
+else — a configuration file, a worker pool, an RPC method, a storage backend —
+so the noun has to hold the *subject* position rather than merely appear: either
+the verb attaches to it directly, or the clause ends where the noun and its
+identifier end. Which means a name has to look like a name. An identifier is
+quoted, announced as an "id", or carries a digit or a separator — `s-1`, `c-3`,
+`id=c-3`, `"t-9"` — and a bare English word is none of those, so the word after
+the noun in "session file" is read as the sentence's real subject instead of as
+the conversation's name. For the two phrasings whose verb comes first, "no such
+…" and "unknown …", what may follow the noun is listed as predicates rather than
+excluded as nouns, for the same fail-closed reason the subject is required at
+all: there is no end to the infrastructure a provider can put a history word in
+front of, and a misconfigured install that reads as a disowned history costs an
+operator the accumulated context a repaired install would have handed straight
+back.
+
 The whole thing is fail-closed in one direction: an unrecognized sentence is
 not a refusal. The turn fails, the ledger entry survives, and the next launch
 continues the conversation — so a provider that rephrases its refusals costs a

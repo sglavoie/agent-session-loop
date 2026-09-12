@@ -44,16 +44,58 @@ from typing import Any
 #: whatever else the sentence happened to mention.
 _HISTORY_NOUN = r"(?:conversation|session|thread)"
 
+#: What a name looks like, as opposed to what a word looks like. The identifiers
+#: providers mint are quoted, or announced as an "id", or carry a digit or a
+#: separator: ``s-1``, ``c-3``, ``thread-77``, ``id=c-3``, ``"t-9"``. A bare
+#: English word is none of those, and declining to read one as a name is what
+#: keeps "session file", "thread pool" and "session storage" out of this
+#: vocabulary: in each of them the word after the history noun is not the
+#: history's name, it is the thing the sentence is actually about.
+#:
+#: The length bounds are not about identifiers being short. "Contains a digit or
+#: a separator" is a claim about a whole token, so an unbounded form rescans the
+#: token from every position inside it, and this runs over every line a CLI
+#: harness prints -- one long line of base64 in a provider's diagnostics would
+#: buy quadratic work. Sixty-four characters either side of the separator is
+#: several times any identifier a provider mints, and a longer one falls to the
+#: fail-closed default rather than to a stall.
+_HISTORY_ID = r"(?:['\"`][^'\"`]+['\"`]|[\w.@+:-]{0,64}[\d_.@+:-][\w.@+:-]{0,64})"
+
 #: The noun plus the name a provider may give it, so a verdict stays attached to
 #: the subject it was passed about: ``session s-1 does not exist``, ``thread
 #: "t-9" was deleted``, ``conversation id=c-3 no longer exists``. At most one
-#: token, optionally introduced by "id" and optionally quoted -- room for the
-#: identifier of the history being judged, and no room for a second subject to
-#: take the verb instead. The alternative, an unbounded gap, reads "session/load
-#: failed: the settings file does not exist" as a disowned history.
+#: name -- room for the identifier of the history being judged, and no room for a
+#: second subject to take the verb instead. The alternative, an unbounded gap,
+#: reads "session/load failed: the settings file does not exist" as a disowned
+#: history, and a gap of one *word* reads "session file not found" as one.
 _NAMED_HISTORY = (
-    rf"{_HISTORY_NOUN}\b(?:\s+(?:id|ids|identifier))?"
-    r"(?:[\s:=]+['\"`]?[\w.@+:-]+['\"`]?)?"
+    rf"{_HISTORY_NOUN}\b"
+    rf"(?:\s+(?:id|ids|identifier)\b(?:[\s:=]+{_HISTORY_ID})?"
+    rf"|[\s:=]+{_HISTORY_ID})?"
+)
+
+#: Punctuation that closes the clause a history noun was the subject of, and the
+#: predicates that continue one. Both exist for the two patterns whose verb comes
+#: *before* the noun instead of after it, where nothing downstream of the noun
+#: would otherwise have to agree with it: "no such session" is a whole sentence
+#: about a session, while "no such session/load method" and "unknown session
+#: storage backend" are sentences about a method and a backend in which the
+#: history word is merely an adjective.
+_CLAUSE_END = r"[.,;:!?()\[\]{}'\"`]"
+_HISTORY_PREDICATE = (
+    r"(?:found|exists?|existed|remains?|is|was|were|are|has|have|had"
+    r"|with|for|in|on|to|by|of|from|anymore|yet|available|known|loaded"
+    r"|active|open|named|matching|registered|selected)"
+)
+
+#: The noun, the name it may carry, and the evidence that the clause was about
+#: it. Listing the predicates that may follow rather than the nouns that may not
+#: is the fail-closed direction: there is no end to the infrastructure a provider
+#: can put a history word in front of, so an unrecognized continuation leaves the
+#: sentence unread rather than read as a retirement.
+_HISTORY_AS_SUBJECT = (
+    rf"{_NAMED_HISTORY}"
+    rf"(?=[ \t]*(?:$|[\r\n]|{_CLAUSE_END}|{_HISTORY_PREDICATE}\b))"
 )
 
 #: What a provider says when the history named by the restore no longer exists.
@@ -70,11 +112,20 @@ _NAMED_HISTORY = (
 #: conversation. No vocabulary of transient words can rescue such a match
 #: afterwards, because "no such host: api.example" says nothing transient; it
 #: simply says nothing about history at all.
+#:
+#: Naming the noun is necessary and not sufficient, which is the second half of
+#: the same rule. English builds compounds by putting one noun in front of
+#: another, so "session file", "thread pool", "session/load method" and "session
+#: storage backend" each contain a history word and each is about something else
+#: entirely -- a configuration file, a worker pool, an RPC method, a storage
+#: backend. Every alternative therefore requires the history noun to hold the
+#: subject position: the verb either attaches to it directly, or the clause ends
+#: where the noun and its identifier end.
 MISSING_HISTORY_RE = re.compile(
-    rf"(?:no\s+(?:such\s+)?{_HISTORY_NOUN}\b"
+    rf"(?:no\s+(?:such\s+)?{_HISTORY_AS_SUBJECT}"
     rf"|{_NAMED_HISTORY}\s+(?:was\s+)?not\s+found"
     rf"|{_NAMED_HISTORY}\s+(?:does\s+not\s+exist|no\s+longer\s+exists|was\s+deleted)"
-    rf"|(?:unknown|invalid|expired)\s+{_HISTORY_NOUN}\b)",
+    rf"|(?:unknown|invalid|expired)\s+{_HISTORY_AS_SUBJECT})",
     re.IGNORECASE,
 )
 
@@ -113,8 +164,10 @@ def text_diagnoses_missing_history(text: str) -> bool:
     protocol transports. Both halves of the vocabulary are consulted, so a
     sentence that says the conversation is missing *and* says why in transient
     or access terms is read as the outage it is. The positive half insists on a
-    conversation, session, or thread as the subject of the absence, so a line
-    reporting some other missing thing is simply not an answer to this question.
+    conversation, session, or thread as the *subject* of the absence, so a line
+    reporting some other missing thing -- including one whose name merely begins
+    with a history word, like a session file or a thread pool -- is simply not an
+    answer to this question.
     """
     if not text:
         return False
@@ -195,10 +248,12 @@ class ProviderRejection:
           never retire a conversation on its own;
         * the message says *the history* does not exist, in the shared
           vocabulary above -- naming a conversation, session, or thread as the
-          subject, since a provider reports far more absent hosts, models, and
-          files than absent conversations -- because the code alone never says
-          that: both real providers answer a genuinely missing restore with the
-          same invalid-params code they answer a dozen other things with;
+          subject of the absence rather than as an adjective in front of some
+          piece of infrastructure, since a provider reports far more absent
+          hosts, models, config files, and worker pools than absent
+          conversations -- because the code alone never says that: both real
+          providers answer a genuinely missing restore with the same
+          invalid-params code they answer a dozen other things with;
         * neither the message nor the ``data`` blob says the refusal is about an
           outage, a credential, or a permission. ``data`` is consulted only for
           this veto and never as positive evidence: it is free-form, and a
