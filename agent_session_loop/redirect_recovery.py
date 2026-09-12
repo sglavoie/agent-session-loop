@@ -4,7 +4,7 @@ Every earlier module in this subsystem assumes a live runner. Submission waits
 on one, acceptance is a statement by one, escalation is a deadline inside one,
 and delivery is a prompt one builds. A crash removes that process at an
 arbitrary instant, and the instant it removes it decides what the operator is
-owed. Six boundaries matter, and the journal distinguishes all six because
+owed. Seven boundaries matter, and the journal distinguishes all seven because
 nothing in it is ever rewritten:
 
 - before acceptance: a ``submitted`` line and nothing after it. Nobody promised
@@ -12,13 +12,19 @@ nothing in it is ever rewritten:
 - after acceptance, before the prompt: ``accepted`` with no ``continued``. A
   process undertook to stop a worker and hand this correction to its successor,
   and then stopped existing. Nobody else has taken that on;
-- after the prompt, before launch: ``continued`` with no ``delivered``. The
-  words were bound into a prompt, and then the process that was going to run it
-  died or refused. No worker has ever seen them, so this reads like the line
-  above it: still owed, and :func:`reconcile_startup` releases the carry so the
-  next attempt can pick it up. This boundary exists only from journal version 2
-  onward -- version 1 wrote the carry after the launch, so the same shape there
-  is the boundary below and :mod:`redirect_store` replays it as one;
+- after the prompt, before the launch window: ``continued`` with no
+  ``launching``. The words were bound into a prompt, and then the process that
+  was going to run it died or refused *before it could possibly have sent
+  them*. No worker has ever seen them, so this reads like the line above it:
+  still owed, and :func:`reconcile_startup` releases the carry so the next
+  attempt can pick it up. This boundary exists only from journal version 3
+  onward -- version 1 wrote the carry after the launch and version 2 had no
+  ``launching`` line, so the same shape on either is the boundary below;
+- inside the launch window: ``launching`` with no ``delivered`` and no
+  ``released``. The attempt said the prompt was about to leave the process and
+  then said nothing more. It may have sent the words and died, or died first,
+  and no reading of the file can separate the two. Reported as
+  :data:`STATUS_UNCERTAIN` and never released;
 - after launch, before receipt: ``delivered`` with no ``acknowledged``. A worker
   was started holding the words. Whether a model read them is exactly the
   question the acknowledgment protocol exists because nothing cheaper answers;
@@ -36,14 +42,21 @@ touches no FIFO, no process, and no plan file. An operator asking what happened
 to a correction must not be the reason a worker starts, and a status command
 that spawned one would make "check before acting" the dangerous option.
 
-**Ambiguity is reported, never resolved by guessing.** The one case this module
-refuses to decide is a launch without receipt. Re-handing the correction to a
-new worker would tell it the operator's first correction is new; dropping it
-would discard a correction that may never have been read. Both are worse than
-saying so, so those ids come back as :data:`STATUS_UNCERTAIN` and nothing here
-acts on them -- not by default and not under a flag. The operator who looks and
-decides it was never read says so by submitting the correction again, in words
-chosen knowing what happened.
+**Ambiguity is reported, never resolved by guessing.** Two cases this module
+refuses to decide: a delivery without receipt, and an open launch window
+without either. Re-handing the correction to a new worker would tell it the
+operator's first correction is new; dropping it would discard a correction that
+may never have been read. Both are worse than saying so, so those ids come back
+as :data:`STATUS_UNCERTAIN` and nothing here acts on them -- not by default and
+not under a flag. The operator who looks and decides it was never read says so
+by submitting the correction again, in words chosen knowing what happened.
+
+The second case is the one a *failed* write produces as readily as a crash. An
+attempt that cannot record what became of its carry has not thereby proved the
+carry went nowhere, and the run loop is required to abandon the prompt rather
+than send one it could not declare -- but a write that fails after the prompt is
+already out leaves this shape, and it has to read as a question rather than as
+an invitation to send the words again.
 
 The mutating half, :func:`reconcile_startup`, runs under the new run's own lock
 and follows the shape ``state.migrate_plan_state`` established for relocation:
@@ -310,7 +323,15 @@ def operation_status(
             # recorded the carry only after the launch, so the journal cannot
             # even say whether the prompt went out, let alone what was read.
             return STATUS_UNCERTAIN
-        # A carry with no delivery reads as ``accepted`` alongside one that was
+        if request.launch_ambiguous:
+            # The carrying attempt declared the prompt about to go out and never
+            # said what happened -- or wrote at a version that had no way to
+            # declare it. The unknown here is one step earlier than above: not
+            # what a worker read, but whether one was ever handed anything. It
+            # lands in the same bucket because the only safe answers are the
+            # same two, and both belong to an operator.
+            return STATUS_UNCERTAIN
+        # A carry with no launch reads as ``accepted`` alongside one that was
         # never carried at all, and the collapse is deliberate. Both say a
         # runner undertook to act and no process ever ran holding the words, so
         # both are owed to the next attempt; keeping them apart here would put a
@@ -418,7 +439,11 @@ class RecoveryReport:
 
     @property
     def uncertain(self) -> tuple[OperationOutcome, ...]:
-        """Corrections delivered to an attempt that never receipted them."""
+        """Corrections whose fate the journal cannot settle, oldest first.
+
+        Delivered to an attempt that never receipted them, or bound into a
+        prompt an attempt declared it was about to send and never accounted for.
+        """
         return self.with_status(STATUS_UNCERTAIN)
 
     def to_payload(self) -> dict[str, Any]:
@@ -582,16 +607,18 @@ def reconcile_startup(
 
     - every request past its window is expired in the journal, so the refusal
       survives this process too;
-    - every correction a dead run bound into a prompt but never launched a
-      worker with is released. That window -- prompt finalized, process not yet
-      started -- is the one place a carry proves nothing about what anybody saw,
+    - every correction a dead run bound into a prompt but never got as far as
+      declaring it about to leave the process is released. That window -- prompt
+      finalized, ``launching`` not yet written -- is the one place a carry
+      proves nothing about what anybody saw *and* the journal can prove it,
       and leaving the carry standing would let a crash inside it retire the
       operator's words to a turn that never ran. Releasing is safe precisely
-      because ``delivered`` is written on the far side of it: a correction a
-      worker actually received is not touched here. A version-1 carry has no
-      far side, so replay reads it as delivered and this step passes it by --
-      an upgraded plan reports its predecessor's carries as uncertain rather
-      than replaying words that were already in front of a worker;
+      because ``launching`` is written on the far side of it: a correction that
+      may already have gone out is not touched here. A carry written before
+      that line existed has no far side -- a version-1 one replays as delivered,
+      a version-2 one as launch-ambiguous -- so this step passes both by, and an
+      upgraded plan reports its predecessor's carries as uncertain rather than
+      replaying words that may already have been in front of a worker;
     - every *unanswered* request of a dead run whose session this plan is not
       going to run again is settled ``rejected``/``run-ended``. That reason is
       written exactly here: it means the process that owed the operator an
@@ -602,10 +629,11 @@ def reconcile_startup(
       "accepted, and then nobody was left to deliver it", and inventing one
       would overwrite the runner's own decision after the fact;
     - everything still unfinished whose session *is* pending is reported as
-      recoverable, and every request a launched worker never receipted is
-      reported as uncertain. Neither is acted on here. Recovery happens when the
-      session is actually selected, because only then does a continuation
-      attempt exist to carry a correction into.
+      recoverable, and every request a launched worker never receipted -- or
+      whose launch window a dead run left open -- is reported as uncertain.
+      Neither is acted on here. Recovery happens when the session is actually
+      selected, because only then does a continuation attempt exist to carry a
+      correction into.
 
     ``pending_session_ids`` is supplied by the caller rather than read from the
     plan: this module has no business deciding what a plan is going to run, and
@@ -685,8 +713,8 @@ def reconcile_startup(
         for request in view.requests
         if request.target.run_id != run_id
         and request.accepted
-        and request.delivered
         and not request.acknowledged
+        and (request.delivered or request.launch_ambiguous)
     )
     return ReconciliationReport(
         plan_dir=str(plan_dir),
@@ -712,7 +740,11 @@ def _release_unlaunched_carries(
     state_dir: str | Path | None,
     moment: datetime,
 ) -> tuple[str, ...]:
-    """Hand back every carry a dead run made but never launched with, oldest first.
+    """Hand back every carry a dead run provably never sent, oldest first.
+
+    "Provably" is the whole of it. A carry the dead run had already declared it
+    was about to submit is skipped, because the release would rest on a silence
+    that has two readings and this module picks neither.
 
     Restricted to *other* runs on purpose. A carry belonging to this run at
     startup is impossible -- the run id is minted for this process -- and a rule
@@ -730,6 +762,12 @@ def _release_unlaunched_carries(
             continue
         carried_into = request.continuation
         if carried_into is None or request.reached_a_worker:
+            continue
+        if request.launch_ambiguous:
+            # The dead run declared this prompt about to go out and then went
+            # silent. Handing the carry back here would be this module deciding
+            # the words never left that process, which is exactly what it has no
+            # evidence for. Left carried, and reported as uncertain below.
             continue
         try:
             redirect_store.release_request(

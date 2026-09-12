@@ -22,6 +22,15 @@ the next attempt when this one never got as far as a process. Without the pair,
 a refusal after the coalescing boundary reads exactly like a delivery nobody
 receipted, and the operator's words are spent on a turn that never happened.
 
+Neither of those two is written by an attempt that *stopped existing* in the
+gap, which is why :func:`launch_corrections` sits between them. It is appended
+while the words demonstrably have not gone out, and it is the only reason a
+later reader can tell "this attempt died before submitting" from "this attempt
+died just after submitting". Before it, silence is safe to act on; after it,
+silence is a question for an operator. A caller that cannot append it has to
+abandon the prompt rather than send it, because a submission it could not
+declare is one nothing can ever account for.
+
 **What counts as the worker having received it?** Only an explicit receipt from
 the worker, naming the correction *and* the attempt it is running:
 :func:`acknowledge_correction`. Everything cheaper is evidence of something
@@ -407,7 +416,7 @@ def carried_corrections(
 
 
 class _CarryAnnotator(Protocol):
-    """The shape :func:`redirect_store.deliver_request` and its sibling share."""
+    """The shape :func:`redirect_store.deliver_request` and its siblings share."""
 
     def __call__(
         self,
@@ -424,11 +433,11 @@ class _CarryAnnotator(Protocol):
 class CarryAnnotations:
     """The outcome of settling what became of one attempt's carries.
 
-    Two facts share this shape because they are the two answers to the same
-    question -- did the attempt that bound these corrections into a prompt
-    actually put them in front of a worker -- and a caller reporting either one
-    wants the same three things: which attempt, which ids moved, and which the
-    journal would not move.
+    Several facts share this shape because they are the successive answers to
+    the same question -- did the attempt that bound these corrections into a
+    prompt actually put them in front of a worker -- and a caller reporting any
+    of them wants the same three things: which attempt, which ids moved, and
+    which the journal would not move.
     """
 
     continuation: redirect_store.RedirectTarget
@@ -473,6 +482,39 @@ def _carry_annotation_targets(
         return tuple(operation_ids)
     view = redirect_store.read_journal(plan_dir, state_dir=state_dir)
     return tuple(request.operation_id for request in view.carried_for(continuation))
+
+
+def launch_corrections(
+    plan_dir: str | Path,
+    *,
+    continuation: redirect_store.RedirectTarget,
+    operation_ids: Sequence[str] | None = None,
+    state_dir: str | Path | None = None,
+    now: datetime | None = None,
+) -> CarryAnnotations:
+    """Declare that ``continuation`` is about to submit a prompt holding these.
+
+    The last durable statement an attempt can make while it is still true that
+    the words have not gone out. Everything after it is the window a crash makes
+    unreadable, and the declaration is what tells a later reader that the window
+    was entered at all.
+
+    Unlike its siblings this one's refusals are *not* advisory. A caller that
+    cannot get these lines down must not submit the prompt: doing so would put
+    the correction in a worker's hands with nothing on disk to stop the next run
+    from handing it over a second time. Refusals are still collected rather than
+    raised, because the caller has to decide what to do about a partial pass --
+    some ids declared, some not -- and an exception would hide which is which.
+    """
+    return _annotate_carries(
+        plan_dir,
+        continuation=continuation,
+        operation_ids=operation_ids,
+        kind=redirect_store.KIND_LAUNCHING,
+        annotate=redirect_store.launch_request,
+        state_dir=state_dir,
+        now=now,
+    )
 
 
 def deliver_corrections(

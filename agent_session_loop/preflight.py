@@ -1305,6 +1305,31 @@ RUNTIME_REPAIR_HINTS: dict[str, RepairHint] = {
         ),
         fix_category="env-state",
     ),
+    "redirect-delivery-unrecordable": RepairHint(
+        category="redirect-delivery-unrecordable",
+        check_id="runtime.redirect-delivery-unrecordable",
+        severity_hint="red",
+        message=(
+            "The turn was carrying an urgent correction and the redirect "
+            "journal would not record that its prompt was about to be sent, so "
+            "the run refused to send it. That refusal is deliberate: a "
+            "submission the journal cannot show would be indistinguishable "
+            "afterwards from one that never happened, and the next run would "
+            "hand the same correction to a second worker. "
+            "`details.operation_ids` names the corrections still held and the "
+            "preceding `redirect-continuation` event carries the journal's own "
+            "reason. Check the state directory the journal lives in -- "
+            "`df -h` for a full filesystem, `mount` and the directory's mode "
+            "for a read-only or unwritable one -- then re-run. The words are "
+            "still in the journal and the next turn carries them; nothing was "
+            "lost and no reply is needed."
+        ),
+        question_template=(
+            "Runner paused: the redirect journal could not record this turn's "
+            "submission ({message}). Should I check the state directory?"
+        ),
+        fix_category="env-state",
+    ),
 }
 
 

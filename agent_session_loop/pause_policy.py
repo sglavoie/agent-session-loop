@@ -88,6 +88,15 @@ USER_REQUIRED_HARNESS_FAILURE_REASONS: tuple[str, ...] = (
 #   deliberately an operator's to make, never a supervisor's. Classifying it
 #   ``reply`` would both open a mailbox wait nothing answers and let the
 #   recoverable-retry path replay a fresh start.
+# - ``redirect-delivery-unrecordable``: the redirect journal would not record
+#   that a carried correction's prompt was about to be submitted, so the turn
+#   was not started. What refused is storage — a full disk, an unwritable or
+#   read-only state directory — and it is still refusing when the next run
+#   starts, which is what makes this a standing environment blocker rather than
+#   a property of the turn. No answer an operator sends frees a byte; once the
+#   storage is repaired an ordinary relaunch runs the turn with the words still
+#   in the journal. Classifying it ``reply`` would open a mailbox wait on a
+#   machine that may not be able to write the mailbox either.
 ENVIRONMENT_BLOCKED_PAUSE_REASONS: tuple[str, ...] = (
     "commit-preflight",
     "commit-failed",
@@ -99,6 +108,7 @@ ENVIRONMENT_BLOCKED_PAUSE_REASONS: tuple[str, ...] = (
     events.PAUSE_REASON_GUARD_PROTECTED_PATH_CHANGED,
     events.PAUSE_REASON_GUARD_PROTECTED_PATH_UNAVAILABLE,
     events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
+    events.PAUSE_REASON_REDIRECT_DELIVERY_UNRECORDABLE,
 )
 
 # Verdicts a post-turn guard reached, and turn outcomes nobody asked a question

@@ -287,6 +287,14 @@ PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED = "conversation-recovery-required"
 # recoverable — and being non-recoverable is also what keeps the run from
 # committing the interrupted turn's retained work.
 PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED = "redirect-successor-blocked"
+# A turn carrying an accepted redirect could not record, before starting, that
+# its prompt was about to be submitted. The turn is not started: a submission
+# this run could not declare is one no later reader can tell apart from a
+# submission that never happened, and that ambiguity is what makes the same
+# correction reach a second worker. The words stay in the journal, so the fix is
+# to the journal's storage — a full disk, a read-only or unwritable state
+# directory — after which an ordinary relaunch runs the turn with them.
+PAUSE_REASON_REDIRECT_DELIVERY_UNRECORDABLE = "redirect-delivery-unrecordable"
 
 # The subset of harness-failure categories that a supervisor may safely retry
 # by relaunching the same session. Quota, authentication, invalid-model, and
@@ -330,6 +338,7 @@ PAUSE_REASONS: tuple[str, ...] = (
     PAUSE_REASON_REVIEW_NOT_CLEAR,
     PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
     PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
+    PAUSE_REASON_REDIRECT_DELIVERY_UNRECORDABLE,
     PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     PAUSE_REASON_QUOTA_EXHAUSTED,
     PAUSE_REASON_AUTH_FAILED,

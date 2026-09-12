@@ -742,6 +742,138 @@ class CrashBeforeLaunchTests(RecoveryTestCase):
         self.assertEqual(1, len(payload["released"]))
 
 
+class CrashInsideTheLaunchWindowTests(RecoveryTestCase):
+    """A crash between declaring the launch and hearing what the worker did.
+
+    This is the narrow window the launch record exists to name. The prompt was
+    written and handed towards a process; whether it left is exactly what the
+    crash destroyed the answer to. Nothing here may be read as proof either
+    way, so the carry stands: not released, not stranded, not replayed, and
+    reported to the operator as the only party who can find out.
+    """
+
+    def carried_and_launching(self) -> redirect_store.RedirectRequest:
+        """Accepted, bound into a prompt, declared outbound, and then the crash."""
+        request = self.accept(self.submit(turn_index=7))
+        redirect_store.carry_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(8),
+            state_dir=self.state_dir,
+        )
+        redirect_store.launch_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(8),
+            state_dir=self.state_dir,
+        )
+        self.write_lock(pid=self.DEAD_PID)
+        return request
+
+    def test_the_launching_carry_is_not_handed_back(self) -> None:
+        request = self.carried_and_launching()
+
+        report = self.reconcile()
+
+        self.assertEqual((), report.released)
+        stored = self.read().request(request.operation_id)
+        assert stored is not None
+        self.assertTrue(stored.carried)
+        self.assertFalse(stored.released)
+        self.assertFalse(stored.delivered)
+        self.assertTrue(stored.launch_ambiguous)
+
+    def test_it_is_reported_uncertain_rather_than_recoverable(self) -> None:
+        request = self.carried_and_launching()
+
+        report = self.reconcile()
+
+        self.assertEqual((request.operation_id,), report.uncertain_for(SESSION_ID))
+        self.assertEqual((), report.recoverable_for(SESSION_ID))
+        self.assertEqual(
+            redirect_recovery.STATUS_UNCERTAIN, self.status_of(request.operation_id)
+        )
+
+    def test_no_route_through_recovery_replays_it(self) -> None:
+        """Not offered, and not carried by a successor that names it anyway."""
+        request = self.carried_and_launching()
+        report = self.reconcile()
+
+        carried = redirect_ack.carry_corrections(
+            self.plan_dir,
+            continuation=target(1, run_id=NEW_RUN),
+            recovered_operation_ids=(request.operation_id,),
+            state_dir=self.state_dir,
+        )
+
+        self.assertEqual(
+            (), redirect_recovery.recoverable_operation_ids(report, SESSION_ID)
+        )
+        self.assertEqual((), carried.operation_ids())
+        self.assertNotIn(FIRST, json.dumps(report.to_payload()))
+
+    def test_the_ambiguity_is_not_settled_as_stranded_either(self) -> None:
+        """A finished session does not convert the unknown into an answer."""
+        request = self.carried_and_launching()
+        lines = len(self.journal_lines())
+
+        report = self.reconcile(pending=())
+
+        self.assertEqual((), report.stranded)
+        self.assertEqual((request.operation_id,), report.uncertain_for(SESSION_ID))
+        self.assertEqual(lines, len(self.journal_lines()))
+        stored = self.read().request(request.operation_id)
+        assert stored is not None
+        self.assertTrue(stored.carried)
+
+    def test_reconciling_twice_appends_nothing(self) -> None:
+        request = self.carried_and_launching()
+        self.reconcile()
+        lines = len(self.journal_lines())
+
+        again = self.reconcile()
+
+        self.assertEqual((), again.released)
+        self.assertEqual((request.operation_id,), again.uncertain_for(SESSION_ID))
+        self.assertEqual(lines, len(self.journal_lines()))
+
+    def test_a_refusal_recorded_before_the_crash_is_still_recoverable(self) -> None:
+        """The launch window closes both ways, and only one of them is unknown.
+
+        A run that declared the launch and then learned the prompt never went
+        out says so by releasing the carry. That release is evidence, so the
+        correction survives the same crash as an offer rather than a doubt.
+        """
+        request = self.accept(self.submit(turn_index=7))
+        redirect_store.carry_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(8),
+            state_dir=self.state_dir,
+        )
+        redirect_store.launch_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(8),
+            state_dir=self.state_dir,
+        )
+        redirect_store.release_request(
+            self.plan_dir,
+            request.operation_id,
+            continuation=target(8),
+            state_dir=self.state_dir,
+        )
+        self.write_lock(pid=self.DEAD_PID)
+
+        report = self.reconcile()
+
+        self.assertEqual((), report.uncertain_for(SESSION_ID))
+        self.assertEqual((request.operation_id,), report.recoverable_for(SESSION_ID))
+        self.assertEqual(
+            redirect_recovery.STATUS_ACCEPTED, self.status_of(request.operation_id)
+        )
+
+
 class NoSilentRedeliveryTests(RecoveryTestCase):
     """A crash after delivery is ambiguous, and ambiguity is reported."""
 
@@ -831,29 +963,36 @@ class NoSilentRedeliveryTests(RecoveryTestCase):
 
 
 class LegacyJournalUpgradeTests(RecoveryTestCase):
-    """A journal written before the carry and the launch became two records.
+    """Journals written before the records this module now reasons from existed.
 
-    The upgrade moves what a line already on disk means. Version 1 appended
+    Each upgrade moves what a line already on disk means, and both of them move
+    it towards more evidence than the old writer ever had. Version 1 appended
     ``continued`` from a run whose worker was already up, so its journals hold
-    the crash-before-launch shape without ever having been in that state --
-    accepted, carried, nothing after it, because nothing after it existed to
-    write. Read under the new rule, every correction a pre-upgrade run ever
-    delivered becomes an unlaunched carry, which is the one shape this module
-    releases and offers for automatic replay. The version on the line is what
-    stops that, and these tests are the guarantee the upgrade does not reverse:
-    ambiguity stays ambiguous, and only the operator resolves it.
+    the crash-before-launch shape without ever having been in that state.
+    Version 2 split the carry off from the delivery but had no way to say a
+    prompt was outbound, so its carries are silent about the one thing the
+    release rule now reads their silence as proving. Under the current rule
+    either one would become an unlaunched carry, which is the single shape this
+    module releases and offers for automatic replay. The version on the line is
+    what stops that, and these tests are the guarantee neither upgrade reverses
+    itself: ambiguity stays ambiguous, and only the operator resolves it.
     """
 
     LEGACY_OP = "legacy-op"
     LEGACY_TEXT = "the correction the dead run already handed over"
 
-    def write_legacy_carry(self, *, acknowledged: bool = False) -> None:
-        """Lay down the journal a pre-split writer would have left behind."""
+    def write_legacy_carry(
+        self,
+        *,
+        acknowledged: bool = False,
+        version: int = redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+    ) -> None:
+        """Lay down the journal a writer of that version would have left behind."""
         created = clock.utc_now()
         continuation = target(2).to_payload()
         rows: list[dict[str, Any]] = [
             {
-                "version": redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+                "version": version,
                 "kind": "submitted",
                 "id": self.LEGACY_OP,
                 "created_at": clock.isoformat(created),
@@ -862,13 +1001,13 @@ class LegacyJournalUpgradeTests(RecoveryTestCase):
                 "text": self.LEGACY_TEXT,
             },
             {
-                "version": redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+                "version": version,
                 "kind": "accepted",
                 "id": self.LEGACY_OP,
                 "created_at": clock.isoformat(created + timedelta(seconds=1)),
             },
             {
-                "version": redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+                "version": version,
                 "kind": "continued",
                 "id": self.LEGACY_OP,
                 "created_at": clock.isoformat(created + timedelta(seconds=2)),
@@ -878,7 +1017,7 @@ class LegacyJournalUpgradeTests(RecoveryTestCase):
         if acknowledged:
             rows.append(
                 {
-                    "version": redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+                    "version": version,
                     "kind": "acknowledged",
                     "id": self.LEGACY_OP,
                     "created_at": clock.isoformat(created + timedelta(seconds=3)),
@@ -958,11 +1097,51 @@ class LegacyJournalUpgradeTests(RecoveryTestCase):
             redirect_recovery.STATUS_ACKNOWLEDGED, self.status_of(self.LEGACY_OP)
         )
 
+    def test_a_pre_launch_carry_is_uncertain_too(self) -> None:
+        """Version 2 could split the carry off, but not say a prompt was outbound.
+
+        Its carries end the same way whether the run died before the worker
+        started or between submitting the prompt and writing the receipt, so
+        the release rule has nothing to read and the operator gets the question.
+        """
+        self.write_legacy_carry(
+            version=redirect_store.REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION
+        )
+
+        report = self.reconcile()
+
+        self.assertEqual((), report.released)
+        self.assertEqual((self.LEGACY_OP,), report.uncertain_for(SESSION_ID))
+        self.assertEqual((), report.recoverable_for(SESSION_ID))
+        self.assertEqual(
+            redirect_recovery.STATUS_UNCERTAIN, self.status_of(self.LEGACY_OP)
+        )
+
+    def test_a_pre_launch_carry_is_not_read_as_a_delivery_either(self) -> None:
+        """The two upgrades are separate claims, and only one of them applies.
+
+        Version 2 did distinguish a carry from a delivery; what it lacked was
+        the launch. Reading its silence as a delivery would settle receipts
+        that were never earned, so the carry stays carried and unacknowledged.
+        """
+        self.write_legacy_carry(
+            version=redirect_store.REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION
+        )
+
+        stored = self.read().request(self.LEGACY_OP)
+
+        assert stored is not None
+        self.assertTrue(stored.carried)
+        self.assertFalse(stored.delivered)
+        self.assertFalse(stored.delivered_legacy)
+        self.assertTrue(stored.launch_unrecorded)
+        self.assertTrue(stored.launch_ambiguous)
+
     def test_the_new_format_is_still_recovered_beside_it(self) -> None:
         """The upgrade preserves the distinction rather than collapsing it.
 
         One journal, both shapes: the legacy carry that stands for a delivery,
-        and a version-2 carry whose missing launch record is real evidence.
+        and a current carry whose missing launch record is real evidence.
         Only the second one is handed back.
         """
         self.write_legacy_carry()

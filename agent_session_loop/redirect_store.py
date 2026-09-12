@@ -32,6 +32,17 @@ Four properties are structural rather than incidental:
   delivery to a worker that never ran. A released correction is carryable again;
   a delivered one is not, because only the worker can say what it read and
   :mod:`redirect_ack` exists for that answer.
+- **The absence of a delivery only means something inside a window that was
+  declared.** ``launching`` is appended at the last instant before the prompt
+  can leave the process, and it is what makes "carried, not delivered" two
+  distinguishable facts instead of one ambiguous one. Before it, nothing can
+  have gone out, so a carry with no launch record is safe to hand back. After
+  it, a missing ``delivered`` line means either that the prompt never went out
+  *or* that it did and the writer died before saying so — and since the journal
+  cannot tell those apart, neither may anything reading it. Such a carry is
+  reported as uncertain and is never released automatically. An attempt that
+  knows it did not submit says so itself, with ``released``; that is a
+  statement by a live process, not an inference from a silence.
 - **The feedback text never leaves this module by accident.** No parsed object
   carries it: :class:`RedirectRequest` holds a byte count and a digest, and
   rejected lines are reported without their raw bytes because a malformed line
@@ -41,15 +52,17 @@ Four properties are structural rather than incidental:
   bounded, and submissions stop one tier below the cap so a full journal can
   still record the acceptance, rejection, or expiry of what is already in it.
 
-Splitting planned delivery from actual delivery is also why the record version
-moved to 2 rather than staying at 1. Version 1 wrote
-``continued`` only once a worker was running, so the same line means "a worker
-holds these words" on an old journal and "nobody ever ran" on a new one.
-Replay therefore reads each line at the version that line carries: a version-1
-``continued`` records the delivery its writer meant by it, which keeps a
-correction an upgraded plan's previous run already handed over out of the
-automatic release and recovery paths and in front of the operator as
-uncertain.
+Both of those splits moved the meaning of a line already on disk, which is why
+the record version has moved twice. Version 1 wrote ``continued`` only once a
+worker was running, so the same line means "a worker holds these words" on a
+version-1 journal and "nobody ever ran" on a later one. Version 2 had the split
+but no ``launching``, so a version-2 carry with no delivery cannot say whether
+its writer died before or after the prompt went out. Replay therefore reads
+each line at the version that line carries: a version-1 ``continued`` records
+the delivery its writer meant by it, and a version-2 ``continued`` records that
+its writer had no way to declare the launch window. Both keep a correction an
+upgraded plan's previous run may already have handed over out of the automatic
+release and recovery paths and in front of the operator as uncertain.
 
 A ``continued`` line ordinarily names a later turn of the request's own run.
 The one exception is marked on the line itself: ``recovered`` says a run that
@@ -93,13 +106,24 @@ REDIRECT_JOURNAL_FILE_NAME = "redirect-journal.jsonl"
 #: meaning, because replay has no other way to tell the two apart, and reading
 #: an old line under the new rule would hand a correction a worker already acted
 #: on back to the next attempt as if it were unseen.
-REDIRECT_JOURNAL_VERSION = 2
+#: Version 3 adds ``launching``, the declaration that the prompt is about to
+#: leave this process. Its absence after a version-3 ``continued`` proves the
+#: prompt never went out; its absence after a version-2 one proves nothing at
+#: all, because that writer had no such line to append. The number moves for the
+#: same reason it moved before: the meaning of a silence changed, and replay has
+#: nothing but the version to tell which silence it is reading.
+REDIRECT_JOURNAL_VERSION = 3
 #: The last version whose ``continued`` line was itself the delivery record.
 REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION = 1
+#: The last version that could not declare the launch window. A ``continued``
+#: line at or below it leaves the carry ambiguous rather than releasable.
+REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION = 2
 #: Read support is per line, not per file. A journal an upgrade caught mid-run
-#: holds both versions, and each line is interpreted as its own writer meant it.
+#: holds more than one version, and each line is interpreted as its own writer
+#: meant it.
 REDIRECT_JOURNAL_SUPPORTED_VERSIONS: tuple[int, ...] = (
     REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+    REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION,
     REDIRECT_JOURNAL_VERSION,
 )
 
@@ -139,6 +163,7 @@ RecordKind = Literal[
     "rejected",
     "expired",
     "continued",
+    "launching",
     "delivered",
     "released",
     "acknowledged",
@@ -148,6 +173,7 @@ KIND_ACCEPTED: RecordKind = "accepted"
 KIND_REJECTED: RecordKind = "rejected"
 KIND_EXPIRED: RecordKind = "expired"
 KIND_CONTINUED: RecordKind = "continued"
+KIND_LAUNCHING: RecordKind = "launching"
 KIND_DELIVERED: RecordKind = "delivered"
 KIND_RELEASED: RecordKind = "released"
 KIND_ACKNOWLEDGED: RecordKind = "acknowledged"
@@ -157,6 +183,7 @@ RECORD_KINDS: tuple[RecordKind, ...] = (
     KIND_REJECTED,
     KIND_EXPIRED,
     KIND_CONTINUED,
+    KIND_LAUNCHING,
     KIND_DELIVERED,
     KIND_RELEASED,
     KIND_ACKNOWLEDGED,
@@ -168,14 +195,16 @@ RECORD_KINDS: tuple[RecordKind, ...] = (
 #: remainder, which is how :meth:`_Replay._apply` reaches them.
 ANNOTATION_KINDS: tuple[RecordKind, ...] = (
     KIND_CONTINUED,
+    KIND_LAUNCHING,
     KIND_DELIVERED,
     KIND_RELEASED,
     KIND_ACKNOWLEDGED,
 )
 #: The annotations that say something about a carry already on the record, as
-#: opposed to creating one. All three name the continuation they are about and
+#: opposed to creating one. All of them name the continuation they are about and
 #: are refused unless that is the carry the journal currently holds.
 CARRY_ANNOTATION_KINDS: tuple[RecordKind, ...] = (
+    KIND_LAUNCHING,
     KIND_DELIVERED,
     KIND_RELEASED,
     KIND_ACKNOWLEDGED,
@@ -245,6 +274,7 @@ ERROR_NOT_ACCEPTED = "redirect-not-accepted"
 ERROR_ALREADY_CARRIED = "redirect-already-carried"
 ERROR_NOT_CARRIED = "redirect-not-carried"
 ERROR_CONTINUATION_MISMATCH = "redirect-continuation-mismatch"
+ERROR_ALREADY_LAUNCHING = "redirect-already-launching"
 ERROR_ALREADY_DELIVERED = "redirect-already-delivered"
 ERROR_ALREADY_ACKNOWLEDGED = "redirect-already-acknowledged"
 ERROR_REPLAY_CONFLICT = "redirect-replay-conflict"
@@ -278,6 +308,7 @@ REJECT_NOT_ACCEPTED = "not-accepted"
 REJECT_ALREADY_CARRIED = "already-carried"
 REJECT_NOT_CARRIED = "not-carried"
 REJECT_CONTINUATION_MISMATCH = "continuation-mismatch"
+REJECT_ALREADY_LAUNCHING = "already-launching"
 REJECT_ALREADY_DELIVERED = "already-delivered"
 REJECT_ALREADY_ACKNOWLEDGED = "already-acknowledged"
 
@@ -363,11 +394,23 @@ class RedirectRequest:
     ``released_at`` is that window's undo -- it withdraws a carry that never
     reached a worker and puts the correction back in front of the next attempt.
 
-    On a version-1 journal the two marks were one, so ``delivered_at`` is read
-    off the ``continued`` line and ``delivered_legacy`` says so. The flag
-    changes no decision here -- a legacy delivery is a delivery -- and exists
-    because an operator asking what became of their words deserves to know the
-    delivery is the old format's single mark rather than an observed launch.
+    ``launching_at`` cuts that window in two. It is appended at the last instant
+    before the prompt can leave the process, so a carry without it cannot have
+    been submitted and a carry with it but no delivery is a question nobody can
+    answer from the file alone: the writer either never got the prompt out or
+    got it out and died before saying so. :attr:`launch_ambiguous` is that
+    second case, and it is the difference between a correction the next attempt
+    may take back and one only an operator may resolve.
+
+    On a version-1 journal the carry and the delivery were one mark, so
+    ``delivered_at`` is read off the ``continued`` line and ``delivered_legacy``
+    says so. The flag changes no decision here -- a legacy delivery is a
+    delivery -- and exists because an operator asking what became of their words
+    deserves to know the delivery is the old format's single mark rather than an
+    observed launch. ``launch_unrecorded`` is the same courtesy one version
+    later: a version-2 writer had no ``launching`` line to append, so its silence
+    is not evidence, and the flag is what stops that silence from being read as
+    one.
     """
 
     operation_id: str
@@ -385,6 +428,9 @@ class RedirectRequest:
     continued_at: str | None = None
     continued_seq: int | None = None
     continuation_recovered: bool = False
+    launching_at: str | None = None
+    launching_seq: int | None = None
+    launch_unrecorded: bool = False
     delivered_at: str | None = None
     delivered_seq: int | None = None
     delivered_legacy: bool = False
@@ -413,6 +459,16 @@ class RedirectRequest:
         return self.continuation is not None
 
     @property
+    def launching(self) -> bool:
+        """Whether the carrying attempt declared the prompt about to go out.
+
+        The mark is appended before the submission it describes, so it never
+        means the worker got the words -- only that this process was past the
+        last point at which it could still promise it had not sent them.
+        """
+        return self.launching_at is not None
+
+    @property
     def delivered(self) -> bool:
         """Whether the carrying attempt actually launched a worker with it.
 
@@ -420,6 +476,24 @@ class RedirectRequest:
         once the worker was up, so the ``continued`` line is the launch.
         """
         return self.delivered_at is not None
+
+    @property
+    def launch_ambiguous(self) -> bool:
+        """Whether this carry's fate cannot be read off the journal.
+
+        True when the words were declared about to go out and nothing since
+        says whether they did, and true for a carry written before ``launching``
+        existed, whose writer could not have declared it either way. Both are
+        the same fact for every caller: an automatic decision here would be a
+        guess, so the carry is neither released nor redelivered and is put in
+        front of an operator instead.
+
+        False once the attempt itself settled the question -- a ``delivered``
+        or a ``released`` line is a statement by a live process, not a silence.
+        """
+        if not self.carried or self.reached_a_worker:
+            return False
+        return self.launching or self.launch_unrecorded
 
     @property
     def released(self) -> bool:
@@ -500,6 +574,10 @@ class RedirectRequest:
             "continued_at": self.continued_at,
             "continued_seq": self.continued_seq,
             "continuation_recovered": self.continuation_recovered,
+            "launching_at": self.launching_at,
+            "launching_seq": self.launching_seq,
+            "launch_unrecorded": self.launch_unrecorded,
+            "launch_ambiguous": self.launch_ambiguous,
             "delivered_at": self.delivered_at,
             "delivered_seq": self.delivered_seq,
             "delivered_legacy": self.delivered_legacy,
@@ -613,15 +691,18 @@ class RedirectJournalView:
         whole acknowledgment protocol exists because delivery is not receipt:
         deciding here that a launched delivery never happened would be the guess
         that protocol refuses to make. :mod:`redirect_recovery` reports those as
-        uncertain instead. A carry with no delivery is a different animal --
-        nothing ran, so there is nothing to be uncertain about -- and stays
-        strandable so the words can be recovered.
+        uncertain instead. So is a carry whose attempt declared the prompt about
+        to go out and then said nothing: the declaration is there precisely so
+        that silence cannot be read as "nothing ran". A carry with no such
+        declaration is the different animal -- the words provably never left the
+        dead process -- and stays strandable so they can be recovered.
         """
         return tuple(
             request
             for request in self.requests
             if request.target.run_id != run_id
             and not request.reached_a_worker
+            and not request.launch_ambiguous
             and (not request.terminal or request.accepted)
         )
 
@@ -1006,9 +1087,10 @@ class _Replay:
     ) -> None:
         """Apply a carry annotation to an accepted request.
 
-        ``continued`` creates the carry; ``delivered``, ``released`` and
-        ``acknowledged`` all speak about a carry already on the record and are
-        refused unless they name the one the journal currently holds.
+        ``continued`` creates the carry; ``launching``, ``delivered``,
+        ``released`` and ``acknowledged`` all speak about a carry already on the
+        record and are refused unless they name the one the journal currently
+        holds.
 
         Every condition the appenders check is re-checked here, because a replay
         that trusted the file would let a hand-edited or racing line invent a
@@ -1020,7 +1102,11 @@ class _Replay:
         ``record_version`` decides what a ``continued`` line claims.
         :data:`REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION` and below wrote it from
         a run that had already launched the worker, so the carry and the launch
-        are the same line and both are applied from it.
+        are the same line and both are applied from it. Through
+        :data:`REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION` the writer had no
+        ``launching`` line at all, so the carry is marked as one whose launch
+        window was never declarable rather than one that was declared and did
+        not happen.
         """
         existing = self.requests.get(operation_id)
         if existing is None:
@@ -1063,6 +1149,11 @@ class _Replay:
                 continued_at=created_at,
                 continued_seq=seq,
                 continuation_recovered=recovered,
+                launching_at=None,
+                launching_seq=None,
+                launch_unrecorded=(
+                    record_version <= REDIRECT_JOURNAL_LEGACY_LAUNCH_VERSION
+                ),
             )
             if record_version <= REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION:
                 # The writer of this line had no separate launch record to
@@ -1089,6 +1180,25 @@ class _Replay:
             # crossed a crash is describing a delivery that never happened.
             self.reject(seq, REJECT_CONTINUATION_MISMATCH, operation_id)
             return
+        if kind == KIND_LAUNCHING:
+            # The window can only be declared open once, and only while it is
+            # still ahead of the prompt. A line claiming it after a delivery or
+            # a receipt is describing a moment that has already passed.
+            if existing.delivered:
+                self.reject(seq, REJECT_ALREADY_DELIVERED, operation_id)
+                return
+            if existing.acknowledged:
+                self.reject(seq, REJECT_ALREADY_ACKNOWLEDGED, operation_id)
+                return
+            if existing.launching:
+                self.reject(seq, REJECT_ALREADY_LAUNCHING, operation_id)
+                return
+            self.requests[operation_id] = replace(
+                existing,
+                launching_at=created_at,
+                launching_seq=seq,
+            )
+            return
         if kind == KIND_DELIVERED:
             if existing.delivered:
                 self.reject(seq, REJECT_ALREADY_DELIVERED, operation_id)
@@ -1103,7 +1213,10 @@ class _Replay:
             # Releasing is only ever the undo of a carry nothing saw. Once a
             # worker was launched with the words -- or receipted them -- the
             # attempt owns them, and withdrawing the carry here would hand the
-            # same correction to a second worker.
+            # same correction to a second worker. A declared-but-unfinished
+            # launch window is not that: the attempt writing this line is the
+            # one that declared it and is still alive to say the prompt never
+            # went out, which is the only evidence that can close the window.
             if existing.delivered:
                 self.reject(seq, REJECT_ALREADY_DELIVERED, operation_id)
                 return
@@ -1116,6 +1229,9 @@ class _Replay:
                 continued_at=None,
                 continued_seq=None,
                 continuation_recovered=False,
+                launching_at=None,
+                launching_seq=None,
+                launch_unrecorded=False,
                 released_at=created_at,
                 released_seq=seq,
                 released_from=continuation,
@@ -1639,10 +1755,10 @@ def _annotate_locked(
     against.
 
     Their demand is bounded by the run loop rather than by the record kinds.
-    ``delivered`` and ``acknowledged`` are still at most one apiece, and a
-    release-then-recarry cycle costs two more lines per attempt that gave up
-    before launching -- bounded by the run's own attempt limits, which already
-    bound the submission tier.
+    ``launching``, ``delivered`` and ``acknowledged`` are still at most one
+    apiece, and a release-then-recarry cycle costs two more lines per attempt
+    that gave up before launching -- bounded by the run's own attempt limits,
+    which already bound the submission tier.
     """
     record: dict[str, Any] = {
         **_record(kind, existing.operation_id, clock.isoformat(moment)),
@@ -1668,6 +1784,15 @@ def _annotate_locked(
             continued_at=created_at,
             continued_seq=seq,
             continuation_recovered=recovered,
+            launching_at=None,
+            launching_seq=None,
+            launch_unrecorded=False,
+        )
+    elif kind == KIND_LAUNCHING:
+        annotated = replace(
+            existing,
+            launching_at=created_at,
+            launching_seq=seq,
         )
     elif kind == KIND_DELIVERED:
         annotated = replace(
@@ -1682,6 +1807,9 @@ def _annotate_locked(
             continued_at=None,
             continued_seq=None,
             continuation_recovered=False,
+            launching_at=None,
+            launching_seq=None,
+            launch_unrecorded=False,
             released_at=created_at,
             released_seq=seq,
             released_from=continuation,
@@ -1835,9 +1963,9 @@ def _require_carried_by(
 ) -> RedirectRequest:
     """Return the request ``continuation`` currently holds a carry on.
 
-    Shared by the two annotations that speak about an existing carry rather than
-    creating one. Both have exactly one thing to prove before they may append --
-    that the carry on the record is *this* attempt's -- and both have to refuse a
+    Shared by the annotations that speak about an existing carry rather than
+    creating one. Each has exactly one thing to prove before it may append --
+    that the carry on the record is *this* attempt's -- and each has to refuse a
     settled, uncarried or foreign-carried request the same way, because the
     caller cannot tell those apart from a successful no-op.
     """
@@ -1886,6 +2014,58 @@ def _require_carried_by(
             },
         )
     return existing
+
+
+def launch_request(
+    plan_dir: str | Path,
+    operation_id: str,
+    *,
+    continuation: RedirectTarget,
+    state_dir: str | Path | None = None,
+    now: datetime | None = None,
+) -> RedirectRequest:
+    """Declare that ``continuation`` is about to let this carry leave the process.
+
+    The line a caller must get onto disk *before* it can submit the prompt, and
+    the reason a missing :func:`deliver_request` means something. Up to here the
+    words provably never went out, so a dead attempt's carry can be handed back
+    to the next one. Past here nobody reading the file can tell a prompt that
+    never left from one that left and outlived its writer, so the carry stops
+    being automatically recoverable and becomes an operator's question --
+    :attr:`RedirectRequest.launch_ambiguous`.
+
+    That is the whole trade: one extra fsync per carried correction per attempt,
+    in exchange for never delivering the same correction twice on the strength
+    of a silence. A caller that cannot append this must not submit the prompt,
+    because doing so would re-create the very ambiguity the line exists to
+    bound -- except that nothing would record it.
+
+    Repeating the declaration for the same continuation returns the existing
+    record and appends nothing, and so does one made after the delivery it
+    precedes, so a retried launch neither doubles the line nor un-delivers a
+    correction.
+    """
+    validate_target(continuation)
+    journal_path = journal_path_for_plan(plan_dir, state_dir)
+    with _locked_journal(journal_path) as (fd, replay):
+        existing = _require_carried_by(
+            replay,
+            operation_id,
+            journal_path=journal_path,
+            continuation=continuation,
+        )
+        if existing.launching or existing.reached_a_worker:
+            return existing
+        return _annotate_locked(
+            fd,
+            replay,
+            journal_path=journal_path,
+            existing=existing,
+            kind=KIND_LAUNCHING,
+            continuation=existing.continuation or continuation,
+            moment=_moment(now),
+            recovered=existing.continuation_recovered,
+        )
 
 
 def deliver_request(
@@ -1955,6 +2135,12 @@ def release_request(
     acting on the words, and handing them to a second attempt would be a
     duplicate rather than a rescue. Repeating the release for the same
     continuation returns the existing record and appends nothing.
+
+    Allowed, and important, after :func:`launch_request`: the attempt that
+    declared the launch window is the only thing that can close it, and this is
+    how it says the prompt never went out after all. The declaration is cleared
+    along with the carry, so what a later reader sees is a plain undelivered
+    correction rather than an unanswerable one.
     """
     validate_target(continuation)
     journal_path = journal_path_for_plan(plan_dir, state_dir)

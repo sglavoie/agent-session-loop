@@ -572,6 +572,102 @@ class OrdinaryTurnTests(_TurnTestCase):
         self.assertTrue(signal.completed)
 
 
+class SubmissionStatedOnTheResultTests(_TurnTestCase):
+    """What the turn tells a caller that was not watching its callbacks.
+
+    A caller holding an operator's correction has to know whether the prompt
+    went out, and the callback alone cannot tell it: no callback means either
+    "never sent" or "sent, and whatever would have said so did not survive".
+    So the adapter answers on the result, where a turn that reached one has an
+    answer and a turn that never reached one leaves the question open.
+    """
+
+    def test_a_turn_that_submitted_says_so(self) -> None:
+        adapter = _LifecycleAdapter()
+        process = _FakeProcess(running=False)
+
+        result = self.run_turn(adapter, process)
+
+        self.assertTrue(result.prompt_submitted)
+        self.assertFalse(harnesses.prompt_provably_unsubmitted(result))
+
+    def test_a_turn_cancelled_before_the_spawn_says_the_opposite(self) -> None:
+        adapter = _LifecycleAdapter()
+        signal = harnesses.AbortSignal()
+        signal.arm("operator stopped the run")
+
+        result = self.run_turn(adapter, _FakeProcess(), abort=signal)
+
+        self.assertFalse(result.prompt_submitted)
+        self.assertTrue(harnesses.prompt_provably_unsubmitted(result))
+
+    def test_a_handshake_that_refused_says_the_opposite_too(self) -> None:
+        signal = harnesses.AbortSignal()
+        adapter = _LifecycleAdapter(
+            transport=harnesses.TRANSPORT_STREAM_JSON,
+            before_submit=lambda: signal.arm("operator stopped the run"),
+        )
+
+        result = self.run_turn(adapter, _FakeProcess(), abort=signal)
+
+        self.assertFalse(result.prompt_submitted)
+        self.assertTrue(harnesses.prompt_provably_unsubmitted(result))
+
+    def test_a_one_shot_turn_cancelled_late_is_not_read_as_unsubmitted(self) -> None:
+        """Where the seam and the cancellation window disagree, the seam wins.
+
+        A turn that carries its prompt on argv submitted at the spawn, so a
+        cancellation named for the handshake window says nothing about whether
+        the worker got the words -- and it did. Reading the window instead
+        would hand an already-delivered correction to a second worker.
+        """
+        signal = harnesses.AbortSignal()
+        adapter = _LifecycleAdapter(
+            before_submit=lambda: signal.arm("operator stopped the run")
+        )
+
+        result = self.run_turn(adapter, _FakeProcess(), abort=signal)
+
+        self.assertEqual(harnesses.CANCEL_STAGE_HANDSHAKE, result.cancel_stage)
+        self.assertTrue(result.prompt_submitted)
+        self.assertFalse(harnesses.prompt_provably_unsubmitted(result))
+
+    def test_a_protocol_failure_with_no_field_of_its_own_still_says_it(
+        self,
+    ) -> None:
+        """The case the older refusal fields miss, and the reason for this one.
+
+        A provider that was simply unreachable refuses nothing about the
+        history, so it sets neither ``conversation_restore_refused`` nor
+        ``conversation_error`` -- it is an ordinary failed turn. The seam still
+        knows no prompt was sent, and saying so is what keeps that correction
+        recoverable instead of merely doubtful.
+        """
+        adapter = _LifecycleAdapter(transport=harnesses.TRANSPORT_STREAM_JSON)
+        process = _FakeProcess(running=False)
+
+        def refuse() -> None:
+            raise harnesses.HarnessError("temporary service unavailable")
+
+        adapter._before_submit = refuse
+        with self.assertRaises(harnesses.HarnessError):
+            self.run_turn(adapter, process)
+
+        # Raised rather than returned, which is the other half of the claim: a
+        # turn with no result to stamp reports nothing, and the caller reads
+        # that silence as the open question it is.
+        self.assertTrue(process.killed)
+
+    def test_a_result_nobody_stamped_proves_nothing(self) -> None:
+        """A fabricated result is silent, and silence is not a refusal."""
+        result = harnesses.HarnessResult(
+            name="codex", argv=["codex"], returncode=1, stdout="", stderr=""
+        )
+
+        self.assertIsNone(result.prompt_submitted)
+        self.assertFalse(harnesses.prompt_provably_unsubmitted(result))
+
+
 class CancellationWindowTests(_TurnTestCase):
     """The four windows a cancellation can arrive in."""
 

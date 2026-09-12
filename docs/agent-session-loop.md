@@ -3355,10 +3355,25 @@ non-recoverable one: the repair is to the machine — a surviving process, an
 unreaped child — and no text an operator sends makes a successor safe to start,
 so the pause also makes no automatic commit of the retained work.
 
+A journal that will not accept the launch declaration pauses the same way, with
+`redirect-delivery-unrecordable`, and the turn is not started at all. This is
+the one piece of redirect bookkeeping the loop may not shrug off: its siblings
+report a decision already made, while this one is a precondition of making it. A
+journal that cannot record the undertaking cannot record its outcome either, so
+launching anyway would put the operator's words in a worker's hands with nothing
+on disk to say so — precisely the shape that produces a duplicate delivery
+later. The correction is handed back on the way out, as a best effort, and a
+carry the same failing journal will not release is reported as uncertain rather
+than offered again. It is an `inspect` pause because the repair is to the disk
+the journal lives on — a full filesystem, a read-only mount — and no reply
+changes that: a turn not run costs a pause an operator can act on, where a turn
+run undeclared costs a correction delivered twice with nobody able to tell.
+
 A crash is not a fifth kind of failure here; it is the same four states seen
-from the next process. A correction can stop existing mid-flight at five
+from the next process. A correction can stop existing mid-flight at six
 instants — before anyone accepted it, after acceptance and before it reached a
-prompt, after it reached a prompt and before the worker said so, after the
+prompt, after it reached a prompt and before that prompt was declared outbound,
+inside the window between that declaration and the worker saying so, after the
 receipt, and mid-append on the journal's own last line — and each leaves a
 different, readable file behind. Recovery is therefore reconstruction from
 durable evidence rather than replay: the next run reads what the dead one wrote
@@ -3394,8 +3409,14 @@ Before any of that, reconciliation hands back the carries the dead run never
 launched with. A correction bound into a prompt whose worker never started is
 not in any conversation's history and was never in front of anybody, so
 releasing it costs nothing and leaves it takeable; left carried it would be
-unreachable forever, because a second carry over an existing one is refused. The
-release is restricted to *other* runs: a carry belonging to the starting run is
+unreachable forever, because a second carry over an existing one is refused.
+What makes "never started" a fact rather than a guess is that the run writes the
+launch down before it happens. A carry with no launch record behind it is one
+the dead run can still be proved not to have sent; a carry whose launch was
+declared and whose outcome never arrived proves nothing either way, and is left
+exactly where it is. The absence that licenses a release is therefore the
+absence of a specific line, never the absence of news. The release is restricted
+to *other* runs: a carry belonging to the starting run is
 impossible, since its id was minted for this process, and a rule that did not
 say so would become a live run releasing its own in-flight prompt the first time
 reconciliation ran from somewhere else. A refusal is swallowed rather than
@@ -3416,16 +3437,28 @@ acknowledgment whose marker disagrees with the delivery it claims is rejected on
 replay like any other mismatch. An operator's ordering survives the crash the
 same way it survives an interruption, by journal sequence.
 
-The one outcome recovery refuses to decide is a *submitted* delivery without a
-receipt. The journal records that the words went out to a worker; whether a
-model read them is the question the acknowledgment protocol exists because
-nothing cheaper answers. That is the whole reason the submission is written down
-apart from the carry: without it this uncertainty would swallow every crash in
-the window before the prompt was handed over too — including the worker a
-provider refuses the moment it asks to restore its conversation, which is
-spawned and then told nothing — and those corrections are recoverable.
-Re-handing the correction would tell a worker its first correction is new;
-dropping it would discard one that may never have been read. So it is reported
+The one outcome recovery refuses to decide is a delivery that was submitted, or
+may have been, without a receipt. The journal records that the words went out to
+a worker; whether a model read them is the question the acknowledgment protocol
+exists because nothing cheaper answers. That is the whole reason the submission
+is written down apart from the carry: without it this uncertainty would swallow
+every crash in the window before the prompt was handed over too — including the
+worker a provider refuses the moment it asks to restore its conversation, which
+is spawned and then told nothing — and those corrections are recoverable. The
+launch record draws the other edge of that window, and it is what keeps the
+first edge honest: a run that died between submitting a prompt and recording the
+submission left the same file behind as one that died before submitting at all,
+so without it the uncertainty would be resolved in the *unsafe* direction and
+the correction handed to a second worker. The same goes for a delivery line the
+journal simply refused to take, and for a transport whose reporting thread died
+before it could say the prompt went out: neither is a refusal, both are
+silences, and a silence inside the launch window is a question. A refusal a live
+attempt actually observed is different — a cancellation caught before the
+handshake finished, a conversation that could not be recorded, a restore the
+provider declined — and that attempt says so by releasing the carry, which is
+evidence and keeps those corrections recoverable. Re-handing an ambiguous
+correction would tell a worker its first correction is new; dropping it would
+discard one that may never have been read. So it is reported
 as `uncertain` and nothing acts on it automatically — and there is no flag that
 does, because the coalescing boundary refuses a second delivery of an already
 carried request in any case. The operator who reads the report and concludes it
@@ -7350,7 +7383,7 @@ precondition (`commit-preflight`, `commit-failed`,
 `repository-registry-required`, `workspace-repository-contention`,
 `not-loop-ready`, `required-checks-incomplete`, `review-not-clear`,
 `guard-protected-path-changed`, `guard-protected-path-unavailable`,
-`conversation-recovery-required`); and the
+`conversation-recovery-required`, `redirect-delivery-unrecordable`); and the
 verdicts a post-turn guard reached along with the turn outcomes nobody asked a
 question about (`workspace-write-scope-violation`,
 `workspace-write-guard-unavailable`, `review-guard-unavailable`,

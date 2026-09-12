@@ -992,6 +992,9 @@ def _annotate_carried_corrections(
     journal that refuses them is reported and never raised: at the release site
     the run is already pausing for a reason of its own, and at the delivery site
     a worker is already running.
+
+    Not shared with :func:`_launch_carried_corrections`, which is bookkeeping the
+    decision *depends on* and therefore cannot swallow its own failure.
     """
     if carried is None or not carried.corrections:
         return
@@ -1028,6 +1031,72 @@ def _annotate_carried_corrections(
             **result.to_payload(),
         },
     )
+
+
+def _launch_carried_corrections(
+    ctx: RunContext,
+    *,
+    plan_dir: Path,
+    state_dir_arg: str | Path | None,
+    carried: redirect_ack.CarriedCorrections | None,
+    session_id: str,
+    turn_index: int,
+    harness: str,
+) -> bool:
+    """Declare this attempt's carry about to go out, and say whether it worked.
+
+    The one piece of redirect bookkeeping the run loop may not shrug off. Its
+    siblings report a decision already made; this one is a precondition of
+    making it. Appended before the executor is given the prompt, it is what lets
+    a later reader tell an attempt that died before submitting from one that
+    died just after -- and the whole point of that distinction is to stop the
+    second case from being replayed to a new worker as if it were the first.
+
+    So a refusal here returns ``False`` and the caller must abandon the turn
+    rather than launch it. Submitting a prompt this run could not declare would
+    put the operator's words in a worker's hands with nothing on disk to say so,
+    which is precisely the shape that produces a duplicate delivery later. A
+    turn not run costs a pause the operator can act on; a turn run undeclared
+    costs a correction delivered twice with nobody able to tell.
+
+    ``True`` with nothing carried is the ordinary case: no carry, nothing to
+    declare, nothing that can fail.
+    """
+    if carried is None or not carried.corrections:
+        return True
+    error: dict[str, Any] | None = None
+    result: redirect_ack.CarryAnnotations | None = None
+    try:
+        result = redirect_ack.launch_corrections(
+            plan_dir,
+            continuation=carried.continuation,
+            operation_ids=carried.operation_ids(),
+            state_dir=state_dir_arg,
+        )
+    except redirect_store.RedirectStoreError as failure:
+        error = {"reason": failure.reason, "message": str(failure)}
+    else:
+        if result.refused:
+            # A per-id refusal is as disqualifying as a raised one. The prompt
+            # holds every carried correction, so declaring only some of them
+            # would leave the rest in exactly the state this call exists to
+            # prevent.
+            refusal = result.refused[0]
+            error = {"reason": refusal.reason, "message": refusal.message}
+    ctx.persistence.append_event(
+        ctx.event_path,
+        events.REDIRECT_CONTINUATION_EVENT,
+        {
+            "run_id": ctx.run_id,
+            "turn_index": turn_index,
+            **plans.session_identity_payload(session_id),
+            "outcome": "launching" if error is None else "launching-failed",
+            "harness": harness,
+            **(result.to_payload() if result is not None else {}),
+            **({"error": error} if error is not None else {}),
+        },
+    )
+    return error is None
 
 
 def _release_carried_corrections(
@@ -1099,12 +1168,14 @@ def _deliver_carried_corrections(
 class _TurnDelivery:
     """One attempt's carry, from the launch boundary to the turn's outcome.
 
-    An attempt that carried corrections ends in exactly one of two states, and
-    only the harness knows which: the prompt reached a worker, or it did not.
-    Both are recorded here because they are the same decision read from opposite
-    ends -- ``delivered`` makes taking the words back a duplicate, ``released``
-    makes handing them out again a rescue -- and an attempt that recorded
-    neither would leave the operator's words bound to a turn that is over.
+    An attempt that carried corrections ends in one of three states, and only
+    the harness can narrow it: the prompt reached a worker, it provably did not,
+    or neither could be established. The first two are recorded here because
+    they are the same decision read from opposite ends -- ``delivered`` makes
+    taking the words back a duplicate, ``released`` makes handing them out again
+    a rescue. The third is deliberately recorded as nothing at all: the
+    ``launching`` line written before the launch already stands, and leaving it
+    unanswered is what tells a later reader to ask rather than to guess.
 
     Settled exactly once, under a lock, because the two ends are reached from
     different threads: a protocol harness submits on its own driver thread while
@@ -1155,21 +1226,34 @@ class _TurnDelivery:
             harness=self._harness,
         )
 
-    def settle_unsubmitted(self) -> None:
-        """Hand the carry back if the turn ended without submitting its prompt.
+    def settle_unsubmitted(self, result: harnesses.HarnessResult) -> None:
+        """Hand the carry back if the turn *proved* it submitted no prompt.
 
         The launch-side counterpart of the prelaunch releases: a turn that
         spawned and then refused -- a native restore the provider declined, a
-        cancellation caught mid-handshake, a prompt the harness could not write
-        -- leaves the correction bound to an attempt that never delivered it.
+        cancellation caught mid-handshake, a conversation it could not record --
+        leaves the correction bound to an attempt that never delivered it.
         Without this the journal would go on claiming those words were the dead
         worker's, and the authorized fresh continuation that follows would
         arrive empty-handed.
+
+        The proof is the result's own refusal fields, not the absence of a
+        submission callback. A missing callback is a silence, and by the time
+        this runs the journal already says the prompt was about to go out, so
+        the silence has two readings: the turn never sent it, or it sent it and
+        whatever would have reported that did not survive -- an adapter thread
+        that died between the write and the notification, a delivery line the
+        journal refused. Releasing on the silence is how the same correction
+        reaches a second worker, so an unproven turn releases nothing and the
+        carry stands as :attr:`~.redirect_store.RedirectRequest.launch_ambiguous`
+        for an operator to reconcile.
 
         Called on every path out of the turn, including the ones that submitted:
         the settle guard is what makes it a no-op there rather than a withdrawal
         of work already done.
         """
+        if not harnesses.prompt_provably_unsubmitted(result):
+            return
         if not self._claim():
             return
         _release_carried_corrections(
@@ -2495,6 +2579,53 @@ def run_locked(
                 harness=turn_harness,
             )
 
+            # The last durable statement made while it is still true that the
+            # words have not gone out. After this line the journal can no longer
+            # prove this attempt did not submit, which is the entire reason a
+            # crash from here on reads as a question instead of an invitation to
+            # deliver the same correction again.
+            if not _launch_carried_corrections(
+                ctx,
+                plan_dir=before.plan_dir,
+                state_dir_arg=args.state_dir,
+                carried=turn_corrections,
+                session_id=session_id,
+                turn_index=turn_index,
+                harness=turn_harness,
+            ):
+                # Undeclarable, so unsendable. The carry goes back by the same
+                # route every other prelaunch refusal uses -- a best effort,
+                # since the journal that just refused one line may refuse this
+                # one too, and a carry left standing is reported as uncertain
+                # rather than handed out again.
+                _release_carried_corrections(
+                    ctx,
+                    plan_dir=before.plan_dir,
+                    state_dir_arg=args.state_dir,
+                    carried=turn_corrections,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    harness=turn_harness,
+                )
+                ctx.record_final_snapshot(before)
+                ctx.pause(
+                    reason=events.PAUSE_REASON_REDIRECT_DELIVERY_UNRECORDABLE,
+                    message=(
+                        "the redirect journal would not record that this turn's "
+                        "prompt was about to be submitted, so the turn was not "
+                        "started"
+                    ),
+                    details={
+                        "session_id": session_id,
+                        "turn_index": turn_index,
+                        "harness": turn_harness,
+                        "operation_ids": list(turn_corrections.operation_ids())
+                        if turn_corrections is not None
+                        else [],
+                    },
+                )
+                break
+
             # Started before the launch, not after it: a correction submitted
             # against this turn's identity can land the instant that identity is
             # published, and the gate's own bind wait is what holds such an
@@ -2546,10 +2677,12 @@ def run_locked(
             result = execution.result
             live_turn_payload = execution.live_turn
             # Immediately on the way out of the turn, ahead of every guard that
-            # can end the run: a turn that never submitted its prompt is holding
-            # words that belong back in the journal, and the pause it is about
-            # to take is exactly when the operator would look for them.
-            turn_delivery.settle_unsubmitted()
+            # can end the run: a turn that can show it never submitted its
+            # prompt is holding words that belong back in the journal, and the
+            # pause it is about to take is exactly when the operator would look
+            # for them. The result is what carries that showing; a turn that
+            # cannot make it leaves the carry where it is.
+            turn_delivery.settle_unsubmitted(result)
             with run_control_lock:
                 ctx.run_control_context = None
             if conversation_capture is not None:

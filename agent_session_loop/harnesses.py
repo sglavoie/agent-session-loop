@@ -803,6 +803,58 @@ class HarnessResult:
     #: transport that cannot restore are all excluded: those leave the history
     #: intact and are ordinary failures of this turn.
     conversation_restore_refused: str | None = None
+    #: What the turn's own submission seam says about whether its prompt went
+    #: out: ``True`` submitted, ``False`` ended without submitting, ``None`` no
+    #: statement at all. The three values are not two -- the seam is closed by
+    #: the boundary that owns the process, so a turn that returned a result has
+    #: an answer, while a turn whose process died on the way to one leaves the
+    #: field where it started. Only a run that *observed* the seam close may
+    #: read ``False`` as proof, which is why the absence of a statement is its
+    #: own value rather than a default of ``False``.
+    prompt_submitted: bool | None = None
+
+
+def prompt_provably_unsubmitted(result: HarnessResult) -> bool:
+    """Whether this result *proves* its turn put no prompt in front of a worker.
+
+    Not the negation of :attr:`TurnSubmission.submitted` as a caller observes
+    it. A caller sees that flag only through a callback, and the absence of a
+    callback covers two very different things: a turn that refused before
+    sending anything, and a turn that sent something and then lost the thread
+    that would have said so. A caller holding an operator's words has to tell
+    those apart, because acting on the second as if it were the first hands the
+    same words to a second worker.
+
+    ``prompt_submitted`` is the whole answer wherever there is one: the adapter
+    stamps it from the submission seam as it returns, so it reports what this
+    turn actually did rather than what its exit path implies. That matters in
+    both directions -- it covers the protocol handshakes that fail without a
+    refusal field of their own, a provider that was merely unreachable most of
+    all, and it is the only field that knows a one-shot turn submitted its
+    prompt on argv before the window its cancellation was named for.
+
+    A result nothing stamped falls back to what a turn sets when it *declines*,
+    each written on a path that has not sent a prompt:
+
+    - a cancellation acted on in the ``unstarted`` or ``handshake`` window, the
+      two windows :data:`CancelStage` documents as costing nothing;
+    - ``conversation_error``, set only where a turn refused to submit because it
+      could not record the conversation it would have run on;
+    - ``conversation_restore_refused``, set only where the provider declined to
+      restore the history the prompt was going to continue.
+
+    Everything else -- a nonzero exit, a timeout, a transport that died at an
+    unknown point, and every result assembled by something other than an
+    adapter -- answers ``False``, which means "not proven", not "it was
+    submitted". The caller's job on ``False`` is to leave the question open.
+    """
+    if result.prompt_submitted is not None:
+        return not result.prompt_submitted
+    if result.cancel_stage in (CANCEL_STAGE_UNSTARTED, CANCEL_STAGE_HANDSHAKE):
+        return True
+    if result.conversation_error is not None:
+        return True
+    return result.conversation_restore_refused is not None
 
 
 class _OutputProcessor:
@@ -1501,6 +1553,24 @@ class HarnessAdapter:
             abort=abort,
             submission=TurnSubmission(on_prompt_submitted),
         )
+
+        def stated(result: HarnessResult) -> HarnessResult:
+            """Answer, on the way out, whether this turn's prompt went out.
+
+            For the early returns, which build their result before there is a
+            turn to describe; the ones further down state it beside the other
+            facts they read off the lifecycle. Every return from this method
+            answers one way or the other, because the caller that has to know is
+            holding words it will otherwise hand to somebody else, and the only
+            results that stay silent are the ones this method never produced.
+            Read from the seam rather than from the exit path, so a failure mode
+            nobody anticipated reports the submission it actually made rather
+            than the one its branch assumed.
+            """
+            return dataclasses.replace(
+                result, prompt_submitted=lifecycle.prompt_submitted
+            )
+
         lifecycle.begin()
         if lifecycle.cancel_due:
             # Cancelled before spawn: the cheapest window there is. Nothing is
@@ -1508,7 +1578,7 @@ class HarnessAdapter:
             # caller waits on is satisfied immediately.
             lifecycle.note_cancelled(CANCEL_STAGE_UNSTARTED)
             lifecycle.close()
-            return self._cancelled_result(invocation, CANCEL_STAGE_UNSTARTED)
+            return stated(self._cancelled_result(invocation, CANCEL_STAGE_UNSTARTED))
 
         try:
             process = subprocess.Popen(
@@ -1579,10 +1649,12 @@ class HarnessAdapter:
             lifecycle.note_cancelled(CANCEL_STAGE_HANDSHAKE)
             sweep = self._stop_before_submission(process)
             lifecycle.close()
-            return self._cancelled_result(
-                invocation,
-                CANCEL_STAGE_HANDSHAKE,
-                process_sweep=sweep,
+            return stated(
+                self._cancelled_result(
+                    invocation,
+                    CANCEL_STAGE_HANDSHAKE,
+                    process_sweep=sweep,
+                )
             )
         except ConversationCaptureError as error:
             # The turn is abandoned rather than run: a conversation that was
@@ -1591,15 +1663,17 @@ class HarnessAdapter:
             # conversation nothing can find again.
             sweep = self._stop_before_submission(process)
             lifecycle.close()
-            return HarnessResult(
-                name=self.name,
-                argv=invocation.argv,
-                transport=invocation.transport,
-                returncode=_CONVERSATION_ABANDON_RETURNCODE,
-                stdout="",
-                stderr=f"{self.name} turn abandoned: {error}\n",
-                process_sweep=sweep,
-                conversation_error=str(error),
+            return stated(
+                HarnessResult(
+                    name=self.name,
+                    argv=invocation.argv,
+                    transport=invocation.transport,
+                    returncode=_CONVERSATION_ABANDON_RETURNCODE,
+                    stdout="",
+                    stderr=f"{self.name} turn abandoned: {error}\n",
+                    process_sweep=sweep,
+                    conversation_error=str(error),
+                )
             )
         except BaseException:
             # A handshake that failed for any other reason leaves a spawned
@@ -1787,6 +1861,7 @@ class HarnessAdapter:
                     stream_io=dict(stream_io),
                     conversation_id=lifecycle.conversation.native_id,
                     cancel_stage=lifecycle.cancel_stage,
+                    prompt_submitted=lifecycle.prompt_submitted,
                 )
 
             if reader_errors:
@@ -1815,6 +1890,7 @@ class HarnessAdapter:
                     stream_io=dict(stream_io),
                     conversation_id=lifecycle.conversation.native_id,
                     cancel_stage=lifecycle.cancel_stage,
+                    prompt_submitted=lifecycle.prompt_submitted,
                 )
             if timed_out:
                 return HarnessResult(
@@ -1835,6 +1911,7 @@ class HarnessAdapter:
                     stream_io=dict(stream_io),
                     conversation_id=lifecycle.conversation.native_id,
                     cancel_stage=lifecycle.cancel_stage,
+                    prompt_submitted=lifecycle.prompt_submitted,
                 )
 
             interrupted = process.returncode == -signal.SIGINT
@@ -1856,6 +1933,7 @@ class HarnessAdapter:
                 stream_io=dict(stream_io),
                 conversation_id=lifecycle.conversation.native_id,
                 cancel_stage=lifecycle.cancel_stage,
+                prompt_submitted=lifecycle.prompt_submitted,
             )
         finally:
             # Endpoint first: closing it waits out any delivery already in
