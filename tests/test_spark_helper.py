@@ -1,0 +1,215 @@
+"""Behavioral tests for the shared one-shot Spark command."""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SPARK = REPO_ROOT / "bin/.local/bin/spark"
+
+FAKE_CODEX = """#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+Path(os.environ["FAKE_CAPTURE"]).write_text(json.dumps({
+    "argv": sys.argv[1:],
+    "prompt": sys.stdin.read(),
+    "cwd": os.getcwd(),
+    "active": os.environ.get("SPARK_HELPER_ACTIVE"),
+}), encoding="utf-8")
+mode = os.environ.get("FAKE_MODE", "success")
+if mode == "wait":
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    Path(os.environ["FAKE_CHILD_PID"]).write_text(str(child.pid), encoding="utf-8")
+    time.sleep(30)
+elif mode == "error":
+    print("provider rejected request", file=sys.stderr)
+    sys.exit(7)
+elif mode == "empty":
+    print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 3}}))
+else:
+    print(json.dumps({"type": "item.completed", "item": {
+        "type": "agent_message", "text": "Found the target."}}))
+    print(json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": 12, "output_tokens": 4}}))
+"""
+
+
+class SparkHelperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.fake_dir = self.root / "fake bin"
+        self.fake_dir.mkdir()
+        fake = self.fake_dir / "codex"
+        fake.write_text(FAKE_CODEX, encoding="utf-8")
+        fake.chmod(0o755)
+        self.capture = self.root / "capture.json"
+        self.child_pid = self.root / "child.pid"
+        self.work = self.root / "repo with spaces"
+        self.work.mkdir()
+        self.env = {
+            **os.environ,
+            "PATH": str(self.fake_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "FAKE_CAPTURE": str(self.capture),
+            "FAKE_CHILD_PID": str(self.child_pid),
+        }
+        self.env.pop("SPARK_HELPER_ACTIVE", None)
+
+    def run_spark(
+        self, *args: str, input: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SPARK), *args],
+            input=input,
+            text=True,
+            capture_output=True,
+            env=self.env,
+            cwd=self.root,
+            timeout=10,
+            check=False,
+        )
+
+    def capture_payload(self) -> dict[str, Any]:
+        return json.loads(self.capture.read_text(encoding="utf-8"))
+
+    def assert_child_gone(self) -> None:
+        pid = int(self.child_pid.read_text(encoding="utf-8"))
+        for _ in range(30):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        self.fail(f"child process {pid} survived")
+
+    def test_argument_prompt_default_sandbox_and_json_usage(self) -> None:
+        prompt = "Find `odd` $(literal) in source"
+        completed = self.run_spark("--cwd", str(self.work), "--json", prompt)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["answer"], "Found the target.")
+        self.assertEqual(result["usage"], {"input_tokens": 12, "output_tokens": 4})
+        self.assertGreaterEqual(result["elapsed_seconds"], 0)
+        capture = self.capture_payload()
+        self.assertEqual(capture["prompt"], prompt)
+        self.assertEqual(capture["cwd"], str(self.work.resolve()))
+        self.assertEqual(capture["active"], "1")
+        argv = capture["argv"]
+        self.assertEqual(argv[:2], ["exec", "--model"])
+        self.assertIn("gpt-5.3-codex-spark", argv)
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+        self.assertIn("--ephemeral", argv)
+        self.assertIn('model_reasoning_effort="medium"', argv)
+        self.assertEqual(argv[-1], "-")
+
+    def test_stdin_edit_and_effort(self) -> None:
+        completed = self.run_spark(
+            "--edit",
+            "--effort",
+            "high",
+            "--cwd",
+            str(self.work),
+            "-",
+            input="Edit the typo.",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "Found the target.")
+        capture = self.capture_payload()
+        self.assertEqual(capture["prompt"], "Edit the typo.")
+        argv = capture["argv"]
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
+        self.assertIn('model_reasoning_effort="high"', argv)
+
+    def test_implicit_stdin_prompt(self) -> None:
+        completed = self.run_spark(input="Locate reconnect tests.")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.capture_payload()["prompt"], "Locate reconnect tests.")
+
+    def test_multiple_argument_words_are_prompt_data(self) -> None:
+        completed = self.run_spark(
+            "Locate the tests", "src/a file.py", "`literal`", "$(literal)"
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            self.capture_payload()["prompt"],
+            "Locate the tests src/a file.py `literal` $(literal)",
+        )
+
+    def test_recursion_and_invalid_input_never_start_codex(self) -> None:
+        self.env["SPARK_HELPER_ACTIVE"] = "1"
+        result = self.run_spark("--json", "Find tests")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recursive", json.loads(result.stdout)["error"])
+        self.assertFalse(self.capture.exists())
+        del self.env["SPARK_HELPER_ACTIVE"]
+        for args in (("--json", ""), ("--json", "--timeout", "0", "Find tests")):
+            with self.subTest(args=args):
+                result = self.run_spark(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.capture.exists())
+
+    def test_failed_and_empty_responses_are_errors(self) -> None:
+        for mode, expected in (
+            ("error", "provider rejected request"),
+            ("empty", "no final answer"),
+        ):
+            with self.subTest(mode=mode):
+                self.env["FAKE_MODE"] = mode
+                result = self.run_spark("--json", "Find tests")
+                self.assertNotEqual(result.returncode, 0)
+                payload = json.loads(result.stdout)
+                self.assertFalse(payload["ok"])
+                self.assertIn(expected, payload["error"])
+
+    def test_timeout_stops_descendant(self) -> None:
+        self.env["FAKE_MODE"] = "wait"
+        result = self.run_spark("--timeout", "1", "Find tests")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("timed out", result.stderr)
+        self.assert_child_gone()
+
+    def test_cancellation_stops_descendant(self) -> None:
+        self.env["FAKE_MODE"] = "wait"
+        process = subprocess.Popen(
+            [sys.executable, str(SPARK), "Find tests"],
+            cwd=self.root,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            for _ in range(100):
+                if self.child_pid.exists():
+                    break
+                time.sleep(0.02)
+            self.assertTrue(self.child_pid.exists())
+            process.send_signal(signal.SIGTERM)
+            _out, err = process.communicate(timeout=5)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn("cancelled", err)
+            self.assert_child_gone()
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+
+if __name__ == "__main__":
+    unittest.main()
