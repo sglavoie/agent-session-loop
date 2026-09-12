@@ -4792,6 +4792,55 @@ cover operational JSON only; `asl gc` projects the age-based reclaim over
 `runs/<run-id>/` directories, which is where corpus size actually accumulates,
 and renders its byte totals the same way so the two commands compare directly.
 
+Metrics also reports an `execution_timing` section — a text
+`Execution timing` block and an additive JSON object — that answers where the
+runs finishing inside the window spent their wall clock. It is rendered from
+[the execution timing collector](#execution-timing-accounting), which is a pure
+function of the event records and turn results this command already read: the
+section adds no scan of its own. Its window is a whole-run window rather than a
+per-record one. A run belongs to it by its **finish** time and then contributes
+every second it lasted, including seconds before the window opened, because half
+a run measures nothing; the report never spans two runs, so the idle gap between
+invocations is accounted nowhere. The evidence behind it is read unfiltered so
+lineage and retry ordering can see what the window hides: a retry whose first
+attempt predates the window is still recognized as a repeat, and a check that
+started before the window still counts against the run that finished inside it.
+
+The phases are the collector's, with worker execution split by lineage into
+`implementation` and `generated_repair`. That split is never inferred from the
+shape of a session id — an authored plan may use dotted ids legitimately. A
+session is a generated repair child when materialization lineage names it
+(`repair_session_ids` or `repair_groups[].repair_session_id` on a
+`review_cycle` or `review_repair_reopened` event) or when its own session body
+carries the generated review-repair marker; dotted ids only decide which bodies
+are worth reading. Turns whose `session_kind` no record states stay in
+`turn_unclassified` and are never filed under implementation.
+
+Coverage is reported next to every number, because a share is not a census.
+Measured seconds aggregate over **every** included run, so a run missing one
+phase still contributes the phases it recorded and the per-phase denominators
+differ; `runs_with_phase` publishes them. Shares aggregate over `complete` runs
+alone and are `null` — not zeroes — when no run qualifies, since absent evidence
+does not support the claim that no time went anywhere. `runs_outside_share_basis`
+says how much of the window the shares leave out. Cumulative verification check
+work is reported beside the verification phase rather than inside it: a parallel
+recipe's checks overlap, so summing them into a phase would claim the same
+seconds twice. Checks are ranked by repository key, working directory, and
+command, never by name alone, so two projects whose contracts both name a check
+`tests` never merge; a check with neither a repository key nor a working
+directory falls back to its plan key rather than merging on the shared name, and
+`checks_without_command` says how many rows rest on a check name alone. Repeated
+attempts count in-window turns that followed an earlier attempt of the same
+session and report the seconds those attempts took. That time is **not**
+described as discarded: a later attempt is usually what produced the work that
+landed. Review-scope selections are reported with their `fallback_reason`
+counts, which is how often a review widened to full scope because recorded
+evidence could not prove a narrower one. Text output ranks the 10
+highest-duration plans and the 10 highest-duration check scopes, with the count
+shown out of the total; `--json` carries every plan and every scope in
+deterministic order. Plans aggregate across resumed invocations, so one paused
+and resumed plan is one row whose `runs` names how many invocations it covers.
+
 Metrics also reports a `cli_invocations` section — a text `CLI invocations`
 block and an additive JSON object — that turns the
 [CLI invocation trace](#cli-invocation-trace) into operational diagnostics. It
@@ -5246,6 +5295,56 @@ Autopilot's human summary names what the audit found rather than deciding
 anything about it. All existing state, event, status, metrics, retention,
 Workbench, and Autopilot fields keep their meaning; every field described here
 is additive.
+
+### Execution timing accounting
+
+`agent_session_loop/execution_timing.py` reconciles per-run timing and is a pure
+collector: it reads no files, holds no clock, and prints nothing. Callers supply
+the evidence and own the window; `asl metrics` is its only operator-facing
+consumer today. Three rules explain most of what its numbers mean, and a reader
+comparing two of them needs all three.
+
+**`unattributed` is a residual, not a measurement.** A run's attributed time is
+the sum of its turn, verification, commit, and assurance phases; whatever the
+wall clock has left over is the runner's own orchestration between phases,
+including the idle gap before a turn. It is reported unclamped when it is
+substantially negative — phases claiming more time than the run lasted is a
+contradiction, and rounding it up to zero would make an impossible total look
+plausible.
+
+**Check work is not phase time.** A verification phase contributes its elapsed
+span. The per-check durations are summed separately as cumulative check *work*
+and never added to a phase, because a parallel recipe runs several checks at
+once and their durations would otherwise claim the same seconds twice. On a
+corpus of serial recipes the two figures nearly coincide; on parallel ones the
+work figure is legitimately larger.
+
+**Known durations and shares answer different questions.** Every run lands in
+exactly one trust classification — `active` (no terminal record), `inconsistent`
+(an anomaly: an invalid number, a duration contradicting its own timestamps, two
+sources contradicting each other, overlapping phases, a finish with no start, or
+phases exceeding the wall clock), `partial` (a gap: a missing start, an unknown
+wall duration, a reconstructed terminal record, a turn with no timing, a turn of
+unknown kind, or a start with no finish), or `complete`. Measured seconds
+aggregate over every included run so a partial run's real seconds are not thrown
+away, while shares aggregate over `complete` runs alone, because a share is a
+claim about a whole run and a run missing a phase would understate that phase for
+everyone. The two are published side by side and are deliberately not
+interchangeable.
+
+A run enters the window by its finish time and then contributes its whole
+duration. Dry runs are excluded on the evidence of `run_started.dry_run`; a run
+whose start record is absent cannot be shown not to be one, so it is kept and
+marked rather than assumed. Timing for one turn is taken from
+`turn_execution_finished`, then `turn_finished`, then the turn's `result.json`,
+because the execution event is written by the code that watched the process
+exit while the other two are copies made later; a lower-precedence source
+disagreeing by more than the tolerance neither overwrites the chosen value nor
+is discarded, but becomes a `conflicting-evidence` anomaly. Records the
+collector cannot attribute to a run are counted in `unattributable_records` and
+`unattributable_turn_results` rather than dropped, so a caller can see that
+evidence went unread; plan-scoped events such as `preflight_skipped` carry no
+`run_id` and land there legitimately.
 
 ## Harness Commands
 
@@ -6958,7 +7057,8 @@ only where the session declares a handoff target.
 window as `since_days`, `window_start`, and `generated_at`, then
 `state_dirs_scanned` and `state_dirs_active` beside the `turns`, `first_pass`,
 `pauses`, `verification_repair`, `review_cycles`, `agent_mux_delivery`,
-`artifacts`, `compaction`, and `cli_invocations` objects. Every field in those
+`artifacts`, `compaction`, `cli_invocations`, and `execution_timing` objects.
+Every field in those
 objects answers for
 the window alone, including `review_cycles.unique_materializations` and its
 `review_cycles.repairs_materialized` alias, so narrowing `--since-days` never
@@ -6978,6 +7078,61 @@ type, and meaning. It carries `trace_root`, `retention_days`, `records_read`,
 invocation completed in the window), and `recent_failures`. An invocation is
 windowed by its start timestamp, so `cli_invocations` narrows with
 `--since-days` exactly like every other section.
+
+`execution_timing` is additive in the same way: every pre-existing metrics field
+keeps its name, type, and meaning. It carries `window_start`, `window_end`, and
+`tolerance_seconds`, then five objects.
+
+`coverage` carries `plans_with_evidence`, `runs_with_evidence`, `runs_included`,
+`runs_by_classification`, `included_runs_by_classification`, `exclusions`,
+`runs_with_known_wall`, `runs_outside_share_basis`, `unattributable_records`,
+and `unattributable_turn_results`. The classification maps use the collector's
+own `complete`, `partial`, `inconsistent`, and `active` keys, and `exclusions`
+uses its `active`, `dry-run`, `outside-window`, and `no-finish-time` reasons.
+
+`phases` carries `wall_seconds`, `seconds`, `runs_with_phase`,
+`share_basis_runs`, `share_basis_seconds`, `share_seconds`, and `shares`. All
+four per-phase maps are keyed by the same eight phases — `implementation`,
+`generated_repair`, `turn_unclassified`, `review`, `verification`, `commits`,
+`assurance`, and `unattributed`. `seconds` and `runs_with_phase` cover every
+included run; `share_seconds` and `shares` cover only the `complete` ones, and
+`shares` is `null` rather than a map of zeroes when that basis is empty or has
+no known duration. `implementation` plus `generated_repair` is the collector's
+single `worker_execution` figure, split by repair lineage.
+
+`verification_checks` carries `runs_with_checks`, `checks`,
+`cumulative_seconds`, `phase_seconds`, `scoped_checks`,
+`checks_without_command`, and `scopes`. `cumulative_seconds` is check work and
+`phase_seconds` is elapsed verification time; the first may legitimately exceed
+the second. Each entry in `scopes` carries `repository`, `working_directory`,
+`plan_key`, `command`, `checks`, `runs`, `seconds`, `checks_without_duration`,
+and `by_status`, ordered by descending `seconds` with the scope identity
+breaking ties. `plan_key` is populated only when neither a repository key nor a
+working directory was recorded, which is what keeps two unrelated projects'
+same-named checks apart.
+
+`repeated_attempts` carries `sessions_tracked`,
+`sessions_with_additional_attempts`, `additional_attempts`,
+`additional_attempt_seconds`, `additional_attempts_without_duration`, and
+`additional_attempts_by_phase`. An attempt counts as additional when an earlier
+attempt of the same session exists anywhere in the supplied history, including
+before the window, and the seconds are the time those attempts took rather than
+a measure of discarded work.
+
+`review_scope` carries `selections`, `refreshed_selections`, `by_scope`,
+`fallback_reasons`, and `selections_without_fallback_reason`, counted over the
+selections belonging to included runs.
+
+`plans` is the complete list, one entry per plan aggregated across every
+invocation it resumed through, each carrying `plan_key`, `plan_dir`, `runs`,
+`runs_with_known_wall`, `wall_seconds`, `attributed_seconds`, `seconds`,
+`attempts`, `additional_attempts`, `verification_checks`,
+`verification_check_seconds`, and `by_classification`. Ordering is descending
+`wall_seconds`, then descending `attributed_seconds`, then `plan_key`, so the
+text report's top ten is the head of this list. Because `execution_timing` is
+windowed by run finish time and a run contributes its whole duration,
+`phases.wall_seconds` may exceed the window itself; narrowing `--since-days`
+still never raises a count.
 
 ## Pause Semantics
 

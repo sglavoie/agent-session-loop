@@ -11,7 +11,10 @@ reports workflow reliability and storage numbers for a recent window
   settled the work its turn retained instead of leaving it for a human,
 - review repair-cycle closure and repetition,
 - artifact growth and projected compaction savings,
-- CLI invocation lifecycle diagnostics from the root-level trace.
+- CLI invocation lifecycle diagnostics from the root-level trace,
+- execution timing: where the runs that finished inside the window spent their
+  wall clock, plus the coverage that says how much of the corpus that answers
+  for.
 
 Windowed activity is derived from ``events.jsonl`` and per-turn
 ``result.json`` files. A state directory whose files were all last written
@@ -24,6 +27,16 @@ event carrying it falls inside the window. No state or plan content is
 mutated. Compaction savings are projected with a dry-run over the state
 directories that had activity inside the window (the full corpus is available
 via ``asl compact-state`` per plan).
+
+The execution-timing section is windowed differently on purpose, because it
+answers a different question. Its unit is a whole run, so a run belongs to the
+window by its *finish* time and then contributes every second it lasted, even
+the ones before the window opened; half a run measures nothing. The evidence
+behind it — a plan's full event log and turn results — is read unfiltered, so a
+retry whose first attempt predates the window is still recognized as a repeat,
+and a check that started before the window still counts against the run that
+finished inside it. See :mod:`agent_session_loop.execution_timing` for the
+accounting rules the numbers obey.
 """
 
 from __future__ import annotations
@@ -44,8 +57,10 @@ from . import (
     cli_trace,
     compact_state,
     events,
+    execution_timing,
     plans,
     review_continuation,
+    review_repair,
     session_overview,
     state,
 )
@@ -82,6 +97,34 @@ FAILING_OUTCOMES = (
 ROOT_COMMAND_LABEL = "(root)"
 UNKNOWN_LABEL = "unknown"
 
+#: The phase vocabulary the timing section renders. It is the collector's, with
+#: ``worker_execution`` split by lineage into original implementation work and
+#: generated review-repair work — a distinction timing evidence alone cannot
+#: make, which is why the collector deliberately does not make it.
+TIMING_PHASE_IMPLEMENTATION = "implementation"
+TIMING_PHASE_GENERATED_REPAIR = "generated_repair"
+TIMING_PHASES: tuple[str, ...] = (
+    TIMING_PHASE_IMPLEMENTATION,
+    TIMING_PHASE_GENERATED_REPAIR,
+    execution_timing.PHASE_TURN_UNCLASSIFIED,
+    execution_timing.PHASE_REVIEW,
+    execution_timing.PHASE_VERIFICATION,
+    execution_timing.PHASE_COMMITS,
+    execution_timing.PHASE_ASSURANCE,
+    execution_timing.PHASE_UNATTRIBUTED,
+)
+#: Phases taken from the collector's run-level accounting unchanged, because
+#: they are measured from phase records rather than from turn attempts.
+_RUN_LEVEL_TIMING_PHASES: tuple[str, ...] = (
+    execution_timing.PHASE_VERIFICATION,
+    execution_timing.PHASE_COMMITS,
+    execution_timing.PHASE_ASSURANCE,
+)
+#: The text report ranks; JSON carries every plan and every check scope.
+TIMING_PLAN_LIMIT = 10
+TIMING_CHECK_LIMIT = 10
+UNKNOWN_COMMAND_LABEL = "(unknown command)"
+
 
 @dataclass
 class _SessionTurns:
@@ -91,6 +134,76 @@ class _SessionTurns:
 
     def sorted_turns(self) -> list[tuple[str, bool]]:
         return sorted(self.turns)
+
+
+@dataclass
+class _CheckRun:
+    """One verification check execution, before it is scoped and ranked.
+
+    ``verification_check_started`` carries the command and working directory
+    while ``verification_check_finished`` carries the duration, so a check's
+    identity and its cost arrive in two records that have to be paired.
+    """
+
+    run_id: str
+    name: str | None = None
+    kind: str | None = None
+    repository: str | None = None
+    working_directory: str | None = None
+    argv: tuple[str, ...] | None = None
+    status: str | None = None
+    duration_seconds: float | None = None
+    finish_seen: bool = False
+
+
+@dataclass(frozen=True)
+class _CheckScope:
+    """Where a check ran and what it ran — never its name alone.
+
+    Two plans checked out against the same repository run the *same* check; two
+    unrelated projects whose contracts both name a check ``tests`` do not. When
+    neither a repository key nor a working directory was recorded, the plan key
+    keeps those two apart instead of merging them on a shared name.
+    """
+
+    repository: str | None
+    working_directory: str | None
+    plan_key: str | None
+    command: str
+
+    def sort_key(self) -> tuple[str, str, str, str]:
+        return (
+            self.repository or "",
+            self.working_directory or "",
+            self.plan_key or "",
+            self.command,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "repository": self.repository,
+            "working_directory": self.working_directory,
+            "plan_key": self.plan_key,
+            "command": self.command,
+        }
+
+
+@dataclass
+class _PlanTimingEvidence:
+    """Per-plan lineage and check evidence the timing collector cannot carry.
+
+    The collector is a pure function of timing records. Which sessions are
+    generated repair children, and which command a check ran, are facts about
+    the plan rather than about a duration, so they are gathered here from the
+    same event corpus the rest of this module already read.
+    """
+
+    plan_key: str
+    plan_dir: str | None = None
+    repair_session_ids: set[str] = field(default_factory=set)
+    checks: dict[tuple[str, Any, Any], _CheckRun] = field(default_factory=dict)
+    #: (run_id, scope, fallback_reason, refreshed)
+    review_scopes: list[tuple[str, str, str | None, bool]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -113,6 +226,7 @@ class MetricsReport:
     compaction: dict[str, Any]
     assurance: dict[str, Any] = field(default_factory=dict)
     cli_invocations: dict[str, Any] = field(default_factory=dict)
+    execution_timing: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -134,6 +248,7 @@ class MetricsReport:
             "compaction": self.compaction,
             "assurance": self.assurance,
             "cli_invocations": self.cli_invocations,
+            "execution_timing": self.execution_timing,
         }
 
 
@@ -418,6 +533,518 @@ def collect_cli_invocations(
     }
 
 
+def _hashable(value: Any) -> Any:
+    """A dict key for a persisted value of unproven type."""
+    return value if isinstance(value, (str, int, type(None))) else repr(value)
+
+
+def _repair_session_ids(
+    event_records: list[dict[str, Any]],
+    snapshot: plans.PlanSnapshot | None,
+) -> set[str]:
+    """Session ids that are generated review-repair children.
+
+    Two independent kinds of evidence answer this, and the *shape* of a session
+    id is neither of them: an authored plan may legitimately use dotted ids, so
+    a dotted id is a candidate, never a classification. Materialization lineage
+    names the children a review created, and a plan's own session bodies carry
+    the generated marker. Dotted ids only decide which bodies are worth reading.
+    """
+    found: set[str] = set()
+    for record in event_records:
+        if record.get("name") not in (
+            events.REVIEW_CYCLE_EVENT,
+            events.REVIEW_REPAIR_REOPENED_EVENT,
+        ):
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        raw_ids = payload.get("repair_session_ids")
+        if isinstance(raw_ids, list):
+            found.update(value for value in raw_ids if isinstance(value, str) and value)
+        raw_groups = payload.get("repair_groups")
+        if isinstance(raw_groups, list):
+            for group in raw_groups:
+                if not isinstance(group, dict):
+                    continue
+                value = group.get("repair_session_id")
+                if isinstance(value, str) and value:
+                    found.add(value)
+    if snapshot is not None:
+        for session in snapshot.sessions:
+            if session.session_id.is_integer:
+                continue
+            try:
+                body = session.path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if review_repair.contains_review_repair_session_marker(body):
+                found.add(session.id)
+    return found
+
+
+def _check_slot(
+    evidence: _PlanTimingEvidence, run_id: str, payload: dict[str, Any]
+) -> _CheckRun:
+    key = (
+        run_id,
+        _hashable(payload.get("turn_index")),
+        _hashable(payload.get("check_index")),
+    )
+    slot = evidence.checks.get(key)
+    if slot is None:
+        slot = _CheckRun(run_id=run_id)
+        evidence.checks[key] = slot
+    return slot
+
+
+def _ingest_timing_evidence(
+    evidence: _PlanTimingEvidence, event_records: list[dict[str, Any]]
+) -> None:
+    """Read check identity and review-scope evidence from the same records.
+
+    Read from the whole history rather than the window: a check or a scope
+    selection belongs to the report when its *run* does, and a run that finished
+    inside the window may have started its checks before the window opened.
+    """
+    for record in event_records:
+        name = record.get("name")
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        run_id = _string_or_none(payload.get("run_id"))
+        if run_id is None:
+            continue
+        if name == events.VERIFICATION_CHECK_STARTED_EVENT:
+            check = _check_slot(evidence, run_id, payload)
+            check.name = _string_or_none(payload.get("name")) or check.name
+            check.kind = _string_or_none(payload.get("kind")) or check.kind
+            check.repository = _string_or_none(payload.get("repo")) or check.repository
+            check.working_directory = (
+                _string_or_none(payload.get("cwd")) or check.working_directory
+            )
+            argv = payload.get("argv")
+            if isinstance(argv, list):
+                command = tuple(item for item in argv if isinstance(item, str))
+                if command:
+                    check.argv = command
+        elif name == events.VERIFICATION_CHECK_FINISHED_EVENT:
+            check = _check_slot(evidence, run_id, payload)
+            check.finish_seen = True
+            check.name = _string_or_none(payload.get("name")) or check.name
+            check.kind = _string_or_none(payload.get("kind")) or check.kind
+            check.repository = _string_or_none(payload.get("repo")) or check.repository
+            check.status = _string_or_none(payload.get("status")) or check.status
+            duration = payload.get("duration_seconds")
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                seconds = float(duration)
+                if seconds >= 0 and seconds == seconds and seconds != float("inf"):
+                    check.duration_seconds = seconds
+        elif name == events.REVIEW_SCOPE_EVENT:
+            evidence.review_scopes.append(
+                (
+                    run_id,
+                    _string_or_none(payload.get("scope")) or UNKNOWN_LABEL,
+                    _string_or_none(payload.get("fallback_reason")),
+                    payload.get("refreshed") is True,
+                )
+            )
+
+
+def _check_scope(plan_key: str, check: _CheckRun) -> _CheckScope:
+    command = " ".join(check.argv) if check.argv else check.name
+    if check.repository is None and check.working_directory is None:
+        return _CheckScope(None, None, plan_key, command or UNKNOWN_COMMAND_LABEL)
+    return _CheckScope(
+        check.repository,
+        check.working_directory,
+        None,
+        command or UNKNOWN_COMMAND_LABEL,
+    )
+
+
+def _attempt_phase(
+    attempt: execution_timing.TurnAttempt, repair_session_ids: set[str]
+) -> str:
+    phase = attempt.phase
+    if phase != execution_timing.PHASE_WORKER_EXECUTION:
+        return phase
+    if attempt.session_id is not None and attempt.session_id in repair_session_ids:
+        return TIMING_PHASE_GENERATED_REPAIR
+    return TIMING_PHASE_IMPLEMENTATION
+
+
+def _run_phase_seconds(
+    run: execution_timing.RunTiming, repair_session_ids: set[str]
+) -> dict[str, float]:
+    """One run's seconds under this report's phase vocabulary.
+
+    Turn phases are re-derived from the run's attempts so the implementation and
+    generated-repair figures add back up to the collector's single
+    ``worker_execution`` total; the remaining phases are the collector's own.
+    """
+    seconds = dict.fromkeys(TIMING_PHASES, 0.0)
+    for attempt in run.attempts:
+        if attempt.duration_seconds is None:
+            continue
+        seconds[_attempt_phase(attempt, repair_session_ids)] += attempt.duration_seconds
+    for phase in _RUN_LEVEL_TIMING_PHASES:
+        seconds[phase] += run.phase_seconds.get(phase, 0.0)
+    if run.unattributed_seconds is not None:
+        seconds[execution_timing.PHASE_UNATTRIBUTED] += run.unattributed_seconds
+    return seconds
+
+
+def _attempt_order_key(
+    run: execution_timing.RunTiming, attempt: execution_timing.TurnAttempt
+) -> tuple[int, str, str, int]:
+    """Order a session's attempts oldest first, undated ones last."""
+    moment = attempt.started_at or attempt.finished_at
+    return (
+        1 if moment is None else 0,
+        moment.isoformat() if moment is not None else "",
+        run.run_id,
+        attempt.turn_index if attempt.turn_index is not None else -1,
+    )
+
+
+def _repeated_attempts(
+    timing: execution_timing.ExecutionTimingReport,
+    repair_ids: dict[str, set[str]],
+    included_run_keys: set[tuple[str, str]],
+) -> dict[str, Any]:
+    """Count in-window attempts that followed an earlier attempt.
+
+    Ordering spans the *whole* supplied history, not the window, so a retry
+    whose first attempt happened before the window opened is still recognized as
+    a repeat rather than mistaken for a first try.
+
+    The seconds are reported as what they are — time spent on attempts after the
+    first. Some of it produced the work that finally landed, so it is never
+    labelled discarded or wasted.
+    """
+    ordered: dict[
+        tuple[str, str],
+        list[
+            tuple[
+                tuple[int, str, str, int],
+                execution_timing.RunTiming,
+                execution_timing.TurnAttempt,
+            ]
+        ],
+    ] = {}
+    for run in timing.runs:
+        for attempt in run.attempts:
+            if attempt.session_id is None:
+                continue
+            ordered.setdefault((run.plan_key, attempt.session_id), []).append(
+                (_attempt_order_key(run, attempt), run, attempt)
+            )
+
+    additional = 0
+    additional_seconds = 0.0
+    attempts_without_duration = 0
+    sessions_with_additional = 0
+    by_phase: dict[str, int] = {}
+    per_plan: dict[str, int] = {}
+    for (plan_key, _session_id), items in ordered.items():
+        items.sort(key=lambda item: item[0])
+        counted = 0
+        for _key, run, attempt in items[1:]:
+            if (run.plan_key, run.run_id) not in included_run_keys:
+                continue
+            counted += 1
+            additional += 1
+            phase = _attempt_phase(attempt, repair_ids.get(plan_key, set()))
+            by_phase[phase] = by_phase.get(phase, 0) + 1
+            if attempt.duration_seconds is None:
+                attempts_without_duration += 1
+            else:
+                additional_seconds += attempt.duration_seconds
+        if counted:
+            sessions_with_additional += 1
+            per_plan[plan_key] = per_plan.get(plan_key, 0) + counted
+
+    return {
+        "sessions_tracked": len(ordered),
+        "sessions_with_additional_attempts": sessions_with_additional,
+        "additional_attempts": additional,
+        "additional_attempt_seconds": round(additional_seconds, 3),
+        "additional_attempts_without_duration": attempts_without_duration,
+        "additional_attempts_by_phase": dict(sorted(by_phase.items())),
+        "_per_plan": per_plan,
+    }
+
+
+def _check_scope_rows(
+    evidence: dict[str, _PlanTimingEvidence],
+    included_run_keys: set[tuple[str, str]],
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Aggregate finished checks into ranked scopes.
+
+    Returns the rows, the number of checks they cover, and how many of those
+    had no recorded command, which is the label that keeps a partial ranking
+    from reading as a complete one.
+    """
+    rows: dict[_CheckScope, dict[str, Any]] = {}
+    runs_by_scope: dict[_CheckScope, set[tuple[str, str]]] = {}
+    scoped_checks = 0
+    without_command = 0
+    for plan_key, item in sorted(evidence.items()):
+        for key in sorted(item.checks, key=repr):
+            check = item.checks[key]
+            if not check.finish_seen:
+                continue
+            if (plan_key, check.run_id) not in included_run_keys:
+                continue
+            scoped_checks += 1
+            if check.argv is None:
+                without_command += 1
+            scope = _check_scope(plan_key, check)
+            row = rows.get(scope)
+            if row is None:
+                row = scope.to_dict() | {
+                    "checks": 0,
+                    "seconds": 0.0,
+                    "checks_without_duration": 0,
+                    "by_status": {},
+                }
+                rows[scope] = row
+                runs_by_scope[scope] = set()
+            row["checks"] += 1
+            runs_by_scope[scope].add((plan_key, check.run_id))
+            if check.duration_seconds is None:
+                row["checks_without_duration"] += 1
+            else:
+                row["seconds"] += check.duration_seconds
+            status = check.status or UNKNOWN_LABEL
+            row["by_status"][status] = row["by_status"].get(status, 0) + 1
+    ordered: list[dict[str, Any]] = []
+    for scope, row in rows.items():
+        row["runs"] = len(runs_by_scope[scope])
+        row["seconds"] = round(row["seconds"], 3)
+        row["by_status"] = dict(sorted(row["by_status"].items()))
+        ordered.append(row)
+    ordered.sort(
+        key=lambda row: (
+            -row["seconds"],
+            -row["checks"],
+            row["repository"] or "",
+            row["working_directory"] or "",
+            row["plan_key"] or "",
+            row["command"],
+        )
+    )
+    return ordered, scoped_checks, without_command
+
+
+def _review_scope_rows(
+    evidence: dict[str, _PlanTimingEvidence],
+    included_run_keys: set[tuple[str, str]],
+) -> dict[str, Any]:
+    selections = 0
+    refreshed = 0
+    by_scope: dict[str, int] = {}
+    fallback_reasons: dict[str, int] = {}
+    without_fallback = 0
+    for plan_key, item in sorted(evidence.items()):
+        for run_id, scope, reason, was_refreshed in item.review_scopes:
+            if (plan_key, run_id) not in included_run_keys:
+                continue
+            selections += 1
+            by_scope[scope] = by_scope.get(scope, 0) + 1
+            if was_refreshed:
+                refreshed += 1
+            if reason is None:
+                without_fallback += 1
+            else:
+                fallback_reasons[reason] = fallback_reasons.get(reason, 0) + 1
+    return {
+        "selections": selections,
+        "refreshed_selections": refreshed,
+        "by_scope": dict(sorted(by_scope.items())),
+        "fallback_reasons": dict(sorted(fallback_reasons.items())),
+        "selections_without_fallback_reason": without_fallback,
+    }
+
+
+def _plan_rows(
+    timing: execution_timing.ExecutionTimingReport,
+    evidence: dict[str, _PlanTimingEvidence],
+    per_run_seconds: dict[tuple[str, str], dict[str, float]],
+    additional_by_plan: dict[str, int],
+) -> list[dict[str, Any]]:
+    """One row per plan, summed across every invocation it resumed through.
+
+    A plan that was paused and resumed is one body of work in several runs, so
+    its rows aggregate by plan rather than by run, and ``runs`` says how many
+    invocations the total covers.
+    """
+    rows: dict[str, dict[str, Any]] = {}
+    for run in timing.included_runs:
+        row = rows.get(run.plan_key)
+        if row is None:
+            known = evidence.get(run.plan_key)
+            row = {
+                "plan_key": run.plan_key,
+                "plan_dir": known.plan_dir if known is not None else None,
+                "runs": 0,
+                "runs_with_known_wall": 0,
+                "wall_seconds": 0.0,
+                "attributed_seconds": 0.0,
+                "seconds": dict.fromkeys(TIMING_PHASES, 0.0),
+                "attempts": 0,
+                "additional_attempts": additional_by_plan.get(run.plan_key, 0),
+                "verification_checks": 0,
+                "verification_check_seconds": 0.0,
+                "by_classification": dict.fromkeys(execution_timing.CLASSIFICATIONS, 0),
+            }
+            rows[run.plan_key] = row
+        row["runs"] += 1
+        row["by_classification"][run.classification] += 1
+        if run.wall_seconds is not None:
+            row["runs_with_known_wall"] += 1
+            row["wall_seconds"] += run.wall_seconds
+        phases = per_run_seconds[(run.plan_key, run.run_id)]
+        for phase in TIMING_PHASES:
+            row["seconds"][phase] += phases[phase]
+            if phase != execution_timing.PHASE_UNATTRIBUTED:
+                row["attributed_seconds"] += phases[phase]
+        row["attempts"] += len(run.attempts)
+        row["verification_checks"] += run.verification_check_count
+        row["verification_check_seconds"] += run.verification_check_seconds
+    ordered = list(rows.values())
+    for row in ordered:
+        row["wall_seconds"] = round(row["wall_seconds"], 3)
+        row["attributed_seconds"] = round(row["attributed_seconds"], 3)
+        row["verification_check_seconds"] = round(row["verification_check_seconds"], 3)
+        row["seconds"] = {
+            phase: round(value, 3) for phase, value in row["seconds"].items()
+        }
+    ordered.sort(
+        key=lambda row: (
+            -row["wall_seconds"],
+            -row["attributed_seconds"],
+            row["plan_key"],
+        )
+    )
+    return ordered
+
+
+def collect_execution_timing(
+    timing: execution_timing.ExecutionTimingReport,
+    evidence: dict[str, _PlanTimingEvidence],
+) -> dict[str, Any]:
+    """Render the timing collector's per-run accounting as one report section.
+
+    Nothing here re-measures anything: the seconds all come from
+    :func:`execution_timing.collect_execution_timing`. What this adds is the
+    lineage the collector has no evidence for (which worker turns were generated
+    repairs), the scoping a ranking needs (which project a check ran in), and
+    the coverage numbers that keep a share from being read as a census.
+    """
+    repair_ids = {key: item.repair_session_ids for key, item in evidence.items()}
+    per_run_seconds = {
+        (run.plan_key, run.run_id): _run_phase_seconds(
+            run, repair_ids.get(run.plan_key, set())
+        )
+        for run in timing.runs
+    }
+    included_run_keys = {(run.plan_key, run.run_id) for run in timing.included_runs}
+
+    known_seconds = dict.fromkeys(TIMING_PHASES, 0.0)
+    runs_with_phase = dict.fromkeys(TIMING_PHASES, 0)
+    wall_seconds = 0.0
+    runs_with_known_wall = 0
+    for run in timing.included_runs:
+        phases = per_run_seconds[(run.plan_key, run.run_id)]
+        for phase in TIMING_PHASES:
+            if phases[phase]:
+                known_seconds[phase] += phases[phase]
+                runs_with_phase[phase] += 1
+        if run.wall_seconds is not None:
+            wall_seconds += run.wall_seconds
+            runs_with_known_wall += 1
+
+    share_seconds = dict.fromkeys(TIMING_PHASES, 0.0)
+    share_basis = 0.0
+    trustworthy = timing.trustworthy_runs
+    for run in trustworthy:
+        phases = per_run_seconds[(run.plan_key, run.run_id)]
+        for phase in TIMING_PHASES:
+            share_seconds[phase] += phases[phase]
+        if run.wall_seconds is not None:
+            share_basis += run.wall_seconds
+    # An empty or zero basis reports no shares at all: zeroes would read as
+    # "no time went anywhere", which absent evidence does not support.
+    shares = (
+        {phase: round(share_seconds[phase] / share_basis, 4) for phase in TIMING_PHASES}
+        if trustworthy and share_basis > 0
+        else None
+    )
+
+    repeated = _repeated_attempts(timing, repair_ids, included_run_keys)
+    additional_by_plan: dict[str, int] = repeated.pop("_per_plan")
+    scope_rows, scoped_checks, checks_without_command = _check_scope_rows(
+        evidence, included_run_keys
+    )
+    check_work = timing.verification_check_work()
+    included_by_classification = timing.included_counts_by_classification()
+
+    return {
+        "window_start": (
+            timing.window_start.isoformat() if timing.window_start is not None else None
+        ),
+        "window_end": (
+            timing.window_end.isoformat() if timing.window_end is not None else None
+        ),
+        "tolerance_seconds": timing.tolerance_seconds,
+        "coverage": {
+            "plans_with_evidence": len(evidence),
+            "runs_with_evidence": len(timing.runs),
+            "runs_included": len(timing.included_runs),
+            "runs_by_classification": timing.counts_by_classification(),
+            "included_runs_by_classification": included_by_classification,
+            "exclusions": timing.exclusions(),
+            "runs_with_known_wall": runs_with_known_wall,
+            "runs_outside_share_basis": len(timing.included_runs) - len(trustworthy),
+            "unattributable_records": timing.unattributable_records,
+            "unattributable_turn_results": timing.unattributable_turn_results,
+        },
+        "phases": {
+            "wall_seconds": round(wall_seconds, 3),
+            # Measured over every included run, so a run that never recorded one
+            # phase still contributes the phases it did record. The per-phase
+            # denominators therefore differ and are published beside them.
+            "seconds": {
+                phase: round(known_seconds[phase], 3) for phase in TIMING_PHASES
+            },
+            "runs_with_phase": dict(runs_with_phase),
+            "share_basis_runs": len(trustworthy),
+            "share_basis_seconds": round(share_basis, 3),
+            "share_seconds": {
+                phase: round(share_seconds[phase], 3) for phase in TIMING_PHASES
+            },
+            "shares": shares,
+        },
+        "verification_checks": {
+            "runs_with_checks": check_work["runs_with_checks"],
+            "checks": check_work["checks"],
+            # Cumulative check work, not run time: a parallel recipe's checks
+            # overlap, so this can exceed the phase elapsed seconds beside it.
+            "cumulative_seconds": check_work["seconds"],
+            "phase_seconds": check_work["phase_seconds"],
+            "scoped_checks": scoped_checks,
+            "checks_without_command": checks_without_command,
+            "scopes": scope_rows,
+        },
+        "repeated_attempts": repeated,
+        "review_scope": _review_scope_rows(evidence, included_run_keys),
+        "plans": _plan_rows(timing, evidence, per_run_seconds, additional_by_plan),
+    }
+
+
 def collect_metrics(
     *,
     state_dir: str | Path | None = None,
@@ -483,6 +1110,11 @@ def collect_metrics(
     state_dirs_scanned = 0
     state_dirs_active = 0
 
+    timing_runs: list[execution_timing.RunTiming] = []
+    timing_evidence: dict[str, _PlanTimingEvidence] = {}
+    timing_unattributable_records = 0
+    timing_unattributable_results = 0
+
     for plan_state_dir in sorted(session_overview._iter_state_plan_dirs(state_root)):
         state_dirs_scanned += 1
         dir_key = plan_state_dir.name
@@ -513,7 +1145,33 @@ def collect_metrics(
             (dir_key, key) for key in materialization_keys
         )
 
-        for payload in _iter_turn_results(plan_state_dir):
+        # Read once, then used twice: the windowed sections below filter these
+        # record by record, while the timing collector needs the full history so
+        # lineage and retry ordering can see an attempt that predates the window.
+        turn_payloads = _iter_turn_results(plan_state_dir)
+        event_records = _read_event_records(plan_state_dir / events.EVENTS_FILE_NAME)
+
+        plan_timing = _PlanTimingEvidence(plan_key=dir_key, plan_dir=plan_dir)
+        plan_timing.repair_session_ids = _repair_session_ids(event_records, snapshot)
+        _ingest_timing_evidence(plan_timing, event_records)
+        timing_evidence[dir_key] = plan_timing
+        # Collected per plan and reduced to per-run accounting immediately, so
+        # the corpus is never held in memory all at once.
+        plan_timing_report = execution_timing.collect_execution_timing(
+            [
+                execution_timing.RunEvidence(
+                    plan_key=dir_key,
+                    event_records=event_records,
+                    turn_results=turn_payloads,
+                )
+            ],
+            window_start=cutoff,
+        )
+        timing_runs.extend(plan_timing_report.runs)
+        timing_unattributable_records += plan_timing_report.unattributable_records
+        timing_unattributable_results += plan_timing_report.unattributable_turn_results
+
+        for payload in turn_payloads:
             finished_at = _parse_timestamp(payload.get("finished_at"))
             if finished_at is None or finished_at < cutoff:
                 continue
@@ -546,7 +1204,7 @@ def collect_metrics(
                     if recorded is None or started_at > recorded:
                         completion_times[key] = started_at
 
-        for record in _read_event_records(plan_state_dir / events.EVENTS_FILE_NAME):
+        for record in event_records:
             name = record.get("name")
             payload = record.get("payload")
             payload = payload if isinstance(payload, dict) else {}
@@ -701,6 +1359,18 @@ def collect_metrics(
         if completed_at is not None and completed_at >= first_failure_at:
             verify_sessions_repaired += 1
 
+    # The per-plan reports are recombined rather than recollected: every run is
+    # keyed by (plan, run id), so concatenating them is the same answer one
+    # whole-corpus call would have given, without holding the corpus.
+    timing_report = execution_timing.ExecutionTimingReport(
+        window_start=cutoff,
+        window_end=None,
+        tolerance_seconds=execution_timing.DEFAULT_TOLERANCE_SECONDS,
+        runs=tuple(sorted(timing_runs, key=lambda run: (run.plan_key, run.run_id))),
+        unattributable_records=timing_unattributable_records,
+        unattributable_turn_results=timing_unattributable_results,
+    )
+
     first_pass_rate = (
         sessions_first_pass / sessions_attempted if sessions_attempted else None
     )
@@ -802,6 +1472,8 @@ def collect_metrics(
             cutoff=cutoff,
             exclude_invocation_id=cli_trace.current_invocation_id(),
         ),
+        # Rendered from evidence already read above; the section adds no scan.
+        execution_timing=collect_execution_timing(timing_report, timing_evidence),
     )
 
 
@@ -816,6 +1488,153 @@ def _format_bytes(count: int) -> str:
 
 def _format_rate(rate: float | None) -> str:
     return "n/a" if rate is None else f"{rate * 100:.1f}%"
+
+
+def _format_hours(seconds: float) -> str:
+    return f"{seconds / 3600:.2f} h"
+
+
+def _print_execution_timing_section(section: dict[str, Any]) -> None:
+    """Print where run time went, with the coverage that qualifies it.
+
+    Coverage is printed before any share so a share is never read as a census,
+    the cumulative check figure is labelled as work rather than elapsed time,
+    and the ranked lists say how much of the whole they show.
+    """
+    print("\nExecution timing:")
+    if not section:
+        print("  not collected")
+        return
+    coverage = section["coverage"]
+    print(
+        f"  runs {coverage['runs_included']} in window "
+        f"of {coverage['runs_with_evidence']} with evidence "
+        f"across {coverage['plans_with_evidence']} plan(s)"
+    )
+    if coverage["runs_included"] == 0:
+        print("  no run finished inside the window; nothing is measured")
+        return
+    included = coverage["included_runs_by_classification"]
+    print(
+        "  included by trust: "
+        + ", ".join(f"{name} {included.get(name, 0)}" for name in included)
+    )
+    if coverage["exclusions"]:
+        print(f"  excluded: {_format_counts(coverage['exclusions'])}")
+    if coverage["unattributable_records"] or coverage["unattributable_turn_results"]:
+        print(
+            f"  unattributable evidence: "
+            f"{coverage['unattributable_records']} event record(s), "
+            f"{coverage['unattributable_turn_results']} turn result(s)"
+        )
+    phases = section["phases"]
+    print(
+        f"  wall clock {_format_hours(phases['wall_seconds'])} known for "
+        f"{coverage['runs_with_known_wall']} of "
+        f"{coverage['runs_included']} included run(s)"
+    )
+    print("  measured seconds by phase (every included run, partial ones too):")
+    for phase in TIMING_PHASES:
+        print(
+            f"    {phase} {_format_hours(phases['seconds'][phase])} "
+            f"({phases['runs_with_phase'][phase]} run(s))"
+        )
+    shares = phases["shares"]
+    if shares is None:
+        print(
+            f"  shares: n/a - no complete run with a known duration "
+            f"({coverage['runs_outside_share_basis']} included run(s) "
+            f"carry a gap or an anomaly)"
+        )
+    else:
+        print(
+            f"  shares over {phases['share_basis_runs']} complete run(s) "
+            f"({_format_hours(phases['share_basis_seconds'])}), "
+            f"{coverage['runs_outside_share_basis']} included run(s) excluded "
+            f"from that basis:"
+        )
+        print(
+            "    "
+            + ", ".join(
+                f"{phase} {shares[phase] * 100:.1f}%" for phase in TIMING_PHASES
+            )
+        )
+    checks = section["verification_checks"]
+    print(
+        f"  verification checks {checks['checks']} across "
+        f"{checks['runs_with_checks']} run(s): cumulative check work "
+        f"{_format_hours(checks['cumulative_seconds'])} "
+        f"(concurrent checks overlap, so this is work done and not elapsed "
+        f"run time) beside verification phase "
+        f"{_format_hours(checks['phase_seconds'])}"
+    )
+    repeated = section["repeated_attempts"]
+    print(
+        f"  repeated attempts {repeated['additional_attempts']} after the first "
+        f"in {repeated['sessions_with_additional_attempts']} session(s), "
+        f"{_format_hours(repeated['additional_attempt_seconds'])} "
+        f"(time spent re-attempting; some of it produced the work that landed)"
+    )
+    if repeated["additional_attempts_without_duration"]:
+        print(
+            f"    {repeated['additional_attempts_without_duration']} of those "
+            f"recorded no duration"
+        )
+    if repeated["additional_attempts_by_phase"]:
+        print(
+            "    by phase: " + _format_counts(repeated["additional_attempts_by_phase"])
+        )
+    review_scope = section["review_scope"]
+    if review_scope["selections"]:
+        print(
+            f"  review scope selections {review_scope['selections']} "
+            f"(refreshed {review_scope['refreshed_selections']})"
+            + (
+                f": {_format_counts(review_scope['by_scope'])}"
+                if review_scope["by_scope"]
+                else ""
+            )
+        )
+        if review_scope["fallback_reasons"]:
+            print(
+                "    fallback reasons: "
+                + _format_counts(review_scope["fallback_reasons"])
+            )
+        else:
+            print("    fallback reasons: none recorded")
+    plan_rows = section["plans"]
+    if plan_rows:
+        shown = plan_rows[:TIMING_PLAN_LIMIT]
+        print(f"  top plans by duration ({len(shown)} of {len(plan_rows)}):")
+        for row in shown:
+            print(
+                f"    {_format_hours(row['wall_seconds'])} "
+                f"{row['plan_dir'] or row['plan_key']} "
+                f"(runs {row['runs']}, known wall {row['runs_with_known_wall']}, "
+                f"repeats {row['additional_attempts']})"
+            )
+    scopes = checks["scopes"]
+    if scopes:
+        shown_checks = scopes[:TIMING_CHECK_LIMIT]
+        print(
+            f"  top checks by cumulative work ({len(shown_checks)} of {len(scopes)}):"
+        )
+        for row in shown_checks:
+            where = (
+                row["repository"]
+                or row["working_directory"]
+                or row["plan_key"]
+                or UNKNOWN_LABEL
+            )
+            print(
+                f"    {_format_hours(row['seconds'])} "
+                f"{row['checks']} execution(s) of {row['command']} [{where}]"
+            )
+        if checks["checks_without_command"]:
+            print(
+                f"    {checks['checks_without_command']} of "
+                f"{checks['scoped_checks']} scoped check(s) recorded no command"
+            )
 
 
 def _print_assurance_section(assurance: dict[str, Any]) -> None:
@@ -977,6 +1796,7 @@ def _print_report(report: MetricsReport) -> None:
         f"{turns['unsuccessful_runtime_seconds'] / 3600:.2f} h "
         f"(successful {turns['successful_runtime_seconds'] / 3600:.2f} h)"
     )
+    _print_execution_timing_section(report.execution_timing)
     first_pass = report.first_pass
     print("\nFirst-pass completion (implementation sessions):")
     print(

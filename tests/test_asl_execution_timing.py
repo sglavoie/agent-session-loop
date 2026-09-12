@@ -97,9 +97,7 @@ def _execution_finished(
     }
     if not omit_turn_index:
         payload["turn_index"] = turn_index
-    return _event(
-        events.TURN_EXECUTION_FINISHED_EVENT, payload, created_at=finished
-    )
+    return _event(events.TURN_EXECUTION_FINISHED_EVENT, payload, created_at=finished)
 
 
 def _turn_finished(
@@ -209,7 +207,9 @@ def _verification(
                 **identity,
                 "passed": True,
                 "finished_at": _iso(finished),
-                "duration_seconds": finished - started if duration is None else duration,
+                "duration_seconds": finished - started
+                if duration is None
+                else duration,
             },
             created_at=finished,
         )
@@ -473,7 +473,9 @@ class ReconciliationTests(unittest.TestCase):
             ],
             [_result(turn_index=1, started=0, finished=100, duration=500.0)],
         )
-        self.assertIn(execution_timing.ANOMALY_CONFLICTING_EVIDENCE, _codes(run.anomalies))
+        self.assertIn(
+            execution_timing.ANOMALY_CONFLICTING_EVIDENCE, _codes(run.anomalies)
+        )
         conflict = next(
             item
             for item in run.anomalies
@@ -515,7 +517,9 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(
             run.phase_seconds[execution_timing.PHASE_WORKER_EXECUTION], 100.0
         )
-        self.assertIn(execution_timing.ANOMALY_DUPLICATE_EVIDENCE, _codes(run.anomalies))
+        self.assertIn(
+            execution_timing.ANOMALY_DUPLICATE_EVIDENCE, _codes(run.anomalies)
+        )
 
     def test_duplicate_verification_finishes_do_not_double_count(self) -> None:
         run = _one(
@@ -529,7 +533,9 @@ class ReconciliationTests(unittest.TestCase):
             ]
         )
         self.assertEqual(run.phase_seconds[execution_timing.PHASE_VERIFICATION], 40.0)
-        self.assertIn(execution_timing.ANOMALY_DUPLICATE_EVIDENCE, _codes(run.anomalies))
+        self.assertIn(
+            execution_timing.ANOMALY_DUPLICATE_EVIDENCE, _codes(run.anomalies)
+        )
 
     def test_a_retried_turn_counts_both_attempts(self) -> None:
         run = _one(
@@ -560,8 +566,12 @@ class ReconciliationTests(unittest.TestCase):
     def test_the_same_run_id_under_two_plans_stays_two_runs(self) -> None:
         report = _collect(
             [
-                execution_timing.RunEvidence("plan-a", event_records=_clean_run_events()),
-                execution_timing.RunEvidence("plan-b", event_records=_clean_run_events()),
+                execution_timing.RunEvidence(
+                    "plan-a", event_records=_clean_run_events()
+                ),
+                execution_timing.RunEvidence(
+                    "plan-b", event_records=_clean_run_events()
+                ),
             ]
         )
         self.assertEqual(len(report.runs), 2)
@@ -1174,9 +1184,7 @@ class PurityTests(unittest.TestCase):
 
     def test_every_observation_code_is_declared(self) -> None:
         run = _one(_clean_run_events())
-        declared = set(execution_timing.ANOMALY_CODES) | set(
-            execution_timing.GAP_CODES
-        )
+        declared = set(execution_timing.ANOMALY_CODES) | set(execution_timing.GAP_CODES)
         self.assertEqual(run.anomalies, ())
         self.assertTrue(declared)
         # Codes are stable identifiers a renderer can switch on.

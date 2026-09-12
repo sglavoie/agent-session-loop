@@ -1337,8 +1337,27 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
     metrics_parser = subparsers.add_parser(
         "metrics",
         help=(
-            "Report workflow reliability and storage metrics from the "
-            "persisted state corpus (default window: last 7 days)."
+            "Report workflow reliability, execution timing, and storage "
+            "metrics from the persisted state corpus "
+            "(default window: last 7 days)."
+        ),
+        description=(
+            "Report workflow reliability, execution timing, and storage "
+            "metrics from the persisted state corpus (default window: last 7 "
+            "days). The execution-timing section reports where the runs that "
+            "finished inside the window spent their wall clock — "
+            "implementation, generated review repairs, unclassified worker "
+            "turns, review, verification, commits, assurance, and the "
+            "unattributed residual — alongside the coverage that qualifies "
+            "those numbers. Measured seconds cover every included run; shares "
+            "cover only runs whose evidence is complete, and are reported as "
+            "unavailable rather than as zeroes when no run qualifies. "
+            "Cumulative verification check work is reported beside, never "
+            "inside, the verification phase, because concurrent checks "
+            "overlap. Repeated attempts count turns that followed an earlier "
+            "attempt of the same session; that time is not all discarded "
+            "work. Text output ranks the 10 longest plans and check scopes; "
+            "--json carries every plan and scope."
         ),
     )
     metrics_parser.add_argument(
