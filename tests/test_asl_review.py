@@ -1506,6 +1506,71 @@ class ReviewRepairMaterializationTests(unittest.TestCase):
         self.assertFalse(self.state_dir.exists())
         self.assertEqual([], sorted(self.plan_dir.glob("session-2.*.md")))
 
+    def test_child_scope_states_runner_owned_verification_and_repeat_policy(
+        self,
+    ) -> None:
+        """A repair child gets the packet's verification policy, not its opposite."""
+        self._write_plan([self._finding("F1", "runner")])
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        rendered = repair_plan.repair_groups[0].rendered_text
+        self.assertIn("## Child scope", rendered)
+        # "Leave the checks passing" no longer stands alone as a bullet an agent
+        # can read as "rerun every check yourself".
+        self.assertNotIn(
+            "- Leave every targeted check in the completion contract passing.\n",
+            rendered,
+        )
+        self.assertIn("do not rerun the contract solely as a final gate", rendered)
+        self.assertIn("ASL runs it authoritatively after this session", rendered)
+        self.assertIn("restores the session to pending on failure", rendered)
+        # The same three justified-repeat cases the task packet names.
+        self.assertIn(
+            "Running a check again, or running a broader one, is justified", rendered
+        )
+        self.assertIn("invalidated it", rendered)
+        self.assertIn("a failure needs diagnosis", rendered)
+        self.assertIn(
+            "concrete correctness concern none of your checks covered", rendered
+        )
+        self.assertIn(
+            "Nothing here caps how many checks you run or how long they take",
+            rendered,
+        )
+        self.assertIn("Record the brief reason in this session's", rendered)
+        # The existing scope and commit rules survive.
+        self.assertIn("Fix only the issues in the findings above", rendered)
+        self.assertIn("Do not commit the repair yourself", rendered)
+
+    def test_child_scope_defers_another_groups_known_failure_to_that_group(
+        self,
+    ) -> None:
+        self._write_plan(
+            [self._finding("F1", "runner"), self._finding("F2", "workbench")]
+        )
+
+        repair_plan = review_repair.plan_review_repair_sessions(self.plan_dir)
+
+        self.assertTrue(repair_plan.ok, repair_plan.error)
+        for group in repair_plan.repair_groups:
+            with self.subTest(group=group.repair_group):
+                rendered = group.rendered_text
+                self.assertIn(
+                    "attributes a failure to another repair group's findings",
+                    rendered,
+                )
+                self.assertIn(
+                    "treat that attribution as the explanation and leave the "
+                    "failure to that group",
+                    rendered,
+                )
+                self.assertIn(
+                    "only when what you observe contradicts the supplied evidence",
+                    rendered,
+                )
+
     def _plan_artifact_path(self, name: str) -> str:
         return str(plans.canonicalize_path(self.plan_dir) / name)
 

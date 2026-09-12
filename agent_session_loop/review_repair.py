@@ -21,6 +21,13 @@ Planning is read-only, and materialization is deterministic and atomic:
   criteria, and whose ``## Completion Contract`` embeds the findings'
   ``verification_checks`` verbatim (deduped by name and by identical command
   execution).
+- The child scope states the same verification ownership the task packet does:
+  the contract must end up passing, but ASL runs it authoritatively after the
+  turn, so the child does not rerun it as its own final gate. Repeating or
+  widening a check is justified by an invalidated result, a failure that needs
+  diagnosis, or an uncovered correctness concern — never by habit — and a
+  failure the supplied evidence already attributes to another repair group is
+  that group's to fix unless the child observes something contradicting it.
 - A group whose evidence or verification checks point the child at a session
   artifact in this plan directory other than its own is refused outright: the
   plan artifact guard makes exactly one session file writable per turn, so such
@@ -658,7 +665,31 @@ def _render_child_body(
                 "- Fix only the issues in the findings above; do not expand "
                 "scope to other subsystems or unrelated findings."
             ),
-            "- Leave every targeted check in the completion contract passing.",
+            (
+                "- Leave every targeted check in the completion contract "
+                "passing, but do not rerun the contract solely as a final "
+                "gate: ASL runs it authoritatively after this session, "
+                "restores the session to pending on failure, and hands the "
+                "failed-check evidence to the repair turn."
+            ),
+            (
+                "- Running a check again, or running a broader one, is "
+                "justified when an edit since that result invalidated it, "
+                "when a failure needs diagnosis, or when a concrete "
+                "correctness concern none of your checks covered remains. "
+                "Nothing here caps how many checks you run or how long they "
+                "take: keep the focused checks that cover the behavior this "
+                "repair changed. Record the brief reason in this session's "
+                "Handoff whenever you repeat or widen a check on that basis."
+            ),
+            (
+                "- When the evidence supplied to this session already "
+                "attributes a failure to another repair group's findings, "
+                "treat that attribution as the explanation and leave the "
+                "failure to that group. Investigate it further only when "
+                "what you observe contradicts the supplied evidence, and say "
+                "so in this session's Handoff when it does."
+            ),
             (
                 "- Do not commit the repair yourself; ASL owns the "
                 "post-verification commit for this generated repair child."

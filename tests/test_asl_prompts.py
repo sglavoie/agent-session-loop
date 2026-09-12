@@ -219,6 +219,59 @@ class TaskPacketBuilderTests(unittest.TestCase):
         self.assertIn("restores this session to pending", rendered)
         self.assertNotIn("run any tests the session names", rendered)
 
+    def test_packet_states_when_repeated_or_broader_checking_is_justified(
+        self,
+    ) -> None:
+        """The final-gate ban must not read as a ban on checking at all."""
+        for kind in (plans.SESSION_KIND_IMPLEMENTATION, plans.SESSION_KIND_REVIEW):
+            with self.subTest(kind=kind):
+                rendered = task_packet.build_task_packet(
+                    "codex", self.PLAN_DIR, session_id="9", session_kind=kind
+                ).render()
+
+                # The three cases that justify running a check again.
+                self.assertIn(
+                    "Running a check again, or running a broader one, is justified",
+                    rendered,
+                )
+                self.assertIn("invalidated it", rendered)
+                self.assertIn("a failure needs diagnosis", rendered)
+                self.assertIn(
+                    "concrete correctness concern none of your checks covered",
+                    rendered,
+                )
+                # A justified repeat is argued in the handoff, not assumed.
+                self.assertIn(
+                    "record the brief reason in this session's handoff", rendered
+                )
+                # No blanket cap on how much checking a turn may do.
+                self.assertIn(
+                    "Nothing here caps how many checks you run or how long they take",
+                    rendered,
+                )
+
+    def test_packet_repeat_policy_matches_the_session_role(self) -> None:
+        implementation = task_packet.build_task_packet(
+            "codex", self.PLAN_DIR, session_id="9"
+        ).render()
+        review_rendered = task_packet.build_task_packet(
+            "codex",
+            self.PLAN_DIR,
+            session_id="9",
+            session_kind=plans.SESSION_KIND_REVIEW,
+        ).render()
+
+        self.assertIn(
+            "keep the focused checks that cover the behavior this session changed",
+            implementation,
+        )
+        self.assertNotIn("read-only checks that substantiate", implementation)
+        self.assertIn(
+            "keep the focused read-only checks that substantiate a finding",
+            review_rendered,
+        )
+        self.assertNotIn("behavior this session changed", review_rendered)
+
     def test_packet_has_no_manual_mode_policy(self) -> None:
         rendered = task_packet.build_task_packet(
             "codex", self.PLAN_DIR, session_id="9", predecessor_id="8"

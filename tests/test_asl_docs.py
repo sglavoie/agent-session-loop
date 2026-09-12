@@ -483,6 +483,38 @@ class SkillInstructionTests(unittest.TestCase):
         self.assertIn("`repair_hint`", text)
         self.assertIn("`--runner-managed`", text)
 
+    def test_session_run_bounds_repeated_checking_without_capping_it(self) -> None:
+        """The skill must not read as "rerun every contract check yourself"."""
+        text = (REPO_ROOT / "skills/session-run/SKILL.md").read_text(encoding="utf-8")
+
+        # Ownership: focused checks while implementing, one authoritative run.
+        self.assertIn(
+            "Do not rerun the full Completion Contract solely as a final gate", text
+        )
+        self.assertIn("manual mode's single authoritative verification step", text)
+        self.assertIn(
+            '"Leave the contract\'s checks passing" is a statement about the '
+            "state you hand over, not an instruction to rerun every check "
+            "yourself.",
+            text,
+        )
+
+        # The three cases that justify running a check again or a broader one.
+        self.assertIn(
+            "Running a check again, or running a broader one, is justified", text
+        )
+        self.assertIn("invalidated it", text)
+        self.assertIn("a failure needs diagnosis", text)
+        self.assertIn("concrete correctness concern none of your checks covered", text)
+        self.assertIn(
+            "Nothing here caps how many checks you run or how long they take", text
+        )
+        self.assertIn("record the brief reason in the handoff `Notes`", text)
+
+        # The policy is shared, so it must not appear as a mode deviation.
+        deviations = text.split("## Mode deviations", 1)[1]
+        self.assertNotIn("Running a check again", deviations)
+
     def test_session_resplit_delegates_mechanics_to_helper(self) -> None:
         text = (REPO_ROOT / "skills/session-resplit/SKILL.md").read_text(
             encoding="utf-8"

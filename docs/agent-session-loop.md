@@ -1669,6 +1669,26 @@ worker marks the session complete, the runner executes that recipe once as the
 authoritative post-turn verification. On failure it restores the session to
 pending and supplies the captured evidence to the next repair turn.
 
+That rule bounds the *final gate*, not checking itself, so every worker-facing
+surface names the same three cases that justify running a check again or
+running a broader one: an edit since that result invalidated it, a failure that
+needs diagnosis, or a concrete correctness concern none of the checks already
+run covered. None of those surfaces caps how many checks a turn runs or how
+long they take — the focused checks covering changed behavior stay available —
+and each asks for the brief reason in the handoff `Notes`, so a repeat is an
+argued decision rather than a habit. The wording is shared by the task packet
+(both the implementation and review roles), the `session-run` skill's shared
+execution path, and the `## Child scope` of every generated repair child. The
+skill also says outright that "leave the contract's checks passing" describes
+the state a session hands over rather than instructing the worker to rerun each
+check; its manual `asl verify` step remains the one authoritative run in that
+mode. A generated repair child carries one extra rule that only applies to a
+split repair cycle: when the evidence supplied to the child already attributes
+a failure to another repair group's findings, that attribution is the
+explanation and the failure belongs to that group, so the child investigates
+further only when what it observes contradicts the supplied evidence, and
+records the contradiction in its Handoff when it does.
+
 Autonomous `asl run` turns prompt the harness with a Python-built session task
 packet (`task_packet.build_task_packet`): a harness-neutral prompt that references
 the session file, `context.md`, `progress.md`, expansion notes, and the

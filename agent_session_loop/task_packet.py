@@ -143,6 +143,38 @@ class SessionTaskPacket:
     def is_review(self) -> bool:
         return self.session_kind == plans.SESSION_KIND_REVIEW
 
+    def _justified_repeat_lines(self) -> list[str]:
+        """Return the bullets that bound repeated and widened checking.
+
+        "Do not rerun the full Completion Contract" is a rule about the *final
+        gate*, not a ban on checking. These bullets name the three cases that
+        justify running a check again or running a broader one, so a worker
+        reading the sentence above cannot conclude that a check it genuinely
+        needs is forbidden. They deliberately impose no cap on how many checks
+        a turn runs or how long they take — the focused regression checks that
+        cover changed behavior stay available — and they ask for a brief reason
+        in the handoff so a repeat is an argued decision rather than a habit.
+        """
+        kept = (
+            "keep the focused read-only checks that substantiate a finding"
+            if self.is_review
+            else "keep the focused checks that cover the behavior this session changed"
+        )
+        return [
+            (
+                "- Running a check again, or running a broader one, is "
+                "justified when an edit since that result invalidated it, "
+                "when a failure needs diagnosis, or when a concrete "
+                "correctness concern none of your checks covered remains. "
+                "Nothing here caps how many checks you run or how long they "
+                f"take: {kept}."
+            ),
+            (
+                "- When you repeat or widen a check on that basis, record the "
+                "brief reason in this session's handoff `Notes`."
+            ),
+        ]
+
     def render(self) -> str:
         lines: list[str] = [f"{TASK_PACKET_HEADING_PREFIX} — session {self.session_id}"]
         lines.append("")
@@ -240,6 +272,8 @@ class SessionTaskPacket:
                 "supplies the failed-check evidence for repair."
             )
             lines.append("")
+            lines.extend(self._justified_repeat_lines())
+            lines.append("")
 
             lines.append("## Allowed mutation (the only writes this session may make)")
             lines.append(
@@ -274,6 +308,8 @@ class SessionTaskPacket:
                 "the runner restores this session to pending and supplies the "
                 "failed-check evidence for repair."
             )
+            lines.append("")
+            lines.extend(self._justified_repeat_lines())
             lines.append("")
 
             lines.append(
