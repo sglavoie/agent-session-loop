@@ -3071,22 +3071,23 @@ What a redirect producer writes before it signals is `redirect-journal.jsonl`,
 an append-only 4 MiB-capped ledger in the same plan hash directory, with a
 512 KiB tail reserved so a journal too full to accept a new submission is never
 too full to record the settlement that closes an existing one. Each physical
-line is a versioned record of one of eight kinds, and they divide into two
+line is a versioned record of one of nine kinds, and they divide into two
 groups. Four are settlements — `submitted`, `accepted`, `rejected`, `expired` —
 and a request's state is a reduction over those records rather than a field
 anything rewrites, so no line is edited in place and the file is never
-truncated. Four are annotations — `continued`, `delivered`, `released`,
-`acknowledged` — which say which continuation attempt bound an accepted
-correction into its prompt, whether that attempt actually submitted that prompt
-to a worker, whether a carry whose prompt never went out was given back, and
-that a worker receipted it. An annotation changes no state, so `submitted` remains the
-only non-terminal one and a carried, receipted correction is still settled
-exactly once. All four are charged against the settlement reserve rather than
-the submission tier: refusing one would leave an accepted correction with no
-durable record of which attempt carried it, which is the only thing a receipt
-can be checked against.
+truncated. Five are annotations — `continued`, `launching`, `delivered`,
+`released`, `acknowledged` — which say which continuation attempt bound an
+accepted correction into its prompt, that the attempt was past the last instant
+at which it could still promise the prompt had not gone out, whether it actually
+submitted that prompt to a worker, whether a carry whose prompt never went out
+was given back, and that a worker receipted it. An annotation changes no state,
+so `submitted` remains the only non-terminal one and a carried, receipted
+correction is still settled exactly once. All five are charged against the
+settlement reserve rather than the submission tier: refusing one would leave an
+accepted correction with no durable record of which attempt carried it, which is
+the only thing a receipt can be checked against.
 
-Three of those annotations exist because planned delivery and actual delivery
+Four of those annotations exist because planned delivery and actual delivery
 are different facts, and a correction can be lost in the gap between them.
 Everything from finalizing a prompt to putting it in front of a worker can
 still refuse — the prompt build, the conversation selection, an authorized
@@ -3096,39 +3097,57 @@ recorded only the carry would say the words had been given to an attempt that
 never spoke them. `continued` is therefore the undertaking and `delivered` the
 submission: the prompt on the argv of a one-shot turn, the answered
 `turn/start`, the accepted `session/prompt`, the stream-JSON message that was
-written — never the spawn, which proves only that a process exists. `released`
-is the undo an attempt owes the operator
-when it gives up in between: it clears the carry, so the request is accepted and
+written — never the spawn, which proves only that a process exists. `launching`
+cuts that gap in two, because its two halves are not equally answerable: it is
+appended at the last instant before the prompt can leave the process, so a carry
+without it cannot have been submitted, while a carry with it and no `delivered`
+after it is a question the file alone cannot answer — the writer either never
+got the prompt out or got it out and died before saying so. `released` is the
+undo an attempt owes the operator when it gives up in between: it clears the
+carry, and the launch declaration with it, so the request is accepted and
 uncarried again and the next attempt that names it may take it. The asymmetry is
 what makes releasing safe to call from any unwind path — a correction that
 `reached_a_worker`, meaning delivered or acknowledged, may never be released,
 because re-offering words a worker was already shown would present one worker's
-correction to a second as if it were new. At most one `delivered` and one
-`acknowledged` exist per request; `continued` and `released` may alternate, and
-each pairing is one attempt's whole story.
+correction to a second as if it were new. A release inside a declared launch
+window is still permitted, and is the only way that window closes without a
+delivery: it is a live attempt reporting a refusal it observed, which is
+evidence, where a dead attempt's silence is not. At most one `launching`, one
+`delivered` and one `acknowledged` exist per carry; `continued` and `released`
+may alternate, and each pairing is one attempt's whole story.
 
-Splitting the carry from the launch changed what a line already on disk means,
-which is why records moved to `version: 2`. Version 1 wrote `continued` from a
-run whose worker was already up, so on an old journal the carry *is* the
-delivery, while on a new one the same line says a prompt was assembled and
-nothing ran. Replay therefore reads each line at the version its own writer
-stamped on it, and both versions are readable — an upgrade caught a plan
-mid-run leaves a journal with some of each. A version-1 `continued` records
-the delivery it meant, so `delivered_at` is read off the carry and
-`delivered_legacy` marks that the evidence is the old format's single mark
-rather than an observed launch. What that buys is the guarantee the split
-would otherwise have reversed: a pre-upgrade correction whose worker never
-receipted it stays `uncertain`, out of the release path and out of automatic
-recovery, instead of being handed to the next attempt as words nobody saw.
-Legacy receipts are untouched — an old `acknowledged` line still settles its
-correction — and a version-2 carry with no launch after it is still released
-and recovered, because there the missing record is real evidence. Identity is
-the producer's own
-`operation_id`: resubmitting it with the same target and the same feedback
-digest returns the existing request instead of appending a second one, while
-resubmitting it with a different target or digest fails with
-`invalid-operation-id` rather than
-silently replacing what was already promised. The first terminal record for a
+Each of those splits changed what a line already on disk means, which is why
+records are stamped `version: 3` and why the two older versions stay readable.
+Version 1 wrote `continued` from a run whose worker was already up, so on a
+version-1 journal the carry *is* the delivery, while on a later one the same
+line says a prompt was assembled and nothing ran. Version 2 had that split but
+no `launching`, so a version-2 carry with no delivery after it cannot say
+whether its writer died before the prompt went out or after it. Replay
+therefore reads each line at the version its own writer stamped on it, and all
+three versions are readable — an upgrade caught a plan mid-run leaves a journal
+with some of each. A version-1 `continued` records the delivery it meant, so
+`delivered_at` is read off the carry and `delivered_legacy` marks that the
+evidence is the old format's single mark rather than an observed launch. A
+version-2 `continued` records a writer that had no way to declare the launch
+window at all, which `launch_unrecorded` marks, so its silence is evidence of
+nothing.
+
+What that buys is the guarantee the splits would otherwise have reversed, and
+it is the same guarantee twice. Neither a legacy version-1 delivery nor an
+ambiguous version-2 carry is released or recovered automatically: a pre-upgrade
+correction whose worker never receipted it stays `uncertain`, out of the release
+path and out of automatic recovery, and so does a version-2 carry with no launch
+record after it, rather than either being handed to the next attempt as words
+nobody saw. Only a version-3 carry with no `launching` line behind it is
+provably unsubmitted — that writer would have declared the window — and only it
+is released and recovered without an operator. Legacy receipts are untouched:
+an old `acknowledged` line still settles its correction.
+
+Identity is the producer's own `operation_id`: resubmitting it with the same
+target and the same feedback digest returns the existing request instead of
+appending a second one, while resubmitting it with a different target or digest
+fails with `invalid-operation-id` rather than silently replacing what was
+already promised. The first terminal record for a
 request wins and every later one is refused as `already-settled`, which is what
 makes a retry that races its own settlement safe. The whole read-decide-append
 sequence holds an exclusive lock on the journal and fullsyncs before releasing
