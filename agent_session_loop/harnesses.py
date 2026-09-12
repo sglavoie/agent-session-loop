@@ -28,6 +28,7 @@ from . import (
     copilot_acp,
     guards,
     guidance_delivery,
+    restore_diagnosis,
 )
 from .process_tree import (
     clear_process_tree,
@@ -2684,21 +2685,6 @@ class _ClaudeStreamTransport(HarnessTransport):
         self.session.shutdown()
 
 
-#: What the claude CLI says when it will not continue the conversation named on
-#: ``--resume``. Every alternative is a statement about that conversation's
-#: existence rather than about this machine or this turn, which is what makes it
-#: safe to act on durably; "could not read", "permission denied" and the like
-#: are deliberately absent, because a history that cannot be reached right now
-#: is not a history that is gone.
-_CLAUDE_RESTORE_REFUSED_RE = re.compile(
-    r"(?:no (?:such|conversation|session)\b"
-    r"|(?:conversation|session)\s+(?:was\s+)?not\s+found"
-    r"|(?:conversation|session)\b[^\n]*\bdoes not exist"
-    r"|(?:unknown|invalid|expired)\s+(?:conversation|session))",
-    re.IGNORECASE,
-)
-
-
 class ClaudeAdapter(HarnessAdapter):
     name = "claude"
     skill_prefix = "/"
@@ -3083,7 +3069,13 @@ class ClaudeAdapter(HarnessAdapter):
           separates a refused restore from a resumed conversation that then
           failed;
         - the complaint names the very conversation that was asked for, so a
-          generic startup error about something else cannot be read as one.
+          generic startup error about something else cannot be read as one;
+        - and the complaint is a supported missing-history diagnosis in the
+          shared vocabulary of :mod:`~agent_session_loop.restore_diagnosis`,
+          which is the same one the two protocol transports weigh their error
+          responses against -- so a line that names the conversation while
+          saying the service is down, the credential expired, or access was
+          refused is the outage it says it is.
 
         A stopped turn is excluded outright. A timeout or an abort says nothing
         about whether the history exists, and both can leave the CLI having
@@ -3100,7 +3092,7 @@ class ClaudeAdapter(HarnessAdapter):
         for line in text.splitlines():
             if resume not in line:
                 continue
-            if _CLAUDE_RESTORE_REFUSED_RE.search(line):
+            if restore_diagnosis.text_diagnoses_missing_history(line):
                 return f"could not restore conversation {resume}: {line.strip()}"
         return None
 

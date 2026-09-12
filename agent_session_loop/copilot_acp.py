@@ -72,7 +72,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import __version__
+from . import __version__, restore_diagnosis
 
 #: The transport discriminator persisted alongside ``argv``.
 TRANSPORT_ACP = "acp"
@@ -176,7 +176,17 @@ class _RequestRejected(AcpError):
     process, a closed pipe, a request that never answered -- because only this
     one is the agent *stating* something. What it states can outlive the turn; a
     broken pipe says nothing about the conversation behind it.
+
+    It carries the error structured rather than only rendered, because the one
+    caller that acts durably on a rejection has to weigh the code against the
+    message instead of pattern-matching the sentence the two were folded into.
     """
+
+    def __init__(
+        self, message: str, *, rejection: restore_diagnosis.ProviderRejection
+    ) -> None:
+        super().__init__(message)
+        self.rejection = rejection
 
 
 class RestoreRefused(AcpError):
@@ -187,9 +197,14 @@ class RestoreRefused(AcpError):
     durability -- the agent no longer holds this history, so retrying the same
     ``session/load`` later cannot succeed either.
 
-    Only a rejected ``session/load`` raises it. The other three restore refusals
-    are about a session the agent may still have: an unadvertised ``loadSession``
-    capability is this client being unable to ask, a substituted session id is a
+    Only a rejected ``session/load`` raises it, and only when the rejection is a
+    supported missing-history diagnosis under
+    :mod:`~agent_session_loop.restore_diagnosis`: an agent that answers with an
+    internal error, a temporary outage, an expired credential, or a refused
+    workspace has not said the session is gone, and reading it that way would
+    retire a history it is still holding. The other three restore refusals are
+    excluded for the same reason -- an unadvertised ``loadSession`` capability
+    is this client being unable to ask, a substituted session id is a
     disagreement about which conversation came back, and an unreadable replay is
     this client being unable to trust what did.
     """
@@ -272,15 +287,30 @@ class PermissionDecision:
 
 @dataclass
 class _Pending:
-    """One in-flight request, waiting for the reader thread to answer it."""
+    """One in-flight request, waiting for the reader thread to answer it.
+
+    A request can stop waiting for two unrelated reasons, and they are kept in
+    two fields rather than one string: the agent *answered* with an error, or
+    the transport failed underneath it. Only the first is the agent stating
+    something, and folding both into ``error`` is what let a broken pipe during
+    ``session/load`` read as an agent disowning its own history.
+    """
 
     event: threading.Event = field(default_factory=threading.Event)
     result: Any = None
     error: str | None = None
+    rejection: restore_diagnosis.ProviderRejection | None = None
 
-    def resolve(self, *, result: Any = None, error: str | None = None) -> None:
+    def resolve(
+        self,
+        *,
+        result: Any = None,
+        error: str | None = None,
+        rejection: restore_diagnosis.ProviderRejection | None = None,
+    ) -> None:
         self.result = result
         self.error = error
+        self.rejection = rejection
         self.event.set()
 
 
@@ -579,7 +609,11 @@ class CopilotAcpSession:
             self._note_protocol_error(f"response to unknown request id {raw_id}")
             return ""
         if "error" in message:
-            pending.resolve(error=_render_error(message.get("error")))
+            pending.resolve(
+                rejection=restore_diagnosis.ProviderRejection.from_payload(
+                    message.get("error")
+                )
+            )
             return ""
         pending.resolve(result=message.get("result"))
         return ""
@@ -857,11 +891,17 @@ class CopilotAcpSession:
             try:
                 response = self._request("session/load", params)
             except _RequestRejected as error:
-                # The agent answered, and its answer was that it will not load
-                # this session. Nothing a later launch does changes that.
-                raise RestoreRefused(
-                    f"could not restore conversation {session_id}: {error}"
-                ) from error
+                detail = f"could not restore conversation {session_id}: {error}"
+                if not error.rejection.diagnoses_missing_history():
+                    # The agent answered, but it did not say the history is
+                    # gone -- it said something about itself, its credentials,
+                    # or this moment. The turn still fails; the session stays a
+                    # session, so repairing whatever this was and re-running
+                    # continues it.
+                    raise AcpError(detail) from error
+                # This answer *is* about the history. Nothing a later launch
+                # does changes it, so the refusal may outlive the turn.
+                raise RestoreRefused(detail) from error
             except AcpError as error:
                 raise AcpError(
                     f"could not restore conversation {session_id}: {error}"
@@ -1188,8 +1228,16 @@ class CopilotAcpSession:
                 with self._state_lock:
                     self._pending.pop(request_id, None)
                 raise AcpError(f"{method} timed out")
+        if pending.rejection is not None:
+            raise _RequestRejected(
+                f"{method} failed: {pending.rejection.rendered}",
+                rejection=pending.rejection,
+            )
         if pending.error is not None:
-            raise _RequestRejected(f"{method} failed: {pending.error}")
+            # The transport gave up on this request rather than the agent
+            # answering it. Same failed turn, but nothing was stated, so it must
+            # not reach the handler that can retire a conversation.
+            raise AcpError(f"{method} failed: {pending.error}")
         return pending.result
 
     def _notify(self, method: str, params: Mapping[str, Any] | None) -> None:
@@ -1316,15 +1364,3 @@ def _content_text(content: object) -> str:
 
 def _text_or_empty(value: object) -> str:
     return value if isinstance(value, str) else ""
-
-
-def _render_error(error: object) -> str:
-    if isinstance(error, Mapping):
-        code = error.get("code")
-        message = str(error.get("message", ""))
-        data = error.get("data")
-        rendered = f"[{code}] {message}" if code is not None else message
-        if data is not None:
-            rendered = f"{rendered} {json.dumps(data, separators=(',', ':'))}"
-        return rendered
-    return str(error)

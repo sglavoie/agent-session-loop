@@ -23,6 +23,11 @@ from typing import Any
 
 MODE = os.environ.get("FAKE_APP_SERVER_MODE", "success")
 RECORD_PATH = os.environ.get("FAKE_APP_SERVER_RECORD")
+#: The whole ``error`` member ``thread/resume`` answers with under the
+#: ``resume-rejected`` mode. A mode per error response would be a mode per
+#: sentence; what the client has to tell apart is which *kind* of refusal it is
+#: looking at, so the error itself is the parameter.
+RESUME_ERROR = os.environ.get("FAKE_APP_SERVER_RESUME_ERROR")
 LAUNCH_LOG = os.environ.get("FAKE_APP_SERVER_LAUNCH_LOG")
 
 #: The sandbox discriminator the real app-server echoes for each policy name.
@@ -177,6 +182,9 @@ def main() -> int:
                         "error": {"code": -32602, "message": "no such thread"},
                     }
                 )
+                continue
+            if MODE == "resume-rejected":
+                _send({"id": request_id, "error": json.loads(RESUME_ERROR or "{}")})
                 continue
             restored = str(params.get("threadId"))
             if MODE == "resume-other-thread":

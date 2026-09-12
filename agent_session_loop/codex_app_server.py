@@ -65,7 +65,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import __version__, guidance_delivery
+from . import __version__, guidance_delivery, restore_diagnosis
 
 #: The transport discriminator persisted alongside ``argv``.
 TRANSPORT_APP_SERVER = "app-server"
@@ -156,7 +156,17 @@ class _RequestRejected(AppServerError):
     a dead process, a closed pipe, a request that never answered -- because only
     this one is the app-server *stating* something. What it states can outlive
     the turn; a broken pipe says nothing about the conversation behind it.
+
+    It carries the error structured rather than only rendered, because the one
+    caller that acts durably on a rejection has to weigh the code against the
+    message instead of pattern-matching the sentence the two were folded into.
     """
+
+    def __init__(
+        self, message: str, *, rejection: restore_diagnosis.ProviderRejection
+    ) -> None:
+        super().__init__(message)
+        self.rejection = rejection
 
 
 class RestoreRefused(AppServerError):
@@ -168,11 +178,17 @@ class RestoreRefused(AppServerError):
     provider's own history, not about this turn, so retrying the same resume
     later cannot succeed either.
 
-    Deliberately narrow. Only the ``thread/resume`` request itself answering
-    with an error raises it. A thread that came back under a different id, a
-    widened sandbox, and drifted settings are all thread-level disagreements
-    about a conversation the provider still holds, and discarding that history
-    because this turn could not use it would throw away recoverable work.
+    Deliberately narrow, and narrow twice over. Only the ``thread/resume``
+    request itself answering with an error can raise it, and only when that
+    error is a supported missing-history diagnosis under
+    :mod:`~agent_session_loop.restore_diagnosis` -- so the internal-error code a
+    server wraps every unhandled failure in, a temporary outage, an expired
+    credential, and a refused workspace all stay ordinary failures that leave
+    the saved conversation exactly where it was. A thread that came back under a
+    different id, a widened sandbox, and drifted settings are excluded for the
+    same reason: they are thread-level disagreements about a conversation the
+    provider still holds, and discarding that history because this turn could
+    not use it would throw away recoverable work.
     """
 
 
@@ -197,15 +213,30 @@ class _SubmissionRefused(Exception):
 
 @dataclass
 class _Pending:
-    """One in-flight request, waiting for the reader thread to answer it."""
+    """One in-flight request, waiting for the reader thread to answer it.
+
+    A request can stop waiting for two unrelated reasons, and they are kept in
+    two fields rather than one string: the app-server *answered* with an error,
+    or the transport failed underneath it. Only the first is the app-server
+    stating something, and folding both into ``error`` is what let a broken pipe
+    during ``thread/resume`` read as a provider disowning its own history.
+    """
 
     event: threading.Event = field(default_factory=threading.Event)
     result: Any = None
     error: str | None = None
+    rejection: restore_diagnosis.ProviderRejection | None = None
 
-    def resolve(self, *, result: Any = None, error: str | None = None) -> None:
+    def resolve(
+        self,
+        *,
+        result: Any = None,
+        error: str | None = None,
+        rejection: restore_diagnosis.ProviderRejection | None = None,
+    ) -> None:
         self.result = result
         self.error = error
+        self.rejection = rejection
         self.event.set()
 
 
@@ -494,7 +525,11 @@ class CodexAppServerSession:
             self._note_protocol_error(f"response to unknown request id {raw_id}")
             return ""
         if "error" in message:
-            pending.resolve(error=_render_error(message.get("error")))
+            pending.resolve(
+                rejection=restore_diagnosis.ProviderRejection.from_payload(
+                    message.get("error")
+                )
+            )
             return ""
         pending.resolve(result=message.get("result"))
         return ""
@@ -687,11 +722,16 @@ class CodexAppServerSession:
         try:
             response = self._request("thread/resume", params)
         except _RequestRejected as error:
-            # The app-server answered, and its answer was that it will not
-            # restore this thread. Nothing a later launch does changes that.
-            raise RestoreRefused(
-                f"could not restore conversation {resume}: {error}"
-            ) from error
+            detail = f"could not restore conversation {resume}: {error}"
+            if not error.rejection.diagnoses_missing_history():
+                # The app-server answered, but it did not say the history is
+                # gone -- it said something about itself, its credentials, or
+                # this moment. The turn still fails; the thread stays a thread,
+                # so repairing whatever this was and re-running continues it.
+                raise AppServerError(detail) from error
+            # This answer *is* about the history. Nothing a later launch does
+            # changes it, so the refusal is allowed to outlive the turn.
+            raise RestoreRefused(detail) from error
         self._adopt_thread(response, resumed=True)
 
     def _adopt_thread(self, response: Any, *, resumed: bool) -> None:
@@ -941,8 +981,16 @@ class CodexAppServerSession:
                 with self._state_lock:
                     self._pending.pop(request_id, None)
                 raise AppServerError(f"{method} timed out")
+        if pending.rejection is not None:
+            raise _RequestRejected(
+                f"{method} failed: {pending.rejection.rendered}",
+                rejection=pending.rejection,
+            )
         if pending.error is not None:
-            raise _RequestRejected(f"{method} failed: {pending.error}")
+            # The transport gave up on this request rather than the app-server
+            # answering it. Same failed turn, but nothing was stated, so it must
+            # not reach the handler that can retire a conversation.
+            raise AppServerError(f"{method} failed: {pending.error}")
         return pending.result
 
     def _notify(self, method: str, params: Mapping[str, Any] | None) -> None:
@@ -1044,18 +1092,6 @@ _WORK_NOTIFICATIONS = frozenset(
         "error",
     }
 )
-
-
-def _render_error(error: object) -> str:
-    if isinstance(error, Mapping):
-        code = error.get("code")
-        message = str(error.get("message", ""))
-        data = error.get("data")
-        rendered = f"[{code}] {message}" if code is not None else message
-        if data is not None:
-            rendered = f"{rendered} {json.dumps(data, separators=(',', ':'))}"
-        return rendered
-    return str(error)
 
 
 def _steer_deferral_reason(detail: str) -> str:

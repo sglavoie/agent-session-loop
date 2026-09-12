@@ -23,6 +23,11 @@ from typing import Any
 
 MODE = os.environ.get("FAKE_ACP_MODE", "success")
 RECORD_PATH = os.environ.get("FAKE_ACP_RECORD")
+#: The whole ``error`` member ``session/load`` answers with under the
+#: ``load-rejected`` mode. A mode per error response would be a mode per
+#: sentence; what the client has to tell apart is which *kind* of refusal it is
+#: looking at, so the error itself is the parameter.
+LOAD_ERROR = os.environ.get("FAKE_ACP_LOAD_ERROR")
 
 #: The prompt the fake echoes back the way the real agent does: once as a
 #: ``user_message_chunk`` and once as the title of a ``session_info_update``.
@@ -337,6 +342,15 @@ def main() -> int:
                         "jsonrpc": "2.0",
                         "id": request_id,
                         "error": {"code": -32602, "message": "no such session"},
+                    }
+                )
+                continue
+            if MODE == "load-rejected":
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": json.loads(LOAD_ERROR or "{}"),
                     }
                 )
                 continue

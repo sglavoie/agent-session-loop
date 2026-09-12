@@ -5994,20 +5994,62 @@ with an error response, or an ACP agent answering `session/load` with one. Both
 transports distinguish that from a transport failure by raising `RestoreRefused`
 only from the narrow `_RequestRejected` a rejected request produces — a dead
 process, a closed pipe, or a timeout is still an ordinary failure, because none
-of them is the provider saying the history is gone. The near misses are excluded
-for the same reason, and each would cost a live history if it were not: settings
-drift on a restore, a thread or session the provider substituted for the one
-asked for, an agent that never advertised `loadSession`, and a replay that could
-not be read all leave the conversation intact.
+of them is the provider saying the history is gone. The separation is kept in
+the pending-request record rather than reconstructed afterwards: a `_Pending`
+carries an *answered* rejection and a transport reason in two different fields,
+so the path that fails every in-flight request when the process dies cannot
+produce the exception the restore path reads as a disowned history. The near
+misses are excluded for the same reason, and each would cost a live history if
+it were not: settings drift on a restore, a thread or session the provider
+substituted for the one asked for, an agent that never advertised
+`loadSession`, and a replay that could not be read all leave the conversation
+intact.
+
+A rejected request is necessary and not sufficient. The same call that answers
+"there is no such thread" also answers "internal error", "try again later", and
+"your token expired", and retiring a conversation is permanent — the operator's
+only way past it is authorizing a fresh start, which discards the accumulated
+history a working provider would have handed back an hour later. So the
+rejection has to *diagnose a missing history*, and that judgement lives in
+`restore_diagnosis.py`: one vocabulary all three adapters ask, because the
+alternative is an outage reading as a refusal on codex and an error on copilot.
+It sits below the harnesses and imports nothing from the package, which is what
+lets the adapters use it at all.
+
+It judges the error the provider actually sent, not a rendered string. Both
+transports carry the JSON-RPC code, message, and `data` through as a
+`ProviderRejection` instead of flattening them at the raise, and the order of
+the checks is the argument: a protocol-fixed code — `-32700`, `-32600`,
+`-32601`, `-32603` — decides nothing about history, because those are verdicts
+on the *call*, not on a thread; a message or `data` blob explaining itself as
+temporary, overloaded, rate-limited, unauthenticated, forbidden, or malformed
+vetoes the reading outright; and only what survives both may be carried by
+missing-history wording. That order is what makes "internal error: the
+conversation store is unavailable" a failed turn rather than a retired
+conversation, even though it names the conversation. `-32602` is deliberately
+not on the fixed-code list, because it is what both providers answer a
+genuinely missing thread with. `data` is read for the veto and never as
+positive evidence, since it is where providers put retry hints rather than
+history verdicts.
+
+The whole thing is fail-closed in one direction: an unrecognized sentence is
+not a refusal. The turn fails, the ledger entry survives, and the next launch
+continues the conversation — so a provider that rephrases its refusals costs a
+turn, and never an agent's history. Nothing about the recovery path changes for
+a history that is genuinely gone; what changes is that a provider having a bad
+minute now costs nothing at all, and an ordinary relaunch afterwards resumes
+the exact saved conversation without anyone authorizing a fresh one.
 
 Claude has no restore handshake to refuse, since `--resume` goes on argv and the
 CLI either continues the conversation or complains and exits, so the refusal is
-recognized after the fact and gated three ways rather than one: the turn asked
+recognized after the fact and gated four ways rather than one: the turn asked
 to resume something; the CLI never announced a session of its own, which every
-turn it actually started does before running anything; and the complaint names
-the very conversation that was asked for. A stopped turn — timed out, aborted,
-interrupted — is excluded outright, because none of those says whether the
-history exists and all of them can leave the CLI having printed nothing.
+turn it actually started does before running anything; the complaint names the
+very conversation that was asked for; and the complaint reads as a missing
+history under the same shared vocabulary, so "conversation <id>: service
+temporarily unavailable" is a failed turn here too. A stopped turn — timed out,
+aborted, interrupted — is excluded outright, because none of those says whether
+the history exists and all of them can leave the CLI having printed nothing.
 
 `handoff_guards._terminating_result_disposition` names the branch
 `restore-refused`, placed after the three stopped-turn dispositions and ahead of
