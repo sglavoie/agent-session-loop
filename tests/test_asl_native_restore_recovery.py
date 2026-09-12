@@ -108,6 +108,28 @@ SESSION_FILE_ERROR: dict[str, Any] = {
 }
 
 
+#: The same compound trap written the way code writes it. A provider that did
+#: not recognize the call names the method, and the method is spelled with a dot
+#: -- which is also how a sentence ends, so the classifier once read "no such
+#: session" out of it and stopped there. What is missing is an RPC method on an
+#: out-of-date provider, and an operator who upgrades it gets the conversation
+#: back untouched.
+METHOD_NAME_ERROR: dict[str, Any] = {
+    "code": -32000,
+    "message": "no such session.load method",
+}
+
+
+#: The other half of that trap: the noun, a *filename*, and "not found". The
+#: dot in "config.json" is what makes the word look like an identifier a provider
+#: minted rather than the ordinary compound it is, and the sentence is about a
+#: configuration file the provider could not read.
+CONFIG_FILE_NAME_ERROR: dict[str, Any] = {
+    "code": -32000,
+    "message": "session config.json not found",
+}
+
+
 #: Error responses a provider can answer a restore request with that say
 #: nothing about whether the history exists. The internal-error code is the one
 #: that matters most -- it is what a server wraps any unhandled failure in, so
@@ -117,11 +139,14 @@ SESSION_FILE_ERROR: dict[str, Any] = {
 #: The middle three are the ones no vocabulary of transient words could have
 #: rescued -- a name lookup, a model, and a workspace that are absent say
 #: nothing temporary and nothing at all about whether the history exists.
-#: The last four go one step further: each one *does* contain a history noun,
+#: The last six go one step further: each one *does* contain a history noun,
 #: and in each one that noun is an adjective in front of the thing the provider
 #: is really talking about -- a configuration file, a worker pool, an RPC
 #: method, a storage backend. An operator repairs every one of them in a minute,
-#: and the conversation was never in question.
+#: and the conversation was never in question. The final two write that compound
+#: with punctuation rather than a space, which is the form that reads most like a
+#: finished sentence and a minted identifier: a method spelled "session.load",
+#: and a filename spelled "config.json".
 NOT_A_MISSING_HISTORY: tuple[dict[str, Any], ...] = (
     {"code": -32603, "message": "internal error"},
     {"code": -32603, "message": "temporary service unavailable; retry later"},
@@ -134,6 +159,8 @@ NOT_A_MISSING_HISTORY: tuple[dict[str, Any], ...] = (
     {"code": -32000, "message": "thread pool not found"},
     {"code": -32000, "message": "no such session/load method"},
     {"code": -32000, "message": "unknown session storage backend"},
+    METHOD_NAME_ERROR,
+    CONFIG_FILE_NAME_ERROR,
 )
 
 
@@ -759,6 +786,37 @@ class RestoreDiagnosisTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertFalse(restore_diagnosis.text_diagnoses_missing_history(line))
 
+    def test_punctuation_inside_a_name_is_not_the_end_of_the_sentence(self) -> None:
+        # The same compound trap, written the way code writes compounds. A dot
+        # or a colon joins two halves of one token in "session.load",
+        # "session:load" and "session.json" -- and a dot is also how a sentence
+        # ends, so reading one as a boundary reads "no such session" out of a
+        # complaint about an RPC method. The clause a history noun owns has to
+        # end where a word stops continuing it.
+        for line in (
+            METHOD_NAME_ERROR["message"],
+            "unknown session.load method",
+            "unknown session:load method",
+            "no such session.json file",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(restore_diagnosis.text_diagnoses_missing_history(line))
+
+    def test_a_separator_alone_does_not_make_a_word_an_identifier(self) -> None:
+        # The trap one layer in from the clause boundary: here the noun really is
+        # followed by "not found", and the only question is whether the word
+        # between them is this session's name. "config.json" and
+        # "storage-backend" are compounds of ordinary words that happen to carry
+        # the punctuation an identifier carries -- so a name has to look like a
+        # minted one, which is to say it has to carry a digit.
+        for line in (
+            CONFIG_FILE_NAME_ERROR["message"],
+            "session storage-backend not found",
+            "thread work-queue does not exist",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(restore_diagnosis.text_diagnoses_missing_history(line))
+
     def test_the_ways_a_provider_says_the_history_itself_is_gone(self) -> None:
         # The other direction of the same rule: insisting on the subject may not
         # cost a genuine diagnosis. Each of these names the history and then
@@ -781,6 +839,13 @@ class RestoreDiagnosisTests(unittest.TestCase):
             "no such session.",
             f"no such conversation ({THREAD_ID})",
             "no such thread is available",
+            # And the identifier requirement is about what a minted name looks
+            # like, so these pin the ones it may not refuse along with the
+            # compounds: a hyphenated name, a colon-introduced one, and a dotted
+            # one, each carrying the digit an ordinary word does not.
+            "session s-1 does not exist",
+            f"no such session: {THREAD_ID}",
+            "conversation v2.thread-9 was deleted",
         ):
             with self.subTest(line=line):
                 self.assertTrue(restore_diagnosis.text_diagnoses_missing_history(line))
@@ -1689,6 +1754,48 @@ class SessionFileRestoreFailureRunTests(TransientRestoreFailureRunTests):
     FAILURE_DIR = "app-server-session-file"
 
     REPORTED_WORDS = "session file not found"
+
+
+class MethodNameRestoreFailureRunTests(TransientRestoreFailureRunTests):
+    """The same whole loop, when what the provider could not find was a method.
+
+    A provider one version behind answers an unrecognized call by naming it, and
+    the name is "session.load". The dot is the whole story: it is how a sentence
+    ends as well as how a method is spelled, so the sentence was once read as
+    "no such session" with the rest discarded -- a conversation retired because
+    the operator had not upgraded a binary yet.
+
+    The claims it inherits are the ones that cost real work: the turn fails, the
+    ledger keeps the exact conversation, and the relaunch after the upgrade
+    continues it and hands over the correction the failed turn was holding.
+    """
+
+    REPAIRED_RUN_ID = "run-restore-6"
+
+    RESUME_ERROR = METHOD_NAME_ERROR
+
+    FAILURE_DIR = "app-server-method-name"
+
+    REPORTED_WORDS = "no such session.load method"
+
+
+class ConfigFileNameRestoreFailureRunTests(TransientRestoreFailureRunTests):
+    """The same whole loop, when what the provider could not find was a filename.
+
+    The nearest miss the punctuation rule has to catch on the other side: the
+    noun, then "not found", with a word between them that carries a dot the way
+    a minted identifier does. Read as a name, "session config.json not found" is
+    a history the provider disowned; read as the compound it is, it is a file an
+    operator puts back in a minute with the conversation still sitting there.
+    """
+
+    REPAIRED_RUN_ID = "run-restore-7"
+
+    RESUME_ERROR = CONFIG_FILE_NAME_ERROR
+
+    FAILURE_DIR = "app-server-config-file-name"
+
+    REPORTED_WORDS = "session config.json not found"
 
 
 if __name__ == "__main__":

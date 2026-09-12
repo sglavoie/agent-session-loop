@@ -6104,17 +6104,31 @@ session storage backend" each name a history noun and each is about something
 else — a configuration file, a worker pool, an RPC method, a storage backend —
 so the noun has to hold the *subject* position rather than merely appear: either
 the verb attaches to it directly, or the clause ends where the noun and its
-identifier end. Which means a name has to look like a name. An identifier is
-quoted, announced as an "id", or carries a digit or a separator — `s-1`, `c-3`,
-`id=c-3`, `"t-9"` — and a bare English word is none of those, so the word after
-the noun in "session file" is read as the sentence's real subject instead of as
-the conversation's name. For the two phrasings whose verb comes first, "no such
-…" and "unknown …", what may follow the noun is listed as predicates rather than
-excluded as nouns, for the same fail-closed reason the subject is required at
-all: there is no end to the infrastructure a provider can put a history word in
-front of, and a misconfigured install that reads as a disowned history costs an
-operator the accumulated context a repaired install would have handed straight
-back.
+identifier end.
+
+Code writes those compounds with punctuation as readily as with a space, and
+that is the form both halves of the rule have to be stated against, because
+punctuation is what a clause ends with and what a minted name is spelled with. A
+method is `session.load` or `session:load`, a file is `session.json`, a backend
+is `storage-backend` — so "no such session.load method", "no such session.json
+file", "session config.json not found" and "session storage-backend not found"
+are the same four sentences about a method, two files and a backend, in the one
+disguise the classifier reads as its own vocabulary. A clause therefore does
+not end at a dot or a colon that a word continues: "no such session." is a
+verdict and "no such session.load method" is not, and nothing but the character
+after the dot separates them. And a name is not merely a word with a separator
+in it, because English compounds have separators too — an identifier is quoted,
+announced as an "id", or carries a *digit*: `s-1`, `c-3`, `id=c-3`, `"t-9"`,
+`thread-77`. A bare English word is none of those and neither is a compound of
+two, so the word after the noun in "session file" and in "session config.json"
+is read as the sentence's real subject instead of as the conversation's name.
+
+For the two phrasings whose verb comes first, "no such …" and "unknown …", what
+may follow the noun is listed as predicates rather than excluded as nouns, for
+the same fail-closed reason the subject is required at all: there is no end to
+the infrastructure a provider can put a history word in front of, and a
+misconfigured install that reads as a disowned history costs an operator the
+accumulated context a repaired install would have handed straight back.
 
 The whole thing is fail-closed in one direction: an unrecognized sentence is
 not a refusal. The turn fails, the ledger entry survives, and the next launch

@@ -45,21 +45,28 @@ from typing import Any
 _HISTORY_NOUN = r"(?:conversation|session|thread)"
 
 #: What a name looks like, as opposed to what a word looks like. The identifiers
-#: providers mint are quoted, or announced as an "id", or carry a digit or a
-#: separator: ``s-1``, ``c-3``, ``thread-77``, ``id=c-3``, ``"t-9"``. A bare
-#: English word is none of those, and declining to read one as a name is what
-#: keeps "session file", "thread pool" and "session storage" out of this
-#: vocabulary: in each of them the word after the history noun is not the
-#: history's name, it is the thing the sentence is actually about.
+#: providers mint are quoted, or announced as an "id", or carry a digit:
+#: ``s-1``, ``c-3``, ``thread-77``, ``id=c-3``, ``"t-9"``. A bare English word is
+#: none of those, and declining to read one as a name is what keeps "session
+#: file", "thread pool" and "session storage" out of this vocabulary: in each of
+#: them the word after the history noun is not the history's name, it is the
+#: thing the sentence is actually about.
 #:
-#: The length bounds are not about identifiers being short. "Contains a digit or
-#: a separator" is a claim about a whole token, so an unbounded form rescans the
-#: token from every position inside it, and this runs over every line a CLI
-#: harness prints -- one long line of base64 in a provider's diagnostics would
-#: buy quadratic work. Sixty-four characters either side of the separator is
-#: several times any identifier a provider mints, and a longer one falls to the
-#: fail-closed default rather than to a stall.
-_HISTORY_ID = r"(?:['\"`][^'\"`]+['\"`]|[\w.@+:-]{0,64}[\d_.@+:-][\w.@+:-]{0,64})"
+#: A digit rather than a digit *or a separator*, because a separator is how
+#: English writes compounds too. "session config.json not found" and "session
+#: storage-backend not found" are a file and a backend, and reading the dotted or
+#: hyphenated word after the noun as that session's name turns both into disowned
+#: histories. Every identifier a provider mints and every example above carries a
+#: digit; a compound of ordinary words does not, and one that somehow does not
+#: either falls to the fail-closed default of leaving the conversation alone.
+#:
+#: The length bounds are not about identifiers being short. "Contains a digit" is
+#: a claim about a whole token, so an unbounded form rescans the token from every
+#: position inside it, and this runs over every line a CLI harness prints -- one
+#: long line of base64 in a provider's diagnostics would buy quadratic work.
+#: Sixty-four characters either side of the digit is several times any identifier
+#: a provider mints, and a longer one falls to the same default.
+_HISTORY_ID = r"(?:['\"`][^'\"`]+['\"`]|[\w.@+:-]{0,64}\d[\w.@+:-]{0,64})"
 
 #: The noun plus the name a provider may give it, so a verdict stays attached to
 #: the subject it was passed about: ``session s-1 does not exist``, ``thread
@@ -81,7 +88,17 @@ _NAMED_HISTORY = (
 #: about a session, while "no such session/load method" and "unknown session
 #: storage backend" are sentences about a method and a backend in which the
 #: history word is merely an adjective.
-_CLAUSE_END = r"[.,;:!?()\[\]{}'\"`]"
+#:
+#: The dot and the colon are split out from the rest because they are the two
+#: that also live *inside* a name: the dot in ``session.load`` and
+#: ``session.json``, the colon in ``session:load``. There the punctuation joins
+#: two halves of one token rather than ending a clause, and reading it as an
+#: ending reads the first half as the whole sentence -- which is how "no such
+#: session.load method" came to retire a conversation the provider still had. A
+#: dot or colon that a word continues is therefore not a boundary; one at the end
+#: of a line, or before a space, or before the closing punctuation of a sentence,
+#: still is, so "no such session." keeps its verdict.
+_CLAUSE_END = r"(?:[,;!?()\[\]{}'\"`]|[.:](?!\w))"
 _HISTORY_PREDICATE = (
     r"(?:found|exists?|existed|remains?|is|was|were|are|has|have|had"
     r"|with|for|in|on|to|by|of|from|anymore|yet|available|known|loaded"
@@ -121,6 +138,15 @@ _HISTORY_AS_SUBJECT = (
 #: backend. Every alternative therefore requires the history noun to hold the
 #: subject position: the verb either attaches to it directly, or the clause ends
 #: where the noun and its identifier end.
+#:
+#: Code writes those compounds with punctuation as readily as with a space, and
+#: punctuation is the shape that looks most like the end of a sentence. A method
+#: is "session.load" or "session:load", a file is "session.json", a backend is
+#: "storage-backend" -- so "no such session.load method", "no such session.json
+#: file", "session config.json not found" and "session storage-backend not found"
+#: are the same compound trap written in the vocabulary the classifier reads a
+#: boundary and a name in. Which is why a boundary may not be punctuation a word
+#: continues, and a name may not be an ordinary word a separator joins to another.
 MISSING_HISTORY_RE = re.compile(
     rf"(?:no\s+(?:such\s+)?{_HISTORY_AS_SUBJECT}"
     rf"|{_NAMED_HISTORY}\s+(?:was\s+)?not\s+found"
