@@ -16,7 +16,9 @@ nothing in it is ever rewritten:
   words were bound into a prompt, and then the process that was going to run it
   died or refused. No worker has ever seen them, so this reads like the line
   above it: still owed, and :func:`reconcile_startup` releases the carry so the
-  next attempt can pick it up;
+  next attempt can pick it up. This boundary exists only from journal version 2
+  onward -- version 1 wrote the carry after the launch, so the same shape there
+  is the boundary below and :mod:`redirect_store` replays it as one;
 - after launch, before receipt: ``delivered`` with no ``acknowledged``. A worker
   was started holding the words. Whether a model read them is exactly the
   question the acknowledgment protocol exists because nothing cheaper answers;
@@ -303,7 +305,10 @@ def operation_status(
         if request.delivered:
             # Launched and unreceipted. Not a state to be resolved by looking
             # harder at this journal: what is unknown is what a worker read,
-            # and the journal records only what was handed to it.
+            # and the journal records only what was handed to it. A version-1
+            # carry arrives here too, and for the stronger reason: its writer
+            # recorded the carry only after the launch, so the journal cannot
+            # even say whether the prompt went out, let alone what was read.
             return STATUS_UNCERTAIN
         # A carry with no delivery reads as ``accepted`` alongside one that was
         # never carried at all, and the collapse is deliberate. Both say a
@@ -583,7 +588,10 @@ def reconcile_startup(
       and leaving the carry standing would let a crash inside it retire the
       operator's words to a turn that never ran. Releasing is safe precisely
       because ``delivered`` is written on the far side of it: a correction a
-      worker actually received is not touched here;
+      worker actually received is not touched here. A version-1 carry has no
+      far side, so replay reads it as delivered and this step passes it by --
+      an upgraded plan reports its predecessor's carries as uncertain rather
+      than replaying words that were already in front of a worker;
     - every *unanswered* request of a dead run whose session this plan is not
       going to run again is settled ``rejected``/``run-ended``. That reason is
       written exactly here: it means the process that owed the operator an

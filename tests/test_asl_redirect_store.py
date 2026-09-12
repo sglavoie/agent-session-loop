@@ -627,6 +627,156 @@ class ReplayTests(RedirectStoreTestCase):
         )
 
 
+class RecordVersionTests(RedirectStoreTestCase):
+    """What a line asserts depends on the version its writer stamped on it.
+
+    ``continued`` is the record whose meaning moved. Version 1 appended it once
+    the worker holding the words was up, so the line *is* a delivery; version 2
+    appends it while the prompt is still being assembled, so the same line is
+    an undertaking and the launch is a record of its own. Replay has nothing
+    but the version to tell the two apart, and getting it wrong in either
+    direction loses a correction: read a version-1 carry as an undertaking and
+    an upgraded plan hands a worker words it already had, read a version-2
+    carry as a delivery and a prompt that never went out retires them.
+    """
+
+    def accepted(self, operation_id: str = "op") -> redirect_store.RedirectRequest:
+        self.submit(operation_id=operation_id)
+        return redirect_store.accept_request(
+            self.plan_dir,
+            operation_id,
+            target=_target(),
+            state_dir=self.state_dir,
+        )
+
+    def append_legacy(self, kind: str, operation_id: str = "op") -> None:
+        """Append the line a pre-split writer would have written."""
+        self.append_raw(
+            json.dumps(
+                {
+                    "version": redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+                    "kind": kind,
+                    "id": operation_id,
+                    "created_at": clock.utc_iso_now(),
+                    "continuation": _target(2).to_payload(),
+                }
+            )
+        )
+
+    def test_every_line_a_writer_appends_names_the_current_version(self) -> None:
+        self.accepted()
+        redirect_store.carry_request(
+            self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
+        )
+        redirect_store.deliver_request(
+            self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
+        )
+
+        self.assertEqual(
+            [redirect_store.REDIRECT_JOURNAL_VERSION] * 4,
+            [line["version"] for line in self.raw_lines()],
+        )
+
+    def test_a_legacy_carry_replays_as_the_delivery_it_recorded(self) -> None:
+        self.accepted()
+
+        self.append_legacy("continued")
+
+        stored = self.read().request("op")
+        self.assertEqual((), self.read().rejected)
+        self.assertTrue(stored.carried)
+        self.assertTrue(stored.delivered)
+        self.assertTrue(stored.delivered_legacy)
+        self.assertTrue(stored.reached_a_worker)
+        # One line, so one moment: the carry and the launch it stood for.
+        self.assertEqual(stored.continued_at, stored.delivered_at)
+        self.assertEqual(stored.continued_seq, stored.delivered_seq)
+
+    def test_a_current_carry_is_an_undertaking_until_the_launch_is_written(
+        self,
+    ) -> None:
+        """The distinction the version bump exists to preserve."""
+        self.accepted()
+
+        redirect_store.carry_request(
+            self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
+        )
+
+        stored = self.read().request("op")
+        self.assertTrue(stored.carried)
+        self.assertFalse(stored.delivered)
+        self.assertFalse(stored.delivered_legacy)
+        self.assertFalse(stored.reached_a_worker)
+
+    def test_a_line_whose_version_is_not_a_version_is_refused(self) -> None:
+        """``True == 1``, and the legacy branch must not be reachable that way."""
+        self.accepted()
+        self.append_raw(
+            json.dumps(
+                {
+                    "version": True,
+                    "kind": "continued",
+                    "id": "op",
+                    "created_at": clock.utc_iso_now(),
+                    "continuation": _target(2).to_payload(),
+                }
+            )
+        )
+
+        view = self.read()
+
+        self.assertEqual(
+            [redirect_store.REJECT_UNSUPPORTED_VERSION],
+            [r.reason for r in view.rejected],
+        )
+        self.assertFalse(view.request("op").carried)
+        self.assertFalse(view.request("op").delivered)
+
+    def test_a_legacy_carry_can_never_be_released(self) -> None:
+        """Releasing is the undo of a carry nothing saw, and this one was seen."""
+        self.accepted()
+        self.append_legacy("continued")
+
+        with self.assertRaises(redirect_store.RedirectStoreError) as caught:
+            redirect_store.release_request(
+                self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
+            )
+
+        self.assertEqual(
+            redirect_store.ERROR_ALREADY_DELIVERED, caught.exception.reason
+        )
+        self.assertTrue(self.read().request("op").carried)
+
+    def test_a_legacy_receipt_still_settles_its_correction(self) -> None:
+        """An upgrade must not invalidate the receipts already on the file."""
+        self.accepted()
+        self.append_legacy("continued")
+
+        self.append_legacy("acknowledged")
+
+        stored = self.read().request("op")
+        self.assertEqual((), self.read().rejected)
+        self.assertTrue(stored.acknowledged)
+        self.assertTrue(stored.delivered)
+
+    def test_a_legacy_carry_leaves_no_room_for_a_second_delivery(self) -> None:
+        """A mixed-version journal records one launch per carry, not two.
+
+        ``deliver_request`` is idempotent rather than a refusal, so what proves
+        the point is the file: the legacy line already said what this call
+        would say, and nothing is appended over it.
+        """
+        self.accepted()
+        self.append_legacy("continued")
+
+        delivered = redirect_store.deliver_request(
+            self.plan_dir, "op", continuation=_target(2), state_dir=self.state_dir
+        )
+
+        self.assertTrue(delivered.delivered_legacy)
+        self.assertEqual(3, len(self.raw_lines()))
+
+
 class BoundsTests(RedirectStoreTestCase):
     """A full journal must still be able to answer what is already in it."""
 

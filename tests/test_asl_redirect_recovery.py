@@ -830,6 +830,157 @@ class NoSilentRedeliveryTests(RecoveryTestCase):
         self.assertFalse(stored.acknowledged)
 
 
+class LegacyJournalUpgradeTests(RecoveryTestCase):
+    """A journal written before the carry and the launch became two records.
+
+    The upgrade moves what a line already on disk means. Version 1 appended
+    ``continued`` from a run whose worker was already up, so its journals hold
+    the crash-before-launch shape without ever having been in that state --
+    accepted, carried, nothing after it, because nothing after it existed to
+    write. Read under the new rule, every correction a pre-upgrade run ever
+    delivered becomes an unlaunched carry, which is the one shape this module
+    releases and offers for automatic replay. The version on the line is what
+    stops that, and these tests are the guarantee the upgrade does not reverse:
+    ambiguity stays ambiguous, and only the operator resolves it.
+    """
+
+    LEGACY_OP = "legacy-op"
+    LEGACY_TEXT = "the correction the dead run already handed over"
+
+    def write_legacy_carry(self, *, acknowledged: bool = False) -> None:
+        """Lay down the journal a pre-split writer would have left behind."""
+        created = clock.utc_now()
+        continuation = target(2).to_payload()
+        rows: list[dict[str, Any]] = [
+            {
+                "version": redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+                "kind": "submitted",
+                "id": self.LEGACY_OP,
+                "created_at": clock.isoformat(created),
+                "expires_at": clock.isoformat(created + timedelta(seconds=120)),
+                **target(1).to_payload(),
+                "text": self.LEGACY_TEXT,
+            },
+            {
+                "version": redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+                "kind": "accepted",
+                "id": self.LEGACY_OP,
+                "created_at": clock.isoformat(created + timedelta(seconds=1)),
+            },
+            {
+                "version": redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+                "kind": "continued",
+                "id": self.LEGACY_OP,
+                "created_at": clock.isoformat(created + timedelta(seconds=2)),
+                "continuation": continuation,
+            },
+        ]
+        if acknowledged:
+            rows.append(
+                {
+                    "version": redirect_store.REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+                    "kind": "acknowledged",
+                    "id": self.LEGACY_OP,
+                    "created_at": clock.isoformat(created + timedelta(seconds=3)),
+                    "continuation": continuation,
+                }
+            )
+        path = self.journal_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+        )
+        self.write_lock(pid=self.DEAD_PID)
+
+    def test_the_whole_legacy_journal_still_replays(self) -> None:
+        """Nothing about the upgrade makes an old line unreadable."""
+        self.write_legacy_carry()
+
+        view = self.read()
+
+        self.assertEqual((), view.rejected)
+        stored = view.request(self.LEGACY_OP)
+        assert stored is not None
+        self.assertTrue(stored.accepted)
+        self.assertTrue(stored.carried)
+        self.assertTrue(stored.delivered_legacy)
+
+    def test_a_legacy_carry_is_not_released_as_an_unlaunched_one(self) -> None:
+        self.write_legacy_carry()
+
+        report = self.reconcile()
+
+        self.assertEqual((), report.released)
+        stored = self.read().request(self.LEGACY_OP)
+        assert stored is not None
+        self.assertTrue(stored.carried)
+        self.assertFalse(stored.released)
+
+    def test_it_is_reported_uncertain_rather_than_recoverable(self) -> None:
+        self.write_legacy_carry()
+
+        report = self.reconcile()
+
+        self.assertEqual((self.LEGACY_OP,), report.uncertain_for(SESSION_ID))
+        self.assertEqual((), report.recoverable_for(SESSION_ID))
+        self.assertEqual(
+            redirect_recovery.STATUS_UNCERTAIN, self.status_of(self.LEGACY_OP)
+        )
+
+    def test_no_route_through_recovery_replays_it(self) -> None:
+        """Not offered, and not deliverable to a caller that names it anyway."""
+        self.write_legacy_carry()
+        report = self.reconcile()
+
+        carried = redirect_ack.carry_corrections(
+            self.plan_dir,
+            continuation=target(1, run_id=NEW_RUN),
+            recovered_operation_ids=(self.LEGACY_OP,),
+            state_dir=self.state_dir,
+        )
+
+        self.assertEqual(
+            (), redirect_recovery.recoverable_operation_ids(report, SESSION_ID)
+        )
+        self.assertEqual((), carried.operation_ids())
+        self.assertNotIn(self.LEGACY_TEXT, json.dumps(report.to_payload()))
+
+    def test_a_legacy_receipt_survives_the_upgrade(self) -> None:
+        """An acknowledged old correction is settled, not resurrected."""
+        self.write_legacy_carry(acknowledged=True)
+
+        report = self.reconcile()
+
+        self.assertEqual((), report.uncertain_for(SESSION_ID))
+        self.assertEqual((), report.recoverable_for(SESSION_ID))
+        self.assertEqual((), report.released)
+        self.assertEqual(
+            redirect_recovery.STATUS_ACKNOWLEDGED, self.status_of(self.LEGACY_OP)
+        )
+
+    def test_the_new_format_is_still_recovered_beside_it(self) -> None:
+        """The upgrade preserves the distinction rather than collapsing it.
+
+        One journal, both shapes: the legacy carry that stands for a delivery,
+        and a version-2 carry whose missing launch record is real evidence.
+        Only the second one is handed back.
+        """
+        self.write_legacy_carry()
+        fresh = self.accept(self.submit(SECOND, turn_index=7))
+        redirect_store.carry_request(
+            self.plan_dir,
+            fresh.operation_id,
+            continuation=target(8),
+            state_dir=self.state_dir,
+        )
+
+        report = self.reconcile()
+
+        self.assertEqual((fresh.operation_id,), report.released)
+        self.assertEqual((fresh.operation_id,), report.recoverable_for(SESSION_ID))
+        self.assertEqual((self.LEGACY_OP,), report.uncertain_for(SESSION_ID))
+
+
 class StrandedSettlementTests(RecoveryTestCase):
     """A correction no future attempt can carry gets a durable answer."""
 

@@ -41,6 +41,16 @@ Four properties are structural rather than incidental:
   bounded, and submissions stop one tier below the cap so a full journal can
   still record the acceptance, rejection, or expiry of what is already in it.
 
+Splitting planned delivery from actual delivery is also why the record version
+moved to 2 rather than staying at 1. Version 1 wrote
+``continued`` only once a worker was running, so the same line means "a worker
+holds these words" on an old journal and "nobody ever ran" on a new one.
+Replay therefore reads each line at the version that line carries: a version-1
+``continued`` records the delivery its writer meant by it, which keeps a
+correction an upgraded plan's previous run already handed over out of the
+automatic release and recovery paths and in front of the operator as
+uncertain.
+
 A ``continued`` line ordinarily names a later turn of the request's own run.
 The one exception is marked on the line itself: ``recovered`` says a run that
 died was holding this correction and the run resuming the same session took
@@ -74,8 +84,24 @@ from typing import Any, Literal
 from . import clock, durability, literals, state
 
 REDIRECT_JOURNAL_FILE_NAME = "redirect-journal.jsonl"
-REDIRECT_JOURNAL_VERSION = 1
-REDIRECT_JOURNAL_SUPPORTED_VERSIONS: tuple[int, ...] = (REDIRECT_JOURNAL_VERSION,)
+#: Version 1 had one delivery annotation. ``continued`` was written once the
+#: worker holding the correction was running, so its presence *was* the proof a
+#: worker had been launched. Version 2 splits that into the undertaking and the
+#: outcome, which moves the meaning of a line already on disk: a version-2
+#: ``continued`` with no ``delivered`` after it says nothing ever ran, while the
+#: identical version-1 line says something did. The number has to move with the
+#: meaning, because replay has no other way to tell the two apart, and reading
+#: an old line under the new rule would hand a correction a worker already acted
+#: on back to the next attempt as if it were unseen.
+REDIRECT_JOURNAL_VERSION = 2
+#: The last version whose ``continued`` line was itself the delivery record.
+REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION = 1
+#: Read support is per line, not per file. A journal an upgrade caught mid-run
+#: holds both versions, and each line is interpreted as its own writer meant it.
+REDIRECT_JOURNAL_SUPPORTED_VERSIONS: tuple[int, ...] = (
+    REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION,
+    REDIRECT_JOURNAL_VERSION,
+)
 
 #: Total journal size. A redirect journal holds one run's corrections, so this
 #: is generous rather than tight; the bound exists to keep a runaway producer
@@ -336,6 +362,12 @@ class RedirectRequest:
     build that refuses, a conversation the run cannot prove is usable, a crash.
     ``released_at`` is that window's undo -- it withdraws a carry that never
     reached a worker and puts the correction back in front of the next attempt.
+
+    On a version-1 journal the two marks were one, so ``delivered_at`` is read
+    off the ``continued`` line and ``delivered_legacy`` says so. The flag
+    changes no decision here -- a legacy delivery is a delivery -- and exists
+    because an operator asking what became of their words deserves to know the
+    delivery is the old format's single mark rather than an observed launch.
     """
 
     operation_id: str
@@ -355,6 +387,7 @@ class RedirectRequest:
     continuation_recovered: bool = False
     delivered_at: str | None = None
     delivered_seq: int | None = None
+    delivered_legacy: bool = False
     released_at: str | None = None
     released_seq: int | None = None
     released_from: RedirectTarget | None = None
@@ -381,7 +414,11 @@ class RedirectRequest:
 
     @property
     def delivered(self) -> bool:
-        """Whether the carrying attempt actually launched a worker with it."""
+        """Whether the carrying attempt actually launched a worker with it.
+
+        True for a version-1 carry as well: that format recorded the carry only
+        once the worker was up, so the ``continued`` line is the launch.
+        """
         return self.delivered_at is not None
 
     @property
@@ -465,6 +502,7 @@ class RedirectRequest:
             "continuation_recovered": self.continuation_recovered,
             "delivered_at": self.delivered_at,
             "delivered_seq": self.delivered_seq,
+            "delivered_legacy": self.delivered_legacy,
             "released_at": self.released_at,
             "released_seq": self.released_seq,
             "released_from": (
@@ -882,7 +920,14 @@ class _Replay:
 
     def apply(self, seq: int, payload: Mapping[str, Any]) -> None:
         version = payload.get("version")
-        if version not in REDIRECT_JOURNAL_SUPPORTED_VERSIONS:
+        # ``True`` equals 1, so membership alone would admit a boolean and hand
+        # it to the legacy branch below. The version now decides what a line
+        # asserts rather than only whether it is readable, which makes a value
+        # that is not a version a line to refuse.
+        if (
+            isinstance(version, bool)
+            or version not in REDIRECT_JOURNAL_SUPPORTED_VERSIONS
+        ):
             self.reject(seq, REJECT_UNSUPPORTED_VERSION, str(version))
             return
         kind = payload.get("kind")
@@ -901,7 +946,17 @@ class _Replay:
             self._apply_submitted(seq, payload, operation_id, str(created_at))
             return
         if kind in ANNOTATION_KINDS:
-            self._apply_annotation(seq, payload, operation_id, str(created_at), kind)
+            self._apply_annotation(
+                seq,
+                payload,
+                operation_id,
+                str(created_at),
+                kind,
+                # The line's own version, not the module's. What ``continued``
+                # asserts changed between the two, and the writer's version is
+                # the only record of which assertion this line was making.
+                int(version),
+            )
             return
         self._apply_settlement(seq, payload, operation_id, str(created_at), kind)
 
@@ -947,6 +1002,7 @@ class _Replay:
         operation_id: str,
         created_at: str,
         kind: str,
+        record_version: int,
     ) -> None:
         """Apply a carry annotation to an accepted request.
 
@@ -960,6 +1016,11 @@ class _Replay:
         is the whole evidence that a worker read it. The same applies to
         ``delivered``: it is what stops a later reader from recovering words a
         worker is already acting on.
+
+        ``record_version`` decides what a ``continued`` line claims.
+        :data:`REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION` and below wrote it from
+        a run that had already launched the worker, so the carry and the launch
+        are the same line and both are applied from it.
         """
         existing = self.requests.get(operation_id)
         if existing is None:
@@ -996,13 +1057,25 @@ class _Replay:
             if existing.carried:
                 self.reject(seq, REJECT_ALREADY_CARRIED, operation_id)
                 return
-            self.requests[operation_id] = replace(
+            carried = replace(
                 existing,
                 continuation=continuation,
                 continued_at=created_at,
                 continued_seq=seq,
                 continuation_recovered=recovered,
             )
+            if record_version <= REDIRECT_JOURNAL_LEGACY_DELIVERY_VERSION:
+                # The writer of this line had no separate launch record to
+                # append, so its absence proves nothing. Treating the carry as
+                # the delivery it was meant as is what keeps an upgrade from
+                # replaying a correction a worker already received.
+                carried = replace(
+                    carried,
+                    delivered_at=created_at,
+                    delivered_seq=seq,
+                    delivered_legacy=True,
+                )
+            self.requests[operation_id] = carried
             return
         if not existing.carried:
             self.reject(seq, REJECT_NOT_CARRIED, operation_id)

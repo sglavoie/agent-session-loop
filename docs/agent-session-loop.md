@@ -3105,7 +3105,25 @@ what makes releasing safe to call from any unwind path — a correction that
 because re-offering words a worker was already shown would present one worker's
 correction to a second as if it were new. At most one `delivered` and one
 `acknowledged` exist per request; `continued` and `released` may alternate, and
-each pairing is one attempt's whole story. Identity is the producer's own
+each pairing is one attempt's whole story.
+
+Splitting the carry from the launch changed what a line already on disk means,
+which is why records moved to `version: 2`. Version 1 wrote `continued` from a
+run whose worker was already up, so on an old journal the carry *is* the
+delivery, while on a new one the same line says a prompt was assembled and
+nothing ran. Replay therefore reads each line at the version its own writer
+stamped on it, and both versions are readable — an upgrade caught a plan
+mid-run leaves a journal with some of each. A version-1 `continued` records
+the delivery it meant, so `delivered_at` is read off the carry and
+`delivered_legacy` marks that the evidence is the old format's single mark
+rather than an observed launch. What that buys is the guarantee the split
+would otherwise have reversed: a pre-upgrade correction whose worker never
+receipted it stays `uncertain`, out of the release path and out of automatic
+recovery, instead of being handed to the next attempt as words nobody saw.
+Legacy receipts are untouched — an old `acknowledged` line still settles its
+correction — and a version-2 carry with no launch after it is still released
+and recovered, because there the missing record is real evidence. Identity is
+the producer's own
 `operation_id`: resubmitting it with the same target and the same feedback
 digest returns the existing request instead of appending a second one, while
 resubmitting it with a different target or digest fails with
