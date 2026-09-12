@@ -86,6 +86,44 @@ POLICY_ANCHOR = "Running a check again, or running a broader one, is justified w
 #: The second policy bullet: a repeat has to be argued in the handoff.
 POLICY_RATIONALE_ANCHOR = "record the brief reason"
 
+#: Who runs the broad gate after the turn. This is the behaviour the trials
+#: measure, so the sentence assigning it has to be inside the digest: while the
+#: digest covered only the two bullets above, reversing "Do not rerun the full
+#: Completion Contract solely as a final gate" into its opposite left every
+#: cached receipt looking policy-current. The anchor names the contract rather
+#: than the prohibition, so a reversal keeps the line captured and changes its
+#: recorded text instead of dropping out of the digest unseen.
+POLICY_FINAL_GATE_ANCHOR = "the full Completion Contract"
+
+#: The packet's opening role paragraph, which divides authoritative final
+#: verification from the worker's own focused validation. Both roles state it,
+#: in wording that differs only in what the worker owns.
+POLICY_OWNERSHIP_ANCHOR = "owns authoritative final verification"
+
+#: The skill's one-line statement of the same division. The skill says it in
+#: its own words, so it needs its own anchor rather than sharing one.
+POLICY_SKILL_OWNERSHIP_ANCHOR = "Verification ownership is the same in both modes"
+
+#: Every phrase that makes a line policy-bearing. A line carrying any of them
+#: is hashed; every other line is prose this evidence has no stake in.
+#:
+#: Manual mode's own verification step is deliberately absent: live trials run
+#: runner-managed, so what manual mode tells a human-driven turn is not policy
+#: this evidence is acceptance for.
+POLICY_ANCHORS = (
+    POLICY_ANCHOR,
+    POLICY_RATIONALE_ANCHOR,
+    POLICY_FINAL_GATE_ANCHOR,
+    POLICY_OWNERSHIP_ANCHOR,
+    POLICY_SKILL_OWNERSHIP_ANCHOR,
+)
+
+#: What every worker-facing surface has to state for a trial to be a test of
+#: the current policy: what justifies repeating a check, and who owns the final
+#: gate. The ownership anchors above are role- and surface-specific, so they
+#: are hashed everywhere they appear but required nowhere.
+REQUIRED_POLICY_ANCHORS = (POLICY_ANCHOR, POLICY_FINAL_GATE_ANCHOR)
+
 #: Words that turn a mention of the broad gate into a reason for having run
 #: it. The policy asks for a brief reason in the worker's own words, so this
 #: recognises the shapes a reason takes rather than a required phrase.
@@ -313,15 +351,19 @@ def _sha256_text(text: str) -> str:
 def _policy_lines(text: str) -> list[str]:
     """Extract the policy-bearing lines from one worker-facing surface.
 
-    Only the lines that state the policy are taken, so unrelated prose edits
-    elsewhere in the same surface do not age a trial's evidence out. A surface
-    that states nothing yields an empty list, which is itself a policy change
-    the digest reports.
+    A line is policy-bearing when it carries one of :data:`POLICY_ANCHORS`:
+    the bullets that bound a repeated or widened check, and the statements that
+    assign the final gate to the runner. Only those lines are taken, so
+    unrelated prose *elsewhere in the surface* does not age a trial's evidence
+    out; prose sharing a line with a policy statement is hashed with it, since
+    the line is the unit each surface's authors chose for a paragraph. A
+    surface that states nothing yields an empty list, which is itself a policy
+    change the digest reports.
     """
     lines: list[str] = []
     for raw in text.splitlines():
         collapsed = " ".join(raw.split())
-        if POLICY_ANCHOR in collapsed or POLICY_RATIONALE_ANCHOR in collapsed:
+        if any(anchor in collapsed for anchor in POLICY_ANCHORS):
             lines.append(collapsed)
     return lines
 
@@ -363,6 +405,32 @@ def policy_surfaces(candidate_root: Path) -> dict[str, list[str]]:
     except OSError as error:
         surfaces["skill:session-run"] = [f"<unreadable: {error}>"]
     return surfaces
+
+
+def missing_policy_anchors(surfaces: Any) -> dict[str, list[str]]:
+    """Return, per surface, the :data:`REQUIRED_POLICY_ANCHORS` it omits.
+
+    Read from a receipt's recorded surfaces rather than from the checkout, so
+    it answers what the policy said *when the trial ran*. The digest answers
+    the other half — whether that text is still what the checkout says now.
+    """
+    if not isinstance(surfaces, dict):
+        return {}
+    missing: dict[str, list[str]] = {}
+    for name, lines in surfaces.items():
+        recorded = (
+            [line for line in lines if isinstance(line, str)]
+            if isinstance(lines, list)
+            else []
+        )
+        absent = [
+            anchor
+            for anchor in REQUIRED_POLICY_ANCHORS
+            if not any(anchor in line for line in recorded)
+        ]
+        if absent:
+            missing[str(name)] = absent
+    return missing
 
 
 def policy_digest(surfaces: Mapping[str, Sequence[str]]) -> str:
@@ -937,21 +1005,18 @@ def evaluate_trial(
         ),
     )
     surfaces = receipt.get("policy_surfaces")
-    stated = (
-        isinstance(surfaces, dict)
-        and bool(surfaces)
-        and all(
-            any(POLICY_ANCHOR in line for line in lines)
-            for lines in surfaces.values()
-            if isinstance(lines, list)
-        )
-    )
+    unstated = missing_policy_anchors(surfaces)
+    stated = isinstance(surfaces, dict) and bool(surfaces) and not unstated
     add(
         "policy-stated",
         stated,
         "every recorded surface stated the policy"
         if stated
-        else f"a surface stated no policy: {surfaces!r}",
+        else (
+            f"surfaces that stated no policy: {unstated}"
+            if unstated
+            else f"no surface was recorded: {surfaces!r}"
+        ),
     )
 
     if evidence.missing:

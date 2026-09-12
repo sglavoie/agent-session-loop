@@ -72,7 +72,15 @@ contradictory evidence instead of a quiet pass.
   checkout. The policy digest covers only the policy-bearing lines of each
   worker-facing surface, and the fixture digest covers only `repo/` and the
   scenario definitions, so unrelated prose and later edits to `evaluate.py`
-  do not age evidence out.
+  do not age evidence out. A line is policy-bearing when it states what
+  justifies repeating or widening a check, or when it assigns the final gate —
+  both packet roles' ownership paragraphs, the "do not rerun the full
+  Completion Contract solely as a final gate" sentence in each role and in the
+  skill's implement step, and the skill's ownership note. Rewriting or
+  removing any of them invalidates the cached trials, because a trial that
+  measured a different division of ownership is not evidence for this one.
+  Manual mode's own verify step is deliberately outside the digest: trials run
+  runner-managed, so it is not policy they are acceptance for.
 - **Not live** — a trial driven by an injected harness executable. The
   deterministic tests produce exactly these, which is why they can exercise
   the whole pipeline without ever being mistaken for acceptance.

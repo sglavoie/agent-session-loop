@@ -1709,7 +1709,14 @@ contradictory evidence rather than as a quiet pass. Trial session files state
 the task and nothing about verification ownership — a fixture that coached the
 worker would be measuring itself — and `check` refuses evidence that is
 missing, incomplete, contradictory, stale against the current policy or fixture
-digest, driven by an injected harness, or reused across conversations.
+digest, driven by an injected harness, or reused across conversations. The
+policy digest covers every line that assigns the final gate as well as the
+lines bounding a repeated check — both packet roles' ownership paragraphs, the
+"do not rerun the full Completion Contract solely as a final gate" sentence
+wherever a runner-managed worker reads it, and the skill's ownership note — so
+rewriting or removing an ownership instruction ages the cached trials out
+rather than leaving them looking current; manual mode's own verify step stays
+outside it, because trials run runner-managed.
 `tests/test_asl_worker_verification.py` covers all of that with fake harnesses
 and synthetic receipts, and launches no model.
 
