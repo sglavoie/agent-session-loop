@@ -218,20 +218,24 @@ def _verification(
 
 
 def _check_finished(
-    *, turn_index: int, check_index: int, duration: float, run_id: str = RUN_ID
+    *,
+    turn_index: int,
+    check_index: int,
+    duration: float,
+    run_id: str = RUN_ID,
+    omit_check_index: bool = False,
 ) -> dict[str, Any]:
-    return _event(
-        events.VERIFICATION_CHECK_FINISHED_EVENT,
-        {
-            "run_id": run_id,
-            "turn_index": turn_index,
-            "session": "1",
-            "check_index": check_index,
-            "name": f"check-{check_index}",
-            "status": "passed",
-            "duration_seconds": duration,
-        },
-    )
+    payload: dict[str, Any] = {
+        "run_id": run_id,
+        "turn_index": turn_index,
+        "session": "1",
+        "name": f"check-{check_index}",
+        "status": "passed",
+        "duration_seconds": duration,
+    }
+    if not omit_check_index:
+        payload["check_index"] = check_index
+    return _event(events.VERIFICATION_CHECK_FINISHED_EVENT, payload)
 
 
 def _commit(
@@ -535,6 +539,97 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(run.phase_seconds[execution_timing.PHASE_VERIFICATION], 40.0)
         self.assertIn(
             execution_timing.ANOMALY_DUPLICATE_EVIDENCE, _codes(run.anomalies)
+        )
+
+    def test_a_replayed_check_finish_is_one_check_not_two(self) -> None:
+        check = _check_finished(turn_index=1, check_index=0, duration=12.0)
+        report = _collect(
+            [
+                execution_timing.RunEvidence(
+                    PLAN,
+                    event_records=[
+                        _run_started(),
+                        *_verification(turn_index=1, started=10, finished=30),
+                        check,
+                        check,
+                        _run_finished(),
+                    ],
+                )
+            ]
+        )
+        run = report.runs[0]
+        self.assertEqual(run.verification_check_count, 1)
+        self.assertEqual(run.verification_check_seconds, 12.0)
+        work = report.verification_check_work()
+        self.assertEqual(work["checks"], 1)
+        self.assertEqual(work["seconds"], 12.0)
+        # Replay is still visible: the run states one execution twice.
+        self.assertIn(
+            execution_timing.ANOMALY_DUPLICATE_EVIDENCE, _codes(run.anomalies)
+        )
+
+    def test_conflicting_check_durations_leave_the_run_untrusted(self) -> None:
+        run = _one(
+            [
+                _run_started(),
+                *_verification(turn_index=1, started=10, finished=30),
+                _check_finished(turn_index=1, check_index=0, duration=12.0),
+                _check_finished(turn_index=1, check_index=0, duration=15.0),
+                _run_finished(),
+            ]
+        )
+        self.assertEqual(run.verification_check_count, 1)
+        self.assertEqual(run.verification_check_seconds, 12.0)
+        conflict = next(
+            item
+            for item in run.anomalies
+            if item.code == execution_timing.ANOMALY_CONFLICTING_EVIDENCE
+        )
+        self.assertEqual(conflict.detail["check_index"], 0)
+        self.assertEqual(conflict.detail["values"], [12.0, 15.0])
+        self.assertEqual(
+            run.classification, execution_timing.CLASSIFICATION_INCONSISTENT
+        )
+        self.assertFalse(run.trustworthy)
+
+    def test_checks_of_different_identity_are_separate_executions(self) -> None:
+        run = _one(
+            [
+                _run_started(),
+                *_verification(turn_index=1, started=10, finished=30),
+                _check_finished(turn_index=1, check_index=0, duration=12.0),
+                _check_finished(turn_index=1, check_index=1, duration=12.0),
+                _check_finished(turn_index=2, check_index=0, duration=12.0),
+                _run_finished(),
+            ]
+        )
+        self.assertEqual(run.verification_check_count, 3)
+        self.assertEqual(run.verification_check_seconds, 36.0)
+        self.assertEqual(_codes(run.anomalies), [])
+
+    def test_a_check_without_a_check_index_is_marked_rather_than_multiplied(
+        self,
+    ) -> None:
+        run = _one(
+            [
+                _run_started(),
+                *_verification(turn_index=1, started=10, finished=30),
+                _check_finished(
+                    turn_index=1, check_index=0, duration=12.0, omit_check_index=True
+                ),
+                _check_finished(
+                    turn_index=1, check_index=1, duration=12.0, omit_check_index=True
+                ),
+                _run_finished(),
+            ]
+        )
+        # Two records nothing distinguishes reconcile into one execution, and
+        # the gap says so rather than the count claiming certainty.
+        self.assertEqual(run.verification_check_count, 1)
+        self.assertEqual(run.verification_check_seconds, 12.0)
+        self.assertIn(execution_timing.GAP_MISSING_IDENTITY, _codes(run.gaps))
+        self.assertNotEqual(
+            run.classification, execution_timing.CLASSIFICATION_COMPLETE
         )
 
     def test_a_retried_turn_counts_both_attempts(self) -> None:

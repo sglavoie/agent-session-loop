@@ -639,7 +639,16 @@ def _ingest_timing_evidence(
             duration = payload.get("duration_seconds")
             if isinstance(duration, (int, float)) and not isinstance(duration, bool):
                 seconds = float(duration)
-                if seconds >= 0 and seconds == seconds and seconds != float("inf"):
+                # First usable reading wins, as it does in the execution timing
+                # collector: a repeated finish restates one execution, and
+                # letting the later copy overwrite would make the scoped seconds
+                # here disagree with the cumulative check work beside them.
+                if (
+                    check.duration_seconds is None
+                    and seconds >= 0
+                    and seconds == seconds
+                    and seconds != float("inf")
+                ):
                     check.duration_seconds = seconds
         elif name == events.REVIEW_SCOPE_EVENT:
             evidence.review_scopes.append(

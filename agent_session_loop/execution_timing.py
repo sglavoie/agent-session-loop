@@ -54,6 +54,18 @@ per-check figure is still useful — it is how much check *work* the run did —
 and is reported separately under ``verification_check_work``, never added to a
 phase share.
 
+An individual check is identified by ``(run id, turn index, check index)``,
+which is how the metrics scope collector keys it too, so cumulative check work
+and per-scope check totals count the same executions. A repeated
+``verification_check_finished`` is a second statement about one execution, not
+a second execution: its duration is reconciled against the first rather than
+added to it, and the repeat is recorded as ``duplicate-evidence`` when the two
+agree within ``tolerance_seconds`` and ``conflicting-evidence`` when they do
+not. A record that omits either identity field cannot be told apart from
+another such record, so it reconciles into the same slot the metrics collector
+would use and leaves a ``missing-identity`` gap rather than inflating the
+count.
+
 **Eligibility.** A run is in the window when it has a terminal record and that
 record's finish time falls in ``[window_start, window_end)``. Success and pause
 outcomes are both included: a paused run spent its time as surely as a
@@ -538,6 +550,14 @@ class _PhaseEvidence:
 
 
 @dataclass
+class _CheckEvidence:
+    """One verification check execution, however many records restate it."""
+
+    duration_seconds: float | None = None
+    finish_count: int = 0
+
+
+@dataclass
 class _RunEvidence:
     """Accumulated evidence for one ``(plan, run)`` pair."""
 
@@ -550,14 +570,23 @@ class _RunEvidence:
     run_finished_count: int = 0
     attempts: dict[Any, _AttemptEvidence] = field(default_factory=dict)
     phases: dict[Any, _PhaseEvidence] = field(default_factory=dict)
-    check_seconds: float = 0.0
-    check_count: int = 0
+    checks: dict[Any, _CheckEvidence] = field(default_factory=dict)
     anomalies: list[Observation] = field(default_factory=list)
     gaps: list[Observation] = field(default_factory=list)
 
 
 def _string_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _hashable(value: Any) -> Any:
+    """A dict key for a persisted value of unproven type.
+
+    Mirrors ``metrics._hashable`` deliberately: the two collectors must agree
+    on when two check records name the same check, or the same report would
+    total a different number of checks in each of its two places.
+    """
+    return value if isinstance(value, (str, int, type(None))) else repr(value)
 
 
 def _attempt_key(run: _RunEvidence, turn_index: Any, fallback: str) -> Any:
@@ -698,6 +727,69 @@ def _record_phase_duration(
         slot.started_at = started_at
 
 
+def _record_check(run: _RunEvidence, payload: Mapping[str, Any]) -> None:
+    """Reconcile one check finish against the execution it reports on.
+
+    ``(turn_index, check_index)`` is the check's durable identity within a run.
+    A second finish for that identity is another copy of one execution, so its
+    duration is compared against the first rather than summed with it: summing
+    would report two checks and twice the work for a single replayed record,
+    and would disagree with the per-scope totals the metrics collector derives
+    from the same events.
+    """
+    raw_duration = payload.get("duration_seconds")
+    duration = _finite_seconds(raw_duration)
+    if duration is None or duration < 0:
+        run.anomalies.append(
+            Observation(
+                ANOMALY_INVALID_NUMBER,
+                {
+                    "source": events.VERIFICATION_CHECK_FINISHED_EVENT,
+                    "field": "duration_seconds",
+                    "value": repr(raw_duration),
+                },
+            )
+        )
+        return
+    turn_index = payload.get("turn_index")
+    check_index = payload.get("check_index")
+    if turn_index is None or check_index is None:
+        # Unidentified records cannot be told apart from each other. They share
+        # a slot — the same one the metrics collector shares — so the two never
+        # disagree, and the gap says the count is a floor rather than a fact.
+        run.gaps.append(
+            Observation(
+                GAP_MISSING_IDENTITY,
+                {
+                    "record": events.VERIFICATION_CHECK_FINISHED_EVENT,
+                    "field": "turn_index" if turn_index is None else "check_index",
+                },
+            )
+        )
+    slot = run.checks.get((_hashable(turn_index), _hashable(check_index)))
+    if slot is None:
+        run.checks[(_hashable(turn_index), _hashable(check_index))] = _CheckEvidence(
+            duration_seconds=duration, finish_count=1
+        )
+        return
+    slot.finish_count += 1
+    previous = slot.duration_seconds
+    agrees = previous is not None and abs(previous - duration) <= run.tolerance_seconds
+    run.anomalies.append(
+        Observation(
+            ANOMALY_DUPLICATE_EVIDENCE if agrees else ANOMALY_CONFLICTING_EVIDENCE,
+            {
+                "source": events.VERIFICATION_CHECK_FINISHED_EVENT,
+                "field": "duration_seconds",
+                "turn_index": turn_index,
+                "check_index": check_index,
+                "values": [previous, duration],
+                "count": slot.finish_count,
+            },
+        )
+    )
+
+
 def _ingest_event(
     run: _RunEvidence,
     name: str,
@@ -775,22 +867,7 @@ def _ingest_event(
         _record_phase_duration(run, slot, payload)
         return
     if name == events.VERIFICATION_CHECK_FINISHED_EVENT:
-        raw_duration = payload.get("duration_seconds")
-        duration = _finite_seconds(raw_duration)
-        if duration is None or duration < 0:
-            run.anomalies.append(
-                Observation(
-                    ANOMALY_INVALID_NUMBER,
-                    {
-                        "source": events.VERIFICATION_CHECK_FINISHED_EVENT,
-                        "field": "duration_seconds",
-                        "value": repr(raw_duration),
-                    },
-                )
-            )
-            return
-        run.check_seconds += duration
-        run.check_count += 1
+        _record_check(run, payload)
         return
     if name == events.COMMIT_STARTED_EVENT:
         slot = _phase_slot(
@@ -1220,6 +1297,17 @@ def _run_timing(
         if started_at is None:
             started_at = _parse_timestamp(run.run_started.get("run_started_at"))
 
+    # One slot per check execution, whatever the number of records that stated
+    # it, so a replayed event never counts as extra work.
+    check_seconds = sum(
+        (
+            slot.duration_seconds
+            for slot in run.checks.values()
+            if slot.duration_seconds is not None
+        ),
+        0.0,
+    )
+
     attributed = sum(phase_seconds.values())
     unattributed: float | None = None
     if wall_seconds is not None:
@@ -1282,8 +1370,8 @@ def _run_timing(
         },
         attributed_seconds=_round(attributed),
         unattributed_seconds=unattributed,
-        verification_check_seconds=_round(run.check_seconds),
-        verification_check_count=run.check_count,
+        verification_check_seconds=_round(check_seconds),
+        verification_check_count=len(run.checks),
         attempts=attempts,
         anomalies=tuple(run.anomalies),
         gaps=tuple(run.gaps),

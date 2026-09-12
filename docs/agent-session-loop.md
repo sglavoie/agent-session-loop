@@ -5317,7 +5317,17 @@ span. The per-check durations are summed separately as cumulative check *work*
 and never added to a phase, because a parallel recipe runs several checks at
 once and their durations would otherwise claim the same seconds twice. On a
 corpus of serial recipes the two figures nearly coincide; on parallel ones the
-work figure is legitimately larger.
+work figure is legitimately larger. An individual check is identified by
+`(run id, turn index, check index)`, keyed identically by the timing collector
+and by the metrics scope ranking, so `verification_checks.checks` and
+`verification_checks.scoped_checks` count the same executions. A repeated
+`verification_check_finished` restates one execution rather than reporting a
+second: the first usable duration stands, and the repeat becomes a
+`duplicate-evidence` anomaly when the two agree within the tolerance and a
+`conflicting-evidence` one when they do not, which takes the run out of the
+share basis. A record missing either identity field cannot be distinguished
+from another such record, so it reconciles into the shared slot both collectors
+use and leaves a `missing-identity` gap: the check count is then a floor.
 
 **Known durations and shares answer different questions.** Every run lands in
 exactly one trust classification — `active` (no terminal record), `inconsistent`

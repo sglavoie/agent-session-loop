@@ -1952,6 +1952,77 @@ class ExecutionTimingMetricsSectionTests(unittest.TestCase):
         self.assertEqual(10800.0, checks["phase_seconds"])
         self.assertIn("cumulative check work", self._text())
 
+    def _replayed_check_finish(
+        self, state_dir: Path, *, duration_seconds: float
+    ) -> None:
+        """Restate the check written by `_timing_check` once more."""
+        _append_event(
+            state_dir,
+            created_at=_iso(self.now, hours_ago=5),
+            name=events.VERIFICATION_CHECK_FINISHED_EVENT,
+            payload={
+                "run_id": "run-1",
+                "turn_index": 1,
+                "session": "1",
+                "check_index": 0,
+                "name": "ci",
+                "kind": "command",
+                "repo": "app",
+                "status": "passed",
+                "duration_seconds": duration_seconds,
+            },
+        )
+
+    def _one_scoped_check(self) -> Path:
+        state_dir = self._plan("plan-replay")
+        _timing_run(state_dir, self.now, run_id="run-1", started=6, finished=1)
+        _timing_check(
+            state_dir,
+            self.now,
+            run_id="run-1",
+            turn_index=1,
+            check_index=0,
+            name="ci",
+            argv=["make", "ci"],
+            repo="app",
+            cwd="/src/app",
+            started=6,
+            finished=5,
+        )
+        return state_dir
+
+    def test_a_replayed_check_record_inflates_neither_check_total(self) -> None:
+        state_dir = self._one_scoped_check()
+        self._replayed_check_finish(state_dir, duration_seconds=3600.0)
+
+        checks = self._section()["verification_checks"]
+
+        # One execution stated twice is one check in both places: the
+        # cumulative work figure and the scoped ranking count the same thing.
+        self.assertEqual(1, checks["checks"])
+        self.assertEqual(1, checks["scoped_checks"])
+        self.assertEqual(3600.0, checks["cumulative_seconds"])
+        self.assertEqual([3600.0], [row["seconds"] for row in checks["scopes"]])
+        self.assertEqual([1], [row["checks"] for row in checks["scopes"]])
+
+    def test_a_check_restated_with_a_different_duration_stays_reconciled(self) -> None:
+        state_dir = self._one_scoped_check()
+        self._replayed_check_finish(state_dir, duration_seconds=7200.0)
+
+        section = self._section()
+        checks = section["verification_checks"]
+
+        # The contradiction does not double the work nor split the totals; the
+        # run simply stops backing a share.
+        self.assertEqual(1, checks["checks"])
+        self.assertEqual(1, checks["scoped_checks"])
+        self.assertEqual(3600.0, checks["cumulative_seconds"])
+        self.assertEqual([3600.0], [row["seconds"] for row in checks["scopes"]])
+        self.assertEqual(1, section["coverage"]["runs_outside_share_basis"])
+        self.assertEqual(
+            1, section["coverage"]["included_runs_by_classification"]["inconsistent"]
+        )
+
     def test_a_check_without_repository_or_directory_falls_back_to_the_plan(
         self,
     ) -> None:
