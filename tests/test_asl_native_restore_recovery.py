@@ -88,17 +88,33 @@ THREAD_ID = "thread-77"
 RUN_CONVERSATION_ID = "conv-1"
 
 
+#: A name lookup that failed on the way to the provider. It is the shape of
+#: refusal a blacklist of transient words can never catch: nothing in it is
+#: temporary, an operator repairs it in a minute, and the only reason it was
+#: ever read as a disowned history is that it happens to contain "no such".
+UNRELATED_NO_SUCH_ERROR: dict[str, Any] = {
+    "code": -32000,
+    "message": "no such host: api.provider.example",
+}
+
+
 #: Error responses a provider can answer a restore request with that say
 #: nothing about whether the history exists. The internal-error code is the one
 #: that matters most -- it is what a server wraps any unhandled failure in, so
 #: every transient backend fault arrives wearing it -- and the rest are the
 #: refusals an operator repairs rather than starts over from: a service that is
 #: down, a credential that expired, and a workspace this launch may not read.
+#: The last three are the ones no vocabulary of transient words could have
+#: rescued -- a name lookup, a model, and a workspace that are absent say
+#: nothing temporary and nothing at all about whether the history exists.
 NOT_A_MISSING_HISTORY: tuple[dict[str, Any], ...] = (
     {"code": -32603, "message": "internal error"},
     {"code": -32603, "message": "temporary service unavailable; retry later"},
     {"code": -32000, "message": "authentication required: the token has expired"},
     {"code": -32000, "message": "permission denied for this workspace"},
+    {"code": -32000, "message": UNRELATED_NO_SUCH_ERROR["message"]},
+    {"code": -32000, "message": "no such model: missing-model-id"},
+    {"code": -32000, "message": "no such workspace: /workspace"},
 )
 
 
@@ -679,6 +695,52 @@ class RestoreDiagnosisTests(unittest.TestCase):
                 self.assertEqual(
                     expected, restore_diagnosis.text_diagnoses_missing_history(line)
                 )
+
+    def test_something_else_being_absent_is_never_a_missing_history(self) -> None:
+        # The words "no such" are a sentence about *something* being gone, and
+        # almost everything a provider reports gone is not a conversation. None
+        # of these is transient either, so nothing in the veto vocabulary could
+        # have caught them: the subject has to be required, not excused.
+        for line in (
+            UNRELATED_NO_SUCH_ERROR["message"],
+            "no such model: missing-model-id",
+            "no such workspace: /workspace",
+            "open /tmp/plan/state.json: no such file or directory",
+            "no such tool: shell",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(restore_diagnosis.text_diagnoses_missing_history(line))
+
+    def test_a_verdict_belongs_to_the_subject_it_was_passed_about(self) -> None:
+        # The same trap one clause further along: a message may name a session
+        # and then report something else missing. The history noun appearing
+        # somewhere in the sentence is not the history being disowned.
+        for line in (
+            "session/load failed: the settings file does not exist",
+            f"while resuming thread {THREAD_ID}: the model endpoint was not found",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(restore_diagnosis.text_diagnoses_missing_history(line))
+
+    def test_the_ways_a_provider_says_the_history_itself_is_gone(self) -> None:
+        # The other direction of the same rule: insisting on the subject may not
+        # cost a genuine diagnosis. Each of these names the history and then
+        # says it is gone, with and without the identifier in between.
+        for line in (
+            "no such thread",
+            "no such session",
+            "no conversation",
+            "session not found",
+            f"thread {THREAD_ID} was not found",
+            "conversation does not exist",
+            f'thread "{THREAD_ID}" was deleted',
+            "conversation id=c-3 no longer exists",
+            "unknown session",
+            f"invalid thread {THREAD_ID}",
+            "expired conversation",
+        ):
+            with self.subTest(line=line):
+                self.assertTrue(restore_diagnosis.text_diagnoses_missing_history(line))
 
 
 class RefusedRestoreDispositionTests(unittest.TestCase):
@@ -1409,19 +1471,30 @@ class TransientRestoreFailureRunTests(_NativeRestoreRun):
     #: The relaunch after the provider recovered, minting its own id.
     REPAIRED_RUN_ID = "run-restore-3"
 
+    #: What ``thread/resume`` is answered with, and the only thing subclasses
+    #: vary: every claim below is about what the loop does with the sentence.
+    RESUME_ERROR: dict[str, Any] = {
+        "code": -32603,
+        "message": "temporary service unavailable; retry later",
+    }
+
+    #: Where the real app-server for that answer is installed, so two classes
+    #: never share one directory.
+    FAILURE_DIR = "app-server"
+
+    #: The provider's words the pause must still show an operator.
+    REPORTED_WORDS = "temporary service unavailable"
+
     def setUp(self) -> None:
         super().setUp()
         self.resumed: list[str | None] = []
         self.prompts: list[str] = []
         self.failed = False
         self.failure = codex_resume_result(
-            self.tmp / "app-server",
+            self.tmp / self.FAILURE_DIR,
             conversation=RUN_CONVERSATION_ID,
             mode="resume-rejected",
-            resume_error={
-                "code": -32603,
-                "message": "temporary service unavailable; retry later",
-            },
+            resume_error=self.RESUME_ERROR,
         )
 
     def _fake_worker(self, name: str, **kwargs: Any) -> harnesses.HarnessResult:
@@ -1490,7 +1563,7 @@ class TransientRestoreFailureRunTests(_NativeRestoreRun):
 
         # Preserving the binding is not the same as swallowing the reason. The
         # words the provider used are what an operator decides on.
-        self.assertIn("temporary service unavailable", self.failure.stderr)
+        self.assertIn(self.REPORTED_WORDS, self.failure.stderr)
         self.assertIsNone(self.failure.conversation_restore_refused)
 
     def test_the_conversation_is_still_the_one_a_later_launch_would_resume(
@@ -1525,6 +1598,30 @@ class TransientRestoreFailureRunTests(_NativeRestoreRun):
     def _repair_after_pause(self) -> dict[str, Any]:
         self._pause()
         return self.run_loop_once(run_id=self.REPAIRED_RUN_ID, prepare_plan=False)
+
+
+class UnrelatedAbsenceRestoreFailureRunTests(TransientRestoreFailureRunTests):
+    """The same whole loop, when what the provider could not find was a host.
+
+    The failure above announces itself as temporary; this one announces nothing
+    of the kind, and an operator repairs it by fixing a name server rather than
+    by waiting. It is here because the sentence contains the words "no such",
+    which is the entire reason it once retired a conversation the provider was
+    still holding -- and because no list of transient words could have stopped
+    it, only requiring the absence to be *about a conversation* can.
+
+    Every claim it inherits is the claim that matters: the turn fails, nothing
+    is decided about the history, and an ordinary relaunch after the lookup
+    starts working again continues the exact conversation.
+    """
+
+    REPAIRED_RUN_ID = "run-restore-4"
+
+    RESUME_ERROR = UNRELATED_NO_SUCH_ERROR
+
+    FAILURE_DIR = "app-server-unrelated-absence"
+
+    REPORTED_WORDS = "no such host"
 
 
 if __name__ == "__main__":

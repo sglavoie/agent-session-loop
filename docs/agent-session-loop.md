@@ -6065,6 +6065,19 @@ genuinely missing thread with. `data` is read for the veto and never as
 positive evidence, since it is where providers put retry hints rather than
 history verdicts.
 
+The veto is the second half of the rule and never the first. Every phrasing on
+the positive side has to name a conversation, session, or thread as the subject
+of the absence, because a sentence that merely says something is missing is
+almost never about the history: "no such host: api.example" is a name lookup,
+"no such model" is a configuration mistake, and "no such file or directory" is
+whatever the provider was reading at the time. None of the three is temporary,
+so no vocabulary of transient words could ever have excused them — a
+subject-free positive match cannot be made safe afterwards, it can only be
+refused up front. The verdict has to attach to that subject too, within the
+identifier a provider may name it by and no further: "session `s-1` does not
+exist" is a disowned history, and "session/load failed: the settings file does
+not exist" is a missing file in a sentence that happens to mention a session.
+
 The whole thing is fail-closed in one direction: an unrecognized sentence is
 not a refusal. The turn fails, the ledger entry survives, and the next launch
 continues the conversation — so a provider that rephrases its refusals costs a

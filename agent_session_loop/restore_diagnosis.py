@@ -44,17 +44,37 @@ from typing import Any
 #: whatever else the sentence happened to mention.
 _HISTORY_NOUN = r"(?:conversation|session|thread)"
 
+#: The noun plus the name a provider may give it, so a verdict stays attached to
+#: the subject it was passed about: ``session s-1 does not exist``, ``thread
+#: "t-9" was deleted``, ``conversation id=c-3 no longer exists``. At most one
+#: token, optionally introduced by "id" and optionally quoted -- room for the
+#: identifier of the history being judged, and no room for a second subject to
+#: take the verb instead. The alternative, an unbounded gap, reads "session/load
+#: failed: the settings file does not exist" as a disowned history.
+_NAMED_HISTORY = (
+    rf"{_HISTORY_NOUN}\b(?:\s+(?:id|ids|identifier))?"
+    r"(?:[\s:=]+['\"`]?[\w.@+:-]+['\"`]?)?"
+)
+
 #: What a provider says when the history named by the restore no longer exists.
 #: Every alternative is a statement about that conversation's existence rather
 #: than about this machine, this credential, or this moment, which is what makes
 #: it safe to act on durably. "could not read", "permission denied" and the like
 #: are deliberately absent: a history that cannot be reached right now is not a
 #: history that is gone.
+#:
+#: Every alternative also names a history noun, and that is load-bearing rather
+#: than incidental. A subject-free positive such as a bare "no such" is a
+#: sentence about *something* being absent, and the things a provider reports
+#: absent -- a host, a model, a file, a workspace -- are overwhelmingly not the
+#: conversation. No vocabulary of transient words can rescue such a match
+#: afterwards, because "no such host: api.example" says nothing transient; it
+#: simply says nothing about history at all.
 MISSING_HISTORY_RE = re.compile(
-    r"(?:no (?:such|conversation|session|thread)\b"
-    rf"|{_HISTORY_NOUN}\s+(?:was\s+)?not\s+found"
-    rf"|{_HISTORY_NOUN}\b[^\n]*\b(?:does not exist|no longer exists|was deleted)"
-    rf"|(?:unknown|invalid|expired)\s+{_HISTORY_NOUN})",
+    rf"(?:no\s+(?:such\s+)?{_HISTORY_NOUN}\b"
+    rf"|{_NAMED_HISTORY}\s+(?:was\s+)?not\s+found"
+    rf"|{_NAMED_HISTORY}\s+(?:does\s+not\s+exist|no\s+longer\s+exists|was\s+deleted)"
+    rf"|(?:unknown|invalid|expired)\s+{_HISTORY_NOUN}\b)",
     re.IGNORECASE,
 )
 
@@ -92,7 +112,9 @@ def text_diagnoses_missing_history(text: str) -> bool:
     The whole of the decision for claude, and the message half of it for the two
     protocol transports. Both halves of the vocabulary are consulted, so a
     sentence that says the conversation is missing *and* says why in transient
-    or access terms is read as the outage it is.
+    or access terms is read as the outage it is. The positive half insists on a
+    conversation, session, or thread as the subject of the absence, so a line
+    reporting some other missing thing is simply not an answer to this question.
     """
     if not text:
         return False
@@ -171,10 +193,12 @@ class ProviderRejection:
         * the code is not one the protocol already spends on something else, so
           the internal-error code a server wraps every unhandled failure in can
           never retire a conversation on its own;
-        * the message says the history does not exist, in the shared vocabulary
-          above, because the code alone never says that -- both real providers
-          answer a genuinely missing restore with the same invalid-params code
-          they answer a dozen other things with;
+        * the message says *the history* does not exist, in the shared
+          vocabulary above -- naming a conversation, session, or thread as the
+          subject, since a provider reports far more absent hosts, models, and
+          files than absent conversations -- because the code alone never says
+          that: both real providers answer a genuinely missing restore with the
+          same invalid-params code they answer a dozen other things with;
         * neither the message nor the ``data`` blob says the refusal is about an
           outage, a credential, or a permission. ``data`` is consulted only for
           this veto and never as positive evidence: it is free-form, and a
