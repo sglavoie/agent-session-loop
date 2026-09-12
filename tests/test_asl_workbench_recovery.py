@@ -715,6 +715,31 @@ class WorkbenchRecoveryTests(unittest.TestCase):
                 [row.value for row in recovery.evidence],
             )
 
+    def test_submission_recovery_offers_inspection_and_an_explicit_decision(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            recovery = self._recovery_for_payload(
+                Path(tmp),
+                {
+                    "ok": False,
+                    "paused": True,
+                    "reason": events.PAUSE_REASON_REDIRECT_SUBMISSION_UNRESOLVED,
+                    "pause_reason": events.PAUSE_REASON_REDIRECT_SUBMISSION_UNRESOLVED,
+                    "pause_message": "The native submission outcome is unknown",
+                    "run_id": "run-uncertain",
+                },
+                plan_name="submission-uncertain",
+            )
+            self.assertEqual("conversation-recovery", recovery.kind)
+            self.assertEqual(2, len(recovery.commands))
+            self.assertIn("redirect-status", recovery.commands[0].command)
+            self.assertIn("--outcome OUTCOME", recovery.commands[1].command)
+            self.assertIn("resolve-redirect", recovery.commands[1].command)
+            self.assertTrue(
+                all(action.kind != "endpoint" for action in recovery.actions)
+            )
+
     def test_registered_pause_reasons_have_explicit_recovery_mapping(self) -> None:
         mapped_reasons = set(workbench.PAUSE_REASON_RECOVERY_KIND_BY_REASON)
         generic_reasons = set(workbench.GENERIC_RECOVERY_PAUSE_REASONS)

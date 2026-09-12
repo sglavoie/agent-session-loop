@@ -63,6 +63,7 @@ from . import (
     redirect_ack,
     redirect_admission,
     redirect_recovery,
+    redirect_restart,
     redirect_store,
     responses,
 )
@@ -712,10 +713,19 @@ def control_redirect_status_from_args(args: argparse.Namespace) -> int:
     operations = [
         operation_payload(operation, live_target=live_target) for operation in selected
     ]
+    journal = redirect_store.read_journal(plan_dir, state_dir=state_dir)
+    for operation in operations:
+        request = journal.request(operation["operation_id"])
+        operation["operator_resolution"] = (
+            redirect_restart.resolution_for(plan_dir, request, state_dir)
+            if request is not None
+            else None
+        )
     unresolved = [
         operation["operation_id"]
         for operation in operations
         if operation["stage"] == STAGE_UNCERTAIN
+        and not operation["operator_resolution"]
     ]
     outstanding = list(wait_payload["outstanding"]) if wait_payload else []
     exit_code = EXIT_UNRESOLVED if unresolved or outstanding else EXIT_OK
@@ -799,6 +809,12 @@ def _print_status_text(
                 f"session {operation['target']['session_id']} "
                 f"turn {operation['target']['turn_index']}"
             )
+            decision = operation.get("operator_resolution")
+            if decision:
+                print(
+                    f"    operator decision: {decision['outcome']} "
+                    f"({decision['reason']})"
+                )
     if not report.complete:
         print(
             "  note: the journal is incomplete, so a record may be missing "
@@ -977,4 +993,44 @@ def control_recover_conversation_from_args(args: argparse.Namespace) -> int:
                     for operation in retained
                 )
             )
+    return EXIT_OK
+
+
+def control_resolve_redirect_from_args(args: argparse.Namespace) -> int:
+    """An operator decision, serialized against runner startup by the plan lock."""
+    from . import state
+
+    command = "control-resolve-redirect"
+    label = "control resolve-redirect"
+    context = cli_common.resolve_plan_context(
+        args, command_name=command, text_label=label
+    )
+    if context is None:
+        return EXIT_REFUSED
+    try:
+        payload = redirect_restart.resolve_submission(
+            context.snapshot.plan_dir,
+            args.operation_id,
+            outcome=args.outcome,
+            reason=args.reason,
+            state_dir=getattr(args, "state_dir", None),
+        )
+    except (
+        OSError,
+        ValueError,
+        state.StateError,
+        redirect_store.RedirectStoreError,
+    ) as error:
+        cli_common.print_error(
+            args,
+            command_name=command,
+            text_label=label,
+            reason="redirect-resolution-refused",
+            error=str(error),
+        )
+        return EXIT_REFUSED
+    if args.json:
+        responses.print_json({"ok": True, "command": command, "resolution": payload})
+    else:
+        print(f"Recorded {args.outcome} for {args.operation_id}")
     return EXIT_OK

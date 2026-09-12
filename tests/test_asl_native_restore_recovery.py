@@ -817,6 +817,26 @@ class RestoreDiagnosisTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertFalse(restore_diagnosis.text_diagnoses_missing_history(line))
 
+    def test_infrastructure_identifiers_are_not_native_history(self) -> None:
+        for line in (
+            "session config-v2.json not found",
+            'session "config.json" not found',
+            "session v2-backend does not exist",
+            "no such session::load method",
+            "no such session() method",
+            "no such session[load] method",
+            "pthread not found",
+            "subsession not found",
+            "session config99.toml not found",
+            'session "v3-cache" was deleted',
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(
+                    restore_diagnosis.ProviderRejection(
+                        code=-32000, message=line
+                    ).diagnoses_missing_history()
+                )
+
     def test_the_ways_a_provider_says_the_history_itself_is_gone(self) -> None:
         # The other direction of the same rule: insisting on the subject may not
         # cost a genuine diagnosis. Each of these names the history and then
@@ -1800,3 +1820,17 @@ class ConfigFileNameRestoreFailureRunTests(TransientRestoreFailureRunTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VersionedInfrastructureRestoreTests(TransientRestoreFailureRunTests):
+    RESUME_ERROR = {"code": -32000, "message": "session config-v2.json not found"}
+    REPORTED_WORDS = "session config-v2.json not found"
+    FAILURE_DIR = "versioned-config"
+    REPAIRED_RUN_ID = "versioned-config-repaired"
+
+
+class CompoundMethodRestoreTests(TransientRestoreFailureRunTests):
+    RESUME_ERROR = {"code": -32000, "message": "no such session::load method"}
+    REPORTED_WORDS = "no such session::load method"
+    FAILURE_DIR = "compound-method"
+    REPAIRED_RUN_ID = "compound-method-repaired"

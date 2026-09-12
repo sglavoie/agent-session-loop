@@ -6106,22 +6106,15 @@ so the noun has to hold the *subject* position rather than merely appear: either
 the verb attaches to it directly, or the clause ends where the noun and its
 identifier end.
 
-Code writes those compounds with punctuation as readily as with a space, and
-that is the form both halves of the rule have to be stated against, because
-punctuation is what a clause ends with and what a minted name is spelled with. A
-method is `session.load` or `session:load`, a file is `session.json`, a backend
-is `storage-backend` — so "no such session.load method", "no such session.json
-file", "session config.json not found" and "session storage-backend not found"
-are the same four sentences about a method, two files and a backend, in the one
-disguise the classifier reads as its own vocabulary. A clause therefore does
-not end at a dot or a colon that a word continues: "no such session." is a
-verdict and "no such session.load method" is not, and nothing but the character
-after the dot separates them. And a name is not merely a word with a separator
-in it, because English compounds have separators too — an identifier is quoted,
-announced as an "id", or carries a *digit*: `s-1`, `c-3`, `id=c-3`, `"t-9"`,
-`thread-77`. A bare English word is none of those and neither is a compound of
-two, so the word after the noun in "session file" and in "session config.json"
-is read as the sentence's real subject instead of as the conversation's name.
+The classifier requires a leading word boundary and a complete history subject.
+Punctuation inside a method name (`session::load`, `session()`, `session[load]`)
+does not end that subject. Quoting, separators, and digits do not establish a
+native identifier: `"config.json"`, `config-v2.json`, and `v2-backend` remain
+infrastructure. Accepted identifier forms are UUIDs and the supported numeric
+history names (`s-1`, `c-3`, `thread-77`, `acp-session-1`, `v2.thread-9`),
+optionally quoted or introduced as an ID. Unknown identifier forms leave the
+saved conversation intact on a failed turn. `no such session.` still diagnoses
+missing history; `pthread not found` does not.
 
 For the two phrasings whose verb comes first, "no such …" and "unknown …", what
 may follow the noun is listed as predicates rather than excluded as nouns, for
@@ -7454,7 +7447,8 @@ question about (`workspace-write-scope-violation`,
 `workspace-write-guard-unavailable`, `review-guard-unavailable`,
 `review-mutated-worktree`, `plan-artifact-tampered`, `unexpected-status-change`,
 `multiple-status-changes`, `nonzero-exit`, `malformed-plan`,
-`malformed-review-repair`, `interrupted`, `redirect-successor-blocked`). The
+`malformed-review-repair`, `interrupted`, `redirect-successor-blocked`,
+`redirect-submission-unresolved`). The
 dividing principle is whether a
 mailbox answer can make the run proceed: a dirty worktree stays dirty however
 the operator answers, so waiting for a reply would only burn the mailbox lease
@@ -10123,3 +10117,36 @@ Workbench browser workflow:
   detail view and confirm the card kind, severity, evidence rows,
   action-card targets, copy-only commands, and artifact links match the
   seeded state without executing arbitrary repair commands.
+
+
+### Redirect recovery before restarting
+
+`redirect_restart.py` checks durable predecessor evidence before startup
+reconciliation, commit recovery, another attempt, or plan completion. Each
+accepted turn owes proof of termination even after its runner releases the lock
+or dies. Private `redirect-predecessors/` state records the worker group and
+sampled descendant identities. An uncleared predecessor is checked again on
+restart without sending signals. A live group, surviving descendant, unknown
+identity, foreign host, missing evidence, or process-sweep opt-out keeps
+`redirect-successor-blocked` in force. A proven stopped predecessor permits
+normal recovery. A new run ID or `--fresh-conversation` cannot bypass this gate.
+Inspect the `evidence_path` and confirmation in the pause details, stop the
+identified predecessor through the normal operator process procedure, then
+rerun. Missing or corrupt historical evidence requires restoring valid evidence;
+rerunning or deleting a lock does not manufacture termination proof.
+
+An open native submission window also blocks retries and relaunches of its
+session with `redirect-submission-unresolved`. Inspect provider history and
+`asl control redirect-status PLAN_DIR --json`, then explicitly record the
+observed outcome:
+
+```bash
+asl control resolve-redirect PLAN_DIR --operation-id ID --outcome submitted --reason "Observed in native history"
+asl control resolve-redirect PLAN_DIR --operation-id ID --outcome not-submitted --reason "Confirmed never submitted"
+```
+
+Choose one outcome from evidence. `submitted` permits execution without
+replaying the correction or fabricating acknowledgment. `not-submitted` releases
+the correction for the next prompt, but is refused if delivery is already
+recorded. The command requires a reason and refuses a live runner; the decision
+is durable before any release. There is no timed or default resolution.

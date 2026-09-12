@@ -167,6 +167,8 @@ UNANSWERABLE_OUTCOME_PAUSE_REASONS: tuple[str, ...] = (
     events.PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     events.PAUSE_REASON_INTERRUPTED,
     events.PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
+    # Resolved through the explicit control command, never a generic mailbox reply.
+    events.PAUSE_REASON_REDIRECT_SUBMISSION_UNRESOLVED,
 )
 
 # Every pause an operator must inspect rather than answer, from any source: a

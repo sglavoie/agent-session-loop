@@ -2598,6 +2598,20 @@ def build_parser(prog: str = "agent-session-loop") -> argparse.ArgumentParser:
         handler_ref="redirect_cli:control_redirect_from_args",
     )
 
+    resolve_redirect_parser = control_sub.add_parser(
+        "resolve-redirect",
+        help="Record an explicit decision about an uncertain submission.",
+    )
+    _add_plan_reference_args(resolve_redirect_parser)
+    resolve_redirect_parser.add_argument("--operation-id", required=True)
+    resolve_redirect_parser.add_argument(
+        "--outcome", choices=("submitted", "not-submitted"), required=True
+    )
+    resolve_redirect_parser.add_argument("--reason", required=True)
+    resolve_redirect_parser.set_defaults(
+        handler_ref="redirect_cli:control_resolve_redirect_from_args"
+    )
+
     control_redirect_status_parser = control_sub.add_parser(
         "redirect-status",
         help="Report what became of this plan's corrections, without changing any.",

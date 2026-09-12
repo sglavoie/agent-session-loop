@@ -71,7 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from . import process_tree, redirect_admission, redirect_store
+from . import process_tree, redirect_admission, redirect_restart, redirect_store
 
 #: The escalation deadline, measured from arming. Derived from the one number
 #: the producer's own bounded wait is derived from, rather than set beside it:
@@ -346,6 +346,7 @@ class UrgentController:
         tools: TerminationTools | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
+        self._recovery_directory: Path | None = None
         self._worker = worker
         self._cancellation = cancellation
         self._transport = transport
@@ -394,6 +395,11 @@ class UrgentController:
         # already given up on, so the superseded run cannot publish ``finished``
         # over the top of the one that replaced it.
         self._escalation_epoch = 0
+
+    def set_recovery_directory(self, directory: Path) -> None:
+        """Persist the ownership obligation before any acceptance is possible."""
+        redirect_restart.write_evidence(directory, self._worker.to_payload(), {})
+        self._recovery_directory = directory
 
     # -- state ---------------------------------------------------------------
 
@@ -699,6 +705,11 @@ class UrgentController:
             raise SuccessorBlockedError(
                 report.blocking_reason or BLOCK_UNCONFIRMED, report
             )
+        if self._recovery_directory is not None:
+            try:
+                redirect_restart.mark_stopped(self._recovery_directory)
+            except OSError as error:
+                raise SuccessorBlockedError(BLOCK_UNREPORTED, report) from error
         return report
 
     # -- internals -----------------------------------------------------------
@@ -746,6 +757,13 @@ class UrgentController:
                 "collected": False,
                 "sample_error": str(exc),
             }
+        if self._recovery_directory is not None:
+            try:
+                redirect_restart.write_evidence(
+                    self._recovery_directory, self._worker.to_payload(), evidence
+                )
+            except OSError as error:
+                evidence = {**evidence, "collected": False, "sample_error": str(error)}
         self._evidence = evidence
         self._evidence_ready.set()
 

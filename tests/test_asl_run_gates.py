@@ -1362,6 +1362,7 @@ class TerminatingDispositionSourceTests(unittest.TestCase):
         "redirected",
         "timeout",
         "aborted",
+        "restore-refused",
         "malformed-plan",
         "runner-pause",
         "nonzero-exit",

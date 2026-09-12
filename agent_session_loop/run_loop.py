@@ -87,6 +87,7 @@ from . import (
     redirect_ack,
     redirect_continuation,
     redirect_recovery,
+    redirect_restart,
     redirect_store,
     review,
     review_continuation,
@@ -797,6 +798,35 @@ def _redirected_turn_harness(
     return pending.harness
 
 
+def _pause_for_redirect_restart(
+    ctx: RunContext, *, args: argparse.Namespace, snapshot: plans.PlanSnapshot
+) -> bool:
+    if args.dry_run:
+        return False
+    try:
+        blocked = redirect_restart.restart_blocker(
+            snapshot.plan_dir,
+            pending_session_ids=tuple(
+                s.id for s in snapshot.sessions if s.status == "pending"
+            ),
+            state_dir=args.state_dir,
+        )
+    except (OSError, redirect_store.RedirectStoreError) as error:
+        blocked = {"reason": "redirect-successor-blocked", "error": str(error)}
+    if blocked is None:
+        return False
+    ctx.record_final_snapshot(snapshot)
+    ctx.pause(
+        reason=blocked["reason"],
+        message=(
+            "Redirect recovery requires predecessor termination proof and "
+            "an explicit resolution of any uncertain native submission."
+        ),
+        details={"redirect_recovery": blocked},
+    )
+    return True
+
+
 def _reconcile_stranded_redirects(
     ctx: RunContext,
     *,
@@ -813,11 +843,9 @@ def _reconcile_stranded_redirects(
     claiming an unanswered correction for a run that no longer exists would make
     that decision on a lie.
 
-    Unlike the repair rollback this never refuses the run. Everything it settles
-    is a correction nothing was going to act on, and everything it cannot settle
-    it reports; a plan whose journal is unreadable still has sessions worth
-    running, and pausing here would turn a redirect that was never delivered
-    into a run that never started.
+    The restart gate runs before reconciliation: no release, commit, or worker
+    is allowed until predecessor termination and submission ambiguity have
+    been checked. This function then settles only provably unsent carries.
     """
     if args.dry_run:
         # A dry run promises to write nothing durable, and settling a request is
@@ -1549,6 +1577,8 @@ def run_locked(
             ),
         },
     )
+    if _pause_for_redirect_restart(ctx, args=args, snapshot=snapshot):
+        return _terminalize(ctx, 1)
     _reconcile_stranded_redirects(ctx, args=args, snapshot=snapshot)
     ctx.persistence.write_state(ctx.payload)
     run_persistence._notify_agent_mux_loop_started(ctx.payload, ctx.persistence)
@@ -1985,6 +2015,8 @@ def run_locked(
                 # review creation. Refreshing the baseline in this one place
                 # covers every path, including ones added later.
                 ctx.runner_work_finished_at = clock.utc_now()
+            if _pause_for_redirect_restart(ctx, args=args, snapshot=snapshot):
+                break
             entering_first_pass = ctx.first_loop_pass
             ctx.first_loop_pass = False
             if not entering_first_pass:

@@ -44,75 +44,30 @@ from typing import Any
 #: whatever else the sentence happened to mention.
 _HISTORY_NOUN = r"(?:conversation|session|thread)"
 
-#: What a name looks like, as opposed to what a word looks like. The identifiers
-#: providers mint are quoted, or announced as an "id", or carry a digit:
-#: ``s-1``, ``c-3``, ``thread-77``, ``id=c-3``, ``"t-9"``. A bare English word is
-#: none of those, and declining to read one as a name is what keeps "session
-#: file", "thread pool" and "session storage" out of this vocabulary: in each of
-#: them the word after the history noun is not the history's name, it is the
-#: thing the sentence is actually about.
-#:
-#: A digit rather than a digit *or a separator*, because a separator is how
-#: English writes compounds too. "session config.json not found" and "session
-#: storage-backend not found" are a file and a backend, and reading the dotted or
-#: hyphenated word after the noun as that session's name turns both into disowned
-#: histories. Every identifier a provider mints and every example above carries a
-#: digit; a compound of ordinary words does not, and one that somehow does not
-#: either falls to the fail-closed default of leaving the conversation alone.
-#:
-#: The length bounds are not about identifiers being short. "Contains a digit" is
-#: a claim about a whole token, so an unbounded form rescans the token from every
-#: position inside it, and this runs over every line a CLI harness prints -- one
-#: long line of base64 in a provider's diagnostics would buy quadratic work.
-#: Sixty-four characters either side of the digit is several times any identifier
-#: a provider mints, and a longer one falls to the same default.
-_HISTORY_ID = r"(?:['\"`][^'\"`]+['\"`]|[\w.@+:-]{0,64}\d[\w.@+:-]{0,64})"
-
-#: The noun plus the name a provider may give it, so a verdict stays attached to
-#: the subject it was passed about: ``session s-1 does not exist``, ``thread
-#: "t-9" was deleted``, ``conversation id=c-3 no longer exists``. At most one
-#: name -- room for the identifier of the history being judged, and no room for a
-#: second subject to take the verb instead. The alternative, an unbounded gap,
-#: reads "session/load failed: the settings file does not exist" as a disowned
-#: history, and a gap of one *word* reads "session file not found" as one.
+# Accept only known native identifier forms, rather than guessing from quoting,
+# digits or punctuation. Unknown names preserve the binding on a failed turn.
+_NATIVE_ID = (
+    r"(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|(?:v\d+\.)?(?:acp-session|conversation|session|thread|[sct])-\d+)"
+)
+_HISTORY_ID = rf"(?:{_NATIVE_ID}|'{_NATIVE_ID}'|\"{_NATIVE_ID}\"|`{_NATIVE_ID}`)"
 _NAMED_HISTORY = (
-    rf"{_HISTORY_NOUN}\b"
+    rf"\b{_HISTORY_NOUN}\b"
     rf"(?:\s+(?:id|ids|identifier)\b(?:[\s:=]+{_HISTORY_ID})?"
     rf"|[\s:=]+{_HISTORY_ID})?"
 )
-
-#: Punctuation that closes the clause a history noun was the subject of, and the
-#: predicates that continue one. Both exist for the two patterns whose verb comes
-#: *before* the noun instead of after it, where nothing downstream of the noun
-#: would otherwise have to agree with it: "no such session" is a whole sentence
-#: about a session, while "no such session/load method" and "unknown session
-#: storage backend" are sentences about a method and a backend in which the
-#: history word is merely an adjective.
-#:
-#: The dot and the colon are split out from the rest because they are the two
-#: that also live *inside* a name: the dot in ``session.load`` and
-#: ``session.json``, the colon in ``session:load``. There the punctuation joins
-#: two halves of one token rather than ending a clause, and reading it as an
-#: ending reads the first half as the whole sentence -- which is how "no such
-#: session.load method" came to retire a conversation the provider still had. A
-#: dot or colon that a word continues is therefore not a boundary; one at the end
-#: of a line, or before a space, or before the closing punctuation of a sentence,
-#: still is, so "no such session." keeps its verdict.
-_CLAUSE_END = r"(?:[,;!?()\[\]{}'\"`]|[.:](?!\w))"
+# A terminal mark must end the token. Parentheses may enclose a native ID,
+# but method punctuation (session(), session::load) never closes a subject.
+_CLAUSE_END = r"(?:[.,;:!?](?=\s|$)|$)"
 _HISTORY_PREDICATE = (
     r"(?:found|exists?|existed|remains?|is|was|were|are|has|have|had"
     r"|with|for|in|on|to|by|of|from|anymore|yet|available|known|loaded"
     r"|active|open|named|matching|registered|selected)"
 )
-
-#: The noun, the name it may carry, and the evidence that the clause was about
-#: it. Listing the predicates that may follow rather than the nouns that may not
-#: is the fail-closed direction: there is no end to the infrastructure a provider
-#: can put a history word in front of, so an unrecognized continuation leaves the
-#: sentence unread rather than read as a retirement.
 _HISTORY_AS_SUBJECT = (
     rf"{_NAMED_HISTORY}"
-    rf"(?=[ \t]*(?:$|[\r\n]|{_CLAUSE_END}|{_HISTORY_PREDICATE}\b))"
+    rf"(?=[ \t]*(?:$|[\r\n]|{_CLAUSE_END}"
+    rf"|\s+\({_NATIVE_ID}\)(?=\s|$|[.,;!?])|\s+{_HISTORY_PREDICATE}\b))"
 )
 
 #: What a provider says when the history named by the restore no longer exists.

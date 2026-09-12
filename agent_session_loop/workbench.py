@@ -2466,6 +2466,8 @@ PAUSE_REASON_RECOVERY_KIND_BY_REASON: dict[str, RecoveryKind] = {
     "no-contract": "no-contract",
     "not-loop-ready": "not-loop-ready",
     "redirect-successor-blocked": "conversation-recovery",
+    "redirect-submission-unresolved": "conversation-recovery",
+    "redirect-delivery-unrecordable": "conversation-recovery",
     "runner-pause": "reply-needed",
     "unresolved-prerequisite": "reply-needed",
     "verify-failed": "verify-failed",
@@ -4469,6 +4471,72 @@ def _build_conversation_recovery(
     and the bridge's recovery read cannot name three different recoveries for
     the same pause.
     """
+    if reason in (
+        events.PAUSE_REASON_REDIRECT_SUBMISSION_UNRESOLVED,
+        events.PAUSE_REASON_REDIRECT_DELIVERY_UNRECORDABLE,
+    ):
+        base = ["asl", "control"]
+        extra = ["--state-dir", str(state_dir)] if state_dir is not None else []
+        detail = context.pause_details.get("redirect_recovery")
+        operation_id = (
+            detail.get("operation_id", "ID") if isinstance(detail, dict) else "ID"
+        )
+        return _build_context_recovery_payload(
+            context,
+            kind="conversation-recovery",
+            title="Submission outcome needs an explicit decision",
+            summary=(
+                "Inspect native history before deciding whether the correction "
+                "was submitted. A retry cannot resolve this uncertainty."
+            ),
+            severity="error",
+            recoverable=True,
+            artifacts=context.base_artifacts,
+            evidence=(
+                RecoveryEvidenceRow(
+                    label="Pause reason",
+                    value=reason,
+                    detail=context.pause_message,
+                    severity="error",
+                ),
+            ),
+            actions=(
+                _inspect_action("Inspect native history and the redirect journal."),
+            ),
+            commands=(
+                RecoveryCopyCommand(
+                    label="Inspect redirect status",
+                    command=shlex.join(
+                        base
+                        + ["redirect-status", str(context.snapshot.plan_dir)]
+                        + extra
+                        + ["--json"]
+                    ),
+                    description="Read the recorded delivery evidence; writes nothing.",
+                ),
+                RecoveryCopyCommand(
+                    label="Record a submission decision",
+                    command=shlex.join(
+                        base
+                        + [
+                            "resolve-redirect",
+                            str(context.snapshot.plan_dir),
+                            "--operation-id",
+                            str(operation_id),
+                            "--outcome",
+                            "OUTCOME",
+                            "--reason",
+                            "EXPLANATION",
+                        ]
+                        + extra
+                    ),
+                    description=(
+                        "Choose submitted or not-submitted from native evidence "
+                        "and replace EXPLANATION. Neither outcome is a default."
+                    ),
+                ),
+            ),
+        )
     classified = intervention.recovery_decision(reason, paused=True)
     decision = classified.decision
     commands = redirect_cli.recovery_commands(

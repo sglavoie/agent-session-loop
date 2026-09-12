@@ -287,6 +287,7 @@ PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED = "conversation-recovery-required"
 # recoverable — and being non-recoverable is also what keeps the run from
 # committing the interrupted turn's retained work.
 PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED = "redirect-successor-blocked"
+PAUSE_REASON_REDIRECT_SUBMISSION_UNRESOLVED = "redirect-submission-unresolved"
 # A turn carrying an accepted redirect could not record, before starting, that
 # its prompt was about to be submitted. The turn is not started: a submission
 # this run could not declare is one no later reader can tell apart from a
@@ -338,6 +339,7 @@ PAUSE_REASONS: tuple[str, ...] = (
     PAUSE_REASON_REVIEW_NOT_CLEAR,
     PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
     PAUSE_REASON_REDIRECT_SUCCESSOR_BLOCKED,
+    PAUSE_REASON_REDIRECT_SUBMISSION_UNRESOLVED,
     PAUSE_REASON_REDIRECT_DELIVERY_UNRECORDABLE,
     PAUSE_REASON_MALFORMED_REVIEW_REPAIR,
     PAUSE_REASON_QUOTA_EXHAUSTED,

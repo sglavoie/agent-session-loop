@@ -52,6 +52,7 @@ from . import (
     conversations,
     redirect_admission,
     redirect_control,
+    redirect_restart,
     redirect_store,
 )
 
@@ -429,6 +430,13 @@ class TurnRedirect:
                 self._controller = self._build_controller(
                     redirect_control.OwnedWorker.session_leader(pid)
                 )
+                configure = getattr(self._controller, "set_recovery_directory", None)
+                if configure is not None:
+                    configure(
+                        redirect_restart.evidence_dir(
+                            self._plan_dir, self._target, self._state_dir
+                        )
+                    )
         self._bound.set()
 
     def settle(self) -> bool:
