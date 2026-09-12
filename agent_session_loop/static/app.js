@@ -225,6 +225,7 @@
     detailInFlight: false,
     detailPlan: null,
     detailRegistry: null,
+    recoveryPanelPlanDir: null,
     detailReplyContext: null,
     // Urgent-correction composer state. `operationId` is the durable identity
     // of the correction being composed: minted at the first submit and kept
@@ -2699,7 +2700,13 @@
     let renderedRecovery = null;
     if (compact) {
       renderedRecovery = compact;
-      renderRecoveryPanel(compact);
+      // The compact projection omits evidence and artifacts. Replacing an
+      // already populated panel with it on every poll collapses the detail
+      // layout until the full recovery request completes.
+      if (state.recoveryPanelPlanDir !== planDir) {
+        renderRecoveryPanel(compact);
+        state.recoveryPanelPlanDir = planDir;
+      }
     }
     try {
       const body = await apiRequest(
@@ -2708,6 +2715,7 @@
       if (body && body.ok === true && body.recovery) {
         renderedRecovery = body.recovery;
         renderRecoveryPanel(body.recovery);
+        state.recoveryPanelPlanDir = planDir;
       } else if (!compact) {
         renderRecoveryError(
           (body && body.error) || "recovery diagnosis unavailable"
