@@ -47,6 +47,14 @@ measurement, and it is reported unclamped: a *negative* remainder means the
 phases claim more time than the run lasted, and rounding that up to zero would
 turn a contradiction into a plausible total.
 
+A non-turn phase whose start and finish both exist but whose length nothing
+states — no usable ``duration_seconds`` and not enough timestamps to span one —
+contributes no seconds and leaves a ``phase-timing-unknown`` gap. Two event
+names are evidence that the phase *ran*, not that it took zero time; without the
+gap its seconds would fall into ``unattributed`` while the run still counted as
+``complete``, which would put a fabricated zero-length phase into the share
+basis. The run's other, known durations stay attributed exactly as they were.
+
 **Verification concurrency.** A parallel recipe runs several checks at once, so
 the per-check ``duration_seconds`` values sum to more than the phase lasted.
 Run accounting therefore uses the phase elapsed time only. The cumulative
@@ -91,7 +99,8 @@ invocations belongs to nobody and is not accounted anywhere.
 ``partial``
     No anomaly, but a gap: a missing start record, an unknown wall duration, a
     terminal record reconstructed after the fact, a turn with no timing, a
-    turn of unknown kind, or a start with no finish.
+    turn of unknown kind, a finished phase of unknown length, or a start with
+    no finish.
 ``complete``
     Every phase reconciles and nothing is missing.
 
@@ -186,6 +195,7 @@ GAP_TURN_TIMING_UNKNOWN = "turn-timing-unknown"
 GAP_TURN_KIND_UNKNOWN = "turn-kind-unknown"
 GAP_UNMATCHED_START = "unmatched-start"
 GAP_MISSING_IDENTITY = "missing-identity"
+GAP_PHASE_TIMING_UNKNOWN = "phase-timing-unknown"
 GAP_CODES: tuple[str, ...] = (
     GAP_RUN_START_ABSENT,
     GAP_WALL_DURATION_UNKNOWN,
@@ -194,6 +204,7 @@ GAP_CODES: tuple[str, ...] = (
     GAP_TURN_KIND_UNKNOWN,
     GAP_UNMATCHED_START,
     GAP_MISSING_IDENTITY,
+    GAP_PHASE_TIMING_UNKNOWN,
 )
 
 #: Timing sources for one attempt, most authoritative first.
@@ -1188,6 +1199,18 @@ def _run_timing(
                     )
         elif slot.finish_seen and interval is not None:
             phase_seconds[slot.phase] += (interval[1] - interval[0]).total_seconds()
+        elif slot.finish_seen:
+            # The phase ran — both of its records exist — but nothing states how
+            # long it took: no usable duration and not enough timestamps to span
+            # one. Contributing nothing would file those seconds under
+            # ``unattributed`` and still call the run complete, which asserts a
+            # zero-length phase the evidence never claimed. The seconds this run
+            # *does* know stay attributed; the run itself leaves the share basis.
+            run.gaps.append(
+                Observation(
+                    GAP_PHASE_TIMING_UNKNOWN, {"phase": slot.phase, "key": str(key)}
+                )
+            )
         if slot.start_seen and not slot.finish_seen:
             run.gaps.append(
                 Observation(GAP_UNMATCHED_START, {"phase": slot.phase, "key": str(key)})

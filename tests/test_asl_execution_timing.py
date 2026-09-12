@@ -304,6 +304,49 @@ def _finalization(
     ]
 
 
+def _untimed_phase(
+    start_name: str,
+    finish_name: str,
+    identity: dict[str, Any],
+    *,
+    run_id: str = RUN_ID,
+) -> list[dict[str, Any]]:
+    """A phase that ran — both records exist — that nothing ever timed.
+
+    No ``duration_seconds`` and no timestamps: the shape a finished phase takes
+    when its length was never recorded, which is not the shape of a phase that
+    took no time.
+    """
+    return [
+        _event(start_name, {"run_id": run_id, **identity}),
+        _event(finish_name, {"run_id": run_id, **identity}),
+    ]
+
+
+#: ``(phase, start event, finish event, identity payload)`` for every non-turn
+#: phase, so one missing-timing regression covers all three.
+UNTIMED_PHASE_CASES: tuple[tuple[str, str, str, dict[str, Any]], ...] = (
+    (
+        execution_timing.PHASE_VERIFICATION,
+        events.VERIFICATION_STARTED_EVENT,
+        events.VERIFICATION_FINISHED_EVENT,
+        {"turn_index": 1, "session": "1"},
+    ),
+    (
+        execution_timing.PHASE_COMMITS,
+        events.COMMIT_STARTED_EVENT,
+        events.COMMIT_FINISHED_EVENT,
+        {"commit_index": 1, "repository_key": "root"},
+    ),
+    (
+        execution_timing.PHASE_ASSURANCE,
+        events.FINALIZATION_STARTED_EVENT,
+        events.FINALIZATION_FINISHED_EVENT,
+        {"phase": "assurance-audit"},
+    ),
+)
+
+
 def _clean_run_events() -> list[dict[str, Any]]:
     """A run whose every phase reconciles: the trustworthy baseline.
 
@@ -912,6 +955,91 @@ class MissingEvidenceTests(unittest.TestCase):
         # The measured duration survives the anomaly.
         self.assertEqual(run.phase_seconds[execution_timing.PHASE_VERIFICATION], 40.0)
 
+    def test_a_finished_phase_nothing_timed_is_a_gap_rather_than_zero(self) -> None:
+        for phase, start_name, finish_name, identity in UNTIMED_PHASE_CASES:
+            with self.subTest(phase=phase):
+                run = _one(
+                    [
+                        _run_started(),
+                        *_untimed_phase(start_name, finish_name, identity),
+                        _run_finished(),
+                    ]
+                )
+                gap = next(
+                    item
+                    for item in run.gaps
+                    if item.code == execution_timing.GAP_PHASE_TIMING_UNKNOWN
+                )
+                self.assertEqual(gap.detail["phase"], phase)
+                self.assertEqual(_codes(run.anomalies), [])
+                self.assertEqual(
+                    run.classification, execution_timing.CLASSIFICATION_PARTIAL
+                )
+                self.assertFalse(run.trustworthy)
+                # No seconds are invented for the phase, and the run that would
+                # have carried a fabricated zero into the shares is out of them.
+                self.assertEqual(run.phase_seconds[phase], 0.0)
+
+    def test_an_untimed_phase_keeps_a_run_out_of_the_share_basis(self) -> None:
+        report = _collect(
+            [
+                execution_timing.RunEvidence(
+                    PLAN,
+                    event_records=[
+                        *_clean_run_events(),
+                        *_untimed_phase(
+                            events.COMMIT_STARTED_EVENT,
+                            events.COMMIT_FINISHED_EVENT,
+                            {"commit_index": 9, "repository_key": "root"},
+                        ),
+                    ],
+                )
+            ]
+        )
+        run = report.runs[0]
+        self.assertIn(
+            execution_timing.GAP_PHASE_TIMING_UNKNOWN,
+            _codes(run.gaps),
+        )
+        self.assertEqual(run.classification, execution_timing.CLASSIFICATION_PARTIAL)
+        self.assertEqual(report.phase_shares()["basis_runs"], 0)
+        self.assertIsNone(report.phase_shares()["shares"])
+        # Every duration the run does know survives the exclusion.
+        self.assertTrue(run.included)
+        self.assertEqual(
+            dict(run.phase_seconds),
+            {
+                execution_timing.PHASE_WORKER_EXECUTION: 100.0,
+                execution_timing.PHASE_REVIEW: 50.0,
+                execution_timing.PHASE_TURN_UNCLASSIFIED: 0.0,
+                execution_timing.PHASE_VERIFICATION: 40.0,
+                execution_timing.PHASE_COMMITS: 10.0,
+                execution_timing.PHASE_ASSURANCE: 20.0,
+            },
+        )
+        self.assertEqual(report.known_durations()["seconds"]["commits"], 10.0)
+        self.assertEqual(run.unattributed_seconds, 30.0)
+
+    def test_a_phase_timed_only_by_its_timestamps_is_not_a_gap(self) -> None:
+        run = _one(
+            [
+                _run_started(),
+                _event(
+                    events.COMMIT_STARTED_EVENT,
+                    {"run_id": RUN_ID, "commit_index": 1, "started_at": _iso(140)},
+                    created_at=140,
+                ),
+                _event(
+                    events.COMMIT_FINISHED_EVENT,
+                    {"run_id": RUN_ID, "commit_index": 1, "finished_at": _iso(150)},
+                    created_at=150,
+                ),
+                _run_finished(),
+            ]
+        )
+        self.assertEqual(_codes(run.gaps), [])
+        self.assertEqual(run.phase_seconds[execution_timing.PHASE_COMMITS], 10.0)
+
     def test_a_record_without_a_turn_index_is_a_missing_identity_gap(self) -> None:
         run = _one(
             [
@@ -1182,6 +1310,31 @@ class ZeroAndEmptyTests(unittest.TestCase):
         self.assertEqual(run.attempts[0].duration_seconds, 0.0)
         self.assertEqual(_codes(run.anomalies), [])
         self.assertEqual(_codes(run.gaps), [])
+
+    def test_an_explicit_zero_length_phase_is_not_a_missing_timing_gap(self) -> None:
+        """A recorded ``0.0`` is a measurement; an absent duration is not."""
+        for phase, records in (
+            (
+                execution_timing.PHASE_VERIFICATION,
+                _verification(turn_index=1, started=100, finished=100),
+            ),
+            (
+                execution_timing.PHASE_COMMITS,
+                _commit(commit_index=0, started=140, finished=140),
+            ),
+            (
+                execution_timing.PHASE_ASSURANCE,
+                _finalization(started=200, finished=200),
+            ),
+        ):
+            with self.subTest(phase=phase):
+                run = _one([_run_started(), *records, _run_finished()])
+                self.assertEqual(_codes(run.gaps), [])
+                self.assertEqual(_codes(run.anomalies), [])
+                self.assertEqual(
+                    run.classification, execution_timing.CLASSIFICATION_COMPLETE
+                )
+                self.assertEqual(run.phase_seconds[phase], 0.0)
 
     def test_no_evidence_at_all_produces_an_empty_report(self) -> None:
         report = _collect([])

@@ -5310,7 +5310,16 @@ wall clock has left over is the runner's own orchestration between phases,
 including the idle gap before a turn. It is reported unclamped when it is
 substantially negative — phases claiming more time than the run lasted is a
 contradiction, and rounding it up to zero would make an impossible total look
-plausible.
+plausible. For the same reason a finished verification, commit, or assurance
+phase whose length nothing states — no usable `duration_seconds` and not enough
+timestamps to span one — contributes no seconds and leaves a
+`phase-timing-unknown` gap. Two matching event names are evidence that the phase
+*ran*, not that it took zero time; without the gap its seconds would silently
+join `unattributed` while the run still counted as `complete`, putting a
+fabricated zero-length phase into the share basis. The run stays included and
+every duration it does know stays attributed; only its eligibility to back a
+share is withdrawn. An explicitly recorded `0.0` is a measurement and is
+unaffected.
 
 **Check work is not phase time.** A verification phase contributes its elapsed
 span. The per-check durations are summed separately as cumulative check *work*
@@ -5335,7 +5344,8 @@ exactly one trust classification — `active` (no terminal record), `inconsisten
 sources contradicting each other, overlapping phases, a finish with no start, or
 phases exceeding the wall clock), `partial` (a gap: a missing start, an unknown
 wall duration, a reconstructed terminal record, a turn with no timing, a turn of
-unknown kind, or a start with no finish), or `complete`. Measured seconds
+unknown kind, a finished phase of unknown length, or a start with no finish), or
+`complete`. Measured seconds
 aggregate over every included run so a partial run's real seconds are not thrown
 away, while shares aggregate over `complete` runs alone, because a share is a
 claim about a whole run and a run missing a phase would understate that phase for
