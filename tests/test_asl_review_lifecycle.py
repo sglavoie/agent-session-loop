@@ -4734,6 +4734,39 @@ class ReviewDeltaScopeTests(unittest.TestCase):
         )
         self.assertIn("src/repair.py", scope)
 
+    def test_a_reopened_review_scopes_against_the_tree_it_reviewed(self) -> None:
+        """A reopen supersedes its cycle, so it has to carry the same base.
+
+        The reopen record is the newest repair evidence, and one written
+        without the reviewed tree left the rereview with no base to narrow
+        against at all — a full re-read after every reopen, which is the one
+        case delta scoping exists for.
+        """
+        base = self._commit("src/base.py", "base\n")
+        self._record_repair_cycle(repo_head=base, worktree_dirty=False)
+        events.append_event(
+            self.event_path,
+            events.Event(
+                events.REVIEW_REPAIR_REOPENED_EVENT,
+                {
+                    "materialized": True,
+                    "source_cycle": 1,
+                    "source_review_session_id": "2",
+                    "repair_session_ids": ["2.1"],
+                },
+            ),
+        )
+        self._commit("src/repair.py", "repaired\n")
+
+        delta, fallback_reason = self._compute()
+
+        self.assertIsNone(fallback_reason)
+        assert delta is not None
+        self.assertEqual(review_session_body.REVIEW_SCOPE_DELTA, delta["mode"])
+        self.assertEqual(base, delta["base_sha"])
+        self.assertEqual(["src/repair.py"], delta["changed_files"])
+        self.assertIn("src/repair.py", self._scope_section(delta))
+
     def test_scope_covers_repairs_the_handoff_never_declared(self) -> None:
         base = self._commit("src/base.py", "base\n")
         self._record_repair_cycle(repo_head=base)

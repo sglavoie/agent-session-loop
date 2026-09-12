@@ -2650,6 +2650,28 @@ therefore always full-scope. Delta scoping narrows only what the reviewer must
 read: the output grammar, required artifacts, and verdict enforcement are
 scope-agnostic.
 
+A reopened review is scoped against the tree its *source* review read. The
+newest repair evidence is either a `repairs-materialized` cycle or a
+materialized `review_repair_reopened` record, and a reopen supersedes the cycle
+it descends from — so the reopen carries the same `repo_head`, `worktree_dirty`,
+`dirty_paths`, and (for a registered workspace) `repositories` base vector,
+copied at write time from that source cycle's own record. Reopen records written
+before this copy existed carry none of them; the runner recovers those fields in
+memory when it reads such a record, from the source cycle's still-durable event,
+and never rewrites the historical record itself. Both the copy and the recovery
+are attribution-only and fail closed: the cycle has to record the same `cycle`
+number and `review_session_id` the reopen names — an absent field is not
+agreement — and any cycle whose own `review_output_sha256` or
+`review_artifact_sha256` disagrees with the reopen's `source_*` digests
+identifies a different review and abandons the lookup entirely. Identity-
+matching duplicate cycles are accepted only while they agree about the baseline.
+When no cycle can be attributed — including the crash window where children
+became durable and the cycle event never did — the fields stay absent and the
+rereview falls back to `scope: full` under `fallback_reason: no-recorded-base`.
+Recovery never overwrites a baseline field the reopen already carries, and the
+`current_findings` and `current_repositories` a reopen records still supersede
+the source review's own.
+
 For registered rereviews, the cycle records an ordered `repositories` base
 vector instead of collapsing the workspace to one `repo_head`. Delta selection
 requires a resolvable ancestor base and complete dirty-path evidence for every
@@ -6348,7 +6370,11 @@ disposition). `review_repair_reopened` records each later attempt to consume
 an existing findings artifact. Successful records include the source
 cycle/session/disposition, previous and current artifact evidence, repair child
 IDs, and before/after materialization-cap accounting; failed attempts preserve
-the stable result and error without consuming budget. `tail` renders review
+the stable result and error without consuming budget. Every attempt, refused or
+not, also carries the reviewed baseline — `repo_head` / `worktree_dirty` /
+`dirty_paths`, or the ordered `repositories` vector — copied from the source
+cycle it names, and omits those keys entirely when no cycle can be attributed
+to it. `tail` renders review
 cycle events inline alongside other events. Commit events include the commit index,
 scope, session ID for per-session commits, argv, cwd, artifact paths, status
 result, duration, and commit SHA when one was created. `run_control` events

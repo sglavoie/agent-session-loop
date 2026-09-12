@@ -335,6 +335,122 @@ def read_prior_review_cycles(event_path: str | Path) -> list[dict[str, Any]]:
     ]
 
 
+#: What a ``review_cycle`` record says about the tree its review actually read.
+#: ``repo_head`` plus the dirty evidence describe a single repository;
+#: ``repositories`` is the ordered base vector a registered workspace records
+#: instead. Nothing else on a cycle record describes the reviewed tree, so a
+#: reopen that carries these carries the whole baseline.
+REVIEW_BASELINE_FIELDS: tuple[str, ...] = (
+    "repo_head",
+    "worktree_dirty",
+    "dirty_paths",
+    "repositories",
+)
+
+
+def review_baseline_evidence(cycle: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the reviewed-tree baseline a cycle record actually recorded.
+
+    Only fields the record *has* are returned. A recorded ``None`` is dropped
+    rather than carried, because the readers downstream treat a present-but-null
+    base as no base at all and an absent field is the honest way to say the
+    record never knew one.
+    """
+    return {
+        key: cycle[key] for key in REVIEW_BASELINE_FIELDS if cycle.get(key) is not None
+    }
+
+
+def _digest_contradicts(
+    cycle: Mapping[str, Any], key: str, expected: str | None
+) -> bool:
+    """Whether a cycle's recorded digest positively disagrees with ``expected``.
+
+    A digest the cycle never recorded is silence, not agreement, and cannot
+    contradict anything. A digest it did record and that differs identifies a
+    *different* review, whatever the cycle number and session id say.
+    """
+    if expected is None:
+        return False
+    recorded = _nonempty_str(cycle.get(key))
+    return recorded is not None and recorded != expected
+
+
+def find_source_review_cycle(
+    event_path: str | Path,
+    *,
+    source_cycle: int | None,
+    review_session_id: str | None,
+    review_output_sha256: str | None = None,
+    review_artifact_sha256: str | None = None,
+) -> Mapping[str, Any] | None:
+    """Return the one recorded cycle a reopen can be attributed to, or ``None``.
+
+    This is attribution, not a best-effort match, because the caller uses the
+    answer as the baseline a later rereview narrows against: naming the wrong
+    cycle would tell a reviewer that a tree it never read is the tree it did.
+    So every identifying key the caller knows has to be *recorded and equal* on
+    the candidate — an absent ``cycle`` or ``review_session_id`` is not
+    agreement — and a candidate whose own artifact digests disagree with the
+    caller's is a different review under the same identity, which makes the
+    whole history ambiguous rather than merely disqualifying that one record.
+    Identity-matching duplicates are tolerated only while they agree about the
+    baseline; when they do not, nothing here can say which tree was reviewed.
+
+    Unlike :func:`~agent_session_loop.review_cycle._prior_review_cap`, which
+    reports a *budget* and may fall back to the newest cycle when a caller knows
+    only half the identity, this refuses to answer without proof. A cap read
+    from the wrong cycle is a wrong number; a baseline read from the wrong cycle
+    is a review that never looks at the code that changed.
+    """
+    if source_cycle is None and review_session_id is None:
+        return None
+    candidates: list[Mapping[str, Any]] = []
+    for cycle in read_prior_review_cycles(event_path):
+        recorded_cycle = _nonnegative_int(cycle.get("cycle"))
+        recorded_session = _nonempty_str(cycle.get("review_session_id"))
+        if source_cycle is not None and recorded_cycle != source_cycle:
+            continue
+        if review_session_id is not None and recorded_session != review_session_id:
+            continue
+        if _digest_contradicts(
+            cycle, "review_output_sha256", review_output_sha256
+        ) or _digest_contradicts(
+            cycle, "review_artifact_sha256", review_artifact_sha256
+        ):
+            return None
+        candidates.append(cycle)
+    if not candidates:
+        return None
+    baselines = [review_baseline_evidence(cycle) for cycle in candidates]
+    if any(baseline != baselines[-1] for baseline in baselines):
+        return None
+    return candidates[-1]
+
+
+def find_reopen_source_cycle(
+    event_path: str | Path, reopen: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    """Locate the cycle a ``review-repair-reopened`` record attributes itself to.
+
+    The identity is read strictly from the ``source_*`` fields the reopen record
+    states about itself. The permissive fallbacks elsewhere in this module --
+    inferring a source from repair child ids, or from a reopen's own
+    ``review_session_id`` -- are deliberately not used: they answer "which
+    review does this lineage belong to" for accounting, which is a weaker
+    question than "which recorded tree was reviewed".
+    """
+    return find_source_review_cycle(
+        event_path,
+        source_cycle=_nonnegative_int(reopen.get("source_cycle")),
+        review_session_id=_nonempty_str(reopen.get("source_review_session_id")),
+        review_output_sha256=_nonempty_str(reopen.get("source_review_output_sha256")),
+        review_artifact_sha256=_nonempty_str(
+            reopen.get("source_review_artifact_sha256")
+        ),
+    )
+
+
 def cycle_is_all_clear(cycle: Mapping[str, Any]) -> bool:
     """Whether one recorded review cycle closed the loop with nothing left."""
     return (

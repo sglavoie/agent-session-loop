@@ -66,6 +66,13 @@ Invariants that survive the move:
   counting children the evaluator has already reconciled, so the historical
   materialization total stays the number of times repairs were actually
   opened.
+* **A reopen names the tree its source review read.** The record copies the
+  attributed cycle's ``repo_head``, ``worktree_dirty``, ``dirty_paths`` and
+  registered base vector, because the reopen supersedes that cycle as the
+  newest repair evidence a later rereview scopes itself against. Attribution is
+  proof, not preference: the identity and the artifact digests both have to
+  agree, and a reopen that can attribute nothing names no baseline at all
+  rather than borrowing a convenient earlier cycle's.
 * **A missing cap is not a zero cap.** :func:`_prior_review_cap` returns
   ``None`` when the source cycle recorded no budget, including for legacy
   events that predate the field, rather than reporting a cap of zero that
@@ -231,6 +238,21 @@ def _review_reopen_record(
         ]
     if resume.repair_groups is not None:
         record["repair_groups"] = [dict(item) for item in resume.repair_groups]
+    # The reopen record becomes the newest repair evidence a later rereview
+    # scopes itself against, so it has to carry the tree the *source* review
+    # read. Without it the reopen supersedes a cycle record that named a base
+    # and names none itself, and every review after a reopen re-reads the whole
+    # tree. The baseline is copied from the attributed cycle only: when nothing
+    # can be attributed the fields stay absent, and full scope is the answer.
+    source = review_continuation.find_source_review_cycle(
+        event_path,
+        source_cycle=resume.source_cycle,
+        review_session_id=resume.review_session_id,
+        review_output_sha256=resume.source_review_output_sha256,
+        review_artifact_sha256=resume.source_review_artifact_sha256,
+    )
+    if source is not None:
+        record.update(review_continuation.review_baseline_evidence(source))
     return record
 
 

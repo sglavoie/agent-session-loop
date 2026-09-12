@@ -51,6 +51,13 @@ Invariants that survive the move:
 * **Every probe is repository-wide and root-relative.** Neither a nested ``cwd``
   nor a ``diff.relative=true`` config can drop a repository-root repair from
   the scope.
+* **A superseding reopen still has to name a base.** The newest materialized
+  reopen record replaces the cycle it descends from as the repair evidence
+  scope is computed against, so a record written before the baseline was copied
+  has it read back here from the source cycle's own durable event. The recovery
+  is in memory and attribution-only: a historical event is never rewritten, a
+  field the record already carries is never overwritten, and an unattributable
+  or self-contradicting lineage recovers nothing and stays full scope.
 * **A missing digest is not a clean digest.** :func:`_review_artifact_digests`
   turns an unreadable artifact into ``None`` rather than letting the failure
   mask a cycle result the caller is about to compare against.
@@ -164,6 +171,40 @@ def _review_artifact_digests(plan_dir: Path) -> tuple[str | None, str | None]:
     return digests[0], digests[1]
 
 
+def _recover_reopen_baseline(
+    event_path: Path, reopen: dict[str, Any]
+) -> dict[str, Any]:
+    """Fill in baseline fields a reopen record was written without.
+
+    Reopen records only began carrying the reviewed tree once the writer started
+    copying it from the source cycle; every record written before that names no
+    base, and a reopen supersedes the cycle record that did name one. The
+    evidence is not lost, though — it is still on the source cycle's own
+    append-only record — so it is read back here, in memory, for the one
+    caller that needs it. Nothing is rewritten: a historical event says what it
+    said, and a recovery that edited it would destroy the only copy of what was
+    actually recorded at the time.
+
+    Recovery is attribution-only, and never overrides evidence the reopen
+    already carries. When the source cycle cannot be identified beyond doubt the
+    fields stay missing and the rereview falls back to full scope, which is the
+    same answer these records have always produced.
+    """
+    missing = [
+        key
+        for key in review_continuation.REVIEW_BASELINE_FIELDS
+        if reopen.get(key) is None
+    ]
+    if not missing:
+        return reopen
+    source = review_continuation.find_reopen_source_cycle(event_path, reopen)
+    if source is None:
+        return reopen
+    recovered = review_continuation.review_baseline_evidence(source)
+    reopen.update({key: recovered[key] for key in missing if key in recovered})
+    return reopen
+
+
 def _last_repairs_materialized_cycle(
     event_path: Path,
 ) -> dict[str, Any] | None:
@@ -187,7 +228,7 @@ def _last_repairs_materialized_cycle(
             findings = payload.get("current_findings")
             if isinstance(findings, list):
                 payload["findings"] = findings
-            return payload
+            return _recover_reopen_baseline(event_path, payload)
     return None
 
 
