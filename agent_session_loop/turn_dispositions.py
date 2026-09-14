@@ -1106,7 +1106,9 @@ def settle_nonzero_exit(
                 )
         fallback_reason = classification.reason
         if cooldown is None:
-            spark_run_suppression = f"{classification.reason}-for-current-run"
+            spark_run_suppression = (
+                spark_run_suppression or f"{classification.reason}-for-current-run"
+            )
             spark_status_update = {
                 "available": False,
                 "availability": False,

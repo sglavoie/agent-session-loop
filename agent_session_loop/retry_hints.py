@@ -26,6 +26,12 @@ _CLOCK_RE = re.compile(
     r"(?:\s*\(([A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+)\))?$",
     re.IGNORECASE,
 )
+_DATED_RE = re.compile(
+    r"^([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,\s*(\d{4})\s+"
+    r"(\d{1,2}):(\d{2})\s*([ap]m)"
+    r"(?:\s*\(([A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+)\))?$",
+    re.IGNORECASE,
+)
 
 
 def extract_retry_hint(text: str) -> str | None:
@@ -70,6 +76,29 @@ def resolve_retry_at(value: object, *, now: datetime | None = None) -> datetime 
             parsed = datetime.fromisoformat(text)
             return parsed.astimezone() if parsed.tzinfo is None else parsed
         except ValueError, OverflowError, OSError:
+            return None
+
+    dated = _DATED_RE.fullmatch(hint)
+    if dated is not None:
+        month, day, year, hour, minute, meridiem, zone_name = dated.groups()
+        try:
+            parsed = None
+            for fmt in ("%b %d, %Y %I:%M %p", "%B %d, %Y %I:%M %p"):
+                try:
+                    parsed = datetime.strptime(
+                        f"{month} {day}, {year} {hour}:{minute} {meridiem}", fmt
+                    )
+                    break
+                except ValueError:
+                    continue
+            if parsed is None:
+                return None
+            return (
+                parsed.replace(tzinfo=ZoneInfo(zone_name))
+                if zone_name
+                else parsed.astimezone()
+            )
+        except KeyError, ValueError, OverflowError, OSError:
             return None
 
     match = _CLOCK_RE.fullmatch(hint)

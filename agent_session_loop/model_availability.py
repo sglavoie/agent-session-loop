@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import durability, retry_hints
+from . import durability, retry_hints, spark_status
 
 LEDGER_VERSION = 1
 LEDGER_FILENAME = "model-availability.json"
@@ -125,6 +125,28 @@ def availability(
         )
 
 
+def peek_availability(
+    root: str | Path, model: str, *, now: datetime | None = None
+) -> Availability:
+    """Read an atomic ledger snapshot without creating or changing any file."""
+    current = now or _now()
+    payload, warning = _read(Path(root) / LEDGER_FILENAME)
+    if payload is None:
+        return Availability(False, "ledger-unreadable", warning=warning)
+    entry = payload["models"].get(model)
+    if not isinstance(entry, dict):
+        return Availability(True, "available")
+    retry_at = entry.get("retry_at")
+    reset = retry_hints.resolve_retry_at(retry_at, now=current)
+    if reset is not None and reset <= current:
+        return Availability(True, "cooldown-expired")
+    return Availability(
+        False,
+        str(entry.get("reason") or "cooldown"),
+        retry_at=str(retry_at) if reset is not None else None,
+    )
+
+
 def suppress_until(
     root: str | Path,
     model: str,
@@ -153,3 +175,36 @@ def suppress_until(
         }
         _write(path, payload)
     return Availability(False, reason, retry_at=retry_at)
+
+
+def reconcile_live(
+    root: str | Path,
+    model: str,
+    live: spark_status.SparkStatus,
+    *,
+    run_id: str,
+) -> Availability:
+    """Apply a definitive live result; preserve the ledger on an unknown read."""
+    if live.state == "unknown":
+        return availability(root, model)
+    state_root = Path(root)
+    path = state_root / LEDGER_FILENAME
+    with _locked(state_root):
+        payload, warning = _read(path)
+        if payload is None:
+            return Availability(False, "ledger-unreadable", warning=warning)
+        models = payload["models"]
+        if live.state == "available":
+            if model in models:
+                del models[model]
+                _write(path, payload)
+            return Availability(True, live.reason)
+        retry_at = retry_hints.normalized_retry_at(live.retry_at)
+        models[model] = {
+            "reason": live.reason,
+            "retry_at": retry_at,
+            "run_id": run_id,
+            "updated_at": _now().isoformat().replace("+00:00", "Z"),
+        }
+        _write(path, payload)
+        return Availability(False, live.reason, retry_at=retry_at)

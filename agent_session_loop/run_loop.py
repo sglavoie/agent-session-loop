@@ -109,6 +109,7 @@ from . import (
     run_selection,
     run_termination,
     session_verification,
+    spark_status,
     state,
     supervisor_audit,
     turn_dispositions,
@@ -2168,10 +2169,27 @@ def run_locked(
                 session_id=session_id,
                 turn_index=turn_index,
             )
-            if getattr(args, "spark", False) and spark_run_suppression is None:
+            spark_eligible = (
+                getattr(args, "spark", False)
+                and spark_run_suppression is None
+                and spark_fallback_reason is None
+                and turn_harness == "codex"
+                and not is_review_session
+                and not implementation_overrides.get(turn_harness)
+                and not review_repair.is_generated_review_repair_session_file(
+                    pending_session.path
+                )
+                and run_selection._session_spark_suitability(
+                    before.plan_dir, session_id
+                )[0]
+            )
+            if spark_eligible:
                 try:
-                    refreshed_availability = model_availability.availability(
-                        state.state_root(args.state_dir), run_selection.SPARK_MODEL
+                    refreshed_availability = model_availability.reconcile_live(
+                        state.state_root(args.state_dir),
+                        run_selection.SPARK_MODEL,
+                        spark_status.read_status(),
+                        run_id=ctx.run_id,
                     )
                 except OSError as error:
                     refreshed_availability = model_availability.Availability(
@@ -2181,6 +2199,8 @@ def run_locked(
                     )
                 with ctx.persistence.lock:
                     ctx.payload["spark"].update(refreshed_availability.to_dict())
+            # The immediate retry after a Spark failure stays on the baseline.
+            # Later sessions may use a fresh live read, including an early reset.
             requested_model, turn_model_effort, spark_route = (
                 run_selection._spark_turn_route(
                     args,
@@ -2191,7 +2211,14 @@ def run_locked(
                     is_review_turn=is_review_session,
                     implementation_overrides=implementation_overrides,
                     spark_state=ctx.payload["spark"],
-                    run_suppression=spark_run_suppression,
+                    run_suppression=(
+                        spark_run_suppression
+                        or (
+                            f"{spark_fallback_reason}-immediate-fallback"
+                            if spark_fallback_reason is not None
+                            else None
+                        )
+                    ),
                     fallback_reason=spark_fallback_reason,
                 )
             )

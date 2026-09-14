@@ -24,6 +24,31 @@ import sys
 import time
 from pathlib import Path
 
+if sys.argv[1:] == ["app-server", "--stdio"]:
+    for line in sys.stdin:
+        request = json.loads(line)
+        if request.get("method") == "initialize":
+            print(json.dumps({"id": request["id"], "result": {}}), flush=True)
+        elif request.get("method") == "account/rateLimits/read":
+            mode = os.environ.get("FAKE_LIMIT_MODE", "available")
+            if mode == "failed":
+                print(json.dumps({"id": request["id"],
+                    "error": {"message": "failed"}}), flush=True)
+                continue
+            bucket = {"limitId": "opaque-id", "limitName": "GPT-5.3-Codex-Spark",
+                "primary": {"usedPercent": 100 if mode == "blocked" else 20,
+                    "resetsAt": 1789853632},
+                "secondary": {"usedPercent": 100 if mode == "blocked" else 10,
+                    "resetsAt": 1789854000},
+                "rateLimitReachedType": None}
+            if mode == "reached":
+                bucket["rateLimitReachedType"] = "primary"
+            if mode == "missing":
+                bucket["limitName"] = "Other Model"
+            print(json.dumps({"id": request["id"], "result": {
+                "rateLimitsByLimitId": {"opaque-id": bucket}}}), flush=True)
+    sys.exit(0)
+
 Path(os.environ["FAKE_CAPTURE"]).write_text(json.dumps({
     "argv": sys.argv[1:],
     "prompt": sys.stdin.read(),
@@ -67,6 +92,7 @@ class SparkHelperTests(unittest.TestCase):
             "PATH": str(self.fake_dir) + os.pathsep + os.environ.get("PATH", ""),
             "FAKE_CAPTURE": str(self.capture),
             "FAKE_CHILD_PID": str(self.child_pid),
+            "XDG_STATE_HOME": str(self.root / "state-home"),
         }
         self.env.pop("SPARK_HELPER_ACTIVE", None)
 
@@ -117,6 +143,66 @@ class SparkHelperTests(unittest.TestCase):
         self.assertIn("--ephemeral", argv)
         self.assertIn('model_reasoning_effort="medium"', argv)
         self.assertEqual(argv[-1], "-")
+
+    def test_status_reads_named_bucket_and_blocks_without_exec(self) -> None:
+        for mode, state, allowed in (
+            ("available", "available", True),
+            ("blocked", "blocked", False),
+            ("reached", "blocked", False),
+            ("missing", "unknown", True),
+            ("failed", "unknown", True),
+        ):
+            with self.subTest(mode=mode):
+                self.env["FAKE_LIMIT_MODE"] = mode
+                result = self.run_spark("--status", "--json")
+                payload = json.loads(result.stdout)
+                self.assertEqual(state, payload["state"])
+                self.assertEqual(allowed, payload["attempt_allowed"])
+                self.assertEqual(0 if allowed else 1, result.returncode)
+                self.assertEqual("codex-app-server", payload["source"])
+                self.assertFalse(self.capture.exists())
+                self.assertFalse((self.root / "state-home").exists())
+                if mode == "blocked":
+                    self.assertEqual("2026-09-19T21:40:00Z", payload["retry_at"])
+                if mode == "reached":
+                    self.assertEqual("2026-09-19T21:33:52Z", payload["retry_at"])
+
+    def test_blocked_wrapper_never_launches_exec(self) -> None:
+        self.env["FAKE_LIMIT_MODE"] = "blocked"
+        result = self.run_spark("--json", "Find tests")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Spark is blocked", json.loads(result.stdout)["error"])
+        self.assertFalse(self.capture.exists())
+
+    def test_unknown_live_read_keeps_existing_cooldown(self) -> None:
+        ledger_root = self.root / "state-home" / "agent-session-loop"
+        ledger_root.mkdir(parents=True)
+        (ledger_root / "model-availability.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "models": {
+                        "gpt-5.3-codex-spark": {
+                            "reason": "quota-exhausted",
+                            "retry_at": "2026-09-19T21:40:00Z",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.env["FAKE_LIMIT_MODE"] = "missing"
+        result = self.run_spark("--status", "--json")
+        payload = json.loads(result.stdout)
+        self.assertEqual("blocked", payload["state"])
+        self.assertEqual("model-availability-ledger", payload["source"])
+        self.assertNotEqual(0, result.returncode)
+        self.assertFalse(self.capture.exists())
+
+        self.env["FAKE_LIMIT_MODE"] = "available"
+        result = self.run_spark("--status", "--json")
+        self.assertEqual("available", json.loads(result.stdout)["state"])
+        self.assertEqual(0, result.returncode)
 
     def test_stdin_edit_and_effort(self) -> None:
         completed = self.run_spark(

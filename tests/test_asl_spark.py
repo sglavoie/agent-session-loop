@@ -20,12 +20,14 @@ from agent_session_loop import (
     model_availability,
     plans,
     prepare,
+    retry_hints,
     review_guard,
     run_entry,
     run_flags,
     run_inputs,
     run_selection,
     runner,
+    spark_status,
     state,
 )
 from tests.support import (
@@ -297,6 +299,51 @@ class SparkRoutingTests(unittest.TestCase):
 
 
 class ModelAvailabilityTests(unittest.TestCase):
+    def test_live_block_and_early_reset_reconcile_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = run_selection.SPARK_MODEL
+            blocked = spark_status.SparkStatus(
+                "blocked", "window-exhausted", "2026-09-19T21:40:00Z"
+            )
+            result = model_availability.reconcile_live(
+                root, model, blocked, run_id="run-1"
+            )
+            self.assertFalse(result.available)
+            self.assertEqual(blocked.retry_at, result.retry_at)
+            unknown = spark_status.SparkStatus("unknown", "rate-limit-read-failed")
+            self.assertFalse(
+                model_availability.reconcile_live(
+                    root, model, unknown, run_id="run-1"
+                ).available
+            )
+            self.assertTrue(
+                model_availability.reconcile_live(
+                    root / "fresh", model, unknown, run_id="run-2"
+                ).available
+            )
+            available = spark_status.SparkStatus("available", "rate-limit-available")
+            self.assertTrue(
+                model_availability.reconcile_live(
+                    root, model, available, run_id="run-1"
+                ).available
+            )
+            self.assertTrue(model_availability.availability(root, model).available)
+
+    def test_provider_dated_retry_hint_uses_local_timezone(self) -> None:
+        hint = retry_hints.extract_retry_hint(
+            "You've hit your usage limit. Try again at Sep 19th, 2026 3:33 PM."
+        )
+        self.assertEqual("Sep 19th, 2026 3:33 PM", hint)
+        expected = (
+            datetime(2026, 9, 19, 15, 33)
+            .astimezone()
+            .astimezone(UTC)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        self.assertEqual(expected, retry_hints.normalized_retry_at(hint))
+
     def test_cooldown_is_shared_and_expires(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -362,6 +409,70 @@ class ModelAvailabilityTests(unittest.TestCase):
 
 
 class SparkFallbackIntegrationTests(unittest.TestCase):
+    def test_live_early_reset_routes_next_eligible_turn_to_spark(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            init_git_repo(root)
+            plan_dir = root / "plan"
+            state_root = root / "state"
+            write_plan(plan_dir, ("pending", "pending"))
+            validation_payload = _validator_payload(
+                spark={"eligible": True, "reason": "small explicit fixture session"}
+            )
+            second = dict(validation_payload["sessions"][0])
+            second["session_id"] = "2"
+            validation_payload["sessions"].append(second)
+            (plan_dir / prepare.PREPARE_VALIDATION_FILENAME).write_text(
+                json.dumps(validation_payload), encoding="utf-8"
+            )
+            install_fake_codex(root)
+            argv = [
+                "run",
+                str(plan_dir),
+                "--cwd",
+                str(root),
+                "--state-dir",
+                str(state_root),
+                "--harness-model",
+                "gpt-baseline",
+                "--spark",
+                "--allow-not-loop-ready",
+                "--no-supervisor-audit",
+                "--no-mailbox",
+                "--json",
+            ]
+            args = cli.build_parser().parse_args(argv)
+            output = io.StringIO()
+            live = [
+                spark_status.SparkStatus(
+                    "blocked", "window-exhausted", "2026-09-19T21:40:00Z"
+                ),
+                spark_status.SparkStatus("available", "rate-limit-available"),
+            ]
+            with (
+                patched_env(
+                    PATH=f"{root}:{os.environ.get('PATH', '')}",
+                    FAKE_CODEX_MODE="success",
+                ),
+                mock.patch.object(
+                    spark_status, "read_status", side_effect=live
+                ) as probe,
+                redirect_stdout(output),
+            ):
+                code = runner.run_from_args(args, run_argv=argv)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(0, code)
+            self.assertEqual(2, probe.call_count)
+            self.assertEqual(
+                ["gpt-baseline", run_selection.SPARK_MODEL],
+                [turn["model"] for turn in payload["turns"]],
+            )
+            self.assertTrue(
+                model_availability.availability(
+                    state_root, run_selection.SPARK_MODEL
+                ).available
+            )
+
     def test_quota_failure_retries_same_pending_session_on_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -400,6 +511,13 @@ class SparkFallbackIntegrationTests(unittest.TestCase):
                     PATH=f"{root}:{os.environ.get('PATH', '')}",
                     FAKE_CODEX_MODE="success",
                     FAKE_CODEX_SPARK_FAILURE="quota",
+                ),
+                mock.patch.object(
+                    spark_status,
+                    "read_status",
+                    return_value=spark_status.SparkStatus(
+                        "available", "rate-limit-available"
+                    ),
                 ),
                 redirect_stdout(output),
             ):

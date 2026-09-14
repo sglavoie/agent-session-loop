@@ -77,6 +77,7 @@ from . import (
     plans,
     prepare,
     review_repair,
+    spark_status,
     state,
 )
 from .run_errors import RunError
@@ -85,7 +86,7 @@ from .run_errors import RunError
 #: model in a run is resolved from the CLI or the harness configuration; this
 #: one is named here because Spark is a policy about a specific model rather
 #: than about whatever the operator asked for.
-SPARK_MODEL = "gpt-5.3-codex-spark"
+SPARK_MODEL = spark_status.SPARK_MODEL
 
 #: Commit scoping. ``per-session`` commits each accepted session as it lands,
 #: ``end`` defers to one commit after the last one, and a generated repair
