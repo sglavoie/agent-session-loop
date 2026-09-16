@@ -390,6 +390,85 @@ class GroupMemberPidsTests(unittest.TestCase):
         self.assertEqual([10], process_tree.group_member_pids(10, table))
 
 
+class VerifiedRootRecoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = {
+            "pid": 10,
+            "ppid": 1,
+            "birth": _BIRTH,
+            "command": "claude --print",
+        }
+
+    def prepare(self, table, *, force=False, prior=None):
+        with mock.patch.object(
+            process_tree, "sample_process_table", return_value=table
+        ):
+            return process_tree.prepare_verified_root_recovery(
+                root_pid=10,
+                prior_tree=[self.root] if prior is None else prior,
+                attempted_at="now",
+                force=force,
+                environ={},
+            )
+
+    def test_verified_root_is_signaled_with_the_selected_shutdown_stage(self) -> None:
+        for force, expected in [(False, signal.SIGTERM), (True, signal.SIGKILL)]:
+            with self.subTest(force=force):
+                report, pids = self.prepare({10: self.root}, force=force)
+                kill = mock.Mock()
+                completed = process_tree.signal_verified_root_recovery(
+                    report, pids, force=force, kill=kill
+                )
+                kill.assert_called_once_with(10, expected)
+                self.assertEqual([10], completed["signaled_pids"])
+                self.assertEqual(expected.name, completed["signal"])
+
+    def test_pid_reuse_or_missing_identity_refuses_both_shutdown_stages(self) -> None:
+        for force in [False, True]:
+            for changes in [{"birth": _LATER_BIRTH}, {"command": "stranger"}]:
+                report, pids = self.prepare({10: {**self.root, **changes}}, force=force)
+                self.assertEqual((), pids)
+                self.assertEqual(
+                    "harness_root_identity", report["identity_mismatches"][0]["reason"]
+                )
+            for prior in [[], [{**self.root, "birth": None}]]:
+                report, pids = self.prepare({10: self.root}, force=force, prior=prior)
+                self.assertEqual((), pids)
+                self.assertTrue(report["identity_mismatches"])
+
+    def test_new_descendants_prevent_escalation(self) -> None:
+        report, pids = self.prepare(
+            {10: self.root, 20: {"pid": 20, "ppid": 10}}, force=True
+        )
+        self.assertEqual((), pids)
+        self.assertEqual("harness_has_descendants", report["disabled"])
+
+    def test_missing_root_and_unreadable_table_are_reported(self) -> None:
+        report, pids = self.prepare({})
+        self.assertEqual((), pids)
+        self.assertEqual([10], report["already_gone_pids"])
+        report, pids = self.prepare(None)
+        self.assertEqual((), pids)
+        self.assertIn("sample_error", report)
+
+    def test_opt_out_and_protected_pids_never_sample_or_signal(self) -> None:
+        with mock.patch.object(process_tree, "sample_process_table") as sample:
+            for pid, environ in [
+                (10, {process_tree.SWEEP_DISABLED_ENV_VAR: "true"}),
+                (1, {}),
+                (os.getpid(), {}),
+            ]:
+                report, pids = process_tree.prepare_verified_root_recovery(
+                    root_pid=pid,
+                    prior_tree=[self.root],
+                    attempted_at="now",
+                    environ=environ,
+                )
+                self.assertEqual((), pids)
+                self.assertIn("disabled", report)
+            sample.assert_not_called()
+
+
 class VerifiedLeafRecoveryTests(unittest.TestCase):
     """SIGTERM recovery selects only revalidated leaves of the harness tree."""
 

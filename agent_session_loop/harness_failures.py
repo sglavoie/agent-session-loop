@@ -9,10 +9,11 @@ alike — classifies it the same way without either importing the other.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import events, harnesses, retry_hints
+from . import events, harnesses, process_tree, retry_hints
 
 # A nonzero harness exit is turned into a stable, evidence-based category rather
 # than a generic ``nonzero-exit`` pause. The classifier is fail-closed: only
@@ -315,6 +316,8 @@ def classify_harness_degradation(
 
 def classify_harness_failure(
     result: harnesses.HarnessResult,
+    *,
+    shutdown: Mapping[str, Any] | None = None,
 ) -> FailureClassification:
     """Classify a nonzero harness turn into a stable failure category.
 
@@ -335,6 +338,34 @@ def classify_harness_failure(
             retry_at=None,
             marker="user",
         )
+
+    recovery = (shutdown or {}).get("recovery")
+    if isinstance(recovery, Mapping):
+        expected_exits = {"SIGTERM": {-15, 143}, "SIGKILL": {-9, 137}}
+        root_pid = recovery.get("root_pid")
+        if (
+            not result.timed_out
+            and not result.aborted
+            and not (shutdown or {}).get("canceled_by")
+            and not re.search(r"^claude result: error\b", result.stdout, re.MULTILINE)
+            and isinstance(root_pid, int)
+            and root_pid > 1
+            and recovery.get("policy") == process_tree.POST_RESULT_ROOT_RECOVERY_POLICY
+            and recovery.get("signaled_pids") == [root_pid]
+            and returncode in expected_exits.get(str(recovery.get("signal")), set())
+        ):
+            return FailureClassification(
+                reason=events.PAUSE_REASON_NONZERO_EXIT,
+                retryable=False,
+                fingerprint="nonzero-exit:post-result-shutdown",
+                evidence=(
+                    "harness remained alive after its terminal result; "
+                    f"verified root shutdown sent {recovery['signal']}; "
+                    "authoritative verification is still required"
+                ),
+                returncode=returncode,
+                marker="post-result-shutdown",
+            )
 
     text = _failure_scan_text(result)
     for marker, reason, retryable, pattern in _FAILURE_CLASSIFICATION_RULES:

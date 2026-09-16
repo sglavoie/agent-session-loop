@@ -5039,7 +5039,13 @@ def _check_operator_abort(context: _CheckContext) -> _Verdict:
         context.section("state").get("reference"),
     )
     honored = _abort_turn_records(context, events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED)
-    if not honored:
+    aborted_exits = [
+        _mapping(record.get("payload"))
+        for record in context.records
+        if record.get("name") == events.TURN_EXECUTION_FINISHED_EVENT
+        and _mapping(record.get("payload")).get("aborted") is True
+    ]
+    if not honored and not aborted_exits:
         return _Verdict(
             "pass",
             "the run killed no turn on an operator abort",
@@ -5052,6 +5058,28 @@ def _check_operator_abort(context: _CheckContext) -> _Verdict:
         )
     }
     contradictions: list[str] = []
+    acknowledged = {
+        (
+            str(payload.get("session_id", payload.get("session"))),
+            payload.get("turn_index"),
+        )
+        for payload in honored
+    }
+    missing = [
+        payload
+        for payload in aborted_exits
+        if (
+            str(payload.get("session_id", payload.get("session"))),
+            payload.get("turn_index"),
+        )
+        not in acknowledged
+    ]
+    for payload in missing if not context.events_shed else ():
+        contradictions.append(
+            f"session {payload.get('session_id', payload.get('session'))!r} "
+            f"turn {payload.get('turn_index')!r} records an aborted exit "
+            "without an abort acknowledgment"
+        )
     for payload in honored:
         turn = (payload.get("session"), payload.get("turn_index"))
         if turn not in requested:
@@ -5069,6 +5097,13 @@ def _check_operator_abort(context: _CheckContext) -> _Verdict:
             "fail",
             f"the run killed a turn without an accountable abort behind it: "
             f"{_joined(contradictions)}",
+            evidence,
+        )
+    if missing and context.events_shed:
+        return _Verdict(
+            "unavailable",
+            "aborted turn exits lack acknowledgments in an event log shed "
+            "under the size cap",
             evidence,
         )
     return _Verdict(
@@ -6086,6 +6121,148 @@ def _check_resource_anomalies(context: _CheckContext) -> _Verdict:
     )
 
 
+def _worker_pause_exit_verdict(
+    context: _CheckContext, payload: Mapping[str, Any], result: Mapping[str, Any]
+) -> _Verdict:
+    """Account for one failed exit carrying a worker's own pause declaration.
+
+    This grades its recorded disposition, not why the harness needed to be
+    stopped. Resource checks still own shutdown, stalls, and process sweeps.
+    """
+    identity = (
+        str(payload.get("session_id", payload.get("session"))),
+        payload.get("turn_index"),
+    )
+    evidence = context.evidence(context.event_summary.get("reference"))
+    problems = []
+    if _write_scope_session(payload.get("session_id", payload.get("session"))) is None:
+        problems.append("the failed exit names no session")
+    if (
+        not isinstance(identity[1], int)
+        or isinstance(identity[1], bool)
+        or identity[1] < 1
+        or identity
+        != (
+            str(result.get("session_id", result.get("session"))),
+            result.get("turn_index"),
+        )
+        or payload.get("returncode") != result.get("returncode")
+    ):
+        problems.append("the failed exit and its turn result disagree")
+    if payload.get("timed_out") or payload.get("interrupted") or payload.get("aborted"):
+        problems.append("the exit records a timeout, interruption, or abort")
+    declaration = result.get("runner_pause")
+    if not isinstance(declaration, str) or not declaration.strip():
+        problems.append("the worker declared no pause reason")
+    if result.get("runner_pause_source") not in {"last_message", "stdout"}:
+        problems.append("the pause declaration came from no trusted stream")
+    status = context.section("status")
+    details = _mapping(status.get("pause_details"))
+    session = str(details.get("session_id", details.get("session")))
+    if (
+        status.get("paused") is not True
+        or status.get("ok") is True
+        or session != identity[0]
+    ):
+        problems.append("the run is not holding that failed session under a pause")
+    if result.get("status_result") == "complete":
+        problems.append("the failed turn also claims accepted completion")
+
+    guard = _mapping(result.get("workspace_write_guard"))
+    guard_refused = (
+        status.get("pause_reason")
+        in {
+            events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+        }
+        and guard.get("reason") == status.get("pause_reason")
+        and guard.get("passed") is False
+        and guard.get("reverted_to_pending") is True
+    )
+    if not guard_refused:
+        if (
+            status.get("pause_message") != declaration
+            or details.get("source") != result.get("runner_pause_source")
+            or result.get("status_result")
+            not in {status.get("pause_reason"), "runner-pause"}
+        ):
+            problems.append("the run never acknowledged that worker pause")
+        if result.get("pending_completed_ids") or result.get("pending_completed"):
+            problems.append("the worker pause still carries an unreconciled completion")
+
+    if problems:
+        return _Verdict("fail", _joined(problems), evidence)
+    return _Verdict(
+        "pass",
+        "the failed exit matches a trusted worker pause and its held or "
+        "rejected disposition",
+        evidence,
+    )
+
+
+def _worker_pause_exits(
+    context: _CheckContext,
+) -> list[tuple[dict[str, Any], dict[str, Any], _Verdict]]:
+    candidates = []
+    for record in context.records:
+        if record.get("name") != events.TURN_EXECUTION_FINISHED_EVENT:
+            continue
+        payload = _mapping(record.get("payload"))
+        code = payload.get("returncode")
+        if (
+            not isinstance(code, int)
+            or isinstance(code, bool)
+            or code == 0
+            or payload.get("aborted") is True
+        ):
+            continue
+        identity = (
+            str(payload.get("session_id", payload.get("session"))),
+            payload.get("turn_index"),
+        )
+        for turn in context.turns:
+            result = _mapping(turn.get("result"))
+            if (
+                identity
+                == (
+                    str(result.get("session_id", result.get("session"))),
+                    result.get("turn_index"),
+                )
+                and result.get("runner_pause") is not None
+            ):
+                candidates.append(
+                    (
+                        payload,
+                        result,
+                        _worker_pause_exit_verdict(context, payload, result),
+                    )
+                )
+    return candidates
+
+
+def _check_worker_pause_exits(context: _CheckContext) -> _Verdict:
+    candidates = _worker_pause_exits(context)
+    problems = [
+        verdict.detail for _, _, verdict in candidates if verdict.status != "pass"
+    ]
+    evidence = context.evidence(
+        context.event_summary.get("reference"), *context.turn_directories()
+    )
+    if problems:
+        return _Verdict(
+            "fail",
+            f"worker pause exits have contradictory dispositions: {_joined(problems)}",
+            evidence,
+        )
+    return _Verdict(
+        "pass",
+        f"{len(candidates)} recorded failed exit(s) carrying worker pauses "
+        "match their held or rejected dispositions; shutdown causes remain "
+        "separately audited",
+        evidence,
+    )
+
+
 def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
     summary = context.event_summary
     evidence = context.evidence(
@@ -6106,6 +6283,14 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
     unclassified: dict[str, int] = {}
     classified = _classified_failure_sessions(context)
     aborted = _aborted_turns(context)
+    worker_pauses = {
+        (
+            str(payload.get("session_id", payload.get("session"))),
+            payload.get("turn_index"),
+        )
+        for payload, _, verdict in _worker_pause_exits(context)
+        if verdict.status == "pass"
+    }
     restored = (
         {
             (
@@ -6122,6 +6307,22 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
         if name in _CLASSIFIED_EVENT_NAMES:
             continue
         payload = _mapping(record.get("payload"))
+        # `_check_operator_abort` owns every explicitly aborted exit, including
+        # missing acknowledgments. Such a defect belongs to that named check.
+        if (
+            name == events.TURN_EXECUTION_FINISHED_EVENT
+            and payload.get("aborted") is True
+        ):
+            continue
+        if (
+            name == events.TURN_EXECUTION_FINISHED_EVENT
+            and (
+                str(payload.get("session_id", payload.get("session"))),
+                payload.get("turn_index"),
+            )
+            in worker_pauses
+        ):
+            continue
         if (
             name == events.TURN_EXECUTION_FINISHED_EVENT
             and restored
@@ -6177,6 +6378,22 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
 
 
 _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
+    (
+        CheckSpec(
+            check="worker-pause-exits",
+            lane="lifecycle-retry-resume",
+            category="lifecycle",
+            component="worker-pause-disposition",
+            invariant_key="lifecycle.worker-pause-exit-accounting",
+            severity="medium",
+            recommendation=(
+                "Match the failed turn exit to its trusted worker pause and "
+                "recorded held or rejected disposition before treating it "
+                "as explained."
+            ),
+        ),
+        _check_worker_pause_exits,
+    ),
     (
         CheckSpec(
             check="root-registry-agreement",

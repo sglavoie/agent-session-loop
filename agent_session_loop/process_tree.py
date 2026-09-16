@@ -51,6 +51,7 @@ SWEEP_SETTLE_SECONDS = 0.05
 
 POST_RESULT_RECOVERY_POLICY = "verified_leaf_sigterm"
 POST_RESULT_RECOVERY_SIGNAL = "SIGTERM"
+POST_RESULT_ROOT_RECOVERY_POLICY = "verified_root_shutdown"
 
 # macOS ``ps -o time`` emits ``0:00.03`` (mm:ss.ff); Linux emits
 # ``[[dd-]hh:]mm:ss``. One pattern covers both.
@@ -523,6 +524,64 @@ def prepare_verified_leaf_recovery(
         return report, ()
 
 
+def prepare_verified_root_recovery(
+    *,
+    root_pid: int,
+    prior_tree: Iterable[Mapping[str, Any]],
+    attempted_at: str,
+    force: bool = False,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], tuple[int, ...]]:
+    """Prepare shutdown of an identity-verified harness with no descendants.
+
+    Only the terminal-result sentinel calls this. The original root identity
+    must survive both the initial shutdown and any later escalation.
+    """
+    report: dict[str, Any] = {
+        "policy": POST_RESULT_ROOT_RECOVERY_POLICY,
+        "root_pid": root_pid,
+        "attempted_at": attempted_at,
+        "signal": "SIGKILL" if force else "SIGTERM",
+        "candidate_pids": [],
+        "signaled_pids": [],
+        "already_gone_pids": [],
+        "identity_mismatches": [],
+        "signal_failures": [],
+    }
+    if not sweep_enabled(environ):
+        report["disabled"] = "process_sweep_opt_out"
+        return report, ()
+    if root_pid <= 1 or root_pid == os.getpid():
+        report["disabled"] = "protected_pid"
+        return report, ()
+    table = sample_process_table()
+    if table is None:
+        report["sample_error"] = "process table sample failed"
+        return report, ()
+    recorded = next((row for row in prior_tree if row.get("pid") == root_pid), None)
+    current = table.get(root_pid)
+    if current is None:
+        report["already_gone_pids"] = [root_pid]
+        return report, ()
+    if (
+        recorded is None
+        or not isinstance(recorded.get("birth"), str)
+        or not recorded.get("birth")
+        or current.get("birth") != recorded.get("birth")
+        or not recorded.get("command")
+        or current.get("command") != recorded.get("command")
+    ):
+        report["identity_mismatches"] = [
+            {"pid": root_pid, "reason": "harness_root_identity"}
+        ]
+        return report, ()
+    if descendant_pids(root_pid, table):
+        report["disabled"] = "harness_has_descendants"
+        return report, ()
+    report["candidate_pids"] = [root_pid]
+    return report, (root_pid,)
+
+
 def signal_verified_leaf_recovery(
     report: Mapping[str, Any],
     pids: Iterable[int],
@@ -530,13 +589,34 @@ def signal_verified_leaf_recovery(
     kill: Callable[[int, int], Any] = os.kill,
 ) -> dict[str, Any]:
     """Send SIGTERM once to prepared leaves and return the completed report."""
+    return _signal_verified_recovery(report, pids, kill=kill, force=False)
+
+
+def signal_verified_root_recovery(
+    report: Mapping[str, Any],
+    pids: Iterable[int],
+    *,
+    force: bool = False,
+    kill: Callable[[int, int], Any] = os.kill,
+) -> dict[str, Any]:
+    """Shut down the prepared harness root, with explicit escalation."""
+    return _signal_verified_recovery(report, pids, kill=kill, force=force)
+
+
+def _signal_verified_recovery(
+    report: Mapping[str, Any],
+    pids: Iterable[int],
+    *,
+    kill: Callable[[int, int], Any],
+    force: bool,
+) -> dict[str, Any]:
     completed = dict(report)
     signaled: list[int] = list(completed.get("signaled_pids") or ())
     already_gone: list[int] = list(completed.get("already_gone_pids") or ())
     failures: list[dict[str, Any]] = list(completed.get("signal_failures") or ())
     for pid in pids:
         try:
-            kill(pid, signal.SIGTERM)
+            kill(pid, signal.SIGKILL if force else signal.SIGTERM)
         except ProcessLookupError:
             already_gone.append(pid)
         except Exception as exc:  # noqa: BLE001 - report and fall through

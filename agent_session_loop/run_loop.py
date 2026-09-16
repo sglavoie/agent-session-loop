@@ -2900,6 +2900,16 @@ def run_locked(
                 disarm_exception_guard=disarm_exception_guard,
             )
             if postflight.stopped:
+                if result.aborted:
+                    with run_control_lock:
+                        run_termination._record_aborted_turn_exit(
+                            ctx.run_controls,
+                            payload=ctx.payload,
+                            event_path=ctx.event_path,
+                            control_payload=ctx.control_payload,
+                            context=turn_payload,
+                            persistence=ctx.persistence,
+                        )
                 break
             # The one arming site, and it sits here rather than at any pause
             # because of what is above it: every post-turn write guard has run

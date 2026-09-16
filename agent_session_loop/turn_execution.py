@@ -62,6 +62,7 @@ HANG_TRIGGER_IDLE_SECONDS = 120.0
 HANG_CONFIRM_SAMPLES = 2
 HANG_CPU_EPSILON_SECONDS = 0.5
 HANG_RESULT_GRACE_SECONDS = 45.0
+HANG_ROOT_SHUTDOWN_GRACE_SECONDS = 30.0
 HANG_TRIGGER_IDLE_ENV_VAR = "ASL_HANG_TRIGGER_IDLE_SECONDS"
 HANG_CONFIRM_SAMPLES_ENV_VAR = "ASL_HANG_CONFIRM_SAMPLES"
 HANG_RESULT_GRACE_ENV_VAR = "ASL_HANG_RESULT_GRACE_SECONDS"
@@ -685,13 +686,15 @@ def write_turn_artifacts(
         and signals.get("runner_pause") is None
     ):
         payload["failure_classification"] = harness_failures.classify_harness_failure(
-            result
+            result, shutdown=live_turn.get("harness_shutdown")
         ).to_dict()
     degradation = harness_failures.classify_harness_degradation(result)
     if degradation is not None:
         payload["harness_degradation"] = degradation.to_dict()
     if live_turn.get("action_required") is not None:
         payload["action_required"] = live_turn["action_required"]
+    if "harness_shutdown" in live_turn:
+        payload["harness_shutdown"] = live_turn["harness_shutdown"]
     if plan_error is not None:
         payload["plan_error"] = plan_error
     prompt_kind = live_turn.get("prompt_kind")
@@ -794,6 +797,8 @@ def finalize_turn_execution(
     }
     if result.stream_io is not None:
         execution_payload["stream_io"] = dict(result.stream_io)
+    if "harness_shutdown" in live_turn:
+        execution_payload["harness_shutdown"] = live_turn["harness_shutdown"]
     if plan_error is not None:
         execution_payload["plan_error"] = plan_error
     persistence.append_event(
@@ -1088,6 +1093,7 @@ class HangSentinel:
         confirm_samples: int | None = None,
         cpu_epsilon_seconds: float = HANG_CPU_EPSILON_SECONDS,
         result_grace_seconds: float | None = None,
+        root_shutdown_grace_seconds: float = HANG_ROOT_SHUTDOWN_GRACE_SECONDS,
     ) -> None:
         self._sample_tree = sample_tree
         self._monotonic = monotonic
@@ -1114,6 +1120,10 @@ class HangSentinel:
         self._zero_cpu_streak = 0
         self._suspected: dict[str, Any] | None = None
         self._recovery_attempted = False
+        self._root_shutdown_grace_seconds = root_shutdown_grace_seconds
+        self._root_shutdown_started: float | None = None
+        self._root_shutdown_tree: tuple[dict[str, Any], ...] = ()
+        self._root_shutdown_escalated = False
         # Bumped on every note_activity; assessments carry the generation
         # they sampled so any verdict outlived by resumed output is discarded
         # (mid-sample by evaluate, post-return by confirm_assessment).
@@ -1132,6 +1142,10 @@ class HangSentinel:
             # mask a real hang. Re-notifying the same pid changes nothing, so a
             # repeat call cannot keep resetting the streak.
             self._harness_pid = pid
+            self._activity_generation += 1
+            self._root_shutdown_started = None
+            self._root_shutdown_tree = ()
+            self._root_shutdown_escalated = False
             self._cpu_high_water = {}
             self._last_cpu_seconds = None
             self._zero_cpu_streak = 0
@@ -1163,6 +1177,9 @@ class HangSentinel:
             self._last_cpu_seconds = None
             self._cpu_high_water = {}
             self._recovery_attempted = False
+            self._root_shutdown_started = None
+            self._root_shutdown_tree = ()
+            self._root_shutdown_escalated = False
             return retracted
 
     def note_turn_exit(self) -> dict[str, Any] | None:
@@ -1179,7 +1196,7 @@ class HangSentinel:
             return dict(retracted) if retracted is not None else None
 
     def recover_post_result(self, assessment: HangAssessment) -> HangAssessment:
-        """Attempt one verified-leaf SIGTERM for a terminal-result suspicion.
+        """Recover a terminal-result hang, including a root-only shutdown.
 
         Revalidation samples outside the sentinel lock. The generation is then
         checked again and signals are delivered while holding the lock, so
@@ -1193,23 +1210,54 @@ class HangSentinel:
             if (
                 assessment.generation != self._activity_generation
                 or self._suspected is None
-                or self._recovery_attempted
             ):
                 return assessment
-            self._recovery_attempted = True
             pid = self._harness_pid
             prior_tree = tuple(block.get("process_tree") or ())
+            root_only = (
+                pid is not None
+                and len(prior_tree) == 1
+                and prior_tree[0].get("pid") == pid
+            )
+            force = False
+            previous_recovery = block.get("recovery")
+            if self._root_shutdown_tree:
+                if (
+                    self._root_shutdown_started is None
+                    or self._root_shutdown_escalated
+                    or not root_only
+                    or self._monotonic() - self._root_shutdown_started
+                    < self._root_shutdown_grace_seconds
+                ):
+                    return assessment
+                force = True
+                self._root_shutdown_escalated = True
+                prior_tree = self._root_shutdown_tree
+            elif root_only:
+                self._root_shutdown_tree = tuple(dict(row) for row in prior_tree)
+            elif self._recovery_attempted:
+                return assessment
+            else:
+                self._recovery_attempted = True
             attempted_at = str(
                 block.get("last_checked_at") or clock.isoformat(clock.utc_now())
             )
 
         if pid is None:
             return assessment
-        recovery, candidates = process_tree.prepare_verified_leaf_recovery(
-            root_pid=pid,
-            prior_tree=prior_tree,
-            attempted_at=attempted_at,
-        )
+        if root_only:
+            recovery, candidates = process_tree.prepare_verified_root_recovery(
+                root_pid=pid,
+                prior_tree=prior_tree,
+                attempted_at=attempted_at,
+                force=force,
+            )
+        else:
+            recovery, candidates = process_tree.prepare_verified_leaf_recovery(
+                root_pid=pid,
+                prior_tree=prior_tree,
+                attempted_at=attempted_at,
+            )
 
         with self._lock:
             if (
@@ -1220,7 +1268,18 @@ class HangSentinel:
                 # activity path already cleared the episode and re-armed a
                 # future one, so this stale assessment publishes nothing.
                 return HangAssessment(generation=assessment.generation)
-            recovery = process_tree.signal_verified_leaf_recovery(recovery, candidates)
+            if root_only:
+                recovery = process_tree.signal_verified_root_recovery(
+                    recovery, candidates, force=force
+                )
+                if not force and recovery.get("signaled_pids") == [pid]:
+                    self._root_shutdown_started = self._monotonic()
+            else:
+                recovery = process_tree.signal_verified_leaf_recovery(
+                    recovery, candidates
+                )
+            if previous_recovery is not None:
+                recovery["previous_attempt"] = previous_recovery
             recovered_block = dict(self._suspected)
             recovered_block["recovery"] = recovery
             self._suspected = recovered_block
@@ -1271,6 +1330,9 @@ class HangSentinel:
                 self._last_cpu_seconds = None
                 self._cpu_high_water = {}
                 self._recovery_attempted = False
+                self._root_shutdown_started = None
+                self._root_shutdown_tree = ()
+                self._root_shutdown_escalated = False
                 return HangAssessment(
                     transition="cleared" if retracted is not None else None,
                     retracted=(dict(retracted) if retracted is not None else None),
@@ -1384,6 +1446,8 @@ class HangSentinel:
                 }
                 if tree_error is not None:
                     block["process_tree_error"] = tree_error
+                if previous is not None and "recovery" in previous:
+                    block["recovery"] = previous["recovery"]
                 self._suspected = block
                 return HangAssessment(
                     suspected=dict(block),
@@ -1394,6 +1458,9 @@ class HangSentinel:
             if previous is not None and cpu_positive:
                 self._suspected = None
                 self._announced = False
+                self._root_shutdown_started = None
+                self._root_shutdown_tree = ()
+                self._root_shutdown_escalated = False
                 retracted = dict(previous)
                 retracted["cpu_delta_seconds"] = cpu_delta
                 retracted["last_checked_at"] = checked_at
@@ -1534,6 +1601,12 @@ class LiveTurn:
             # was published is no longer a fresh sample.
             hang_progress_cleared = "hang_cpu_progress" in self._active_turn
             self._active_turn.pop("hang_cpu_progress", None)
+            shutdown = self._active_turn.get("harness_shutdown")
+            if isinstance(shutdown, dict):
+                self._active_turn["harness_shutdown"] = {
+                    **shutdown,
+                    "canceled_by": "activity",
+                }
             if hang_retracted is not None:
                 self._active_turn.pop("hang_suspected", None)
                 hang_cleared_payload = self._hang_event_payload(hang_retracted, now)
@@ -1607,6 +1680,19 @@ class LiveTurn:
                 finished_at,
             )
             active_turn.pop("hang_suspected", None)
+            recovery = (hang_retracted or {}).get("recovery") or (
+                active_turn.get("harness_shutdown") or {}
+            ).get("recovery")
+            if (
+                isinstance(recovery, dict)
+                and recovery.get("policy")
+                == process_tree.POST_RESULT_ROOT_RECOVERY_POLICY
+            ):
+                active_turn["harness_shutdown"] = {
+                    **(active_turn.get("harness_shutdown") or {}),
+                    "result": "exited-after-terminal-result",
+                    "recovery": recovery,
+                }
             self._active_turn = active_turn
             with self._persistence.lock:
                 if hang_retracted is not None:
@@ -1754,8 +1840,30 @@ class LiveTurn:
                 if assessment.suspected is not None:
                     self._active_turn["hang_suspected"] = assessment.suspected
                     heartbeat["hang_suspected"] = assessment.suspected
+                    recovery = assessment.suspected.get("recovery")
+                    if (
+                        isinstance(recovery, dict)
+                        and recovery.get("policy")
+                        == process_tree.POST_RESULT_ROOT_RECOVERY_POLICY
+                    ):
+                        self._active_turn["harness_shutdown"] = {
+                            "result": "recovery-attempted",
+                            "recovery": recovery,
+                        }
                 else:
                     self._active_turn.pop("hang_suspected", None)
+                    shutdown = self._active_turn.get("harness_shutdown")
+                    if isinstance(shutdown, dict) and (
+                        assessment.retracted is not None or assessment.input_wait_active
+                    ):
+                        self._active_turn["harness_shutdown"] = {
+                            **shutdown,
+                            "canceled_by": (
+                                "input-wait"
+                                if assessment.input_wait_active
+                                else "cpu-progress"
+                            ),
+                        }
                 if assessment.cpu_progress is not None:
                     self._active_turn["hang_cpu_progress"] = assessment.cpu_progress
                     heartbeat["hang_cpu_progress"] = assessment.cpu_progress

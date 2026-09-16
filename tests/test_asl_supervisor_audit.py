@@ -9334,5 +9334,134 @@ class ReportStagingTests(unittest.TestCase):
         )
 
 
+class WorkerPauseExitAuditTests(unittest.TestCase):
+    def bundle(self):
+        result = {
+            "session_id": "1",
+            "session": 1,
+            "turn_index": 2,
+            "returncode": 143,
+            "runner_pause": "blocked - operator input needed",
+            "runner_pause_source": "last_message",
+            "status_result": "blocked",
+            "pending_completed_ids": [],
+        }
+        return {
+            "status": {
+                "paused": True,
+                "ok": False,
+                "pause_reason": "blocked",
+                "pause_message": result["runner_pause"],
+                "pause_details": {"session": 1, "source": "last_message"},
+            },
+            "turns": [{"name": "turn-0002-session-1", "result": result}],
+            "events": {
+                "records": [
+                    {
+                        "name": events.TURN_EXECUTION_FINISHED_EVENT,
+                        "payload": {
+                            "session_id": "1",
+                            "session": 1,
+                            "turn_index": 2,
+                            "returncode": 143,
+                        },
+                    }
+                ]
+            },
+        }
+
+    def checks(self, bundle):
+        return {r.check: r for r in supervisor_audit.run_deterministic_checks(bundle)}
+
+    def test_a_held_worker_pause_accounts_only_for_its_exact_exit(self):
+        bundle = self.bundle()
+        results = self.checks(bundle)
+        self.assertEqual("pass", results["worker-pause-exits"].status)
+        self.assertEqual("pass", results["unclassified-anomalies"].status)
+        bundle["events"]["records"].append(
+            {
+                "name": events.TURN_EXECUTION_FINISHED_EVENT,
+                "payload": {
+                    "session_id": "1",
+                    "session": 1,
+                    "turn_index": 3,
+                    "returncode": 143,
+                },
+            }
+        )
+        self.assertEqual("fail", self.checks(bundle)["unclassified-anomalies"].status)
+
+    def test_untrusted_or_contradictory_pause_evidence_is_not_exempt(self):
+        changes_to_try: list[dict[str, Any]] = [
+            {"runner_pause_source": "stderr"},
+            {"returncode": 137},
+            {"runner_pause": ""},
+            {"status_result": "complete"},
+            {"pending_completed_ids": ["1"]},
+        ]
+        for changes in changes_to_try:
+            bundle = self.bundle()
+            bundle["turns"][0]["result"].update(changes)
+            results = self.checks(bundle)
+            self.assertEqual("fail", results["worker-pause-exits"].status)
+            self.assertEqual("fail", results["unclassified-anomalies"].status)
+
+    def test_an_unrelated_pause_accounts_for_no_exit(self):
+        for changes in [
+            {"paused": False},
+            {"ok": True},
+            {"pause_message": "other pause"},
+            {"pause_details": {"session": 9}},
+        ]:
+            bundle = self.bundle()
+            bundle["status"].update(changes)
+            results = self.checks(bundle)
+            self.assertEqual("fail", results["worker-pause-exits"].status)
+            self.assertEqual("fail", results["unclassified-anomalies"].status)
+
+    def test_missing_session_identity_explains_no_exit(self):
+        bundle = self.bundle()
+        bundle["events"]["records"][0]["payload"]["session_id"] = None
+        bundle["turns"][0]["result"]["session_id"] = None
+        bundle["status"]["pause_details"]["session"] = None
+        results = self.checks(bundle)
+        self.assertEqual("fail", results["worker-pause-exits"].status)
+        self.assertEqual("fail", results["unclassified-anomalies"].status)
+
+    def test_a_guard_refusal_must_reconcile_the_workers_completion(self):
+        bundle = self.bundle()
+        guard = {
+            "passed": False,
+            "reverted_to_pending": True,
+            "reason": events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+        }
+        bundle["status"].update(
+            pause_reason=guard["reason"],
+            pause_message="guard refused",
+            pause_details={"session": 1},
+        )
+        result = bundle["turns"][0]["result"]
+        result.update(workspace_write_guard=guard, pending_completed_ids=["1"])
+        results = self.checks(bundle)
+        self.assertEqual("pass", results["worker-pause-exits"].status)
+        self.assertEqual("pass", results["unclassified-anomalies"].status)
+        guard["reverted_to_pending"] = False
+        results = self.checks(bundle)
+        self.assertEqual("fail", results["worker-pause-exits"].status)
+        self.assertEqual("fail", results["unclassified-anomalies"].status)
+
+    def test_an_aborted_exit_missing_its_acknowledgment_has_a_named_owner(self):
+        bundle = self.bundle()
+        bundle["events"]["records"][0]["payload"].update(aborted=True, returncode=137)
+        results = self.checks(bundle)
+        self.assertEqual("fail", results["operator-abort"].status)
+        self.assertIn(
+            "without an abort acknowledgment", results["operator-abort"].detail
+        )
+        self.assertEqual("pass", results["unclassified-anomalies"].status)
+        bundle["omissions"] = [{"section": "events", "reason": "size-cap", "count": 1}]
+        self.assertEqual("unavailable", self.checks(bundle)["operator-abort"].status)
+
+
 if __name__ == "__main__":
     unittest.main()

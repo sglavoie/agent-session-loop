@@ -9568,6 +9568,69 @@ class HarnessTransportClassificationTests(unittest.TestCase):
         )
 
 
+class HarnessShutdownClassificationTests(unittest.TestCase):
+    def test_shutdown_provenance_keeps_failure_and_suppresses_text_guessing(
+        self,
+    ) -> None:
+        recovery = {
+            "policy": process_tree.POST_RESULT_ROOT_RECOVERY_POLICY,
+            "root_pid": 123,
+            "signal": "SIGTERM",
+            "signaled_pids": [123],
+        }
+        result = harnesses.HarnessResult(
+            name="claude",
+            argv=[],
+            returncode=143,
+            stdout="",
+            stderr="",
+            last_message="The task involved credentials and rate limits.",
+        )
+        classified = harness_failures.classify_harness_failure(
+            result, shutdown={"recovery": recovery}
+        )
+        self.assertEqual("nonzero-exit", classified.reason)
+        self.assertEqual("post-result-shutdown", classified.marker)
+        self.assertFalse(classified.retryable)
+        canceled = harness_failures.classify_harness_failure(
+            result, shutdown={"recovery": recovery, "canceled_by": "activity"}
+        )
+        self.assertNotEqual("post-result-shutdown", canceled.marker)
+        changes_to_try: list[dict[str, Any]] = [
+            {"signaled_pids": []},
+            {"signaled_pids": [456]},
+            {"signal": "SIGKILL"},
+            {"policy": "unknown"},
+        ]
+        for changes in changes_to_try:
+            classified = harness_failures.classify_harness_failure(
+                result, shutdown={"recovery": {**recovery, **changes}}
+            )
+            self.assertNotEqual("post-result-shutdown", classified.marker)
+
+    def test_a_provider_error_keeps_its_failure_category_after_shutdown(self) -> None:
+        result = harnesses.HarnessResult(
+            name="claude",
+            argv=[],
+            returncode=143,
+            stdout="claude result: error: authentication failed\n",
+            stderr="",
+            last_message="authentication failed",
+        )
+        classified = harness_failures.classify_harness_failure(
+            result,
+            shutdown={
+                "recovery": {
+                    "policy": process_tree.POST_RESULT_ROOT_RECOVERY_POLICY,
+                    "root_pid": 123,
+                    "signal": "SIGTERM",
+                    "signaled_pids": [123],
+                }
+            },
+        )
+        self.assertEqual("auth-failed", classified.reason)
+
+
 class HarnessAuthenticationClassificationTests(unittest.TestCase):
     """Credential failures reach the category no reply can clear."""
 

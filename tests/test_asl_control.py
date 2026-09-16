@@ -59,6 +59,7 @@ from agent_session_loop import (
     state,
     supervision_liveness,
     turn_execution,
+    turn_postflight,
 )
 from tests.support import (
     REPO_ROOT,
@@ -3766,6 +3767,42 @@ class AbortTurnOrchestrationTests(unittest.TestCase):
         self.assertIn("host reboot", note)
         self.assertIn("holds no completion", note)
 
+    def test_a_guard_pause_still_acknowledges_the_killed_process(self) -> None:
+        def refuse(ctx, **kwargs):
+            ctx.pause(
+                reason=events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+                message="guard evidence unavailable",
+                details=kwargs["session_details"],
+            )
+            return turn_postflight.PostTurnGuards(
+                stopped=True, terminating_disposition=None
+            )
+
+        with mock.patch.object(
+            turn_postflight, "enforce_post_turn_guards", side_effect=refuse
+        ):
+            payload, harness_calls = self._run_loop(
+                statuses=("pending",),
+                abort_during_turn_index=1,
+                reason="stop the stuck harness",
+                expected_exit_code=1,
+            )
+        self.assertTrue(payload["paused"])
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            payload["pause_reason"],
+        )
+        self.assertFalse(payload["ok"])
+        self.assertEqual([], payload["completed_sessions"])
+        self.assertEqual("pending", self._session_status("1"))
+        self.assertEqual(
+            1,
+            self.run_control_actions().count(
+                events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED
+            ),
+        )
+        self.assertFalse(payload["control"]["abort_turn_requested"])
+
     def test_killed_turn_leaves_the_abort_guidance_readable(self) -> None:
         self._run_loop(
             statuses=("pending",),
@@ -6096,6 +6133,166 @@ class PostResultRecoverySentinelTests(unittest.TestCase):
 
         self.assertIs(assessment, unchanged)
         prepare.assert_not_called()
+
+    def root_sentinel(self):
+        ticks = [100.0]
+        sentinel = turn_execution.HangSentinel(
+            sample_tree=lambda pid: self.tree()[:1],
+            monotonic=lambda: ticks[0],
+            confirm_samples=2,
+            result_grace_seconds=0,
+            root_shutdown_grace_seconds=30,
+        )
+        return sentinel, ticks
+
+    def test_root_shutdown_is_bounded_and_preserves_both_attempts(self) -> None:
+        sentinel, ticks = self.root_sentinel()
+        assessment = self.suspected_result(sentinel)
+        table = {123: self.tree()[0]}
+        kills = []
+        signal_root = process_tree.signal_verified_root_recovery
+
+        def deliver(report, pids, *, force=False):
+            return signal_root(
+                report,
+                pids,
+                force=force,
+                kill=lambda pid, sig: kills.append((pid, sig)),
+            )
+
+        with (
+            mock.patch.object(process_tree, "sample_process_table", return_value=table),
+            mock.patch.object(
+                process_tree, "signal_verified_root_recovery", side_effect=deliver
+            ),
+        ):
+            sentinel.recover_post_result(assessment)
+            ticks[0] = 129
+            refreshed = sentinel.evaluate(idle_seconds=150, now=self.NOW)
+            sentinel.recover_post_result(refreshed)
+            self.assertEqual([(123, signal.SIGTERM)], kills)
+            self.assertEqual([123], refreshed.suspected["recovery"]["signaled_pids"])
+            ticks[0] = 130
+            escalated = sentinel.recover_post_result(
+                sentinel.evaluate(idle_seconds=180, now=self.NOW)
+            )
+            self.assertEqual([(123, signal.SIGTERM), (123, signal.SIGKILL)], kills)
+            self.assertEqual(
+                "SIGTERM", escalated.suspected["recovery"]["previous_attempt"]["signal"]
+            )
+            ticks[0] = 200
+            sentinel.recover_post_result(
+                sentinel.evaluate(idle_seconds=240, now=self.NOW)
+            )
+            self.assertEqual(2, len(kills))
+
+    def test_root_escalation_checks_the_original_identity(self) -> None:
+        sentinel, ticks = self.root_sentinel()
+        assessment = self.suspected_result(sentinel)
+        table = {123: dict(self.tree()[0])}
+        with (
+            mock.patch.object(process_tree, "sample_process_table", return_value=table),
+            mock.patch.object(
+                process_tree,
+                "signal_verified_root_recovery",
+                wraps=process_tree.signal_verified_root_recovery,
+            ) as deliver,
+        ):
+            # Prepare only, avoiding a real signal to the fixture pid.
+            deliver.side_effect = lambda report, pids, **kwargs: {
+                **report,
+                "signaled_pids": list(pids),
+            }
+            sentinel.recover_post_result(assessment)
+            ticks[0] = 131
+            table[123]["birth"] = "reused-pid"
+            recovered = sentinel.recover_post_result(
+                sentinel.evaluate(idle_seconds=180, now=self.NOW)
+            )
+            self.assertEqual((), deliver.call_args.args[1])
+            self.assertTrue(recovered.suspected["recovery"]["identity_mismatches"])
+
+    def test_a_failed_sigterm_never_escalates_to_sigkill(self) -> None:
+        sentinel, ticks = self.root_sentinel()
+        assessment = self.suspected_result(sentinel)
+        report = {
+            "policy": process_tree.POST_RESULT_ROOT_RECOVERY_POLICY,
+            "signal": "SIGTERM",
+            "signaled_pids": [],
+            "signal_failures": [{"pid": 123, "error": "denied"}],
+        }
+        with (
+            mock.patch.object(
+                process_tree,
+                "prepare_verified_root_recovery",
+                return_value=(report, (123,)),
+            ) as prepare,
+            mock.patch.object(
+                process_tree, "signal_verified_root_recovery", return_value=report
+            ) as deliver,
+        ):
+            sentinel.recover_post_result(assessment)
+            ticks[0] = 200
+            refreshed = sentinel.recover_post_result(
+                sentinel.evaluate(idle_seconds=240, now=self.NOW)
+            )
+        prepare.assert_called_once()
+        deliver.assert_called_once()
+        self.assertEqual(report, refreshed.suspected["recovery"])
+
+    def test_resumed_activity_cancels_prepared_root_shutdown(self) -> None:
+        sentinel, ticks = self.root_sentinel()
+        assessment = self.suspected_result(sentinel)
+
+        def prepare(**kwargs):
+            sentinel.note_activity(request_started=True)
+            return ({"candidate_pids": [123]}, (123,))
+
+        with (
+            mock.patch.object(
+                process_tree, "prepare_verified_root_recovery", side_effect=prepare
+            ),
+            mock.patch.object(process_tree, "signal_verified_root_recovery") as deliver,
+        ):
+            stale = sentinel.recover_post_result(assessment)
+        self.assertIsNone(stale.suspected)
+        deliver.assert_not_called()
+
+    def test_real_terminal_process_ignoring_sigterm_is_reaped(self) -> None:
+        script = (
+            "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+            "print('terminal-result',flush=True);time.sleep(60)"
+        )
+        with subprocess.Popen(
+            [sys.executable, "-u", "-c", script], stdout=subprocess.PIPE, text=True
+        ) as process:
+            self.addCleanup(process_tree.clear_process_tree, process.pid)
+            try:
+                self.assertEqual("terminal-result\n", process.stdout.readline())
+                sentinel = turn_execution.HangSentinel(
+                    confirm_samples=1,
+                    result_grace_seconds=0,
+                    root_shutdown_grace_seconds=0,
+                )
+                sentinel.note_harness_pid(process.pid)
+                sentinel.note_final_result()
+                sentinel.evaluate(idle_seconds=120, now=self.NOW)
+                term = sentinel.recover_post_result(
+                    sentinel.evaluate(idle_seconds=150, now=self.NOW)
+                )
+                self.assertEqual(
+                    [process.pid], term.suspected["recovery"]["signaled_pids"]
+                )
+                self.assertIsNone(process.poll())
+                killed = sentinel.recover_post_result(
+                    sentinel.evaluate(idle_seconds=180, now=self.NOW)
+                )
+                self.assertEqual("SIGKILL", killed.suspected["recovery"]["signal"])
+                self.assertEqual(-signal.SIGKILL, process.wait(timeout=5))
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
 
     def test_resumed_output_during_revalidation_cancels_signals(self) -> None:
         sentinel = self.make_sentinel()

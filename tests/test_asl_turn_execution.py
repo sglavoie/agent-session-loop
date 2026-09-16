@@ -31,6 +31,7 @@ from agent_session_loop import (
     events,
     harnesses,
     plans,
+    process_tree,
     run_persistence,
     run_reporting,
     turn_execution,
@@ -324,6 +325,60 @@ class TurnExecutorEndingTests(unittest.TestCase):
         self.assertFalse(payload["timed_out"])
         self.assertNotEqual("complete", payload["status_result"])
         self.assertEqual("boom\n", self.harness.paths["stderr"].read_text("utf-8"))
+
+    def test_shutdown_recovery_records_the_exit_without_earning_completion(
+        self,
+    ) -> None:
+        recovery = {
+            "policy": process_tree.POST_RESULT_ROOT_RECOVERY_POLICY,
+            "root_pid": 123,
+            "signal": "SIGKILL",
+            "signaled_pids": [123],
+        }
+        retracted = {
+            "reason": turn_execution.HANG_REASON_RESULT_RECEIVED,
+            "harness_pid": 123,
+            "recovery": recovery,
+        }
+        with mock.patch.object(
+            turn_execution.HangSentinel, "note_turn_exit", return_value=retracted
+        ):
+            execution = self.harness.run(harness_result(returncode=137))
+        finalization = self.finalize(execution)
+        payload = finalization.turn_payload
+        self.assertEqual(
+            "post-result-shutdown", payload["failure_classification"]["marker"]
+        )
+        self.assertFalse(payload["failure_classification"]["retryable"])
+        self.assertEqual("nonzero-exit", payload["status_result"])
+        self.assertEqual(137, payload["returncode"])
+        self.assertEqual(recovery, payload["harness_shutdown"]["recovery"])
+        self.assertEqual(
+            payload["harness_shutdown"],
+            self.harness.persistence.payloads(events.TURN_EXECUTION_FINISHED_EVENT)[0][
+                "harness_shutdown"
+            ],
+        )
+
+    def test_resumed_output_preserves_but_cancels_shutdown_attribution(self) -> None:
+        active = self.harness.active_turn()
+        active["harness_shutdown"] = {
+            "result": "recovery-attempted",
+            "recovery": {
+                "policy": process_tree.POST_RESULT_ROOT_RECOVERY_POLICY,
+                "root_pid": 123,
+                "signal": "SIGTERM",
+                "signaled_pids": [123],
+            },
+        }
+        live = self.harness.live_turn(active)
+        with silent_delivery():
+            live.record_activity("stdout", "claude status: requesting\n")
+            finished = live.finish(clock.utc_now())
+        self.assertEqual("activity", finished["harness_shutdown"]["canceled_by"])
+        self.assertEqual(
+            [123], finished["harness_shutdown"]["recovery"]["signaled_pids"]
+        )
 
     def test_timed_out_turn_is_recorded_as_a_timeout(self) -> None:
         finalization = self.finalize(

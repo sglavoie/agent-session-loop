@@ -701,6 +701,32 @@ def _record_abort_satisfied_by_worker(
     )
 
 
+def _record_aborted_turn_exit(
+    listener: run_control.RunControlListener,
+    *,
+    payload: dict[str, Any],
+    event_path: Path,
+    control_payload: dict[str, Any],
+    context: Mapping[str, Any],
+    persistence: run_persistence._RunPersistence,
+) -> None:
+    """Acknowledge a killed turn even when a write guard owns its pause.
+
+    Consuming the abort records what happened to the process; it grants no
+    completion, commit, scope change, or successful stop disposition.
+    """
+    action = listener.consume_abort_turn()
+    if action is not None:
+        run_coordination.record_run_control_action(
+            event_path=event_path,
+            payload=payload,
+            control_payload=control_payload,
+            action=action,
+            context=context,
+            persistence=persistence,
+        )
+
+
 def _honor_abort_turn(
     listener: run_control.RunControlListener,
     *,

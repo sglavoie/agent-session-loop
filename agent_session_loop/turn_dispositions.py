@@ -1085,7 +1085,9 @@ def settle_nonzero_exit(
     byte-identical to the before-image. Anything else may have half-completed,
     so it pauses and says why.
     """
-    classification = harness_failures.classify_harness_failure(result)
+    classification = harness_failures.classify_harness_failure(
+        result, shutdown=turn_payload.get("harness_shutdown")
+    )
     spark_failure = spark_route["decision"] == "spark" and classification.reason in {
         events.PAUSE_REASON_QUOTA_EXHAUSTED,
         events.PAUSE_REASON_INVALID_MODEL,

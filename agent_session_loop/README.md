@@ -378,6 +378,10 @@ A mailbox `pause` resolution closes its question. Both worker and runner wait pa
 
 The deterministic `lifecycle.conversation-restore-refusal` check accounts for provider refusals separately from ordinary harness failures. It requires a matching failed turn exit, an explained and retired conversation, and the corresponding recovery pause. Only that exact session and turn leave the unclassified-failure catch-all; mismatched exits, timeouts, missing evidence, and other failed turns remain visible.
 
+After a terminal harness result and confirmed idle CPU samples, hang recovery can shut down a harness with no descendants. It verifies the root's PID, birth time, and command before SIGTERM, then waits 30 seconds before a fresh identity and descendant check permits one SIGKILL escalation. Resumed output, CPU progress, a new protocol request, and mailbox input waits cancel the episode; process-sweep opt-out also disables this recovery. Heartbeats retain each recovery attempt, and the turn result and execution event preserve `harness_shutdown` evidence. A matching signal exit is classified as `post-result-shutdown` under the existing non-retryable `nonzero-exit` policy. It earns no completion or authoritative verification and requires operator recovery.
+
+The deterministic `lifecycle.worker-pause-exit-accounting` check grades failed exits that carry a worker pause declaration. It requires matching session, turn, and exit evidence, a trusted declaration source, and a held pause or write-guard refusal that reverted the session to pending. Only matching exits leave the unclassified-failure catch-all; shutdown causes remain the resource lane's responsibility. An explicitly aborted exit is owned by `lifecycle.operator-abort`, which now detects a missing acknowledgment even when no honored-abort record survived. The runner records an honored abort when a post-turn guard pauses a killed turn, preserving the guard's failure and pending session.
+
 ## Accepting remote-ref updates after a paused review
 
 A push or fetch during a read-only review can update remote-tracking refs and
