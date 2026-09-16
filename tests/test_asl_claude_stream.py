@@ -846,6 +846,55 @@ class StreamOutputProcessorTests(unittest.TestCase):
         self.assertTrue(processor.final_result_seen)
         self.assertTrue(stdin.closed_by_asl)
 
+    def test_a_new_request_invalidates_the_prior_terminal_result(self) -> None:
+        processor = harnesses._ClaudeStreamJsonOutputProcessor()
+
+        processor.process_chunk(
+            "stdout", json.dumps({"type": "result", "subtype": "success"}) + "\n"
+        )
+        self.assertTrue(processor.final_result_seen)
+
+        processor.process_chunk(
+            "stdout",
+            json.dumps({"type": "system", "subtype": "init", "session_id": "s"}) + "\n",
+        )
+        self.assertFalse(processor.final_result_seen)
+
+        processor.process_chunk(
+            "stdout", json.dumps({"type": "result", "subtype": "success"}) + "\n"
+        )
+        self.assertTrue(processor.final_result_seen)
+
+    def test_an_error_result_does_not_render_its_provider_subtype_as_outcome(
+        self,
+    ) -> None:
+        session, stdin = session_with()
+        session.send_prompt()
+        processor = self.processor(session)
+
+        rendered = processor.process_chunk(
+            "stdout",
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": True,
+                    "result": "API Error: Connection lost mid-response.\nIncomplete.",
+                    "num_turns": 36,
+                    "duration_ms": 177100,
+                }
+            )
+            + "\n",
+        )
+
+        self.assertEqual(
+            "claude result: error (provider subtype success, 36 turns, 177.1s): "
+            "API Error: Connection lost mid-response. Incomplete.\n",
+            rendered,
+        )
+        self.assertTrue(processor.final_result_seen)
+        self.assertTrue(stdin.closed_by_asl)
+
     def test_a_control_response_answers_the_session_without_being_rendered(
         self,
     ) -> None:

@@ -7981,6 +7981,40 @@ class HarnessReaderJoinAndHookTests(unittest.TestCase):
         self.assertIn("claude result: success", result.stdout)
         self.assertIn("claude status: late", result.stdout)
 
+    def test_a_new_request_rearms_the_final_result_hook(self) -> None:
+        fake_claude = self._write_executable(
+            "fake-claude",
+            "\n".join(
+                [
+                    "#!/usr/bin/env python3",
+                    "import json",
+                    "records = [",
+                    "    {'type': 'result', 'subtype': 'success', 'num_turns': 0},",
+                    "    {'type': 'result', 'subtype': 'success', 'num_turns': 0},",
+                    "    {'type': 'system', 'subtype': 'init', 'session_id': 's'},",
+                    "    {'type': 'result', 'subtype': 'success', 'num_turns': 1},",
+                    "]",
+                    "for record in records:",
+                    "    print(json.dumps(record), flush=True)",
+                    "",
+                ]
+            ),
+        )
+        fired: list[int] = []
+
+        result = harnesses.ClaudeAdapter(executable=str(fake_claude)).run(
+            cwd=self.tmp_dir,
+            plan_dir=self.tmp_dir,
+            prompt="noop",
+            on_final_result=lambda: fired.append(1),
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        # The duplicate result belongs to the first request; the result after
+        # the new init is a distinct terminal result and must reset the hang
+        # sentinel's post-result clock.
+        self.assertEqual([1, 1], fired)
+
     def test_late_write_after_abandoned_readers_cannot_resurrect_finished_state(
         self,
     ) -> None:
@@ -9585,6 +9619,20 @@ class HarnessAuthenticationClassificationTests(unittest.TestCase):
                     self._result(stderr=text)
                 )
                 self.assertEqual(events.PAUSE_REASON_AUTH_FAILED, classification.reason)
+
+    def test_affirmative_authenticated_prose_preserves_exit_provenance(self) -> None:
+        classification = harness_failures.classify_harness_failure(
+            self._result(
+                last_message=(
+                    "Ten real input-to-visible-result-ms values from two "
+                    "authenticated Kiln launches."
+                ),
+                returncode=143,
+            )
+        )
+
+        self.assertEqual(events.PAUSE_REASON_NONZERO_EXIT, classification.reason)
+        self.assertEqual("exit-143", classification.marker)
 
     def test_oauth_and_an_expired_session_join_the_expired_token(self) -> None:
         for text in (

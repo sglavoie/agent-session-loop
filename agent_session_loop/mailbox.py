@@ -786,6 +786,28 @@ class MailboxView:
                 return message
         return None
 
+    def active_worker_wait(
+        self,
+        *,
+        run_id: str,
+        session_id: str | None = None,
+        turn_index: int | None = None,
+    ) -> MailboxMessage | None:
+        """Return the newest input wait owned by the selected worker turn."""
+        for question in reversed(self.unanswered_questions):
+            if question.run_id != run_id:
+                continue
+            if question.waiter_origin != WAITER_ORIGIN_WORKER:
+                continue
+            if session_id is not None and question.session_id != session_id:
+                continue
+            if turn_index is not None and question.turn_index != turn_index:
+                continue
+            wait = self.active_wait_for(question.id)
+            if wait is not None:
+                return wait
+        return None
+
     @property
     def latest_supervision_end(self) -> MailboxMessage | None:
         """Return the highest-sequence supervision-end record, if any."""

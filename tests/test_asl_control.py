@@ -695,6 +695,22 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual((question, wait_start), initial.messages)
         self.assertEqual(mailbox.DELIVERY_MODE_WAIT, question.delivery_mode)
         self.assertEqual(wait_start, initial.active_wait_for(question.id))
+        self.assertEqual(
+            wait_start,
+            initial.active_worker_wait(run_id="run-A", session_id="1", turn_index=2),
+        )
+        self.assertTrue(
+            turn_execution.worker_input_wait_probe(
+                plan_dir=self.plan_dir,
+                state_dir=self.state_dir,
+                run_id="run-A",
+                session_id="1",
+                turn_index=2,
+            )
+        )
+        self.assertIsNone(
+            initial.active_worker_wait(run_id="run-A", session_id="other", turn_index=2)
+        )
 
         reply = mailbox.append_reply(
             self.plan_dir,
@@ -719,6 +735,9 @@ class MailboxTests(unittest.TestCase):
         final = mailbox.read_mailbox(self.plan_dir, state_dir=self.state_dir)
         self.assertEqual("consumed", final.delivery_state_for(question.id))
         self.assertIsNone(final.active_wait_for(question.id))
+        self.assertIsNone(
+            final.active_worker_wait(run_id="run-A", session_id="1", turn_index=2)
+        )
         self.assertEqual(1, final.counts.receipts)
 
     def test_mixed_v1_v2_v3_v4_log_parses_without_rewrite(self) -> None:
@@ -5699,6 +5718,84 @@ class HangSentinelTests(unittest.TestCase):
             "suspected",
             sentinel.evaluate(idle_seconds=270.0, now=self.NOW).transition,
         )
+
+    def test_new_request_invalidates_a_prior_terminal_result(self) -> None:
+        monotonic = {"now": 0.0}
+        sentinel = turn_execution.HangSentinel(
+            sample_tree=lambda pid: self.tree(5.0),
+            monotonic=lambda: monotonic["now"],
+            trigger_idle_seconds=120.0,
+            confirm_samples=2,
+            cpu_epsilon_seconds=0.5,
+            result_grace_seconds=45.0,
+        )
+        sentinel.note_harness_pid(123)
+        sentinel.note_final_result()
+        sentinel.note_activity(request_started=True)
+        monotonic["now"] = 100.0
+
+        assessment = sentinel.evaluate(idle_seconds=30.0, now=self.NOW)
+
+        self.assertIsNone(assessment.suspected)
+        self.assertIsNone(assessment.cpu_progress)
+
+    def test_worker_input_wait_suppresses_sampling_and_clears_a_suspicion(
+        self,
+    ) -> None:
+        sentinel, calls = self.make_sentinel(
+            [self.tree(5.0), self.tree(5.0), self.tree(5.0)]
+        )
+        sentinel.note_harness_pid(123)
+        sentinel.evaluate(idle_seconds=120.0, now=self.NOW)
+        sentinel.evaluate(idle_seconds=150.0, now=self.NOW)
+        suspected = sentinel.evaluate(idle_seconds=180.0, now=self.NOW)
+        self.assertTrue(sentinel.confirm_assessment(suspected))
+
+        waiting = sentinel.evaluate(
+            idle_seconds=210.0,
+            now=self.NOW,
+            input_wait_active=True,
+        )
+
+        self.assertTrue(waiting.input_wait_active)
+        self.assertEqual("cleared", waiting.transition)
+        self.assertIsNone(waiting.suspected)
+        self.assertEqual([123, 123, 123], calls)
+
+    def test_live_turn_projects_an_input_wait_without_sampling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            calls: list[int] = []
+
+            def sample_tree(pid: int) -> list[dict[str, Any]]:
+                calls.append(pid)
+                return self.tree(5.0)
+
+            sentinel = turn_execution.HangSentinel(
+                sample_tree=sample_tree,
+                monotonic=lambda: 1000.0,
+                trigger_idle_seconds=0.0,
+                confirm_samples=2,
+                cpu_epsilon_seconds=0.5,
+                result_grace_seconds=0.0,
+            )
+            live_turn = run_commit._LiveTurn(
+                payload={"state_path": str(tmp_dir / "state.json")},
+                event_path=tmp_dir / "events.jsonl",
+                progress=mock.Mock(),
+                active_turn=LiveTurnSchedulerTests.active_turn(),
+                hang_sentinel=sentinel,
+                input_wait_probe=lambda: True,
+            )
+            live_turn.note_harness_pid(123)
+
+            with mock.patch.object(turn_execution, "notify_turn_heartbeat"):
+                heartbeat = live_turn._record_heartbeat()
+
+            self.assertTrue(heartbeat["input_wait_active"])
+            self.assertEqual([], calls)
+            state = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
+            self.assertTrue(state["active_turn"]["input_wait_active"])
 
     def test_note_activity_during_sample_discards_the_assessment(self) -> None:
         sample_calls = {"count": 0}

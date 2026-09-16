@@ -1064,6 +1064,7 @@ class HangAssessment:
     retracted: dict[str, Any] | None = None
     generation: int = 0
     cpu_progress: dict[str, Any] | None = None
+    input_wait_active: bool = False
 
 
 class HangSentinel:
@@ -1142,15 +1143,19 @@ class HangSentinel:
                 self._result_seen_at = clock.utc_now()
                 self._result_seen_monotonic = self._monotonic()
 
-    def note_activity(self) -> dict[str, Any] | None:
+    def note_activity(self, *, request_started: bool = False) -> dict[str, Any] | None:
         """Retract suspicion on resumed output; return the retracted block.
 
         Returns ``None`` for an unannounced episode (its suspected event was
         never confirmed for persistence) so no orphan cleared event is
-        emitted for a suspicion nobody was ever told about.
+        emitted for a suspicion nobody was ever told about. ``request_started``
+        also invalidates a terminal result from the prior protocol request.
         """
         with self._lock:
             self._activity_generation += 1
+            if request_started:
+                self._result_seen_at = None
+                self._result_seen_monotonic = None
             retracted = self._suspected if self._announced else None
             self._suspected = None
             self._announced = False
@@ -1244,13 +1249,34 @@ class HangSentinel:
                 self._announced = True
             return True
 
-    def evaluate(self, *, idle_seconds: float, now: datetime) -> HangAssessment:
+    def evaluate(
+        self,
+        *,
+        idle_seconds: float,
+        now: datetime,
+        input_wait_active: bool = False,
+    ) -> HangAssessment:
         with self._lock:
             pid = self._harness_pid
             result_seen_at = self._result_seen_at
             result_seen_monotonic = self._result_seen_monotonic
             previous = self._suspected
             generation = self._activity_generation
+
+            if input_wait_active:
+                retracted = self._suspected if self._announced else None
+                self._suspected = None
+                self._announced = False
+                self._zero_cpu_streak = 0
+                self._last_cpu_seconds = None
+                self._cpu_high_water = {}
+                self._recovery_attempted = False
+                return HangAssessment(
+                    transition="cleared" if retracted is not None else None,
+                    retracted=(dict(retracted) if retracted is not None else None),
+                    generation=generation,
+                    input_wait_active=True,
+                )
 
         result_grace_hit = (
             result_seen_monotonic is not None
@@ -1415,6 +1441,7 @@ class LiveTurn:
         monotonic: Callable[[], float] = time.monotonic,
         wait: Callable[[float], bool] | None = None,
         hang_sentinel: HangSentinel | None = None,
+        input_wait_probe: Callable[[], bool] | None = None,
         wakeup: threading.Event | None = None,
     ) -> None:
         self._payload = payload
@@ -1431,6 +1458,7 @@ class LiveTurn:
             if hang_sentinel is None
             else hang_sentinel
         )
+        self._input_wait_probe = input_wait_probe
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._wakeup = wakeup
@@ -1478,7 +1506,13 @@ class LiveTurn:
     def record_activity(self, stream_name: harnesses.StreamName, text: str) -> None:
         signal_to_report: dict[str, Any] | None = None
         now = clock.utc_now()
-        hang_retracted = self._hang_sentinel.note_activity()
+        request_started = stream_name == "stdout" and any(
+            line == "claude status: requesting" or line.startswith("claude init")
+            for line in text.splitlines()
+        )
+        hang_retracted = self._hang_sentinel.note_activity(
+            request_started=request_started
+        )
         hang_progress_cleared = False
         hang_cleared_payload: dict[str, Any] | None = None
         active_turn_snapshot: dict[str, Any] | None = None
@@ -1661,9 +1695,14 @@ class LiveTurn:
         if not self._stop.is_set():
             with self._lock:
                 idle_seconds = clock.duration_seconds(self._last_activity_at, now)
+            input_wait_active = False
+            if self._input_wait_probe is not None:
+                with contextlib.suppress(Exception):
+                    input_wait_active = self._input_wait_probe()
             assessment = self._hang_sentinel.evaluate(
                 idle_seconds=idle_seconds,
                 now=now,
+                input_wait_active=input_wait_active,
             )
             assessment = self._hang_sentinel.recover_post_result(assessment)
         hang_event: tuple[str, dict[str, Any]] | None = None
@@ -1707,6 +1746,11 @@ class LiveTurn:
             self._active_turn["elapsed_seconds"] = heartbeat["elapsed_seconds"]
             self._active_turn["idle_seconds"] = heartbeat["idle_seconds"]
             if assessment is not None:
+                if assessment.input_wait_active:
+                    self._active_turn["input_wait_active"] = True
+                    heartbeat["input_wait_active"] = True
+                else:
+                    self._active_turn.pop("input_wait_active", None)
                 if assessment.suspected is not None:
                     self._active_turn["hang_suspected"] = assessment.suspected
                     heartbeat["hang_suspected"] = assessment.suspected
@@ -1840,6 +1884,30 @@ class LiveTurn:
             if self._active_turn.get("session_number") is not None
             else {}
         )
+
+
+def worker_input_wait_probe(
+    *,
+    plan_dir: str | Path,
+    run_id: str,
+    session_id: str | None,
+    turn_index: int,
+    state_dir: str | Path | None = None,
+) -> bool:
+    """Whether this exact worker turn is intentionally waiting for an answer."""
+    try:
+        view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)
+    except mailbox.MailboxError:
+        # A read failure cannot safely suppress stall detection.
+        return False
+    return (
+        view.active_worker_wait(
+            run_id=run_id,
+            session_id=session_id,
+            turn_index=turn_index,
+        )
+        is not None
+    )
 
 
 @dataclass(frozen=True)

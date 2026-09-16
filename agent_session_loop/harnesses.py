@@ -962,11 +962,12 @@ class _OutputProcessor:
 
     @property
     def final_result_seen(self) -> bool:
-        """Whether a terminal result record has been observed on stdout.
+        """Whether the current request has emitted a terminal result record.
 
         Only the claude stream-json processor can report one; processors that
         do not parse structured output never do, which correctly disables any
-        result-based detection for their harnesses.
+        result-based detection for their harnesses. A processor that can carry
+        more than one request resets this at the next request boundary.
         """
         return False
 
@@ -1090,6 +1091,7 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
                 self._session.note_user_echo(
                     self._assistant_text(record.get("message"))
                 )
+            self._final_result_seen = False
             return []
         if record_type == claude_stream.CONTROL_RESPONSE:
             # Protocol bookkeeping rather than turn output: the session
@@ -1108,6 +1110,11 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
                 self._final_result = result
             subtype = record.get("subtype") or "unknown"
             details = self._result_details(record)
+            if record.get("is_error") is True:
+                details.insert(0, f"provider subtype {subtype}")
+                suffix = "" if not details else f" ({', '.join(details)})"
+                message = self._result_error_message(result)
+                return [f"claude result: error{suffix}: {message}"]
             suffix = "" if not details else f" ({', '.join(details)})"
             return [f"claude result: {subtype}{suffix}"]
         if record_type == "error":
@@ -1118,6 +1125,10 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
     def _render_system(self, record: dict[str, object]) -> list[str]:
         subtype = record.get("subtype")
         if subtype == "init":
+            # A long-lived CLI can emit another initialization after an early
+            # result. From this point that result belongs to the prior request,
+            # so the reader may notify the next terminal result independently.
+            self._final_result_seen = False
             parts = ["claude init"]
             model = record.get("model")
             if model:
@@ -1139,6 +1150,8 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
             return rendered
         if subtype == "status":
             status = record.get("status") or "unknown"
+            if status == "requesting":
+                self._final_result_seen = False
             return [f"claude status: {status}"]
         return []
 
@@ -1221,6 +1234,15 @@ class _ClaudeStreamJsonOutputProcessor(_OutputProcessor):
         if isinstance(duration_ms, int | float):
             details.append(f"{duration_ms / 1000:.1f}s")
         return details
+
+    def _result_error_message(self, result: object) -> str:
+        """Render one bounded line from a terminal error result."""
+        if not isinstance(result, str) or not result.strip():
+            return "unknown"
+        message = " ".join(result.split())
+        if len(message) > 500:
+            return f"{message[:499].rstrip()}…"
+        return message
 
     def _ensure_trailing_newline(self, text: str) -> str:
         return text if text.endswith("\n") else f"{text}\n"
@@ -1838,6 +1860,14 @@ class HarnessAdapter:
                                 stream_name,
                                 chunk,
                             )
+                            if (
+                                stream_name == "stdout"
+                                and not output_processor.final_result_seen
+                            ):
+                                # A protocol request boundary re-arms the hook;
+                                # duplicate result records within one request
+                                # remain suppressed by the set Event below.
+                                final_result_fired.clear()
                             # Only stdout parsing can flip final_result_seen, so
                             # this branch runs on a single thread and the Event
                             # guard makes the hook fire exactly once.

@@ -100,12 +100,12 @@ _FAILURE_CLASSIFICATION_RULES: tuple[tuple[str, str, bool, re.Pattern[str]], ...
         ),
     ),
     (
-        # Matched on the word stem rather than the noun: a harness that says
-        # "Failed to authenticate" reports the same condition as one that says
-        # "authentication failed", and the literal noun let the verb form fall
-        # through to the fail-closed ``nonzero-exit``. That is not a cosmetic
-        # miss — an auth failure that lands there projects ``user_action:
-        # reply``, and no mailbox answer can refresh a harness's credentials.
+        # Match authentication *failures*, not the whole word stem. A turn's
+        # final message can legitimately describe authenticated application
+        # launches; treating that affirmative prose as a harness credential
+        # failure hides the real process-exit provenance. The bounded clauses
+        # below still cover the verb forms providers actually use when login
+        # fails.
         # ``oauth`` and an expired session join the expired token for the same
         # reason: they name the credential, not the request.
         #
@@ -117,7 +117,10 @@ _FAILURE_CLASSIFICATION_RULES: tuple[tuple[str, str, bool, re.Pattern[str]], ...
         events.PAUSE_REASON_AUTH_FAILED,
         False,
         re.compile(
-            r"\b401\b|unauthorized|authenticat\w*|not logged in|"
+            r"\b401\b|unauthorized|"
+            r"(?:failed|unable|cannot|can't|could not) to authenticat\w*|"
+            r"authenticat\w*(?:\s+\w+){0,3}\s+(?:failed|failure|error)|"
+            r"not authenticated|unauthenticated|not logged in|"
             r"invalid api key|invalid_api_key|missing api key|api key|"
             r"please (?:log ?in|sign in)|login required|"
             r"permission denied|forbidden|\b403\b|"
