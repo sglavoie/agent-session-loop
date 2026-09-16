@@ -2296,6 +2296,26 @@ def unanswered_questions(
     return read_mailbox(plan_dir, state_dir=state_dir).unanswered_questions
 
 
+def unanswered_questions_for_run(
+    plan_dir: str | Path,
+    run_id: str | None,
+    *,
+    state_dir: str | Path | None = None,
+) -> tuple[MailboxMessage, ...]:
+    """Select open questions owned by exactly this run, not its plan's history.
+
+    Unknown ownership is not current ownership. The plan-wide mailbox API stays
+    unchanged so direct operators can still inspect and close historical records.
+    """
+    if not isinstance(run_id, str) or not run_id:
+        return ()
+    return tuple(
+        message
+        for message in unanswered_questions(plan_dir, state_dir=state_dir)
+        if message.run_id == run_id
+    )
+
+
 def find_reply(
     plan_dir: str | Path,
     question_id: str,

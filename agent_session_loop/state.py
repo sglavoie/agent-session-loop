@@ -1040,6 +1040,7 @@ def _runner_state_payload(
     state_path: Path,
     *,
     lock_info: LockInfo | None,
+    include_turn_activity: bool = False,
 ) -> dict[str, Any]:
     if not state_path.exists():
         return {
@@ -1172,6 +1173,23 @@ def _runner_state_payload(
         "pause_policy": runner_pause_policy,
         "run_started_at": raw.get("run_started_at"),
         "run_finished_at": raw.get("run_finished_at"),
+        # Body-free activity records from this runner state, not plan history.
+        **(
+            {
+                "turns": [
+                    {
+                        key: turn.get(key)
+                        for key in ("started_at", "finished_at", "last_activity_at")
+                    }
+                    for turn in raw.get("turns", [])
+                    if isinstance(turn, dict)
+                ]
+                if isinstance(raw.get("turns"), list)
+                else []
+            }
+            if include_turn_activity
+            else {}
+        ),
         "duration_seconds": raw.get("duration_seconds"),
         "active_turn": active_turn,
         "active_verification": active_verification,

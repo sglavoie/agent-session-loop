@@ -432,7 +432,9 @@ def _question_projection(
 
     unanswered: tuple[mailbox.MailboxMessage, ...] = ()
     try:
-        unanswered = mailbox.unanswered_questions(plan_dir, state_dir=state_dir)
+        unanswered = mailbox.unanswered_questions_for_run(
+            plan_dir, runner_state.get("run_id"), state_dir=state_dir
+        )
     except OSError, ValueError, mailbox.MailboxError:
         unanswered = ()
     open_ids = tuple(
@@ -451,18 +453,27 @@ def _question_projection(
         for identifier in (_bounded_id(message.id) for message in unanswered)
         if identifier is not None
     ][:MAX_QUESTION_IDS]
-    latest = unanswered[-1] if unanswered else None
-    if question_id is None and latest is not None:
-        question_id = _bounded_id(latest.id)
+    selected = next(
+        (message for message in unanswered if message.id == question_id), None
+    )
+    if waiting is None:
+        selected = unanswered[-1] if unanswered else None
+    question_id = _bounded_id(selected.id) if selected is not None else None
 
     projection = {
         "context_kind": context_kind,
         "question_id": question_id,
         "unanswered_count": len(unanswered),
         "question_ids": question_ids,
-        "asked_at": _bounded_text(latest.created_at) if latest is not None else None,
-        "session_id": _bounded_id(latest.session_id) if latest is not None else None,
-        "turn_index": _bounded_int(latest.turn_index) if latest is not None else None,
+        "asked_at": _bounded_text(selected.created_at)
+        if selected is not None
+        else None,
+        "session_id": _bounded_id(selected.session_id)
+        if selected is not None
+        else None,
+        "turn_index": _bounded_int(selected.turn_index)
+        if selected is not None
+        else None,
         "waiting_status": _bounded_text(runner_state.get("waiting_for_reply_status")),
         "hard_deadline": (
             _bounded_text(waiting.get("hard_deadline")) if waiting else None
@@ -531,6 +542,8 @@ def project_row(
     session_id = _session_identifier(active) or _bounded_id(
         summary.next_pending_session_id
     )
+    if question is not None and question["context_kind"] == CONTEXT_KIND_WAITING:
+        session_id = question["session_id"]
     window_id = _bounded_int(runner_state.get("kitty_window_id"))
 
     return {

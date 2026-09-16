@@ -254,6 +254,59 @@ class RunsProjectionTests(unittest.TestCase):
             self.assertNotIn("text", question)
             self.assertNotIn(QUESTION_BODY, json.dumps(question))
 
+    def test_new_run_does_not_adopt_historical_questions_from_same_session(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir = corpus.paused_plan()
+            for owner in ("previous-run", None):
+                mailbox.append_question(
+                    plan_dir,
+                    "Historical question",
+                    run_id=owner,
+                    session_id="1",
+                    state_dir=corpus.state_root,
+                )
+            (row,) = corpus.snapshot()["rows"]
+            self.assertEqual(0, row["question"]["unanswered_count"])
+            self.assertIsNone(row["question"]["question_id"])
+            self.assertIsNone(row["question"]["asked_at"])
+            self.assertEqual(
+                2,
+                len(
+                    mailbox.unanswered_questions(plan_dir, state_dir=corpus.state_root)
+                ),
+            )
+
+    def test_paused_activity_uses_latest_valid_run_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir = corpus.paused_plan()
+            path = state.plan_state_dir(plan_dir, corpus.state_root) / "state.json"
+            payload = json.loads(path.read_text())
+            payload["run_finished_at"] = "2026-06-19T15:00:00+00:00"
+            payload["turns"][0].update(
+                finished_at="2026-06-19T14:55:00+00:00", last_activity_at="invalid"
+            )
+            corpus.write_state(plan_dir, payload)
+            (row,) = corpus.snapshot()["rows"]
+            self.assertEqual(payload["run_finished_at"], row["last_activity_at"])
+            self.assertEqual("run-finished", row["last_activity_source"])
+            payload["turns"][0]["last_activity_at"] = "2026-06-19T15:05:00+00:00"
+            corpus.write_state(plan_dir, payload)
+            (row,) = corpus.snapshot()["rows"]
+            self.assertEqual("2026-06-19T15:05:00+00:00", row["last_activity_at"])
+            self.assertEqual("turn-record", row["last_activity_source"])
+            payload["run_finished_at"] = "invalid"
+            payload["turns"][0].update(
+                started_at=None, finished_at=None, last_activity_at=None
+            )
+            corpus.write_state(plan_dir, payload)
+            (row,) = corpus.snapshot()["rows"]
+            self.assertEqual(payload["run_started_at"], row["last_activity_at"])
+            self.assertEqual("run-started", row["last_activity_source"])
+
     def test_row_projects_identity_state_and_window_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))

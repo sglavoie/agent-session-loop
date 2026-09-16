@@ -1,5 +1,13 @@
 # Agent Session Loop (ASL)
 
+Bridge question snapshots, body retrieval, intervention facts, and action
+validation select unanswered records owned by the displayed `run_id`. A live
+wait's timestamp, session, and turn come from its exact waiting question;
+missing metadata stays unknown. Historical questions remain in the append-only
+mailbox and available to direct mailbox workflows. Paused-run activity uses the
+latest valid finish or turn timestamp from that run, falling back to its start
+only when no later activity is recorded.
+
 ASL executes a prepared plan one session at a time. Its Autopilot supervisor starts or attaches to `asl run`, watches the active worker, and uses a per-plan mailbox to exchange live guidance, notices, questions, and answers without restarting the session.
 
 ```mermaid

@@ -1275,6 +1275,7 @@
   const ACTIVITY_SOURCE_LABELS = {
     "active-verification": "active verification",
     "active-turn": "active turn",
+    "turn-record": "turn record",
     "run-finished": "run finished",
     "run-started": "run started",
     "lock-created": "lock created",

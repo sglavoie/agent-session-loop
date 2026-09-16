@@ -359,6 +359,97 @@ class BridgeCapabilityTests(unittest.TestCase):
 
 
 class BridgeRowActionTests(unittest.TestCase):
+    def test_wait_metadata_belongs_to_exact_question_not_newest_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir, primary = corpus.waiting_plan()
+            first = mailbox.unanswered_questions(plan_dir, state_dir=corpus.state_root)[
+                0
+            ]
+            mailbox.append_question(
+                plan_dir,
+                "Later question",
+                run_id=RUN_ID,
+                session_id="9",
+                turn_index=8,
+                state_dir=corpus.state_root,
+            )
+            row = corpus.row_for(plan_dir)
+            self.assertEqual(primary, row["question"]["question_id"])
+            self.assertEqual(first.created_at, row["question"]["asked_at"])
+            self.assertEqual("2", row["question"]["session_id"])
+            self.assertEqual(3, row["question"]["turn_index"])
+            self.assertEqual("2", row["session_id"])
+            self.assertEqual(2, row["question"]["unanswered_count"])
+
+    def test_missing_wait_metadata_stays_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir, _ = corpus.waiting_plan()
+            bare = mailbox.append_question(
+                plan_dir, "Bare question", run_id=RUN_ID, state_dir=corpus.state_root
+            )
+            path = (
+                state.plan_state_dir(plan_dir, corpus.state_root)
+                / events.STATE_FILE_NAME
+            )
+            payload = json.loads(path.read_text())
+            payload["waiting_for_reply"]["question_id"] = bare.id
+            corpus.write_state(plan_dir, payload)
+            row = corpus.row_for(plan_dir)
+            self.assertIsNone(row["question"]["session_id"])
+            self.assertIsNone(row["question"]["turn_index"])
+            self.assertIsNone(row["session_id"])
+
+    def test_cross_run_body_and_actions_are_refused_without_closing_history(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _Corpus(Path(tmp))
+            plan_dir, primary = corpus.waiting_plan()
+            historical = mailbox.append_question(
+                plan_dir,
+                "Historical question",
+                run_id="older-run",
+                session_id="2",
+                state_dir=corpus.state_root,
+            )
+            row = corpus.row_for(plan_dir)
+            facts = intervention.inspect_run(plan_dir, state_dir=corpus.state_root)
+            self.assertEqual((primary,), facts.unanswered_ids)
+            self.assertEqual(1, row["question"]["unanswered_count"])
+            with self.assertRaises(intervention.InterventionError) as caught:
+                intervention.question_body(
+                    plan_dir, question_id=historical.id, state_dir=corpus.state_root
+                )
+            self.assertEqual(
+                intervention.REASON_QUESTION_MISMATCH, caught.exception.reason
+            )
+            with self.assertRaises(intervention.InterventionError):
+                intervention.validate_action(
+                    facts,
+                    intervention.ACTION_REPLY,
+                    token=row["action_token"],
+                    question_id=historical.id,
+                )
+            self.assertEqual(
+                2,
+                len(
+                    mailbox.unanswered_questions(plan_dir, state_dir=corpus.state_root)
+                ),
+            )
+            path = (
+                state.plan_state_dir(plan_dir, corpus.state_root)
+                / events.STATE_FILE_NAME
+            )
+            payload = json.loads(path.read_text())
+            payload["waiting_for_reply"]["question_id"] = historical.id
+            corpus.write_state(plan_dir, payload)
+            row = corpus.row_for(plan_dir)
+            self.assertIsNone(row["question"]["question_id"])
+            self.assertIsNone(row["question"]["asked_at"])
+            self.assertNotIn(intervention.ACTION_REPLY, row["actions"])
+
     def test_row_advertises_actions_and_a_token_that_validates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             corpus = _Corpus(Path(tmp))

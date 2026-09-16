@@ -1309,7 +1309,7 @@ class WorkbenchSummaryTests(unittest.TestCase):
                 summary.urgency_rank,
             )
             self.assertEqual("2026-06-19T14:00:00+00:00", summary.last_activity_at)
-            self.assertEqual("run-started", summary.last_activity_source)
+            self.assertEqual("turn-record", summary.last_activity_source)
             self.assertEqual("Awaiting confirmation", summary.concise_reason)
             self.assertIn("v1 column", summary.searchable_text)
             self.assertIn("agent-question", summary.searchable_text)

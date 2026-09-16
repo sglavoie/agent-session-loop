@@ -252,9 +252,7 @@ def build_run_facts(
     if waiting is not None:
         context_kind = "waiting"
         candidate = waiting.get("question_id")
-        question_id = candidate if isinstance(candidate, str) and candidate else None
-        if question_id is None and unanswered_ids:
-            question_id = unanswered_ids[-1]
+        question_id = candidate if candidate in unanswered_ids else None
     elif paused:
         context_kind = "pause"
         question_id = unanswered_ids[-1] if unanswered_ids else None
@@ -274,11 +272,23 @@ def build_run_facts(
 
 
 def unanswered_question_ids(
-    plan_dir: str | Path, *, state_dir: str | Path | None = None
+    plan_dir: str | Path,
+    *,
+    state_dir: str | Path | None = None,
+    run_id: str | None = None,
 ) -> tuple[str, ...]:
     """Return open question ids, degrading an unreadable mailbox to none."""
     try:
-        unanswered = mailbox.unanswered_questions(plan_dir, state_dir=state_dir)
+        if run_id is None:
+            state_path = (
+                state.plan_state_dir(plan_dir, state_dir) / events.STATE_FILE_NAME
+            )
+            run_id = state._runner_state_payload(state_path, lock_info=None).get(
+                "run_id"
+            )
+        unanswered = mailbox.unanswered_questions_for_run(
+            plan_dir, run_id, state_dir=state_dir
+        )
     except OSError, ValueError, mailbox.MailboxError:
         return ()
     return tuple(
@@ -300,11 +310,14 @@ def inspect_run(
     canonical = _canonical_plan_dir(plan_dir)
     lock_info = state.inspect_lock_info(canonical, state_dir)
     state_path = state.plan_state_dir(canonical, state_dir) / events.STATE_FILE_NAME
+    runner_state = state._runner_state_payload(state_path, lock_info=lock_info)
     return build_run_facts(
         canonical,
-        runner_state=state._runner_state_payload(state_path, lock_info=lock_info),
+        runner_state=runner_state,
         lock_active=bool(lock_info is not None and lock_info.active),
-        unanswered_ids=unanswered_question_ids(canonical, state_dir=state_dir),
+        unanswered_ids=unanswered_question_ids(
+            canonical, state_dir=state_dir, run_id=runner_state.get("run_id")
+        ),
     )
 
 
@@ -610,14 +623,16 @@ def question_body(
 
     if selected is not None:
         try:
-            view = mailbox.read_mailbox(canonical, state_dir=state_dir)
+            unanswered = mailbox.unanswered_questions_for_run(
+                canonical, facts.run_id, state_dir=state_dir
+            )
         except (OSError, ValueError, mailbox.MailboxError) as error:
             raise InterventionError(
                 REASON_MISSING_QUESTION_BODY,
                 f"cannot read the mailbox for {canonical}: {error}",
                 retryable=True,
             ) from error
-        for message in view.unanswered_questions:
+        for message in unanswered:
             if message.id == selected:
                 if not isinstance(message.text, str) or not message.text:
                     raise InterventionError(

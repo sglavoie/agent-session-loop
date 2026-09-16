@@ -208,6 +208,7 @@ URGENCY_GROUPS: tuple[UrgencyGroup, ...] = (
 LastActivitySource = Literal[
     "active-verification",
     "active-turn",
+    "turn-record",
     "run-finished",
     "run-started",
     "lock-created",
@@ -216,6 +217,7 @@ LastActivitySource = Literal[
 LAST_ACTIVITY_SOURCES: tuple[LastActivitySource, ...] = (
     "active-verification",
     "active-turn",
+    "turn-record",
     "run-finished",
     "run-started",
     "lock-created",
@@ -2838,6 +2840,38 @@ def _first_activity(
     return None, None
 
 
+def _paused_activity(
+    runner_state: Mapping[str, Any],
+) -> tuple[str | None, LastActivitySource | None]:
+    """Latest valid event in the displayed run; its start is only a fallback."""
+    candidates: list[tuple[Any, LastActivitySource]] = [
+        (runner_state.get("run_finished_at"), "run-finished"),
+    ]
+    turns = runner_state.get("turns")
+    records = list(turns) if isinstance(turns, list) else []
+    if isinstance(runner_state.get("active_turn"), Mapping):
+        records.append(runner_state["active_turn"])
+    for turn in records:
+        if isinstance(turn, Mapping):
+            candidates.extend(
+                (turn.get(key), "turn-record")
+                for key in ("finished_at", "last_activity_at", "started_at")
+            )
+    valid = [
+        (parsed, value, source)
+        for value, source in candidates
+        if isinstance(value, str)
+        and (parsed := _parse_archive_timestamp(value)) is not None
+    ]
+    if valid:
+        _, value, source = max(valid, key=lambda item: item[0])
+        return value, source
+    started = runner_state.get("run_started_at")
+    if isinstance(started, str) and _parse_archive_timestamp(started) is not None:
+        return started, "run-started"
+    return None, None
+
+
 def _last_progress_entry_at(plan_dir: Path) -> str | None:
     try:
         entries = plans.read_progress_entries(plan_dir)
@@ -5174,6 +5208,7 @@ def build_workbench_summary(
     runner_state = state._runner_state_payload(
         state_path,
         lock_info=lock_info,
+        include_turn_activity=True,
     )
     try:
         workspace = _workspace_projection(snapshot.plan_dir, runtime=runner_state)
@@ -5427,9 +5462,7 @@ def build_workbench_summary(
         pause_message = None
         preview = None
         qna_last_message_path = last_message_path
-        paused_activity, paused_source = _first_activity(
-            ((runner_state.get("run_started_at"), "run-started"),)
-        )
+        paused_activity, paused_source = _paused_activity(runner_state)
         try:
             context = expired_wait_context or qna.load_qna_context(
                 snapshot.plan_dir,
