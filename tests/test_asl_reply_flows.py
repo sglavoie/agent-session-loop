@@ -1159,6 +1159,11 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual("blocked", payload["pause_reason"])
             self.assertEqual(pause_message, payload["pause_message"])
             self.assertEqual("last_message", payload["pause_details"]["source"])
+            closure = payload["pause_details"]["mailbox_resolution"]
+            self.assertEqual(mailbox.WAITER_ORIGIN_RUNNER, closure["waiter_origin"])
+            [remediation] = payload["action_required"]["remediation"]
+            self.assertIn("--resume --reply-stdin", remediation["message"])
+            self.assertIn(f"--state-dir {state_dir}", remediation["message"])
             self.assertNotIn("waiting_for_reply", payload)
 
             context = qna.load_qna_context(plan_dir, state_dir=state_dir)
@@ -1289,6 +1294,10 @@ class RunReplyResumeFlowTests(unittest.TestCase):
             self.assertEqual(mailbox.WAITER_ORIGIN_WORKER, correlation["waiter_origin"])
             self.assertEqual("pause", correlation["action"])
             self.assertEqual(len(sensitive_note), correlation["note_length"])
+            [remediation] = payload["action_required"]["remediation"]
+            self.assertIn("closed the mailbox question", remediation["message"])
+            self.assertIn("--resume --reply-stdin", remediation["message"])
+            self.assertIn(f"--state-dir {state_dir}", remediation["message"])
             self.assertNotIn("waiting_for_reply", payload)
 
             view = mailbox.read_mailbox(plan_dir, state_dir=state_dir)

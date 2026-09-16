@@ -374,6 +374,10 @@ The overseer's last gate is not a module but a pair. AgentMux and ASL are releas
 
 Audit scope collection uses authoritative session discovery, retaining exact zero-padded numeric filenames for historical evidence: expansion notes and supporting evidence documents remain artifacts, not malformed sessions. Mailbox collection also joins backwards from this run's guidance-delivery receipts to their referenced guidance, including explicit inbox reads without runner delivery events. Referenced guidance retains sequence, provenance and a redacted content digest; missing targets are counted and recorded as omissions, and deferred attempts never claim successful delivery. Write-guard pause diagnostics distinguish external paths with unresolved write authority from unavailable repository evidence, without changing the guard's fail-closed verdict.
 
+A mailbox `pause` resolution closes its question. Both worker and runner wait paths retain the closure in `pause_details.mailbox_resolution`; the terminal action explains how to supply a new decision with `asl run PLAN_DIR --resume --reply-stdin`, preserving any custom state root. This is an explicit resume, and never reopens the closed inbox question or retries the paused session automatically.
+
+The deterministic `lifecycle.conversation-restore-refusal` check accounts for provider refusals separately from ordinary harness failures. It requires a matching failed turn exit, an explained and retired conversation, and the corresponding recovery pause. Only that exact session and turn leave the unclassified-failure catch-all; mismatched exits, timeouts, missing evidence, and other failed turns remain visible.
+
 ## Accepting remote-ref updates after a paused review
 
 A push or fetch during a read-only review can update remote-tracking refs and

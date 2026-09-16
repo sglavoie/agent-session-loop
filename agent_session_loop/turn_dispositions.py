@@ -638,14 +638,16 @@ def _mailbox_pause_resolution_details(
     run_id: str,
     session_id: str,
     turn_index: int,
+    waiter_origin: mailbox.WaiterOrigin = mailbox.WAITER_ORIGIN_WORKER,
+    question_id: str | None = None,
 ) -> dict[str, Any]:
-    """Describe the answer that arrived before the pause was even entered."""
+    """Describe the resolution that closed a worker or runner question."""
     return {
         "run_id": run_id,
         "session_id": session_id,
         "turn_index": turn_index,
-        "waiter_origin": mailbox.WAITER_ORIGIN_WORKER,
-        "question_id": resolution.to,
+        "waiter_origin": waiter_origin,
+        "question_id": question_id or resolution.to,
         "resolution_message_id": resolution.id,
         "resolution_seq": resolution.seq,
         "action": resolution.action,
@@ -828,6 +830,14 @@ def settle_runner_pause(
                         ),
                     )
                 assert resolution_message.action == mailbox.RESOLUTION_ACTION_PAUSE
+                pause_details["mailbox_resolution"] = _mailbox_pause_resolution_details(
+                    resolution_message,
+                    run_id=ctx.run_id,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    waiter_origin=mailbox.WAITER_ORIGIN_RUNNER,
+                    question_id=prepared_wait.question.id,
+                )
     ctx.pause(
         reason=pause_reason,
         message=str(runner_pause),

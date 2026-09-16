@@ -64,6 +64,7 @@ Invariants that survive the move:
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -471,6 +472,7 @@ def _pause_remediation(
     reason: str,
     plan_dir: str | None = None,
     cwd: str | None = None,
+    state_dir: str | None = None,
 ) -> list[dict[str, Any]]:
     """Remediation for a pause: its own details first, else its reason.
 
@@ -488,11 +490,37 @@ def _pause_remediation(
             current = current.get(key) if isinstance(current, Mapping) else None
         if isinstance(current, list) and current:
             return [entry for entry in current if isinstance(entry, Mapping)]
+    resolution = details.get("mailbox_resolution")
+    if (
+        isinstance(resolution, Mapping)
+        and resolution.get("action") == "pause"
+        and pause_policy.classify_pause(reason)["user_action"]
+        == pause_policy.USER_ACTION_REPLY
+    ):
+        command = ["asl", "run", plan_dir or "PLAN_DIR", "--resume", "--reply-stdin"]
+        if state_dir:
+            command.extend(["--state-dir", state_dir])
+        return [
+            {
+                "check_id": "runtime.mailbox-pause-resolution",
+                "category": reason,
+                "fix_category": "invocation-fix",
+                "message": (
+                    "The pause resolution closed the mailbox question; it cannot "
+                    "receive another inbox reply. When ready to supply a new "
+                    f"decision, run `{shlex.join(command)}` with the answer on "
+                    "stdin. This explicitly resumes the paused session with the "
+                    "saved run configuration; the session stays paused until then."
+                ),
+            }
+        ]
     fallback = _runtime_reason_remediation(reason, plan_dir=plan_dir, cwd=cwd)
     return [] if fallback is None else [fallback]
 
 
-def _supersede_live_action_signal(payload: dict[str, Any], *, reason: str) -> None:
+def _supersede_live_action_signal(
+    payload: dict[str, Any], *, reason: str, question_closed: bool = False
+) -> None:
     """Retire a live harness ask the pause being written has moved past.
 
     ``action_required`` is the run's current unresolved intervention, and a
@@ -518,7 +546,7 @@ def _supersede_live_action_signal(payload: dict[str, Any], *, reason: str) -> No
         return
     if signal.get("reason") not in events.LIVE_ACTION_REQUIRED_REASONS:
         return
-    if reason in events.LIVE_ACTION_REQUIRED_REASONS:
+    if reason in events.LIVE_ACTION_REQUIRED_REASONS and not question_closed:
         # The pause is the ask. Retiring here would drop the more specific
         # record the turn raised in favour of the one assembled below.
         return
@@ -565,7 +593,13 @@ def set_pause(
     # the recoverable/user-required reason sets.
     policy = pause_policy.classify_pause(reason)
     payload["pause_policy"] = policy
-    _supersede_live_action_signal(payload, reason=reason)
+    resolution = payload["pause_details"].get("mailbox_resolution")
+    question_closed = (
+        isinstance(resolution, Mapping) and resolution.get("action") == "pause"
+    )
+    _supersede_live_action_signal(
+        payload, reason=reason, question_closed=question_closed
+    )
     # A pause a machine cannot retry is by definition waiting on a human, so the
     # terminal state names that ask rather than leaving an operator to infer it
     # from the reason. A signal the turn already raised is the more specific
@@ -573,9 +607,14 @@ def set_pause(
     # runner declaring its own refusal, in which case the retirement above has
     # already displaced it. Remediation is whatever the pause evidence carries:
     # a reason with no command still gets a record.
-    if policy["requires_user"] and not isinstance(
-        payload.get("action_required"), Mapping
+    action_required = payload.get("action_required")
+    if policy["requires_user"] and (
+        not isinstance(action_required, Mapping)
+        or action_required.get("source") == "pause"
     ):
+        # This writer owns a prior pause projection too. Refresh it when the
+        # pause gains closure evidence instead of preserving an obsolete ask.
+        config = payload.get("run_config")
         payload["action_required"] = {
             "reason": reason,
             "message": message,
@@ -586,6 +625,11 @@ def set_pause(
                 reason=reason,
                 plan_dir=_optional_str(payload.get("plan_dir")),
                 cwd=_optional_str(payload.get("cwd")),
+                state_dir=_optional_str(
+                    config.get("state_dir_override")
+                    if isinstance(config, Mapping)
+                    else None
+                ),
             ),
         }
 

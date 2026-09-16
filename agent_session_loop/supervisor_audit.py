@@ -4882,6 +4882,122 @@ def _classified_failure_sessions(context: _CheckContext) -> set[Any]:
     return set() if session is None else {session}
 
 
+def _restore_refusal_records(context: _CheckContext) -> list[dict[str, Any]]:
+    return [
+        payload
+        for record in context.records
+        if record.get("name") == events.CONVERSATION_CONTINUATION_EVENT
+        and (payload := _mapping(record.get("payload"))).get("disposition")
+        == "restore-refused"
+    ]
+
+
+def _check_conversation_restore_refusal(context: _CheckContext) -> _Verdict:
+    """Grade the refusal that bypasses the ordinary harness-failure classifier."""
+    status = context.section("status")
+    details = _mapping(status.get("pause_details"))
+    refusal = _mapping(details.get("conversation_restore_refused"))
+    records = _restore_refusal_records(context)
+    evidence = context.evidence(
+        context.event_summary.get("reference"),
+        context.section("state").get("reference"),
+    )
+    if not records:
+        return _Verdict(
+            "unavailable"
+            if refusal and context.events_shed
+            else "fail"
+            if refusal
+            else "pass",
+            "the restore refusal has no conversation event to account for it"
+            if refusal
+            else "the run recorded no refused conversation restore",
+            evidence,
+        )
+    problems: list[str] = []
+    missing_exit = False
+    if (
+        status.get("paused") is not True
+        or status.get("pause_reason")
+        != events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED
+        or status.get("ok") is True
+    ):
+        problems.append("the refused restore did not leave the run paused for recovery")
+    for record in records:
+        session = record.get("session_id", record.get("session"))
+        turn_index = record.get("turn_index")
+        if (
+            not isinstance(session, (int, str))
+            or isinstance(session, bool)
+            or not str(session)
+            or not isinstance(turn_index, int)
+            or isinstance(turn_index, bool)
+            or turn_index < 1
+        ):
+            problems.append("a restore refusal names no session or turn")
+        if (
+            record.get("retired") is not True
+            or record.get("error")
+            or not isinstance(record.get("conversation"), str)
+            or not record.get("conversation")
+            or not isinstance(record.get("detail"), str)
+            or not record.get("detail")
+        ):
+            problems.append("a refused conversation was not explained and retired")
+        if str(details.get("session_id", details.get("session"))) != str(
+            session
+        ) or any(
+            refusal.get(key) != record.get(key)
+            for key in ("conversation", "disposition", "retired", "detail", "error")
+        ):
+            problems.append("the recovery pause does not match the recorded refusal")
+        exits = [
+            payload
+            for event in context.records
+            if event.get("name") == events.TURN_EXECUTION_FINISHED_EVENT
+            and str(
+                (payload := _mapping(event.get("payload"))).get(
+                    "session_id", payload.get("session")
+                )
+            )
+            == str(session)
+            and payload.get("turn_index") == turn_index
+        ]
+        if not exits:
+            missing_exit = True
+            if not context.events_shed:
+                problems.append("the refused restore has no matching turn exit")
+        for exit_record in exits:
+            code = exit_record.get("returncode")
+            if (
+                not isinstance(code, int)
+                or isinstance(code, bool)
+                or code == 0
+                or code != details.get("returncode")
+                or exit_record.get("timed_out")
+                or exit_record.get("interrupted")
+                or exit_record.get("aborted")
+                or exit_record.get("plan_readable") is False
+            ):
+                problems.append("the refused turn's exit has an unexplained outcome")
+    if missing_exit and not problems:
+        return _Verdict(
+            "unavailable",
+            "the refused turn's exit was shed from the evidence",
+            evidence,
+        )
+    return _Verdict(
+        "fail" if problems else "pass",
+        _joined(problems)
+        if problems
+        else (
+            f"{len(records)} refused restore(s) retired the unavailable conversation "
+            "and paused for explicit recovery"
+        ),
+        evidence,
+    )
+
+
 def _abort_turn_records(context: _CheckContext, action: str) -> list[dict[str, Any]]:
     """The run-control payloads carrying one turn-abort action, in order."""
     payloads: list[dict[str, Any]] = []
@@ -5990,11 +6106,33 @@ def _check_unclassified_anomalies(context: _CheckContext) -> _Verdict:
     unclassified: dict[str, int] = {}
     classified = _classified_failure_sessions(context)
     aborted = _aborted_turns(context)
+    restored = (
+        {
+            (
+                str(record.get("session_id", record.get("session"))),
+                record.get("turn_index"),
+            )
+            for record in _restore_refusal_records(context)
+        }
+        if _check_conversation_restore_refusal(context).status == "pass"
+        else set()
+    )
     for record in context.records:
         name = str(record.get("name") or "")
         if name in _CLASSIFIED_EVENT_NAMES:
             continue
         payload = _mapping(record.get("payload"))
+        if (
+            name == events.TURN_EXECUTION_FINISHED_EVENT
+            and restored
+            and isinstance(payload.get("turn_index"), int)
+            and (
+                str(payload.get("session_id", payload.get("session"))),
+                payload.get("turn_index"),
+            )
+            in restored
+        ):
+            continue
         # Narrowed to the session the pause names, because a run reports the
         # outcome of every session it ran and only one of them is the failure
         # the pause classified.
@@ -6157,6 +6295,21 @@ _CHECKS: tuple[tuple[CheckSpec, Callable[[_CheckContext], _Verdict]], ...] = (
             ),
         ),
         _check_retryable_transport_failure,
+    ),
+    (
+        CheckSpec(
+            check="conversation-restore-refusal",
+            lane="lifecycle-retry-resume",
+            category="lifecycle",
+            component="conversation-recovery",
+            invariant_key="lifecycle.conversation-restore-refusal",
+            severity="high",
+            recommendation=(
+                "Retire the refused conversation and pause for explicit recovery; "
+                "record the refusal and matching turn exit without claiming completion."
+            ),
+        ),
+        _check_conversation_restore_refusal,
     ),
     (
         CheckSpec(

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import shlex
 import tempfile
 import threading
 import unittest
@@ -339,6 +340,83 @@ class PauseWriteTests(_TerminationCase):
 
     def test_a_reason_that_resolves_to_nothing_records_no_guesswork(self) -> None:
         self.assertEqual([], run_termination._pause_remediation({}, reason="inspect"))
+
+    def test_a_closed_question_names_the_explicit_reply_resume_command(self) -> None:
+        self.payload["plan_dir"] = "/tmp/plan with 'quotes'"
+        self.payload["state_dir"] = "/tmp/custom state/plan-hash"
+        self.payload["run_config"] = {"state_dir_override": "/tmp/custom state"}
+        closure = {"action": "pause", "question_id": "closed-question"}
+        run_termination.set_pause(
+            self.payload,
+            reason="blocked",
+            message="operator requested a pause",
+            details={"mailbox_resolution": closure},
+        )
+
+        self.assertTrue(self.payload["paused"])
+        self.assertFalse(self.payload["pause_policy"]["recoverable"])
+        action = self.payload["action_required"]
+        self.assertEqual("reply", action["user_action"])
+        [hint] = action["remediation"]
+        self.assertIn("closed the mailbox question", hint["message"])
+        command = hint["message"].split("`")[1]
+        self.assertEqual(
+            [
+                "asl",
+                "run",
+                self.payload["plan_dir"],
+                "--resume",
+                "--reply-stdin",
+                "--state-dir",
+                "/tmp/custom state",
+            ],
+            shlex.split(command),
+        )
+        self.assertEqual(closure, self.payload["pause_details"]["mailbox_resolution"])
+
+    def test_a_closed_question_does_not_turn_a_guard_refusal_into_a_reply(self) -> None:
+        run_termination.set_pause(
+            self.payload,
+            reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
+            message="guard refused writes",
+            details={"mailbox_resolution": {"action": "pause"}},
+        )
+        self.assertEqual("inspect", self.payload["action_required"]["user_action"])
+        self.assertNotIn(
+            "runtime.mailbox-pause-resolution",
+            [
+                hint["check_id"]
+                for hint in self.payload["action_required"]["remediation"]
+            ],
+        )
+
+    def test_a_closed_question_replaces_even_a_generic_live_pause_signal(self) -> None:
+        signal = self._live_signal("runner-pause")
+        self.payload["action_required"] = signal
+        run_termination.set_pause(
+            self.payload,
+            reason="runner-pause",
+            message="paused",
+            details={"mailbox_resolution": {"action": "pause"}},
+        )
+        self.assertEqual(
+            signal, self.payload[events.ACTION_REQUIRED_SUPERSEDED_KEY]["record"]
+        )
+        [hint] = self.payload["action_required"]["remediation"]
+        self.assertIn("--resume --reply-stdin", hint["message"])
+
+    def test_a_pause_projection_refreshes_when_its_question_is_closed(self) -> None:
+        run_termination.set_pause(self.payload, reason="blocked", message="needs input")
+        self.assertEqual([], self.payload["action_required"]["remediation"])
+        run_termination.set_pause(
+            self.payload,
+            reason="blocked",
+            message="operator paused",
+            details={"mailbox_resolution": {"action": "pause"}},
+        )
+        self.assertEqual("operator paused", self.payload["action_required"]["message"])
+        [hint] = self.payload["action_required"]["remediation"]
+        self.assertIn("--resume --reply-stdin", hint["message"])
 
     def test_an_unanswerable_pause_still_says_where_to_look(self) -> None:
         # A pause no reply can clear is exactly the one an operator most needs

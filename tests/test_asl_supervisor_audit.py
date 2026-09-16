@@ -7037,6 +7037,116 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
                 results["commit-group-resolution"].detail,
             )
 
+    def _refused_restore_bundle(self) -> dict[str, Any]:
+        refusal = {
+            "disposition": "restore-refused",
+            "conversation": "claude:missing-history",
+            "detail": "the provider cannot restore this history",
+            "retired": True,
+        }
+        return {
+            "status": {
+                "paused": True,
+                "ok": False,
+                "pause_reason": events.PAUSE_REASON_CONVERSATION_RECOVERY_REQUIRED,
+                "pause_details": {
+                    "session": 4,
+                    "returncode": 1,
+                    "conversation_restore_refused": dict(refusal),
+                },
+            },
+            "events": {
+                "records": [
+                    {
+                        "name": events.TURN_EXECUTION_FINISHED_EVENT,
+                        "payload": {"session": 4, "turn_index": 1, "returncode": 1},
+                    },
+                    {
+                        "name": events.CONVERSATION_CONTINUATION_EVENT,
+                        "payload": {"session_id": "4", "turn_index": 1, **refusal},
+                    },
+                ],
+            },
+        }
+
+    def _restore_checks(self, bundle: dict[str, Any]) -> dict[str, DeterministicResult]:
+        return {
+            result.check: result
+            for result in supervisor_audit.run_deterministic_checks(bundle)
+        }
+
+    def test_a_refused_restore_accounts_for_its_own_failed_exit(self) -> None:
+        results = self._restore_checks(self._refused_restore_bundle())
+        self.assertEqual("pass", results["conversation-restore-refusal"].status)
+        self.assertEqual("pass", results["unclassified-anomalies"].status)
+
+    def test_a_refused_restore_does_not_excuse_another_turn(self) -> None:
+        bundle = self._refused_restore_bundle()
+        bundle["events"]["records"].append(
+            {
+                "name": events.TURN_EXECUTION_FINISHED_EVENT,
+                "payload": {"session": 4, "turn_index": 2, "returncode": 1},
+            }
+        )
+        results = self._restore_checks(bundle)
+        self.assertEqual("pass", results["conversation-restore-refusal"].status)
+        self.assertEqual("fail", results["unclassified-anomalies"].status)
+
+    def test_an_unaccountable_restore_refusal_stays_visible(self) -> None:
+        for defect in (
+            "not-retired",
+            "not-paused",
+            "wrong-session",
+            "different-exit",
+            "timeout",
+            "malformed-turn",
+            "no-event",
+        ):
+            with self.subTest(defect=defect):
+                bundle = self._refused_restore_bundle()
+                status = bundle["status"]
+                records = bundle["events"]["records"]
+                if defect == "not-retired":
+                    records[1]["payload"]["retired"] = False
+                elif defect == "not-paused":
+                    status["paused"] = False
+                    status["ok"] = True
+                elif defect == "wrong-session":
+                    status["pause_details"]["session"] = 5
+                elif defect == "different-exit":
+                    records[0]["payload"]["returncode"] = 143
+                elif defect == "timeout":
+                    records[0]["payload"]["timed_out"] = True
+                elif defect == "malformed-turn":
+                    records[1]["payload"]["turn_index"] = []
+                else:
+                    records.pop()
+                results = self._restore_checks(bundle)
+                self.assertEqual("fail", results["conversation-restore-refusal"].status)
+                self.assertEqual("fail", results["unclassified-anomalies"].status)
+
+    def test_a_shed_restore_event_is_a_gap_not_a_clean_refusal(self) -> None:
+        bundle = self._refused_restore_bundle()
+        bundle["events"]["records"].pop()
+        bundle["omissions"] = [{"section": "events", "reason": "size-cap", "count": 1}]
+        results = self._restore_checks(bundle)
+        self.assertEqual("unavailable", results["conversation-restore-refusal"].status)
+        self.assertEqual("fail", results["unclassified-anomalies"].status)
+
+    def test_a_shed_exit_cannot_hide_a_later_contradictory_refusal(self) -> None:
+        bundle = self._refused_restore_bundle()
+        records = bundle["events"]["records"]
+        records.pop(0)
+        records.append(
+            {
+                "name": events.CONVERSATION_CONTINUATION_EVENT,
+                "payload": {**records[0]["payload"], "turn_index": 2, "retired": False},
+            }
+        )
+        bundle["omissions"] = [{"section": "events", "reason": "size-cap", "count": 1}]
+        results = self._restore_checks(bundle)
+        self.assertEqual("fail", results["conversation-restore-refusal"].status)
+
     def test_a_final_failure_is_accounted_for_by_its_classification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))

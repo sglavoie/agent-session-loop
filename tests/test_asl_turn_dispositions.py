@@ -620,6 +620,11 @@ class RunnerPauseTests(DispositionTestCase):
         )
         self.assertIsNone(outcome)
         self.assertEqual(1, len(self.ctx.pauses))
+        closure = self.ctx.pauses[0]["details"]["mailbox_resolution"]
+        self.assertEqual("question-1", closure["question_id"])
+        self.assertEqual("res-3", closure["resolution_message_id"])
+        self.assertEqual("pause", closure["action"])
+        self.assertEqual(mailbox.WAITER_ORIGIN_RUNNER, closure["waiter_origin"])
 
     def test_a_timed_out_wait_leaves_the_run_paused(self) -> None:
         outcome = self.settle(
