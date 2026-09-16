@@ -2365,6 +2365,105 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual(0, summary["delivered_count"])
             self.assertNotIn(mailbox.KIND_GUIDANCE, summary["counts"])
 
+    def _write_guidance_delivery(
+        self,
+        state_dir: Path,
+        *,
+        run_id: str = RUN_ID,
+        target: str | None = None,
+        delivery_state: str = "delivered-by-read",
+    ) -> None:
+        self._append_mailbox_record(
+            state_dir,
+            {
+                "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "kind": mailbox.KIND_GUIDANCE_DELIVERY,
+                "version": mailbox.MAILBOX_SCHEMA_VERSION,
+                "run_id": run_id,
+                "to": target or self.GUIDANCE_ID,
+                "delivery_state": delivery_state,
+                "delivery_reason": "delivered",
+                "channel": "read",
+                "session_id": "01",
+                "turn_index": 1,
+            },
+        )
+
+    def test_explicit_read_receipts_pull_in_earlier_guidance_without_an_event(
+        self,
+    ) -> None:
+        for delivery_state in mailbox.GUIDANCE_DELIVERED_STATES:
+            with (
+                self.subTest(delivery_state=delivery_state),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                history = self._history(Path(tmp))
+                self._write_guidance(history[2], observed=False)
+                self._write_guidance_delivery(history[2], delivery_state=delivery_state)
+                bundle = self._collect(*history)
+                section = bundle.payload["mailbox"]
+                guidance = next(
+                    row
+                    for row in section["records"]
+                    if row["kind"] == mailbox.KIND_GUIDANCE
+                )
+                self.assertEqual(self.GUIDANCE_ID, guidance["id"])
+                self.assertEqual(
+                    supervisor_audit.MAILBOX_OWNERSHIP_DELIVERED, guidance["ownership"]
+                )
+                self.assertEqual(1, section["summary"]["delivered_count"])
+                self.assertEqual(0, section["summary"]["missing_reference_count"])
+                self.assertNotIn(self.GUIDANCE_TEXT, bundle.to_bytes().decode())
+                receipt = next(
+                    row
+                    for row in section["records"]
+                    if row["kind"] == mailbox.KIND_GUIDANCE_DELIVERY
+                )
+                self.assertLess(guidance["sequence"], receipt["sequence"])
+
+    def test_another_runs_delivery_does_not_claim_the_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_guidance(history[2], observed=False)
+            self._write_guidance_delivery(history[2], run_id=self.FOREIGN_RUN_ID)
+            section = self._collect(*history).payload["mailbox"]
+            self.assertNotIn(mailbox.KIND_GUIDANCE, section["summary"]["counts"])
+            self.assertNotIn(
+                mailbox.KIND_GUIDANCE_DELIVERY, section["summary"]["counts"]
+            )
+
+    def test_a_missing_delivery_target_is_an_explicit_omission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_guidance_delivery(history[2])
+            bundle = self._collect(*history)
+            self.assertEqual(
+                1, bundle.payload["mailbox"]["summary"]["missing_reference_count"]
+            )
+            self.assertTrue(
+                any(
+                    row["section"] == "mailbox"
+                    and row["reason"] == supervisor_audit.REASON_MISSING
+                    for row in bundle.payload["omissions"]
+                )
+            )
+
+    def test_a_deferred_delivery_retains_guidance_but_does_not_claim_delivery(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            self._write_guidance(history[2], observed=False)
+            self._write_guidance_delivery(history[2], delivery_state="deferred")
+            section = self._collect(*history).payload["mailbox"]
+            guidance = next(
+                row
+                for row in section["records"]
+                if row["kind"] == mailbox.KIND_GUIDANCE
+            )
+            self.assertEqual("delivery-referenced", guidance["ownership"])
+            self.assertEqual(0, section["summary"]["delivered_count"])
+
     def test_a_ruled_and_consumed_ask_retires_the_action_required_projection(
         self,
     ) -> None:
@@ -2571,6 +2670,41 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual(
                 events.EVENT_SCHEMA_VERSION, payload["versions"]["event_schema_version"]
             )
+
+    def test_scope_projection_uses_only_authoritative_session_filenames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            for name in (
+                "session-01.expand.md",
+                "session-01.replay-proof.md",
+                "session-01.notes.md",
+                "session-01.contract.md",
+                "session-01-dev-owl-update-check.md",
+                "session-01-live-ticket-recheck.md",
+                "session-01-supervisor-diagnosis.md",
+            ):
+                (history[1] / name).write_text(
+                    "Supporting evidence, not a session.\n", encoding="utf-8"
+                )
+            section = self._collect(*history).payload["scopes"]
+            self.assertTrue(section["available"])
+            self.assertEqual(
+                ["session-01"], [row["session"] for row in section["sessions"]]
+            )
+            self.assertTrue(section["sessions"][0]["available"])
+
+    def test_an_actual_session_with_malformed_scope_still_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            history = self._history(Path(tmp))
+            (history[1] / "session-02.md").write_text(
+                "No scope declared.\n", encoding="utf-8"
+            )
+            section = self._collect(*history).payload["scopes"]
+            row = next(
+                row for row in section["sessions"] if row["session"] == "session-02"
+            )
+            self.assertFalse(row["available"])
+            self.assertEqual(supervisor_audit.REASON_MALFORMED, row["reason"])
 
     def test_generated_bytecode_never_moves_a_tree_digest(self) -> None:
         """Running an interpreter over a skill tree must not restate its version."""

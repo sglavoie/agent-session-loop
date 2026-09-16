@@ -2485,6 +2485,10 @@ def _read_mailbox(
     rather than reported as withheld: an omission means evidence was kept back,
     not that it was someone else's.
 
+    Guidance-delivery receipts seed their targets before that forward walk:
+    explicit inbox reads have receipts but need not have runner delivery events.
+    Missing targets are recorded as omissions instead of silently unscoped.
+
     The file is read directly rather than through :mod:`mailbox`, which is
     addressed by plan directory and takes a shared lock that a live supervisor
     could stall collection behind.
@@ -2530,6 +2534,29 @@ def _read_mailbox(
         for _, parsed in parsed_lines
         if parsed.get("run_id") == run_id and parsed.get("id") is not None
     }
+    # Delivery receipts point backwards to plan-addressed guidance. Seed those
+    # targets before the forward exchange walk, including explicit inbox reads
+    # that do not emit a guidance-observed event (ASI-131).
+    referenced_ids = frozenset(
+        str(parsed["to"])
+        for _, parsed in parsed_lines
+        if parsed.get("run_id") == run_id
+        and parsed.get("kind") == mailbox.KIND_GUIDANCE_DELIVERY
+        and parsed.get("to") is not None
+    )
+    delivered_ids = delivered_ids | frozenset(
+        str(parsed["to"])
+        for _, parsed in parsed_lines
+        if parsed.get("run_id") == run_id
+        and parsed.get("kind") == mailbox.KIND_GUIDANCE_DELIVERY
+        and parsed.get("delivery_state") in mailbox.GUIDANCE_DELIVERED_STATES
+        and parsed.get("to") is not None
+    )
+    present_ids = {str(parsed["id"]) for _, parsed in parsed_lines if parsed.get("id")}
+    missing_ids = sorted((referenced_ids | delivered_ids) - present_ids)
+    summary["missing_reference_count"] = len(missing_ids)
+    for identifier in missing_ids:
+        collector.omissions.record("mailbox", REASON_MISSING, identifier)
     records: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
     unscoped = 0
@@ -2537,8 +2564,14 @@ def _read_mailbox(
     for index, parsed in parsed_lines:
         identifier = parsed.get("id")
         was_delivered = identifier is not None and str(identifier) in delivered_ids
+        was_referenced = identifier is not None and str(identifier) in referenced_ids
         joined = any(parsed.get(key) in owned for key in _MAILBOX_JOIN_KEYS)
-        if not joined and not was_delivered and parsed.get("run_id") != run_id:
+        if (
+            not joined
+            and not was_delivered
+            and not was_referenced
+            and parsed.get("run_id") != run_id
+        ):
             unscoped += 1
             continue
         if identifier is not None:
@@ -2555,6 +2588,8 @@ def _read_mailbox(
             # reader is not left inferring it from the absence of a ``run_id``.
             delivered += 1
             record["ownership"] = MAILBOX_OWNERSHIP_DELIVERED
+        elif was_referenced and parsed.get("run_id") != run_id:
+            record["ownership"] = "delivery-referenced"
         records.append(record)
     summary["delivered_count"] = delivered
     summary[UNPARSABLE_LINE_COUNT_KEY] = rejected
@@ -2652,9 +2687,21 @@ def _scopes_section(
     if not aliases:
         return {"available": False, "reason": REASON_NOT_RECORDED}
     sessions: list[dict[str, Any]] = []
-    for path in sorted(plan_dir.glob("session-*.md")):
-        if plans.SESSION_EXPANSION_FILE_RE.fullmatch(path.name):
-            continue
+    try:
+        session_files = plans.discover_session_files(plan_dir)
+    except plans.PlanError:
+        collector.omissions.record("scopes", REASON_UNREADABLE, str(plan_dir))
+        return {"available": False, "reason": REASON_UNREADABLE}
+    paths = {session_file.path for session_file in session_files}
+    # Historical audit evidence still uses zero-padded session IDs. Preserve
+    # those exact numeric filenames without treating session-N.notes.md (or
+    # other supporting documents) as sessions.
+    paths.update(
+        path
+        for path in plan_dir.glob("session-*.md")
+        if plans.LOOSE_SESSION_FILE_RE.fullmatch(path.name)
+    )
+    for path in sorted(paths):
         entry: dict[str, Any] = {"session": path.stem}
         try:
             text = path.read_text(encoding="utf-8")

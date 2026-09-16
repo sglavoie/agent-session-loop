@@ -21,6 +21,8 @@ It owns four things that the run loop used to hold inline:
 * **The two bounded pause suffixes.** :func:`_workspace_unavailable_summary` and
   :func:`_workspace_guard_violation_summary` name at most three subjects and a
   count, so a pause reason stays a sentence rather than a payload dump.
+  :func:`_workspace_unavailable_message` supplies their shared explanation,
+  distinguishing external write authority from repository capture failures.
 * **Scope-repair freshness.** :func:`_session_expansion_evidence` fingerprints an
   expansion file, :func:`_latest_workspace_scope_repair_requirement` recovers the
   latest uncleared scope violation for a session from the event log,
@@ -244,6 +246,37 @@ def _workspace_unavailable_summary(
     if len(named) > 3:
         suffix += f" (+{len(named) - 3} more)"
     return suffix
+
+
+def _workspace_unavailable_message(
+    unavailable: Mapping[str, Any],
+    *,
+    workspace: workspaces.ResolvedWorkspace,
+) -> str:
+    """Explain the guard's blindness without inventing a repository failure."""
+    external = False
+    repository = False
+    for raw in unavailable.values():
+        detail = raw if isinstance(raw, Mapping) else {}
+        for phase in ("after", "before"):
+            if isinstance(detail.get(phase), Mapping):
+                detail = detail[phase]
+                break
+        if (
+            detail.get("reason")
+            == external_write_evidence.EXTERNAL_WRITE_UNCLASSIFIED_REASON
+        ):
+            external = True
+        else:
+            repository = True
+    explanations = []
+    if external:
+        explanations.append("external paths have unresolved write authority")
+    if repository:
+        explanations.append("repository evidence could not be captured safely")
+    return "; ".join(explanations) + _workspace_unavailable_summary(
+        unavailable, workspace=workspace
+    )
 
 
 def _workspace_write_guard_evidence(

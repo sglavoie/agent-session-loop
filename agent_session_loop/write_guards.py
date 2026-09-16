@@ -298,18 +298,14 @@ def _enforce_workspace_write_guard(
         return False
 
     if evidence["unavailable"]:
-        unavailable_summary = workspace_evidence._workspace_unavailable_summary(
+        unavailable_message = workspace_evidence._workspace_unavailable_message(
             evidence["unavailable"], workspace=workspace
         )
         reason = events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE
-        failure_note = (
-            "workspace write guard unavailable; evidence for a registered "
-            f"repository could not be captured safely{unavailable_summary}"
-        )
+        failure_note = f"workspace write guard unavailable; {unavailable_message}"
         message = (
             f"workspace write guard unavailable after {session_label}; "
-            "evidence for a registered repository could not be captured "
-            f"safely{unavailable_summary}"
+            f"{unavailable_message}"
         )
     else:
         reason = events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION

@@ -32,6 +32,7 @@ from agent_session_loop import (
     config,
     control_queue,
     events,
+    external_write_evidence,
     handoff_correction,
     handoff_guards,
     harnesses,
@@ -3389,6 +3390,44 @@ class WorkspaceGuardExceptionTests(unittest.TestCase):
             returncode=0,
             stdout="ok\n",
             stderr="",
+        )
+
+    def test_external_authority_pause_and_action_agree_with_the_guard(self) -> None:
+        unavailable = {
+            "pi-gradle.py": {
+                "reason": "external-write-unclassified",
+                "digest": "a" * 64,
+            }
+        }
+        with (
+            mock.patch.object(
+                harnesses, "run_harness", side_effect=self._completed_harness_result
+            ),
+            mock.patch.object(
+                external_write_evidence,
+                "_turn_external_write_evidence",
+                return_value={"unclassified": unavailable},
+            ),
+        ):
+            exit_code, payload = self._invoke("external-authority-diagnostic")
+        self.assertEqual(1, exit_code)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            payload["pause_reason"],
+        )
+        guard = payload["turns"][0]["workspace_write_guard"]
+        self.assertFalse(guard["passed"])
+        self.assertTrue(guard["reverted_to_pending"])
+        self.assertEqual(unavailable, guard["unavailable"])
+        for message in (
+            payload["pause_message"],
+            payload["action_required"]["message"],
+            (self.plan_dir / "session-1.md").read_text(encoding="utf-8"),
+        ):
+            self.assertIn("external paths have unresolved write authority", message)
+            self.assertNotIn("repository could not be captured", message)
+        self.assertEqual(
+            "pending", plans.inspect_plan(self.plan_dir).sessions[0].status
         )
 
     def test_harness_exception_records_scope_violation_and_blocks_rerun(

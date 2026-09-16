@@ -78,7 +78,7 @@ MOVED_CALLS = frozenset(
         "review_guard._capture_review_repo_fingerprint",
         "review_guard._review_guard_unavailable_detail",
         "workspace_evidence._workspace_snapshot_unavailable",
-        "workspace_evidence._workspace_unavailable_summary",
+        "workspace_evidence._workspace_unavailable_message",
         "workspace_evidence._workspace_write_guard_evidence",
         "workspace_evidence._workspace_scope_repair_comparison",
         "workspace_evidence._workspace_scope_repair_is_fresh",

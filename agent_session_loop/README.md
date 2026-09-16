@@ -368,6 +368,8 @@ The overseer's last gate is not a module but a pair. AgentMux and ASL are releas
 > **Maintenance note:** Any work on ASL should include checking this README and updating it when behavior or architecture changes.
 
 
+Audit scope collection uses authoritative session discovery, retaining exact zero-padded numeric filenames for historical evidence: expansion notes and supporting evidence documents remain artifacts, not malformed sessions. Mailbox collection also joins backwards from this run's guidance-delivery receipts to their referenced guidance, including explicit inbox reads without runner delivery events. Referenced guidance retains sequence, provenance and a redacted content digest; missing targets are counted and recorded as omissions, and deferred attempts never claim successful delivery. Write-guard pause diagnostics distinguish external paths with unresolved write authority from unavailable repository evidence, without changing the guard's fail-closed verdict.
+
 ## Accepting remote-ref updates after a paused review
 
 A push or fetch during a read-only review can update remote-tracking refs and

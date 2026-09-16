@@ -39,6 +39,7 @@ MOVED_SYMBOLS = (
     "_workspace_review_bases",
     "_workspace_snapshot_unavailable",
     "_workspace_unavailable_summary",
+    "_workspace_unavailable_message",
     "_workspace_write_guard_evidence",
     "_legacy_implementation_write_guard_evidence",
     "_workspace_guard_violation_summary",
@@ -226,6 +227,37 @@ class WorkspaceUnavailableSummaryTests(unittest.TestCase):
                 {}, workspace=_workspace("SVC")
             ),
         )
+
+
+class WorkspaceUnavailableMessageTests(unittest.TestCase):
+    def test_external_authority_is_not_a_repository_capture_failure(self) -> None:
+        message = workspace_evidence._workspace_unavailable_message(
+            {"pi-gradle.py": {"reason": "external-write-unclassified"}},
+            workspace=_workspace("SVC"),
+        )
+        self.assertIn("external paths have unresolved write authority", message)
+        self.assertIn("pi-gradle.py (external-write-unclassified)", message)
+        self.assertNotIn("repository", message)
+
+    def test_repository_failures_still_name_the_capture_failure(self) -> None:
+        message = workspace_evidence._workspace_unavailable_message(
+            {"svc": {"after": {"reason": "unreadable"}}},
+            workspace=_workspace("SVC"),
+        )
+        self.assertIn("repository evidence could not be captured safely", message)
+        self.assertIn("SVC (unreadable)", message)
+        self.assertNotIn("external paths", message)
+
+    def test_mixed_failures_explain_both_surfaces(self) -> None:
+        message = workspace_evidence._workspace_unavailable_message(
+            {
+                "svc": {"before": {"reason": "unreadable"}},
+                "external.py": {"reason": "external-write-unclassified"},
+            },
+            workspace=_workspace("SVC"),
+        )
+        self.assertIn("external paths have unresolved write authority", message)
+        self.assertIn("repository evidence could not be captured safely", message)
 
 
 class WorkspaceGuardViolationSummaryTests(unittest.TestCase):

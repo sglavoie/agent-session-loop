@@ -403,7 +403,7 @@ def capture_turn_baselines(
                     ),
                 )
         if unavailable:
-            unavailable_summary = workspace_evidence._workspace_unavailable_summary(
+            unavailable_message = workspace_evidence._workspace_unavailable_message(
                 unavailable,
                 workspace=workspace,
             )
@@ -421,9 +421,7 @@ def capture_turn_baselines(
             ctx.pause(
                 reason=events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
                 message="workspace write guard unavailable before "
-                f"{session_label}; evidence for a registered "
-                "repository could not be captured safely"
-                f"{unavailable_summary}",
+                f"{session_label}; {unavailable_message}",
                 details={
                     **session_details,
                     "workspace_write_guard": guard_record,
