@@ -1590,6 +1590,101 @@ class PinnedAuditWorkspaceTests(unittest.TestCase):
             listed = git_stdout(workspace / "app", "worktree", "list", "--porcelain")
             self.assertEqual(1, listed.count("worktree "))
 
+    def test_failed_cleanup_keeps_the_checkout_and_records_its_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, run_dir = self._workspace(Path(tmp))
+            origin = workspace / "app"
+            with (
+                self.assertLogs(supervisor_audit.__name__, level="WARNING"),
+                supervisor_audit.pinned_audit_workspace(
+                    workspace,
+                    ("app",),
+                    {"app": self._head(origin)},
+                    cleanup_report_dir=run_dir,
+                ) as pinned,
+            ):
+                self.addCleanup(shutil.rmtree, pinned.root, True)
+                self.addCleanup(
+                    repository_evidence.remove_worktree, origin, pinned.root / "app"
+                )
+                self._git(origin, "worktree", "lock", str(pinned.root / "app"))
+
+            self.assertTrue((pinned.root / "app" / ".git").exists())
+            self.assertIn(
+                (pinned.root / "app").resolve(),
+                repository_evidence.linked_worktrees(origin),
+            )
+            report = json.loads((run_dir / "supervisor-audit-cleanup.json").read_text())
+            self.assertEqual([str(pinned.root / "app")], report["retained_worktrees"])
+            self._git(origin, "worktree", "unlock", str(pinned.root / "app"))
+
+    def test_failed_nested_cleanup_preserves_its_parent_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, _ = self._workspace(Path(tmp))
+            init_git_repo(workspace / "app" / "nested")
+            repositories = ("app", "app/nested")
+            with (
+                self.assertLogs(supervisor_audit.__name__, level="WARNING"),
+                supervisor_audit.pinned_audit_workspace(
+                    workspace,
+                    repositories,
+                    {
+                        relative: self._head(workspace / relative)
+                        for relative in repositories
+                    },
+                ) as pinned,
+            ):
+                self.addCleanup(shutil.rmtree, pinned.root, True)
+                for relative in repositories:
+                    self.addCleanup(
+                        repository_evidence.remove_worktree,
+                        workspace / relative,
+                        pinned.root / relative,
+                    )
+                self._git(
+                    workspace / "app/nested",
+                    "worktree",
+                    "lock",
+                    str(pinned.root / "app/nested"),
+                )
+
+            for relative in repositories:
+                self.assertTrue((pinned.root / relative / ".git").exists())
+            self._git(
+                workspace / "app/nested",
+                "worktree",
+                "unlock",
+                str(pinned.root / "app/nested"),
+            )
+
+    def test_a_failed_add_cleans_its_partial_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, _, _, _ = self._workspace(Path(tmp))
+            origin = workspace / "app"
+            add = repository_evidence.add_detached_worktree
+            destinations: list[Path] = []
+
+            def partial_add(repository: Path, destination: Path, commit: str) -> Path:
+                destinations.append(add(repository, destination, commit))
+                raise repository_evidence.RepositoryEvidenceError(
+                    "checkout interrupted"
+                )
+
+            with (
+                mock.patch.object(
+                    repository_evidence,
+                    "add_detached_worktree",
+                    side_effect=partial_add,
+                ),
+                supervisor_audit.pinned_audit_workspace(
+                    workspace, ("app",), {"app": self._head(origin)}
+                ) as pinned,
+            ):
+                self.assertFalse(pinned.pinned)
+
+            self.assertEqual((), repository_evidence.linked_worktrees(origin))
+            self.assertFalse(destinations[0].parent.exists())
+
     def test_a_run_that_recorded_no_commit_is_judged_on_the_live_workspace(
         self,
     ) -> None:
@@ -7136,6 +7231,57 @@ class DeterministicCheckTests(_RunHistoryFixture, unittest.TestCase):
             # The killed turn is explained by the abort, so it must not fall
             # through to the catch-all that reports unknown failures.
             self.assertEqual("pass", results["unclassified-anomalies"].status)
+
+    def test_successful_stop_only_excuses_its_accountable_aborted_turn(self) -> None:
+        for case in (
+            "stopped",
+            "complete",
+            "unrequested",
+            "other-turn",
+            "scope-breach",
+            "guard-unavailable",
+            "malformed-plan",
+            "verification-failed",
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                history = self._history(Path(tmp))
+                self._aborted_a_turn(
+                    history, session=1, turn_index=1, requested=case != "unrequested"
+                )
+                self._state_with(
+                    history,
+                    ok=True,
+                    reason="complete" if case == "complete" else "stopped",
+                )
+                result = self._read_result(history[3])
+                result.update(
+                    session=1,
+                    session_id="1",
+                    turn_index=2 if case == "other-turn" else 1,
+                    returncode=137,
+                    status_result="nonzero-exit",
+                )
+                if case == "scope-breach":
+                    result["workspace_write_guard"] = {
+                        "passed": False,
+                        "violations": [{"alias": "other"}],
+                    }
+                elif case == "guard-unavailable":
+                    result["workspace_write_guard"] = {"passed": False}
+                elif case == "malformed-plan":
+                    result["status_result"] = "malformed-plan"
+                elif case == "verification-failed":
+                    result["verification"] = {"passed": False}
+                self._write_result(history[3] / "turn-0001-01", result)
+
+                _, results = self._audit(history)
+
+                self.assertEqual(
+                    "pass" if case == "stopped" else "fail",
+                    results["misleading-success"].status,
+                )
+                if case == "unrequested":
+                    self.assertEqual("fail", results["unclassified-anomalies"].status)
 
     def test_a_run_that_killed_nothing_owes_no_abort_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

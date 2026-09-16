@@ -1677,16 +1677,15 @@ def remove_worktree(
     target = Path(os.path.abspath(os.fspath(destination)))
     token = _GIT_RUNNER.set(_run_git_fn)
     try:
-        removed = _run_git(root, ["worktree", "remove", "--force", str(target)])
-        # Pruning regardless: `remove` failing on a directory that is already
-        # gone still leaves the registration behind, and that is the half that
-        # would otherwise outlive the audit.
-        _run_git(root, ["worktree", "prune"])
+        _run_git(root, ["worktree", "remove", "--force", str(target)])
+        # Verify this registration, including when a failed add never created
+        # it. Never prune unrelated worktrees as a side effect of audit cleanup.
+        remaining = linked_worktrees(root, _run_git_fn=_run_git_fn)
     except Exception:
         return False
     finally:
         _GIT_RUNNER.reset(token)
-    return removed.returncode == 0
+    return target.resolve() not in remaining
 
 
 def _is_exact_worktree_root(repository: Path) -> bool:

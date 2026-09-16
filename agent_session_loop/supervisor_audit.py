@@ -47,6 +47,7 @@ import contextlib
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -661,6 +662,8 @@ def pinned_audit_workspace(
     workspace_root: Path | str,
     repositories: Sequence[str],
     commits: Mapping[str, str] | None,
+    *,
+    cleanup_report_dir: Path | None = None,
 ) -> Iterator[PinnedWorkspace]:
     """Check the pinned commits out privately for the boundary check.
 
@@ -677,9 +680,9 @@ def pinned_audit_workspace(
     carries the false positive it was meant to remove while reading as though it
     did not.
 
-    The checkouts are always removed, including their registration in the origin
-    repository, so an audit cannot leave the repositories it graded listing
-    worktrees that no longer exist.
+    Cleanup removes registrations before deleting the temporary root. If Git
+    refuses a removal, keep that checkout and its ancestors intact and report
+    the residue rather than leaving a registration pointing at a deleted tree.
     """
     live = Path(workspace_root)
     if not repositories:
@@ -697,18 +700,44 @@ def pinned_audit_workspace(
             # into the still-empty root before anything nested lands under it.
             for relative in sorted(repositories, key=_pin_depth):
                 origin = live / relative
-                destination = repository_evidence.add_detached_worktree(
-                    origin, root / relative, commits[relative]
-                )
+                destination = root / relative
+                # A failed add can already have registered a partial checkout.
                 added.append((origin, destination))
+                repository_evidence.add_detached_worktree(
+                    origin, destination, commits[relative]
+                )
         except repository_evidence.RepositoryEvidenceError, OSError:
             yield PinnedWorkspace(root=live, reason=PIN_REASON_CHECKOUT_FAILED)
             return
         yield PinnedWorkspace(root=root, commits=dict(commits))
     finally:
+        retained: list[Path] = []
         for origin, destination in reversed(added):
-            repository_evidence.remove_worktree(origin, destination)
-        shutil.rmtree(root, ignore_errors=True)
+            if any(
+                path.is_relative_to(destination) for path in retained
+            ) or not repository_evidence.remove_worktree(origin, destination):
+                retained.append(destination)
+        if retained:
+            report = {
+                "root": str(root),
+                "retained_worktrees": [str(path) for path in retained],
+                "reason": "worktree-removal-failed",
+            }
+            logging.getLogger(__name__).warning(
+                "Audit worktree cleanup incomplete; retained %s", report
+            )
+            if cleanup_report_dir is not None:
+                try:
+                    assurance_models.write_audit_json(
+                        cleanup_report_dir, "supervisor-audit-cleanup.json", report
+                    )
+                except OSError, assurance_models.AssuranceError:
+                    logging.getLogger(__name__).exception(
+                        "Could not record audit worktree cleanup in %s",
+                        cleanup_report_dir,
+                    )
+        else:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def _record_mutation_issue(
@@ -4582,13 +4611,31 @@ def _check_misleading_success(context: _CheckContext) -> _Verdict:
     counter: list[str] = []
     references: list[str] = []
     superseded = _superseded_turn_names(context.turns)
+    # A successful operator stop claims that the stop was honored. It does not
+    # claim the interrupted work completed (ASI-23). Require both abort records
+    # and scope this exception to the exact turn they identify.
+    stopped_turns = (
+        _aborted_turns(context) if status.get("reason") == "stopped" else set()
+    )
     for turn in context.turns:
         result = _mapping(turn.get("result"))
         guard = _mapping(result.get("workspace_write_guard"))
         # A retry replaces the attempt, never the breach: a turn that wrote
         # outside its declared scope stays counter-evidence however cleanly the
         # session finished afterwards.
-        anomalous = turn.get("anomalous") is True and turn.get("name") not in superseded
+        stopped = (
+            (result.get("session"), result.get("turn_index")) in stopped_turns
+            and result.get("status_result") in {"nonzero-exit", "runner-pause"}
+            and turn.get("rejected") is not True
+            and not result.get("plan_error")
+            and not _guard_shows_failure(guard)
+            and _mapping(result.get("verification")).get("passed") is not False
+        )
+        anomalous = (
+            turn.get("anomalous") is True
+            and turn.get("name") not in superseded
+            and not stopped
+        )
         contradicts = anomalous or bool(_sequence(guard.get("violations")))
         if anomalous:
             counter.append(f"{turn.get('name')} recorded an anomalous result")
@@ -4853,12 +4900,20 @@ def _aborted_turns(context: _CheckContext) -> set[tuple[Any, Any]]:
     Keyed by session and turn index together, so the exemption covers the one
     turn the abort named rather than every turn that session ever ran.
     """
+    requested = {
+        (payload.get("session"), payload.get("turn_index"))
+        for payload in _abort_turn_records(
+            context, events.RUN_CONTROL_ACTION_ABORT_TURN_REQUESTED
+        )
+        if payload.get("session") is not None and payload.get("turn_index") is not None
+    }
     return {
         (payload.get("session"), payload.get("turn_index"))
         for payload in _abort_turn_records(
             context, events.RUN_CONTROL_ACTION_ABORT_TURN_HONORED
         )
         if payload.get("abort_reason")
+        and (payload.get("session"), payload.get("turn_index")) in requested
     }
 
 
@@ -8365,6 +8420,7 @@ def audit_terminal_run(
                 workspace_root,
                 repositories,
                 run_commits(run_dir, repositories),
+                cleanup_report_dir=run_dir,
             ) as pinned:
                 outcome = run_agent_audit(
                     role,

@@ -49,6 +49,40 @@ class RepositoryEvidenceParityTests(unittest.TestCase):
         self.plan_dir.mkdir()
         init_git_repo(self.repository)
 
+    def test_worktree_cleanup_removes_only_its_own_stale_registration(self) -> None:
+        head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=self.repository, text=True
+        ).strip()
+        owned = repository_evidence.add_detached_worktree(
+            self.repository, self.root / "owned", head
+        )
+        other = repository_evidence.add_detached_worktree(
+            self.repository, self.root / "other", head
+        )
+        shutil.rmtree(owned)
+        shutil.rmtree(other)
+
+        self.assertTrue(repository_evidence.remove_worktree(self.repository, owned))
+        self.assertEqual(
+            (other.resolve(),), repository_evidence.linked_worktrees(self.repository)
+        )
+
+    def test_worktree_cleanup_cannot_claim_success_when_inventory_fails(self) -> None:
+        commands: list[list[str]] = []
+
+        def git_unavailable(
+            root: Path, argv: list[str]
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(argv)
+            return subprocess.CompletedProcess(argv, 1, "", "Git unavailable")
+
+        self.assertFalse(
+            repository_evidence.remove_worktree(
+                self.repository, self.root / "owned", _run_git_fn=git_unavailable
+            )
+        )
+        self.assertEqual(["worktree", "list", "--porcelain"], commands[-1])
+
     def test_runner_wrapper_and_extracted_engine_are_byte_for_byte_equal(
         self,
     ) -> None:
