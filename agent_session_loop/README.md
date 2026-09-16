@@ -433,3 +433,21 @@ A submitted decision never fabricates a receipt or replays feedback; a confirmed
 unsent decision releases only a carry without recorded delivery. No timeout or
 default resolves ambiguity. Run state exposes the operation and resolution
 command for CLI and supervisor inspection.
+
+### Explicit plan-store write roots
+
+Before launching a selected session, ASL checks its completion contract's
+Done-when bullets that declare plan-store writes with a concrete
+`--state-dir` root (absolute or `~/`-relative, optionally quoted). For example:
+`All plan-store writes used --state-dir ~/.local/share/agent-plans`.
+If that required tree is outside the effective control-plane guard roots,
+the run pauses with `workspace-write-guard-unavailable`, records the required
+and effective roots in `pause_details.plan_store_state_root`, and spends no
+worker turn. This applies to registered and legacy runs, packet and skill
+modes, and reply/resolution continuations. A matching or covering configured
+root passes, as does a write tree already inside this plan's own directory.
+Examples, verification commands, and historical handoffs do not declare a
+state-root requirement; this narrow check is not a general prose write detector.
+An operator must inspect the requirement and explicitly relaunch with the
+intended state root or repair the contract. ASL never supplies an override:
+changing `--state-dir` also changes where the run keeps its bookkeeping.

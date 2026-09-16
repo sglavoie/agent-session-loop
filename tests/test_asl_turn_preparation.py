@@ -248,11 +248,12 @@ class PreparationBoundaryTests(unittest.TestCase):
                     f"back to the loop (turn_preparation.py:{statement.lineno})",
                 )
         self.assertEqual(
-            5,
+            6,
             pauses,
-            "the five refusals that live here are the malformed review scope, "
+            "the six refusals that live here are the malformed review scope, "
             "the conversation-recovery gate, the ineligible repair child, its "
-            "dirty writable set, and the repository-intent gate",
+            "dirty writable set, the repository-intent gate, and the "
+            "plan-store state-root gate",
         )
 
     def test_the_boundary_carries_no_loop_statements(self) -> None:
@@ -816,6 +817,69 @@ class TurnPromptTests(PreparationTestCase):
 
         self.assertFalse(result.paused)
         report.assert_not_called()
+
+    def test_state_root_gate_applies_to_every_prompt_shape_and_workspace_mode(
+        self,
+    ) -> None:
+        for mode in (task_packet.WORKER_MODE_PACKET, task_packet.WORKER_MODE_SKILL):
+            for shape in (
+                {},
+                {"reply": self.reply()},
+                {"resolution": self.resolution()},
+            ):
+                for registered in (False, True):
+                    with self.subTest(mode=mode, shape=shape, registered=registered):
+                        self.ctx.pauses.clear()
+                        inputs = turn_preparation.PacketInputs(
+                            worker_mode=mode,
+                            predecessor_id=None,
+                            has_expansion=False,
+                            has_progress=False,
+                            repair_references=(),
+                            pending_guidance=(),
+                        )
+                        report = {"required_state_roots": ["/external/store"]}
+                        with (
+                            mock.patch.object(
+                                turn_preparation.run_inputs,
+                                "_session_plan_store_state_root_report",
+                                return_value=report,
+                            ) as gate,
+                            mock.patch.object(
+                                turn_preparation.task_packet, "build_task_packet"
+                            ),
+                            mock.patch.object(
+                                turn_preparation.run_prompts, "build_session_prompt"
+                            ),
+                            mock.patch.object(
+                                turn_preparation.run_prompts, "build_reply_prompt"
+                            ),
+                            mock.patch.object(
+                                turn_preparation.run_prompts, "build_resolution_prompt"
+                            ),
+                            mock.patch.object(
+                                turn_preparation.run_inputs,
+                                "_task_packet_repository_intent_report",
+                                return_value=None,
+                            ),
+                        ):
+                            result = self.prepare(
+                                inputs=inputs,
+                                workspace=mock.Mock() if registered else None,
+                                session_scope=mock.Mock() if registered else None,
+                                **shape,
+                            )
+                        self.assertTrue(result.paused)
+                        gate.assert_called_once()
+                        (pause,) = self.ctx.pauses
+                        self.assertEqual(
+                            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+                            pause["reason"],
+                        )
+                        self.assertEqual(
+                            report, pause["details"]["plan_store_state_root"]
+                        )
+                        self.assertIn("no worker was launched", pause["message"])
 
 
 if __name__ == "__main__":

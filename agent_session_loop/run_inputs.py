@@ -27,7 +27,7 @@ registry the gate is refusing for. That write is the migration's own, guarded
 by the migration's own refusal, and the run pauses either way -- see the
 invariant below.
 
-Five invariants survive the move and are load-bearing:
+Six invariants are load-bearing:
 
 * **The registry gate is the final authority.** :func:`_run_repository_intent_report`
   re-derives the verdict at run time because every earlier gate can be skipped:
@@ -52,6 +52,11 @@ Five invariants survive the move and are load-bearing:
   exempts the plan directory, the state root, and the run directory from every
   intent scan, because an operator may legitimately keep ASL's bookkeeping
   inside an unrelated checkout and that is not a repository the run reaches.
+* **An explicit plan-store root is checked, not supplied.**
+  :func:`_session_plan_store_state_root_report` checks a selected contract's
+  plan-store write requirement against the effective control-plane roots.
+  A missing state-root override pauses before launch, never silently moves
+  the run's bookkeeping or authorizes a broader tree.
 * **Binding is checked, never rewritten.** :func:`_resolve_run_verification_context`
   and :func:`_validate_resume_workspace_binding` refuse a mismatch instead of
   re-deriving one, and :func:`_ensure_legacy_run_metadata` first-binds only a
@@ -75,6 +80,7 @@ from typing import Any
 
 from . import (
     config,
+    contracts,
     plans,
     preflight,
     repository_intent,
@@ -374,6 +380,72 @@ def _task_packet_artifact_paths(
     if predecessor_id is not None:
         paths.append(plan_dir / plans.parse_session_id(predecessor_id).filename)
     return tuple(paths)
+
+
+_PLAN_STORE_WRITES_RE = re.compile(
+    r"\b(?:cross[- ]plan[- ]store|plan[- ]store)\s+writes?\b", re.IGNORECASE
+)
+_STATE_ROOT_ARGUMENT_RE = re.compile(
+    r"--state-dir(?:\s*=\s*|\s+)(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|([^\s`,;]+))"
+)
+
+
+def _session_plan_store_state_root_report(
+    plan_dir: Path,
+    session_id: str,
+    *,
+    state_dir_arg: str | None,
+    run_dir: Path,
+) -> dict[str, Any] | None:
+    """Refuse an explicit plan-store write requirement the guard cannot honor.
+
+    Only the selected session's Done-when bullets declare this requirement.
+    Flags quoted in examples, verification commands or historical handoffs
+    are not configuration demands. This is deliberately not a prose write
+    detector: a named external path can legitimately be read-only.
+
+    The runner never supplies the missing override itself. Covering a broader
+    state tree is an operator decision, and changing it also moves the run's
+    own bookkeeping.
+    """
+    try:
+        contract = contracts.read_completion_contract(plan_dir, session_id)
+    except plans.PlanError:
+        # Missing/malformed contracts keep their existing verification gate;
+        # this check must not turn a contract-repair turn into a config error.
+        return None
+    if contract is None:
+        return None
+    guard_roots = _runner_owned_roots(plan_dir, state_dir_arg, run_dir=run_dir)
+    missing: set[str] = set()
+    for requirement in contract.done_when:
+        if _PLAN_STORE_WRITES_RE.search(requirement) is None:
+            continue
+        for match in _STATE_ROOT_ARGUMENT_RE.finditer(requirement):
+            value = next(group for group in match.groups() if group is not None)
+            # Never interpret shell variables or resolve a relative example
+            # against ASL's own cwd. Only concrete filesystem roots bind this
+            # check, including the operator's home-relative spelling.
+            if not (value.startswith("/") or value.startswith("~/")):
+                continue
+            required_root = plans.canonicalize_path(value)
+            if not any(
+                workspaces.is_descendant(required_root, root, allow_equal=True)
+                for root in guard_roots
+            ):
+                missing.add(str(required_root))
+    if not missing:
+        return None
+    return {
+        "session_id": session_id,
+        "required_state_roots": sorted(missing),
+        "effective_state_root": str(state.state_root(state_dir_arg)),
+        "guard_roots": [str(root) for root in guard_roots],
+        "source": (
+            f"{plans.parse_session_id(session_id).filename}"
+            ":Completion Contract/Done when"
+        ),
+    }
 
 
 def _task_packet_repository_intent_report(

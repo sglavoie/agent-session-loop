@@ -26,16 +26,18 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from agent_session_loop import (
     plans,
     repository_registration,
     run_inputs,
     run_selection,
+    state,
     verification,
 )
 from agent_session_loop.run_errors import RunError
-from tests.support import assert_no_runner_import, write_plan
+from tests.support import _contract_block, assert_no_runner_import, write_plan
 
 
 def _args(**overrides: Any) -> argparse.Namespace:
@@ -397,6 +399,120 @@ class TaskPacketIntentTests(unittest.TestCase):
             )
 
         self.assertIsNone(report)
+
+
+class PlanStoreStateRootTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.plan = self.root / "plan"
+        self.run = self.root / "run"
+        self.store = self.root / "external store"
+        self.effective = self.root / "state"
+
+    def report(
+        self, requirement: str, *, override: str | None = None
+    ) -> dict[str, Any] | None:
+        block = _contract_block(
+            '{"type":"file_exists","path":"README.md","name":"readme"}'
+        )
+        write_plan(
+            self.plan,
+            ("pending",),
+            contracts_by_id={"1": block.replace("recipe runs", requirement)},
+        )
+        return run_inputs._session_plan_store_state_root_report(
+            self.plan, "1", state_dir_arg=override, run_dir=self.run
+        )
+
+    def test_required_store_outside_effective_roots_is_reported(self) -> None:
+        report = self.report(
+            f'All plan-store writes used --state-dir "{self.store}"',
+            override=str(self.effective),
+        )
+        assert report is not None
+        self.assertEqual([str(self.store)], report["required_state_roots"])
+        self.assertEqual(str(self.effective), report["effective_state_root"])
+        self.assertEqual("session-1.md:Completion Contract/Done when", report["source"])
+        self.assertEqual(
+            ("pending",),
+            tuple(s.status for s in plans.inspect_plan(self.plan).sessions),
+        )
+
+    def test_matching_or_covering_state_root_needs_no_pause(self) -> None:
+        for override in (self.store, self.root):
+            with self.subTest(override=override):
+                self.assertIsNone(
+                    self.report(
+                        f'All cross-plan-store writes used --state-dir "{self.store}"',
+                        override=str(override),
+                    )
+                )
+
+    def test_same_plan_store_writes_are_already_control_plane(self) -> None:
+        self.assertIsNone(
+            self.report(
+                f"All plan-store writes used --state-dir `{self.plan}`",
+                override=str(self.effective),
+            )
+        )
+
+    def test_home_relative_default_root_is_resolved_without_an_override(self) -> None:
+        with mock.patch.dict("os.environ", {"HOME": str(self.root)}):
+            report = self.report(
+                "All plan-store writes used --state-dir ~/.local/share/agent-plans"
+            )
+            assert report is not None
+            self.assertEqual(
+                [str(self.root / ".local/share/agent-plans")],
+                report["required_state_roots"],
+            )
+            self.assertEqual(
+                str(state.state_root(None)), report["effective_state_root"]
+            )
+
+    def test_equal_flag_and_duplicate_roots_are_supported(self) -> None:
+        report = self.report(
+            f"Plan store writes used --state-dir='{self.store}' "
+            f'and --state-dir="{self.store}"',
+            override=str(self.effective),
+        )
+        assert report is not None
+        self.assertEqual([str(self.store)], report["required_state_roots"])
+
+    def test_flags_without_plan_store_write_requirement_are_not_demands(self) -> None:
+        for requirement in (
+            f'CLI supports --state-dir "{self.store}"',
+            f'Read-only verification uses --state-dir "{self.store}"',
+            "Plan-store writes tested with --state-dir $STORE",
+            "Plan-store writes tested with --state-dir relative/example",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIsNone(
+                    self.report(requirement, override=str(self.effective))
+                )
+
+    def test_historical_handoff_and_examples_are_not_requirements(self) -> None:
+        self.report("recipe runs", override=str(self.effective))
+        path = self.plan / "session-1.md"
+        path.write_text(
+            path.read_text()
+            + f'\n- Plan-store writes used --state-dir "{self.store}"\n'
+        )
+        self.assertIsNone(
+            run_inputs._session_plan_store_state_root_report(
+                self.plan, "1", state_dir_arg=str(self.effective), run_dir=self.run
+            )
+        )
+
+    def test_no_contract_keeps_existing_behavior(self) -> None:
+        write_plan(self.plan, ("pending",))
+        self.assertIsNone(
+            run_inputs._session_plan_store_state_root_report(
+                self.plan, "1", state_dir_arg=None, run_dir=self.run
+            )
+        )
 
 
 class LegacyBindingTests(unittest.TestCase):

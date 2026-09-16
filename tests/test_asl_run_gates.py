@@ -874,6 +874,44 @@ class RunReadinessGateTests(unittest.TestCase):
         self.assertEqual(2, report["git_root_count"])
         self.assertEqual(1, payload["pause_details"]["session"])
 
+    def test_required_plan_store_state_root_pauses_before_spending_a_turn(self) -> None:
+        store = self.tmp_path / "external-store"
+        contract = _contract_block(
+            '{"type":"file_exists","path":"README.md","name":"readme"}'
+        ).replace("recipe runs", f"All plan-store writes used --state-dir {store}")
+        self._write_plan(contracts_by_id={"1": contract})
+
+        completed, payload = self._run()
+
+        self.assertEqual(1, completed.returncode, completed.stderr)
+        self.assertEqual(
+            events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            payload["pause_reason"],
+        )
+        self.assertEqual([], payload["turns"])
+        self.assertEqual(
+            [str(plans.canonicalize_path(store))],
+            payload["pause_details"]["plan_store_state_root"]["required_state_roots"],
+        )
+        self.assertEqual(
+            "pending", plans.inspect_plan(self.plan_dir).sessions[0].status
+        )
+        self.assertFalse(store.exists())
+
+    def test_required_plan_store_state_root_launches_when_configured(self) -> None:
+        contract = _contract_block(
+            '{"type":"file_exists","path":"README.md","name":"readme"}'
+        ).replace(
+            "recipe runs", f"All plan-store writes used --state-dir {self.state_dir}"
+        )
+        self._write_plan(contracts_by_id={"1": contract})
+
+        completed, payload = self._run()
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("all-complete", payload["reason"])
+        self.assertEqual(1, len(payload["turns"]))
+
     def _declare_source(self, source: Path, *, expansion_cites: str) -> None:
         """Point the manifest at ``source`` and cite a path in an expansion note.
 

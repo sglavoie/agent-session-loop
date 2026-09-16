@@ -43,7 +43,7 @@ break a loop it does not own. ``paused`` is that ``break``, and every
 ``ctx.pause`` here is immediately followed by the return that carries it, so a
 refusal can never fall through into the turn it refused.
 
-Six invariants survive the move:
+Seven invariants are load-bearing:
 
 * **A review turn reads the scope it will be judged against.** The contract
   refresh, the scope re-derivation and the repository-base refresh all happen
@@ -70,6 +70,11 @@ Six invariants survive the move:
   report is re-derived from the rendered prompt the worker will receive, and
   only for a run with no registered workspace — a registered run states its
   repositories in the registry instead.
+* **An explicit plan-store write root must be covered before launch.** The
+  selected completion contract's plan-store ``--state-dir`` requirement is
+  checked for legacy and registered runs, including reply and resolution
+  continuations. A missing root pauses without launching or changing state
+  configuration; historical handoffs never declare that requirement.
 """
 
 from __future__ import annotations
@@ -851,6 +856,34 @@ def prepare_turn_prompt(
                 **session_details,
                 "repository_intent": packet_intent_report,
             },
+        )
+        return TurnPrompt(
+            prompt=prompt,
+            prompt_kind=prompt_kind,
+            persisted_prompt=persisted_prompt,
+            reply_source=reply_source,
+            resolution_source=resolution_source,
+            paused=True,
+        )
+    state_root_report = run_inputs._session_plan_store_state_root_report(
+        snapshot.plan_dir,
+        session_id,
+        state_dir_arg=args.state_dir,
+        run_dir=ctx.run_dir,
+    )
+    if state_root_report is not None:
+        ctx.record_final_snapshot(snapshot)
+        required = ", ".join(state_root_report["required_state_roots"])
+        ctx.pause(
+            reason=events.PAUSE_REASON_WORKSPACE_WRITE_GUARD_UNAVAILABLE,
+            message=(
+                f"{session_label} requires plan-store writes with --state-dir "
+                f"{required}, outside this run's effective guard roots; "
+                "no worker was launched. Inspect the requirement and relaunch "
+                "with the explicit state-root configuration, or repair the "
+                "completion contract before retrying"
+            ),
+            details={**session_details, "plan_store_state_root": state_root_report},
         )
         return TurnPrompt(
             prompt=prompt,
