@@ -176,6 +176,7 @@ AttemptOutcome = Literal[
     "invalid-reference",
     "interrupted",
     "mutation-detected",
+    "workspace-changed",
     "unavailable",
 ]
 
@@ -190,6 +191,7 @@ ATTEMPT_OUTCOMES: tuple[AttemptOutcome, ...] = (
     "invalid-reference",
     "interrupted",
     "mutation-detected",
+    "workspace-changed",
     "unavailable",
 )
 

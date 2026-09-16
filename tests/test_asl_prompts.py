@@ -890,6 +890,42 @@ class MultiRepositoryTaskPacketTests(unittest.TestCase):
         self.assertNotIn(str(workspace.get("OAK").root), rendered)
         self.assertIn("Alias:path/to/file", rendered)
 
+        for writes in (("SVC",), ()):
+            scope = plans.SessionScope(reads=("SVC", "OAK"), writes=writes)
+            prompts = {
+                "packet": task_packet.build_task_packet(
+                    "codex",
+                    "/tmp/plan",
+                    session_id="1",
+                    workspace=workspace,
+                    session_scope=scope,
+                ).render(),
+                "review-packet": task_packet.build_task_packet(
+                    "codex",
+                    "/tmp/plan",
+                    session_id="1",
+                    session_kind=plans.SESSION_KIND_REVIEW,
+                    workspace=workspace,
+                    session_scope=scope,
+                ).render(),
+                "skill": run_prompts.build_session_prompt(
+                    "codex",
+                    "/tmp/plan",
+                    workspace=workspace,
+                    session_scope=scope,
+                ),
+            }
+            for mode, prompt in prompts.items():
+                with self.subTest(mode=mode, writes=writes):
+                    self.assertIn("including untracked and ignored files", prompt)
+                    self.assertIn("`--no-cache`", prompt)
+                    self.assertIn("already-authorized scratch location", prompt)
+                    self.assertIn("Do not widen write scope", prompt)
+                    self.assertIn(
+                        "Writable aliases: " + (", ".join(writes) or "(none)"),
+                        prompt,
+                    )
+
 
 class ReplyPromptBuilderTests(unittest.TestCase):
     def _make_context(

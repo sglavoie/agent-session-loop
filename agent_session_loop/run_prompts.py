@@ -164,6 +164,12 @@ def _workspace_prompt_lines(
             "",
             "- Read only repositories named by `Expected read aliases`.",
             "- Modify files only in repositories named by `Writable aliases`.",
+            "- Verification tools can write caches and generated artifacts even "
+            "when they only inspect source. Keep those writes out of read-only "
+            "repositories, including untracked and ignored files. For Ruff, use "
+            "`--no-cache` when checking a read-only dependency; configure other "
+            "tools to disable writes or use an already-authorized scratch location. "
+            "Do not widen write scope merely to accommodate tool caches.",
             "- For repository files in handoffs and cross-repository references "
             "use qualified paths "
             "in canonical `Alias:path/to/file` form; never use an "

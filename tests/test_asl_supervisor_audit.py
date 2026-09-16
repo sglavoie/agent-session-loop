@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import dataclasses
 import hashlib
 import inspect
@@ -11,6 +12,7 @@ import io
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -1094,12 +1096,12 @@ class RestrictedAuditTests(unittest.TestCase):
                     harness, Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
                 )
 
-                self.assertEqual("mutation-detected", result.outcome)
+                self.assertEqual("workspace-changed", result.outcome)
                 self.assertEqual("unavailable", result.state)
                 self.assertEqual(
-                    supervisor_audit.REASON_WORKSPACE_MUTATED, result.reason
+                    supervisor_audit.REASON_WORKSPACE_CHANGED, result.reason
                 )
-                self.assertIn("app", (result.mutation or {})["changed"])
+                self.assertIn("app", (result.workspace_change or {})["changed"])
 
     def test_a_failed_launch_carries_its_classification_and_redacted_streams(
         self,
@@ -1152,10 +1154,9 @@ class RestrictedAuditTests(unittest.TestCase):
 
             self.assertEqual("ok", result.outcome)
             self.assertEqual("pending", result.state)
-            self.assertIsNone(result.mutation)
-            self.assertIsNone(result.issue_id)
+            self.assertIsNone(result.workspace_change)
             self.assertFalse(
-                (run_dir / supervisor_audit.MUTATION_ARTIFACT_NAME).exists()
+                (run_dir / supervisor_audit.WORKSPACE_CHANGE_ARTIFACT_NAME).exists()
             )
 
     def test_a_symlinked_registered_checkout_is_not_audited_as_its_target(
@@ -1183,11 +1184,11 @@ class RestrictedAuditTests(unittest.TestCase):
                 "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
             )
 
-            self.assertEqual("mutation-detected", result.outcome)
+            self.assertEqual("workspace-changed", result.outcome)
             self.assertEqual("unavailable", result.state)
-            self.assertEqual(supervisor_audit.REASON_WORKSPACE_MUTATED, result.reason)
-            self.assertEqual(["app"], (result.mutation or {})["removed"])
-            self.assertEqual({}, (result.mutation or {})["changed"])
+            self.assertEqual(supervisor_audit.REASON_WORKSPACE_CHANGED, result.reason)
+            self.assertEqual(["app"], (result.workspace_change or {})["removed"])
+            self.assertEqual({}, (result.workspace_change or {})["changed"])
 
     def test_a_checkout_symlinked_before_the_audit_cannot_be_audited(self) -> None:
         """Both snapshots omit it, so the empty comparison must not read as ok."""
@@ -1214,7 +1215,7 @@ class RestrictedAuditTests(unittest.TestCase):
             self.assertEqual(
                 supervisor_audit.REASON_WORKSPACE_EVIDENCE_UNAVAILABLE, result.reason
             )
-            self.assertIsNone(result.mutation)
+            self.assertIsNone(result.workspace_change)
             self.assertEqual([], fake.calls)
 
     def test_a_registered_repository_that_stops_being_a_worktree_is_unavailable(
@@ -1235,7 +1236,7 @@ class RestrictedAuditTests(unittest.TestCase):
             self.assertEqual(
                 supervisor_audit.REASON_WORKSPACE_EVIDENCE_UNAVAILABLE, result.reason
             )
-            self.assertIsNone(result.mutation)
+            self.assertIsNone(result.workspace_change)
             self.assertEqual(1, len(fake.calls))
 
     def test_a_registered_repository_unfingerprintable_throughout_is_refused(
@@ -1258,7 +1259,7 @@ class RestrictedAuditTests(unittest.TestCase):
             self.assertEqual(
                 supervisor_audit.REASON_WORKSPACE_EVIDENCE_UNAVAILABLE, result.reason
             )
-            self.assertIsNone(result.mutation)
+            self.assertIsNone(result.workspace_change)
             self.assertEqual([], fake.calls)
             self.assertFalse(escaped.exists())
 
@@ -1309,7 +1310,7 @@ class RestrictedAuditTests(unittest.TestCase):
             )
             self.assertEqual([], fake.calls)
 
-    def test_a_detected_mutation_opens_a_system_issue_with_its_artifact(self) -> None:
+    def test_workspace_activity_is_recorded_without_claiming_a_writer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
             fake = _RecordingHarness(writes=workspace / "app" / "escaped.txt")
@@ -1318,22 +1319,88 @@ class RestrictedAuditTests(unittest.TestCase):
                 "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
             )
 
-            artifact = run_dir / supervisor_audit.MUTATION_ARTIFACT_NAME
-            self.assertTrue(artifact.is_file())
-            self.assertIsNotNone(result.issue_id)
-            recorded = json.loads(
-                (state_dir / assurance_ledger.LEDGER_FILE_NAME).read_text(
-                    encoding="utf-8"
+            artifact = run_dir / supervisor_audit.WORKSPACE_CHANGE_ARTIFACT_NAME
+            recorded = json.loads(artifact.read_text(encoding="utf-8"))
+            self.assertEqual("unattributed", recorded["attribution"]["status"])
+            self.assertEqual(
+                "snapshot-comparison-has-no-writer-identity",
+                recorded["attribution"]["reason"],
+            )
+            self.assertEqual(result.workspace_change, recorded["comparison"])
+            self.assertEqual(
+                {"root": str(workspace)}, recorded["comparison"]["workspace"]
+            )
+            self.assertFalse((state_dir / assurance_ledger.LEDGER_FILE_NAME).exists())
+            self.assertFalse(
+                (run_dir / supervisor_audit.MUTATION_ARTIFACT_NAME).exists()
+            )
+
+    def test_operator_process_activity_invalidates_without_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            path = workspace / "app" / "operator.txt"
+            fake = _RecordingHarness(
+                action=lambda: subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; import sys; "
+                        "Path(sys.argv[1]).write_text('operator edit')",
+                        str(path),
+                    ],
+                    capture_output=True,
+                    check=True,
                 )
             )
-            self.assertEqual(result.issue_id, recorded["issue_id"])
-            self.assertEqual(
-                supervisor_audit.MUTATION_ARTIFACT_NAME,
-                recorded["payload"]["audit_artifact"],
+            result = self._run(
+                "codex", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
             )
-            self.assertEqual(
-                "mutation-commit-guards", recorded["payload"]["finding"]["lane"]
-            )
+            self.assertEqual("unavailable", result.state)
+            self.assertEqual("workspace-changed", result.outcome)
+            self.assertFalse((state_dir / assurance_ledger.LEDGER_FILE_NAME).exists())
+
+    def test_losing_the_change_artifact_does_not_accept_the_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+            fake = _RecordingHarness(writes=workspace / "app" / "escaped.txt")
+            with mock.patch.object(
+                assurance_models, "write_audit_json", side_effect=OSError("disk-full")
+            ):
+                result = self._run(
+                    "codex", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
+                )
+
+            self.assertEqual("unavailable", result.state)
+            self.assertEqual("workspace-changed", result.outcome)
+            self.assertIsNotNone(result.workspace_change)
+
+    def test_ref_changes_preserve_the_remote_tracking_exception(self) -> None:
+        for ref, expected in (
+            ("refs/remotes/origin/main", "ok"),
+            ("refs/heads/sneaky", "workspace-changed"),
+            ("refs/tags/sneaky", "workspace-changed"),
+        ):
+            with self.subTest(ref=ref), tempfile.TemporaryDirectory() as tmp:
+                workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
+                app = workspace / "app"
+                head = git_stdout(app, "rev-parse", "HEAD").strip()
+                fake = _RecordingHarness(
+                    action=lambda ref=ref, head=head, app=app: subprocess.run(
+                        ["git", "update-ref", ref, head],
+                        cwd=app,
+                        capture_output=True,
+                        check=True,
+                    )
+                )
+                result = self._run(
+                    "claude", Path(tmp), fake, workspace, plan_dir, state_dir, run_dir
+                )
+                self.assertEqual(expected, result.outcome)
+                if expected == "workspace-changed":
+                    refs = (result.workspace_change or {})["changed"]["app"][
+                        "refs_added"
+                    ]
+                    self.assertEqual([ref], [entry["ref"] for entry in refs])
 
     def test_an_audit_that_leaves_the_workspace_alone_completes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1346,9 +1413,9 @@ class RestrictedAuditTests(unittest.TestCase):
 
             self.assertEqual("ok", result.outcome)
             self.assertEqual("pending", result.state)
-            self.assertIsNone(result.mutation)
+            self.assertIsNone(result.workspace_change)
             self.assertFalse(
-                (run_dir / supervisor_audit.MUTATION_ARTIFACT_NAME).exists()
+                (run_dir / supervisor_audit.WORKSPACE_CHANGE_ARTIFACT_NAME).exists()
             )
 
     def test_the_auditor_is_launched_read_only_without_the_plan_directory(
@@ -1395,416 +1462,6 @@ class RestrictedAuditTests(unittest.TestCase):
             self.assertEqual("unavailable", result.outcome)
             self.assertEqual("profile-unenforceable", result.reason)
             self.assertEqual([], fake.calls)
-
-
-class PinnedAuditWorkspaceTests(unittest.TestCase):
-    """The boundary check is judged on a tree only the audit turn can change."""
-
-    def _role(self) -> AuditRole:
-        return AuditRole(
-            harness="claude",
-            implementation_harness="codex",
-            source="explicit",
-            timeout_seconds=30.0,
-        )
-
-    def _workspace(self, tmp: Path) -> tuple[Path, Path, Path, Path]:
-        workspace = tmp / "workspace"
-        init_git_repo(workspace / "app")
-        plan_dir = tmp / "plan"
-        plan_dir.mkdir()
-        state_dir = tmp / "state"
-        run_dir = state_dir / "runs" / RUN_ID
-        run_dir.mkdir(parents=True)
-        return workspace, plan_dir, state_dir, run_dir
-
-    def _record_commit(
-        self,
-        run_dir: Path,
-        *,
-        index: int,
-        repository_path: str,
-        head_after: str,
-    ) -> None:
-        directory = run_dir / f"commit-{index}"
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / state.RESULT_FILE_NAME).write_text(
-            json.dumps(
-                {
-                    "commit_index": index,
-                    "repository_path": repository_path,
-                    "head_after": head_after,
-                }
-            ),
-            encoding="utf-8",
-        )
-
-    def _head(self, repository: Path) -> str:
-        return git_stdout(repository, "rev-parse", "HEAD").strip()
-
-    def _pin(self, workspace: Path, run_dir: Path, repositories: tuple[str, ...]):
-        return supervisor_audit.pinned_audit_workspace(
-            workspace, repositories, supervisor_audit.run_commits(run_dir, repositories)
-        )
-
-    def _git(self, repository: Path, *argv: str) -> None:
-        subprocess.run(
-            ["git", *argv],
-            cwd=repository,
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-
-    def test_the_checkout_holds_the_commit_the_run_recorded(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, _, _, run_dir = self._workspace(Path(tmp))
-            recorded = self._head(workspace / "app")
-            (workspace / "app" / "later.txt").write_text("later\n", encoding="utf-8")
-            for argv in (["add", "later.txt"], ["commit", "-m", "later"]):
-                subprocess.run(
-                    ["git", *argv],
-                    cwd=workspace / "app",
-                    text=True,
-                    capture_output=True,
-                    check=True,
-                )
-            self._record_commit(
-                run_dir, index=1, repository_path="app", head_after=recorded
-            )
-
-            with self._pin(workspace, run_dir, ("app",)) as pinned:
-                self.assertTrue(pinned.pinned)
-                self.assertNotEqual(workspace.resolve(), pinned.root.resolve())
-                self.assertEqual(recorded, self._head(pinned.root / "app"))
-                self.assertFalse((pinned.root / "app" / "later.txt").exists())
-                self.assertEqual({"app": recorded}, dict(pinned.commits))
-
-    def test_a_concurrent_write_to_the_live_workspace_is_not_the_auditors_doing(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
-            self._record_commit(
-                run_dir,
-                index=1,
-                repository_path="app",
-                head_after=self._head(workspace / "app"),
-            )
-            fake = _RecordingHarness(writes=workspace / "app" / "concurrent.txt")
-
-            with self._pin(workspace, run_dir, ("app",)) as pinned:
-                result = supervisor_audit.run_restricted_audit(
-                    self._role(),
-                    run_dir=run_dir,
-                    run_id=RUN_ID,
-                    workspace_root=workspace,
-                    plan_dir=plan_dir,
-                    prompt="Audit this run.",
-                    repositories=("app",),
-                    pinned=pinned,
-                    state_dir=state_dir,
-                    _run_harness_fn=fake,
-                )
-
-            self.assertEqual("ok", result.outcome)
-            self.assertIsNone(result.mutation)
-
-    def test_a_write_inside_the_pinned_checkout_is_still_a_mutation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
-            self._record_commit(
-                run_dir,
-                index=1,
-                repository_path="app",
-                head_after=self._head(workspace / "app"),
-            )
-
-            with self._pin(workspace, run_dir, ("app",)) as pinned:
-                fake = _RecordingHarness(writes=pinned.root / "app" / "escaped.txt")
-                result = supervisor_audit.run_restricted_audit(
-                    self._role(),
-                    run_dir=run_dir,
-                    run_id=RUN_ID,
-                    workspace_root=workspace,
-                    plan_dir=plan_dir,
-                    prompt="Audit this run.",
-                    repositories=("app",),
-                    pinned=pinned,
-                    state_dir=state_dir,
-                    _run_harness_fn=fake,
-                )
-
-            self.assertEqual("mutation-detected", result.outcome)
-            self.assertEqual(supervisor_audit.REASON_WORKSPACE_MUTATED, result.reason)
-            mutation = result.mutation or {}
-            self.assertIn("app", mutation["changed"])
-            self.assertTrue(mutation["workspace"]["pinned"])
-
-    def test_the_live_workspaces_other_checkouts_stay_out_of_the_comparison(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
-            head = self._head(workspace / "app")
-            self._record_commit(
-                run_dir, index=1, repository_path="app", head_after=head
-            )
-            sibling = Path(tmp) / "sibling"
-            repository_evidence.add_detached_worktree(workspace / "app", sibling, head)
-            self.addCleanup(
-                repository_evidence.remove_worktree, workspace / "app", sibling
-            )
-            fake = _RecordingHarness(writes=sibling / "escaped.txt")
-
-            with self._pin(workspace, run_dir, ("app",)) as pinned:
-                result = supervisor_audit.run_restricted_audit(
-                    self._role(),
-                    run_dir=run_dir,
-                    run_id=RUN_ID,
-                    workspace_root=workspace,
-                    plan_dir=plan_dir,
-                    prompt="Audit this run.",
-                    repositories=("app",),
-                    pinned=pinned,
-                    state_dir=state_dir,
-                    _run_harness_fn=fake,
-                )
-
-            self.assertEqual("ok", result.outcome)
-
-    def test_the_checkout_and_its_registration_are_dropped_afterwards(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, _, _, run_dir = self._workspace(Path(tmp))
-            self._record_commit(
-                run_dir,
-                index=1,
-                repository_path="app",
-                head_after=self._head(workspace / "app"),
-            )
-
-            with self._pin(workspace, run_dir, ("app",)) as pinned:
-                root = pinned.root
-
-            self.assertFalse(root.exists())
-            listed = git_stdout(workspace / "app", "worktree", "list", "--porcelain")
-            self.assertEqual(1, listed.count("worktree "))
-
-    def test_failed_cleanup_keeps_the_checkout_and_records_its_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, _, _, run_dir = self._workspace(Path(tmp))
-            origin = workspace / "app"
-            with (
-                self.assertLogs(supervisor_audit.__name__, level="WARNING"),
-                supervisor_audit.pinned_audit_workspace(
-                    workspace,
-                    ("app",),
-                    {"app": self._head(origin)},
-                    cleanup_report_dir=run_dir,
-                ) as pinned,
-            ):
-                self.addCleanup(shutil.rmtree, pinned.root, True)
-                self.addCleanup(
-                    repository_evidence.remove_worktree, origin, pinned.root / "app"
-                )
-                self._git(origin, "worktree", "lock", str(pinned.root / "app"))
-
-            self.assertTrue((pinned.root / "app" / ".git").exists())
-            self.assertIn(
-                (pinned.root / "app").resolve(),
-                repository_evidence.linked_worktrees(origin),
-            )
-            report = json.loads((run_dir / "supervisor-audit-cleanup.json").read_text())
-            self.assertEqual([str(pinned.root / "app")], report["retained_worktrees"])
-            self._git(origin, "worktree", "unlock", str(pinned.root / "app"))
-
-    def test_failed_nested_cleanup_preserves_its_parent_checkout(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, _, _, _ = self._workspace(Path(tmp))
-            init_git_repo(workspace / "app" / "nested")
-            repositories = ("app", "app/nested")
-            with (
-                self.assertLogs(supervisor_audit.__name__, level="WARNING"),
-                supervisor_audit.pinned_audit_workspace(
-                    workspace,
-                    repositories,
-                    {
-                        relative: self._head(workspace / relative)
-                        for relative in repositories
-                    },
-                ) as pinned,
-            ):
-                self.addCleanup(shutil.rmtree, pinned.root, True)
-                for relative in repositories:
-                    self.addCleanup(
-                        repository_evidence.remove_worktree,
-                        workspace / relative,
-                        pinned.root / relative,
-                    )
-                self._git(
-                    workspace / "app/nested",
-                    "worktree",
-                    "lock",
-                    str(pinned.root / "app/nested"),
-                )
-
-            for relative in repositories:
-                self.assertTrue((pinned.root / relative / ".git").exists())
-            self._git(
-                workspace / "app/nested",
-                "worktree",
-                "unlock",
-                str(pinned.root / "app/nested"),
-            )
-
-    def test_a_failed_add_cleans_its_partial_registration(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, _, _, _ = self._workspace(Path(tmp))
-            origin = workspace / "app"
-            add = repository_evidence.add_detached_worktree
-            destinations: list[Path] = []
-
-            def partial_add(repository: Path, destination: Path, commit: str) -> Path:
-                destinations.append(add(repository, destination, commit))
-                raise repository_evidence.RepositoryEvidenceError(
-                    "checkout interrupted"
-                )
-
-            with (
-                mock.patch.object(
-                    repository_evidence,
-                    "add_detached_worktree",
-                    side_effect=partial_add,
-                ),
-                supervisor_audit.pinned_audit_workspace(
-                    workspace, ("app",), {"app": self._head(origin)}
-                ) as pinned,
-            ):
-                self.assertFalse(pinned.pinned)
-
-            self.assertEqual((), repository_evidence.linked_worktrees(origin))
-            self.assertFalse(destinations[0].parent.exists())
-
-    def test_a_run_that_recorded_no_commit_is_judged_on_the_live_workspace(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, _, _, run_dir = self._workspace(Path(tmp))
-
-            with self._pin(workspace, run_dir, ("app",)) as pinned:
-                self.assertFalse(pinned.pinned)
-                self.assertEqual(
-                    supervisor_audit.PIN_REASON_NO_RECORDED_COMMIT, pinned.reason
-                )
-                self.assertEqual(workspace, pinned.root)
-
-    def test_one_repository_without_a_commit_abandons_the_whole_pin(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, _, _, run_dir = self._workspace(Path(tmp))
-            init_git_repo(workspace / "lib")
-            self._record_commit(
-                run_dir,
-                index=1,
-                repository_path="app",
-                head_after=self._head(workspace / "app"),
-            )
-
-            self.assertIsNone(supervisor_audit.run_commits(run_dir, ("app", "lib")))
-
-    def test_a_fetch_moving_a_remote_tracking_ref_is_not_a_mutation(self) -> None:
-        # A linked worktree gets its own HEAD, index, and tree, but shares the
-        # ref store, so the pin cannot isolate a remote-tracking ref.
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
-            head = self._head(workspace / "app")
-            self._record_commit(
-                run_dir, index=1, repository_path="app", head_after=head
-            )
-            fake = _RecordingHarness(
-                action=lambda: self._git(
-                    workspace / "app",
-                    "update-ref",
-                    "refs/remotes/origin/main",
-                    head,
-                )
-            )
-
-            with self._pin(workspace, run_dir, ("app",)) as pinned:
-                result = supervisor_audit.run_restricted_audit(
-                    self._role(),
-                    run_dir=run_dir,
-                    run_id=RUN_ID,
-                    workspace_root=workspace,
-                    plan_dir=plan_dir,
-                    prompt="Audit this run.",
-                    repositories=("app",),
-                    pinned=pinned,
-                    state_dir=state_dir,
-                    _run_harness_fn=fake,
-                )
-
-            self.assertEqual("ok", result.outcome)
-            self.assertIsNone(result.mutation)
-
-    def test_a_local_ref_that_moves_is_still_a_mutation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, plan_dir, state_dir, run_dir = self._workspace(Path(tmp))
-            head = self._head(workspace / "app")
-            self._record_commit(
-                run_dir, index=1, repository_path="app", head_after=head
-            )
-            fake = _RecordingHarness(
-                action=lambda: self._git(
-                    workspace / "app", "update-ref", "refs/heads/sneaky", head
-                )
-            )
-
-            with self._pin(workspace, run_dir, ("app",)) as pinned:
-                result = supervisor_audit.run_restricted_audit(
-                    self._role(),
-                    run_dir=run_dir,
-                    run_id=RUN_ID,
-                    workspace_root=workspace,
-                    plan_dir=plan_dir,
-                    prompt="Audit this run.",
-                    repositories=("app",),
-                    pinned=pinned,
-                    state_dir=state_dir,
-                    _run_harness_fn=fake,
-                )
-
-            self.assertEqual("mutation-detected", result.outcome)
-            refs = (result.mutation or {})["changed"]["app"]["refs_added"]
-            self.assertEqual(["refs/heads/sneaky"], [entry["ref"] for entry in refs])
-
-    def test_a_commit_that_cannot_be_checked_out_falls_back_to_the_live_workspace(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, _, _, run_dir = self._workspace(Path(tmp))
-            self._record_commit(
-                run_dir, index=1, repository_path="app", head_after="0" * 40
-            )
-
-            with self._pin(workspace, run_dir, ("app",)) as pinned:
-                self.assertEqual(
-                    supervisor_audit.PIN_REASON_CHECKOUT_FAILED, pinned.reason
-                )
-                self.assertEqual(workspace, pinned.root)
-            listed = git_stdout(workspace / "app", "worktree", "list", "--porcelain")
-            self.assertEqual(1, listed.count("worktree "))
-
-    def test_the_latest_commit_per_repository_is_the_one_pinned(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            _, _, _, run_dir = self._workspace(Path(tmp))
-            self._record_commit(run_dir, index=9, repository_path="app", head_after="a")
-            self._record_commit(
-                run_dir, index=10, repository_path="app", head_after="b"
-            )
-
-            self.assertEqual(
-                {"app": "b"}, supervisor_audit.run_commits(run_dir, ("app",))
-            )
 
 
 class EvidenceBundleTests(unittest.TestCase):
@@ -3647,6 +3304,34 @@ class CommitObservabilityTests(_RunHistoryFixture, unittest.TestCase):
             )
         }
         return results["mutation-commit-guards"]
+
+    def test_snapshot_artifacts_do_not_prove_a_critical_guard_failure(self) -> None:
+        for name in (
+            supervisor_audit.MUTATION_ARTIFACT_NAME,
+            supervisor_audit.WORKSPACE_CHANGE_ARTIFACT_NAME,
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                history = self._worker_committed(tmp)
+                payload = copy.deepcopy(self._bundle(history).payload)
+                reference = f"run/{name}"
+                payload["evidence"].append(
+                    {"kind": "artifact", "locator": reference, "digest": "a" * 64}
+                )
+                verdict = {
+                    r.check: r
+                    for r in supervisor_audit.run_deterministic_checks(payload)
+                }["mutation-commit-guards"]
+                self.assertEqual("unavailable", verdict.status)
+                self.assertIn("identify no writer", verdict.detail)
+                self.assertIn(reference, verdict.evidence)
+                for scope in payload["scopes"]["sessions"]:
+                    scope["writes"] = []
+                verdict = {
+                    r.check: r
+                    for r in supervisor_audit.run_deterministic_checks(payload)
+                }["mutation-commit-guards"]
+                self.assertEqual("fail", verdict.status)
+                self.assertIn("which no session declares as writable", verdict.detail)
 
     def test_a_change_keyed_by_repository_path_is_named_by_its_alias(self) -> None:
         # The change map is keyed by path; session scopes are keyed by alias.
@@ -7702,7 +7387,6 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual(
                 list(RUBRIC_LANES), [lane.lane for lane in outcome.audit.lanes]
             )
-            self.assertIsNone(outcome.mutation_issue_id)
 
     def test_an_agent_finding_is_reported_with_an_asl_assigned_fingerprint(
         self,
@@ -8395,7 +8079,7 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             before = repository_evidence.capture_workspace_snapshot(workspace, plan_dir)
             auditor = _ScriptedAuditor("not an audit")
 
-            outcome = self._run(history, auditor)
+            self._run(history, auditor)
             comparison = repository_evidence.compare_workspace_snapshots(
                 before,
                 repository_evidence.capture_workspace_snapshot(workspace, plan_dir),
@@ -8404,7 +8088,6 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             self.assertEqual({}, dict(comparison["changed"]))
             self.assertEqual([], comparison["added"])
             self.assertEqual([], comparison["removed"])
-            self.assertIsNone(outcome.mutation_issue_id)
             self.assertFalse(
                 (run_dir / supervisor_audit.MUTATION_ARTIFACT_NAME).exists()
             )

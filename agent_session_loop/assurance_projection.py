@@ -165,7 +165,13 @@ UNAVAILABLE_RECOMMENDATIONS: Mapping[str, str] = MappingProxyType(
             "is out of provider quota. Re-run it with `asl assurance "
             "process-pending` once the limit resets, and read the named attempt "
             "artifacts if it then fails for some other reason."
-        )
+        ),
+        "workspace-changed-during-audit": (
+            "Re-run the audit with `asl assurance process-pending` after workspace "
+            "activity has stopped. Read supervisor-audit-workspace-change.json "
+            "and the named attempt artifacts for the comparison; snapshots "
+            "cannot identify who wrote and do not establish an auditor breach."
+        ),
     }
 )
 

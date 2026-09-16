@@ -47,13 +47,11 @@ import contextlib
 import copy
 import hashlib
 import json
-import logging
 import os
 import re
 import shutil
-import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -94,7 +92,6 @@ from .assurance_models import (
     CheckStatus,
     EvidenceKind,
     Finding,
-    IssueObservation,
 )
 from .harnesses import HARNESS_NAMES
 from .literals import as_literal
@@ -116,7 +113,7 @@ REASON_OPTED_OUT = "opted-out"
 REASON_NO_INDEPENDENT_ROLE = "no-independent-role"
 
 #: Why a launched audit produced no usable verdict.
-REASON_WORKSPACE_MUTATED = "workspace-mutated"
+REASON_WORKSPACE_CHANGED = "workspace-changed-during-audit"
 REASON_WORKSPACE_EVIDENCE_UNAVAILABLE = "workspace-evidence-unavailable"
 REASON_HARNESS_FAILED = "harness-failed"
 REASON_QUOTA_EXHAUSTED = "quota-exhausted"
@@ -147,21 +144,9 @@ REASON_INTERRUPTED = "interrupted"
 #: with the rest of the run's evidence and never sits inside the workspace.
 AUDIT_WORKDIR_NAME = "audit-workdir"
 
-#: Run-relative artifact naming the mutation a read-only audit was not supposed
-#: to be able to cause. It is the finding's only evidence reference.
+#: Historical artifact name, retained when interpreting old audit evidence.
 MUTATION_ARTIFACT_NAME = "supervisor-audit-mutation.json"
-
-#: Prefix of the private root the audited run's own commits are checked out
-#: under for the boundary check. It sits outside the run directory on purpose:
-#: the run directory is a read root for the auditor, and a checkout placed
-#: there would hand it the application source the bundle exists to withhold.
-PINNED_WORKSPACE_PREFIX = "asl-audit-pinned-"
-
-#: Why a boundary check was judged on the live workspace rather than on a
-#: checkout pinned to a fixed commit.
-PIN_REASON_NOT_REQUESTED = "not-requested"
-PIN_REASON_NO_RECORDED_COMMIT = "no-recorded-commit"
-PIN_REASON_CHECKOUT_FAILED = "checkout-failed"
+WORKSPACE_CHANGE_ARTIFACT_NAME = "supervisor-audit-workspace-change.json"
 
 #: Run-relative artifact naming an audit that never reached an evidence bundle.
 #: An unavailable audit has to point a reader at something it can open, and a
@@ -435,8 +420,7 @@ class AuditAttemptResult:
     argv: tuple[str, ...] = ()
     returncode: int | None = None
     last_message: str = ""
-    mutation: dict[str, Any] | None = None
-    issue_id: str | None = None
+    workspace_change: dict[str, Any] | None = None
     classification: harness_failures.FailureClassification | None = None
     stdout_tail: str = ""
     stderr_tail: str = ""
@@ -465,14 +449,11 @@ _MUTATION_CHANGE_KEYS = (
 
 
 def _without_remote_tracking_refs(changes: Mapping[str, Any]) -> dict[str, Any]:
-    """Drop the ref moves a pinned checkout shares with every other one.
+    """Drop remote-tracking ref moves from the workspace consistency check.
 
-    A linked worktree gets its own ``HEAD``, index, and working tree, but the
-    ref store stays the origin repository's. A remote-tracking ref therefore
-    moves under the auditor's feet whenever anything else fetches, and the pin
-    that makes every other difference attributable does not isolate it. Counting
-    it charged an auditor with a mutation it could not have made, and one that
-    changed no file, no local branch, and no commit besides (ASI-13).
+    These cache refs can move whenever another checkout fetches, without
+    changing a file, local branch, or commit in the audited workspace (ASI-13).
+    Local branches and tags still invalidate the audit when they change.
     """
     filtered = dict(changes)
     for key in ("refs_added", "refs_removed", "refs_changed"):
@@ -587,217 +568,35 @@ def _observability_changed(
     )
 
 
-@dataclass(frozen=True)
-class PinnedWorkspace:
-    """The workspace tree one audit's read-only boundary check is judged on.
-
-    ``reason`` is set only when no pinned checkout could be made, in which case
-    ``root`` is the live workspace root and the check falls back to comparing
-    that across the turn.
-    """
-
-    root: Path
-    commits: Mapping[str, str] = field(default_factory=dict)
-    reason: str | None = None
-
-    @property
-    def pinned(self) -> bool:
-        return self.reason is None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "pinned": self.pinned,
-            "root": str(self.root),
-            "commits": dict(self.commits),
-            "reason": self.reason,
-        }
-
-
-def run_commits(
-    run_dir: Path | str, repositories: Sequence[str]
-) -> dict[str, str] | None:
-    """Where the run left each registered repository's HEAD, or ``None``.
-
-    ``None`` when even one registered repository has no recorded commit result,
-    because a partial pin would leave the rest of the boundary check on the live
-    tree — the mixture the pin exists to avoid.
-
-    ``head_after`` rather than ``commit_sha`` is what a pinned checkout has to
-    reproduce: the latter is recorded only for a commit that succeeded, while
-    the former is where the repository was actually left either way.
-    """
-    latest: dict[str, tuple[int, str]] = {}
-    try:
-        directories = [
-            entry
-            for entry in Path(run_dir).iterdir()
-            if entry.is_dir() and entry.name.startswith(_COMMIT_DIR_PREFIX)
-        ]
-    except OSError:
-        return None
-    for directory in directories:
-        result, _ = _read_json_file(directory / state.RESULT_FILE_NAME)
-        if not isinstance(result, Mapping):
-            continue
-        relative = result.get("repository_path")
-        head = result.get("head_after")
-        if not isinstance(relative, str) or not isinstance(head, str) or not head:
-            continue
-        index = result.get("commit_index")
-        order = index if isinstance(index, int) else 0
-        if relative not in latest or latest[relative][0] <= order:
-            latest[relative] = (order, head)
-    if any(relative not in latest for relative in repositories):
-        return None
-    return {relative: latest[relative][1] for relative in repositories}
-
-
-def _pin_depth(relative: str) -> tuple[int, str]:
-    """Order registered paths so an ancestor is checked out before a descendant."""
-    return (0 if relative == "." else relative.count("/") + 1, relative)
-
-
-@contextlib.contextmanager
-def pinned_audit_workspace(
-    workspace_root: Path | str,
-    repositories: Sequence[str],
-    commits: Mapping[str, str] | None,
-    *,
-    cleanup_report_dir: Path | None = None,
-) -> Iterator[PinnedWorkspace]:
-    """Check the pinned commits out privately for the boundary check.
-
-    The check asks whether the audit turn wrote to a registered repository, and
-    on the live workspace that question has no honest answer: a concurrent run,
-    or an operator with an editor open, changes the same tree for reasons this
-    audit had nothing to do with, and the comparison reports it as the auditor's
-    doing. A detached checkout of the commits the run itself recorded is a tree
-    with no other writer, so a difference across the turn is evidence again
-    rather than a coincidence.
-
-    Pinning is all-or-nothing. A repository that cannot be checked out abandons
-    the whole pin and yields the live root, because half a pinned comparison
-    carries the false positive it was meant to remove while reading as though it
-    did not.
-
-    Cleanup removes registrations before deleting the temporary root. If Git
-    refuses a removal, keep that checkout and its ancestors intact and report
-    the residue rather than leaving a registration pointing at a deleted tree.
-    """
-    live = Path(workspace_root)
-    if not repositories:
-        yield PinnedWorkspace(root=live, reason=PIN_REASON_NOT_REQUESTED)
-        return
-    if commits is None:
-        yield PinnedWorkspace(root=live, reason=PIN_REASON_NO_RECORDED_COMMIT)
-        return
-
-    root = Path(tempfile.mkdtemp(prefix=PINNED_WORKSPACE_PREFIX))
-    added: list[tuple[Path, Path]] = []
-    try:
-        try:
-            # Shallowest first, so a repository registered at "." is checked out
-            # into the still-empty root before anything nested lands under it.
-            for relative in sorted(repositories, key=_pin_depth):
-                origin = live / relative
-                destination = root / relative
-                # A failed add can already have registered a partial checkout.
-                added.append((origin, destination))
-                repository_evidence.add_detached_worktree(
-                    origin, destination, commits[relative]
-                )
-        except repository_evidence.RepositoryEvidenceError, OSError:
-            yield PinnedWorkspace(root=live, reason=PIN_REASON_CHECKOUT_FAILED)
-            return
-        yield PinnedWorkspace(root=root, commits=dict(commits))
-    finally:
-        retained: list[Path] = []
-        for origin, destination in reversed(added):
-            if any(
-                path.is_relative_to(destination) for path in retained
-            ) or not repository_evidence.remove_worktree(origin, destination):
-                retained.append(destination)
-        if retained:
-            report = {
-                "root": str(root),
-                "retained_worktrees": [str(path) for path in retained],
-                "reason": "worktree-removal-failed",
-            }
-            logging.getLogger(__name__).warning(
-                "Audit worktree cleanup incomplete; retained %s", report
-            )
-            if cleanup_report_dir is not None:
-                try:
-                    assurance_models.write_audit_json(
-                        cleanup_report_dir, "supervisor-audit-cleanup.json", report
-                    )
-                except OSError, assurance_models.AssuranceError:
-                    logging.getLogger(__name__).exception(
-                        "Could not record audit worktree cleanup in %s",
-                        cleanup_report_dir,
-                    )
-        else:
-            shutil.rmtree(root, ignore_errors=True)
-
-
-def _record_mutation_issue(
-    mutation: Mapping[str, Any],
+def _record_workspace_change(
+    comparison: Mapping[str, Any],
     *,
     role: AuditRole,
     run_dir: Path,
     run_id: str,
-    state_dir: Path | str | None,
     observed_at: str,
-) -> str | None:
-    """Persist the mutation artifact and open a system issue for it.
+) -> None:
+    """Record observed activity without inventing a writer's identity.
 
-    Best effort by design: a ledger or disk failure must not swallow the
-    ``unavailable`` verdict the caller already reached, so this returns ``None``
-    instead of raising.
+    Snapshots prove a change, not who caused it. Recording is best effort:
+    losing this artifact cannot turn the already-unavailable audit into a
+    usable verdict. The attempt archive also retains the comparison.
     """
-    try:
+    with contextlib.suppress(OSError, assurance_models.AssuranceError):
         assurance_models.write_audit_json(
             run_dir,
-            MUTATION_ARTIFACT_NAME,
+            WORKSPACE_CHANGE_ARTIFACT_NAME,
             {
                 "run_id": run_id,
                 "observed_at": observed_at,
                 "role": role.to_dict(),
-                "comparison": mutation,
+                "attribution": {
+                    "status": "unattributed",
+                    "reason": "snapshot-comparison-has-no-writer-identity",
+                },
+                "comparison": comparison,
             },
         )
-    except OSError, assurance_models.AssuranceError:
-        return None
-    try:
-        record = assurance_ledger.append_issue_observation(
-            IssueObservation(
-                run_id=run_id,
-                finding=Finding(
-                    category="audit-integrity",
-                    component="supervisor-audit",
-                    invariant_key="audit-read-only-mutation",
-                    lane="mutation-commit-guards",
-                    severity="critical",
-                    summary=(
-                        "The supervisor audit ran under the read-only access "
-                        "profile, but repository evidence changed while it was "
-                        "running."
-                    ),
-                    recommendation=(
-                        "Treat the audit verdict as unavailable and confirm the "
-                        f"{role.harness} read-only profile is still enforced by "
-                        "the installed harness before auditing again."
-                    ),
-                    evidence=(MUTATION_ARTIFACT_NAME,),
-                ),
-                observed_at=observed_at,
-                audit_artifact=MUTATION_ARTIFACT_NAME,
-            ),
-            state_dir=state_dir,
-        )
-    except OSError, assurance_ledger.LedgerError, assurance_models.AssuranceError:
-        return None
-    return record.issue_id
 
 
 def run_restricted_audit(
@@ -810,7 +609,6 @@ def run_restricted_audit(
     prompt: str,
     repositories: Sequence[str],
     registry_declared: bool = True,
-    pinned: PinnedWorkspace | None = None,
     state_dir: Path | str | None = None,
     timeout: int | None = None,
     stream_callback: harnesses.StreamCallback | None = None,
@@ -818,14 +616,16 @@ def run_restricted_audit(
     now: Callable[[], datetime] | None = None,
     _run_harness_fn: Callable[..., harnesses.HarnessResult] | None = None,
 ) -> AuditAttemptResult:
-    """Run one audit attempt under the read-only profile, guarded by evidence.
+    """Run read-only and reject a verdict over a changing live workspace.
 
     ``repositories`` holds the workspace-relative paths the plan registered,
     and they alone are fingerprinted on both sides of the turn. Any change to
     one of them makes the audit unavailable regardless of what the auditor
-    reported, because a read-only turn that mutated a registered repository has
-    already disproved the boundary its verdict depends on. A registered
-    repository the snapshot cannot name at all, one whose evidence is already
+    reported. Snapshots establish activity, never a writer's identity: an
+    auditor escaping its profile and an unrelated concurrent edit produce the
+    same evidence, so neither is accepted as a stable audit or charged to the
+    auditor as a critical breach. A registered repository the snapshot cannot
+    name at all, one whose evidence is already
     unavailable before the turn, or one whose evidence stops (or starts) being
     probeable across the turn, makes the audit unavailable for the same reason:
     silence about a repository is not proof that it was left alone, and no
@@ -840,13 +640,9 @@ def run_restricted_audit(
     that compatibility case auditable without extending the same tolerance to a
     repository a plan really registered.
 
-    ``pinned`` names the tree the comparison is made over. A checkout pinned to
-    the run's own commits has no writer but this audit, so a difference across
-    the turn is the auditor's doing; the live workspace has other writers, and
-    falling back to it keeps the check running while widening what a reported
-    difference could mean. Its linked worktrees are enumerated only in that
-    fallback: from inside a pinned checkout, Git lists the live trees the pin
-    exists to stay out of.
+    The comparison always covers the live workspace, including linked worktrees.
+    A private pin the auditor cannot reach observes no writer and would miss
+    escaped writes to the live tree, even when the run recorded commits.
 
     ``abort`` lets a supervisor cancel the attempt mid-turn; the cancel is
     raised as :class:`AuditCancelled` rather than returned, so no caller can
@@ -858,18 +654,13 @@ def run_restricted_audit(
         return AuditAttemptResult(
             outcome="unavailable", state="unavailable", reason=unavailable
         )
-    guard = (
-        PinnedWorkspace(root=Path(workspace_root), reason=PIN_REASON_NOT_REQUESTED)
-        if pinned is None
-        else pinned
-    )
 
     def snapshot() -> repository_evidence.WorkspaceSnapshot:
         return repository_evidence.capture_registered_snapshot(
-            guard.root,
+            Path(workspace_root),
             plan_dir,
             tuple(repositories),
-            include_linked_worktrees=not guard.pinned,
+            include_linked_worktrees=True,
         )
 
     try:
@@ -929,28 +720,27 @@ def run_restricted_audit(
             last_message=result.last_message,
         )
 
-    mutation = _mutation_comparison(
+    change = _mutation_comparison(
         repository_evidence.compare_workspace_snapshots(before, after)
     )
-    if mutation is not None:
-        mutation["workspace"] = guard.to_dict()
+    if change is not None:
+        change["workspace"] = {"root": str(Path(workspace_root))}
         clock = datetime.now(UTC) if now is None else now()
+        _record_workspace_change(
+            change,
+            role=role,
+            run_dir=run_dir,
+            run_id=run_id,
+            observed_at=clock.isoformat(),
+        )
         return AuditAttemptResult(
-            outcome="mutation-detected",
+            outcome="workspace-changed",
             state="unavailable",
-            reason=REASON_WORKSPACE_MUTATED,
+            reason=REASON_WORKSPACE_CHANGED,
             argv=argv,
             returncode=result.returncode,
             last_message=result.last_message,
-            mutation=mutation,
-            issue_id=_record_mutation_issue(
-                mutation,
-                role=role,
-                run_dir=run_dir,
-                run_id=run_id,
-                state_dir=state_dir,
-                observed_at=clock.isoformat(),
-            ),
+            workspace_change=change,
         )
 
     if _observability_changed(before, after, repositories):
@@ -964,8 +754,8 @@ def run_restricted_audit(
         )
 
     if result.aborted:
-        # After the boundary check, so a cancelled auditor that wrote to a
-        # registered repository is still reported; before every failure branch,
+        # After the consistency check, so workspace activity during a cancelled
+        # attempt is still reported without attribution; before every failure branch,
         # so the kill is never read as a transport error worth retrying.
         raise AuditCancelled(REASON_INTERRUPTED)
     if result.interrupted:
@@ -5473,12 +5263,12 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
     contradictions: list[str] = []
     references: list[str] = []
 
-    mutation = f"{EVIDENCE_ROOT_RUN}/{MUTATION_ARTIFACT_NAME}"
-    if mutation in context.declared:
-        references.append(mutation)
-        contradictions.append(
-            "the audit recorded a workspace mutation under its own read-only profile"
-        )
+    activity = [
+        f"{EVIDENCE_ROOT_RUN}/{name}"
+        for name in (MUTATION_ARTIFACT_NAME, WORKSPACE_CHANGE_ARTIFACT_NAME)
+        if f"{EVIDENCE_ROOT_RUN}/{name}" in context.declared
+    ]
+    references.extend(activity)
 
     writable = {
         str(alias)
@@ -5577,6 +5367,13 @@ def _check_mutation_commit_guards(context: _CheckContext) -> _Verdict:
             "fail",
             f"the run's mutation and commit guards left a gap: "
             f"{_joined(contradictions)}",
+            evidence,
+        )
+    if activity:
+        return _Verdict(
+            "unavailable",
+            "the audit recorded workspace activity, but snapshot comparisons "
+            "identify no writer; this does not establish an auditor breach",
             evidence,
         )
     if not attempts and not guarded:
@@ -6875,10 +6672,10 @@ RETRYABLE_ANSWER_OUTCOMES: frozenset[str] = frozenset(
     }
 )
 
-#: Attempt outcomes that earn a retry at all. A detected mutation, an
+#: Attempt outcomes that earn a retry at all. Observed workspace activity, an
 #: unenforceable profile, and an interrupt are absent on purpose: none is a
 #: transient failure, and retrying would either run a second turn under a
-#: boundary already known to be broken or answer the operator's Ctrl+C with more
+#: workspace already known to be changing or answer the operator's Ctrl+C with more
 #: of what they interrupted.
 RETRYABLE_ATTEMPT_OUTCOMES: frozenset[str] = (
     RETRYABLE_DELIVERY_OUTCOMES | RETRYABLE_ANSWER_OUTCOMES
@@ -6989,6 +6786,12 @@ nothing that must be parsed outside it:
 {schema}
 
 Rules the answer must satisfy:
+
+- Workspace snapshot differences identify activity, not its writer. Neither
+  `supervisor-audit-workspace-change.json` nor the historical
+  `supervisor-audit-mutation.json` alone proves that the auditor wrote anything.
+  Such activity invalidates the audit, but do not report an auditor breach or a
+  critical mutation finding without independent writer-specific evidence.
 
 - `lanes` holds exactly one record per rubric lane named above. A lane you
   could not judge is `unavailable` and still names the evidence that proves it
@@ -7197,7 +7000,6 @@ class AgentAuditOutcome:
     audit: assurance_models.SupervisorAudit
     attempts: tuple[assurance_models.AuditAttempt, ...]
     agent_covered: bool
-    mutation_issue_id: str | None = None
     #: The validated answer behind ``audit``, kept because the canonical audit
     #: carries no identity: allocation reads the decisions from here.
     agent: AgentAudit | None = None
@@ -7220,17 +7022,6 @@ class AgentAuditOutcome:
         if self.agent is None or self.catalog is None:
             return None
         return self.catalog.digest
-
-    @property
-    def linked_issue_ids(self) -> tuple[str, ...]:
-        """Issues the audit's own guards already appended, for the summary.
-
-        The mutation guard opens its issue while the attempt is still running,
-        so the publication names that ID instead of observing the mutation a
-        second time; without this the run's most severe issue would exist only
-        in the inbox and be missing from every run-facing surface.
-        """
-        return () if self.mutation_issue_id is None else (self.mutation_issue_id,)
 
 
 def _inline(text: str, *, limit: int = assurance_models.MAX_TEXT_CHARS) -> str:
@@ -8264,7 +8055,7 @@ def _write_attempt_artifacts(
 ) -> str | None:
     """Archive one attempt, returning its locator, or ``None`` when it cannot.
 
-    Best effort by design, exactly like the mutation artifact: losing the
+    Best effort by design, exactly like the workspace-change artifact: losing the
     archive of an attempt must not lose the verdict the attempt produced.
     """
     try:
@@ -8296,6 +8087,7 @@ def _write_attempt_artifacts(
                     "detail": detail,
                     "reason": attempt.reason,
                     "returncode": attempt.returncode,
+                    "workspace_change": attempt.workspace_change,
                     "argv": _bounded_argv(attempt.argv, prompt=prompt),
                     "classification": (
                         None
@@ -8381,7 +8173,6 @@ def run_agent_audit(
     plan_dir: Path | str,
     repositories: Sequence[str],
     registry_declared: bool = True,
-    pinned: PinnedWorkspace | None = None,
     state_dir: Path | str | None = None,
     results: Sequence[assurance_models.DeterministicResult] | None = None,
     stream_callback: harnesses.StreamCallback | None = None,
@@ -8428,10 +8219,9 @@ def run_agent_audit(
     before each launch, so a cancel that arrives during a transport backoff is
     honored at the end of that wait instead of buying another launch.
 
-    The pinned checkout the boundary check is judged on is made once and shared
-    by every attempt. Each attempt still fingerprints it on both sides of its
-    own turn, so an attempt is judged on what it did rather than on what an
-    earlier one left behind; what the attempts share is the tree, not a verdict.
+    Every attempt checks the live workspace on both sides of its own turn.
+    Observed activity invalidates the verdict without attributing that activity
+    to the auditor; it is not retried automatically over a changing workspace.
     """
     run_dir = Path(run_dir)
     clock = datetime.now(UTC) if now is None else now()
@@ -8445,7 +8235,6 @@ def run_agent_audit(
     inbox = read_identity_catalog(state_dir)
     catalog = build_agent_catalog(inbox)
     attempts: list[assurance_models.AuditAttempt] = []
-    mutation_issue_id: str | None = None
     correction: str | None = None
     candidates: tuple[assurance_projection.IdentityCandidate, ...] = ()
     candidates_offered = False
@@ -8474,14 +8263,12 @@ def run_agent_audit(
             prompt=prompt,
             repositories=repositories,
             registry_declared=registry_declared,
-            pinned=pinned,
             state_dir=state_dir,
             stream_callback=stream_callback,
             abort=abort,
             now=now,
             _run_harness_fn=_run_harness_fn,
         )
-        mutation_issue_id = attempt.issue_id or mutation_issue_id
         agent: AgentAudit | None = None
         matched: tuple[assurance_projection.IdentityCandidate, ...] = ()
         outcome: AttemptOutcome
@@ -8540,7 +8327,6 @@ def run_agent_audit(
                 audit=rendered,
                 attempts=tuple(attempts),
                 agent_covered=True,
-                mutation_issue_id=mutation_issue_id,
                 agent=agent,
                 catalog=catalog,
                 identity_selections=_identity_selections(agent, rendered.findings),
@@ -8608,7 +8394,6 @@ def run_agent_audit(
         ),
         attempts=tuple(attempts),
         agent_covered=False,
-        mutation_issue_id=mutation_issue_id,
         catalog=catalog,
     )
 
@@ -8790,32 +8575,22 @@ def audit_terminal_run(
                 bundle, run_id=run_id, generated_at=clock().isoformat()
             )
         else:
-            # Pinned after the bundle is written: collecting the evidence reads
-            # the live workspace the run actually left behind, while grading it
-            # is judged on a checkout no concurrent run can touch.
-            with pinned_audit_workspace(
-                workspace_root,
-                repositories,
-                run_commits(run_dir, repositories),
-                cleanup_report_dir=run_dir,
-            ) as pinned:
-                outcome = run_agent_audit(
-                    role,
-                    bundle=bundle,
-                    run_id=run_id,
-                    run_dir=run_dir,
-                    workspace_root=workspace_root,
-                    plan_dir=plan_dir,
-                    repositories=repositories,
-                    registry_declared=registry_declared,
-                    pinned=pinned,
-                    state_dir=ledger_state_dir,
-                    stream_callback=stream_callback,
-                    abort=abort,
-                    durable=durable,
-                    now=now,
-                    _run_harness_fn=_run_harness_fn,
-                )
+            outcome = run_agent_audit(
+                role,
+                bundle=bundle,
+                run_id=run_id,
+                run_dir=run_dir,
+                workspace_root=workspace_root,
+                plan_dir=plan_dir,
+                repositories=repositories,
+                registry_declared=registry_declared,
+                state_dir=ledger_state_dir,
+                stream_callback=stream_callback,
+                abort=abort,
+                durable=durable,
+                now=now,
+                _run_harness_fn=_run_harness_fn,
+            )
         staged = stage_audit_reports(run_dir, outcome.audit, durable=durable)
         input_reference = _artifact_reference(input_path, run_dir, bundle.sha256)
         audit_artifacts = (input_reference, *staged.references)
@@ -8834,7 +8609,6 @@ def audit_terminal_run(
                 role=role,
                 attempts=outcome.attempts,
                 artifacts=audit_artifacts,
-                linked_issue_ids=outcome.linked_issue_ids,
                 started_at=started.isoformat(),
                 completed_at=completed.isoformat(),
                 duration_seconds=max(0.0, (completed - started).total_seconds()),

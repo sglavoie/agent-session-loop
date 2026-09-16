@@ -56,7 +56,7 @@ RUN_ID = "20260810T101112123456Z-4242"
 #: Injected so an audit's timestamps are inputs rather than wall-clock reads.
 FIXED_CLOCK = datetime(2026, 8, 10, 10, 11, 12, tzinfo=UTC)
 
-#: Identity of the issue the audit's own read-only guard opens.
+#: Historical critical identity; snapshot activity must not reopen it.
 MUTATION_INVARIANT_KEY = "audit-read-only-mutation"
 
 #: A run other than the one under test, so a seeded ledger issue is never
@@ -720,7 +720,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             )
 
     def test_an_auditor_that_touched_the_workspace_is_unavailable(self) -> None:
-        """A read-only turn that mutated anything has disproved its own verdict."""
+        """Activity invalidates the verdict without establishing who wrote."""
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             root = history[2].parent
@@ -728,7 +728,7 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             summary = self._audit(history, self._mutating_auditor(history))
 
             self.assertEqual("unavailable", summary.state)
-            self.assertEqual(supervisor_audit.REASON_WORKSPACE_MUTATED, summary.reason)
+            self.assertEqual(supervisor_audit.REASON_WORKSPACE_CHANGED, summary.reason)
             self.assertIn(
                 assurance_ledger.KIND_ISSUE_OBSERVED,
                 [
@@ -737,8 +737,8 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 ],
             )
 
-    def test_a_run_that_committed_is_audited_away_from_the_live_workspace(self) -> None:
-        """Writes the audit could not have caused are not charged to it."""
+    def test_a_recorded_commit_does_not_hide_live_workspace_changes(self) -> None:
+        """A pin the auditor cannot reach must never stand in for the live tree."""
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             workspace, _, _, run_dir = history
@@ -762,13 +762,20 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 encoding="utf-8",
             )
 
-            summary = self._audit(history, self._mutating_auditor(history))
+            with mock.patch.object(
+                supervisor_audit.repository_evidence,
+                "add_detached_worktree",
+                side_effect=AssertionError("audits must not create private pins"),
+            ):
+                summary = self._audit(history, self._mutating_auditor(history))
 
-            self.assertEqual("all-clear", summary.state, summary.reason)
+            self.assertEqual("unavailable", summary.state, summary.reason)
+            self.assertEqual(supervisor_audit.REASON_WORKSPACE_CHANGED, summary.reason)
             self.assertTrue((workspace / "app" / "sneaked.txt").exists())
 
-    def test_a_detected_mutation_is_named_by_the_summary_of_its_own_run(self) -> None:
-        """The run's most severe issue has to be copyable from the run itself."""
+    def test_unattributed_activity_publishes_availability_not_a_critical_breach(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             root = history[2].parent
@@ -776,25 +783,39 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
             summary = self._audit(history, self._mutating_auditor(history))
 
             projection = assurance_projection.read_projection(state_dir=root)
-            mutation = next(
-                issue
-                for issue in projection.issues
-                if issue.finding.invariant_key == MUTATION_INVARIANT_KEY
+            self.assertEqual("unavailable", summary.state)
+            self.assertEqual(
+                ["workspace-changed"], [a.outcome for a in summary.attempts]
             )
-            self.assertEqual("critical", mutation.finding.severity)
-            self.assertIn(mutation.issue_id, summary.issue_ids)
-            self.assertIn(mutation.issue_id, projection.run(RUN_ID).issue_ids)
-            # One sighting, written by the guard: the publication links the
-            # issue rather than observing the same mutation a second time.
-            self.assertEqual(1, len(mutation.occurrences))
+            self.assertFalse(
+                any(
+                    i.finding.invariant_key == MUTATION_INVARIANT_KEY
+                    for i in projection.issues
+                )
+            )
+            self.assertTrue(summary.issue_ids)
+            self.assertEqual(summary.issue_ids, projection.run(RUN_ID).issue_ids)
+            for issue in projection.issues:
+                self.assertNotEqual("critical", issue.finding.severity)
+                self.assertIn("cannot identify who wrote", issue.finding.recommendation)
+            outcome = json.loads(
+                (history[3] / "supervisor-audit-attempt-1" / "outcome.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                ["sneaked.txt"],
+                outcome["workspace_change"]["changed"]["app"]["untracked_added"],
+            )
+            self.assertEqual(1, len(summary.attempts))
             self.assertEqual(
                 len(summary.issue_ids),
                 summary.new_issue_count + summary.recurring_issue_count,
             )
-            self.assertEqual(0, summary.recurring_issue_count)
 
-    def test_a_mutation_issue_an_earlier_run_opened_counts_as_recurring(self) -> None:
-        """Linked issues are counted by who opened them, exactly like minted ones."""
+    def test_snapshot_activity_does_not_reopen_a_historical_mutation_issue(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             history = self._history(Path(tmp))
             root = history[2].parent
@@ -816,15 +837,25 @@ class TerminalAuditTests(_RunHistory, unittest.TestCase):
                 ),
                 state_dir=root,
             )
+            assurance_ledger.append_record(
+                assurance_ledger.KIND_ISSUE_DISPOSITION,
+                assurance_models.Disposition(
+                    issue_id=prior.issue_id,
+                    kind="resolve",
+                    recorded_at="2026-08-09T10:12:12+00:00",
+                ),
+                state_dir=root,
+            )
 
             summary = self._audit(history, self._mutating_auditor(history))
 
-            self.assertIn(prior.issue_id, summary.issue_ids)
-            self.assertEqual(1, summary.recurring_issue_count)
-            self.assertEqual(
-                len(summary.issue_ids),
-                summary.new_issue_count + summary.recurring_issue_count,
+            self.assertNotIn(prior.issue_id, summary.issue_ids)
+            issue = assurance_projection.read_projection(state_dir=root).issue(
+                prior.issue_id
             )
+            self.assertEqual("resolved", issue.state)
+            self.assertEqual(1, issue.occurrence_count)
+            self.assertEqual(0, summary.recurring_issue_count)
 
     def test_a_failed_publication_leaves_no_report_behind(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

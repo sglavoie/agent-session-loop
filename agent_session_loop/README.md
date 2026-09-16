@@ -259,9 +259,33 @@ Independence is structural rather than advisory. An `--audit-harness` equal to `
 
 An auditor that can resolve an independent role then runs under an access profile of its own rather than the worker's. The profile is a separate parameter from `unsafe_bypass` on purpose: bypass widens a worker turn, while the profile decides which access model the turn runs under at all, and folding one into the other would make "not bypassed" mean two different things and let a worker default leak into an audit. Each adapter expresses the audit profile in argv the way its own CLI actually enforces it — codex through its read-only sandbox, deliberately without `--add-dir`, because for codex that flag grants *write* access and the read-only sandbox already reads anywhere; claude through plan permission mode with only `Read`, `Glob`, and `Grep` available, editing, shell, web, subagent, MCP, and session persistence denied; copilot through a verified read/search tool list with `write`, `shell`, and `url` denied outright, built-in MCP servers, custom instructions, remote control, remote export, and temporary-directory access all off. Denials are spelled with `--deny-tool=` rather than a space, since the flag takes a variadic value and the space form can swallow the next argument. Audits run from a dedicated `audit-workdir` under the run directory and are handed read access to the evidence bundle and the read-only ASL and skill trees; no writable application root is ever among them, no `plan_dir` is passed, and building an audit invocation that carries either a writable plan directory or an inherited bypass raises rather than silently dropping the grant. An adapter that cannot express the profile leaves `enforces_audit_read_only` false and the audit is declared `unavailable` instead of degrading to worker access, as is a harness that is not installed.
 
-Enforcement is then checked rather than trusted. Every audit turn fingerprints the workspace before and after itself and compares the two vectors; any changed, added, or removed repository makes the audit `unavailable` with outcome `mutation-detected` no matter what the auditor reported, because a read-only turn that mutated something has already disproved the boundary its verdict rests on. Unavailable repository evidence is not treated as a mutation — that is the absence of proof either way, and counting it would turn a transient git failure into a fabricated integrity issue. Neither is a change confined to `refs/remotes/`: the comparison is made on a checkout pinned to a fixed commit precisely so it has no writer but the auditor, and that pin isolates a worktree's `HEAD`, index, and tree but not the origin repository's ref store, so a remote-tracking ref moves whenever anything else fetches and the pin cannot make it attributable (ASI-13). Pinning stays confined to runs that recorded a commit: a pinned tree is one the auditor cannot reach, so pinning every run would leave nothing for the boundary to observe and an auditor that escaped its read-only profile onto the live workspace would go unnoticed. A detected mutation writes `supervisor-audit-mutation.json` into the run directory and appends a critical `mutation-commit-guards` issue to the assurance inbox citing that artifact, both best effort: a ledger or disk failure must not swallow the `unavailable` verdict the run already reached. That issue is opened while the attempt is still running, so the terminal publication links its ID into the run summary instead of observing the same mutation twice, counted new when this run opened it and recurring when an earlier one did; without that link the run's most severe issue would exist only in the inbox and be missing from every run-facing surface. A linked ID is resolved through the merge chain and checked against the issues the ledger actually allocated, inside the transaction that writes the summary, so a caller naming an issue nobody opened writes nothing at all rather than persisting a run summary pointing at a phantom.
+The snapshot comparison is a workspace-consistency check, not writer attribution.
+Every audit attempt fingerprints the live registered repositories and their linked
+worktrees before and after the turn, even when the run recorded commits. A
+changed, added, or removed repository makes the audit `unavailable` with outcome
+`workspace-changed` and reason `workspace-changed-during-audit`; the auditor's
+answer is discarded and the attempt is not automatically retried. Missing or
+unprobeable registered evidence also fails closed. Changes confined to
+`refs/remotes/` remain excluded because they update a cache without changing
+workspace files, local branches, or commits. Native read-only harness profiles
+remain unchanged.
 
-Audit checkout cleanup verifies that Git removed each temporary worktree registration before deleting the temporary root. A refused removal preserves the checkout and any containing checkout, emits a warning, and records the retained paths in `supervisor-audit-cleanup.json` under the run directory. Cleanup also handles partially registered failed checkouts and never prunes unrelated worktrees (ASI-149).
+Snapshots prove activity, never who caused it: an escaped auditor write and a
+concurrent operator edit look the same. ASL records the comparison in
+`supervisor-audit-workspace-change.json`, explicitly marked `unattributed`, and
+in the attempt's `outcome.json`. Artifact recording is best effort and cannot
+make an invalidated audit usable. The ordinary medium-severity availability
+issue records this degradation; snapshot activity never appends or reopens the
+critical `audit-read-only-mutation` identity. Critical auditor-breach findings
+require independent writer-specific evidence, which this comparison does not
+collect. Historical mutation outcomes, artifacts, and ledger records remain
+readable and are not rewritten; replaying a snapshot artifact alone does not
+establish a critical guard failure.
+
+Private pin-based grading is removed. The auditor cannot reach a pinned tree,
+so checking it misses writes escaping into the live workspace. Auditing no
+longer creates temporary Git worktrees or their registrations; historical
+`supervisor-audit-cleanup.json` reports remain evidence of earlier cleanup.
 
 A successful operator stop is distinct from a completed session. The success check does not count the stopped turn's anomaly against the stop when matching abort-requested and abort-honored records identify that exact session and turn and give a reason. Other anomalous turns, failed verification, and write-scope violations remain counter-evidence (ASI-23).
 
@@ -433,6 +457,16 @@ A submitted decision never fabricates a receipt or replays feedback; a confirmed
 unsent decision releases only a carry without recorded delivery. No timeout or
 default resolves ambiguity. Run state exposes the operation and resolution
 command for CLI and supervisor inspection.
+
+### Verification cache write scope
+
+The shared repository-authority block in packet and legacy skill-mode prompts
+warns that inspection and verification can write caches or generated artifacts.
+Read-only dependencies remain read-only for untracked and ignored files too.
+Workers should use Ruff's `--no-cache` for those dependencies and disable other
+tool writes or direct them to an already-authorized scratch location. This is
+worker guidance, not sandboxing or a guard exemption; tool caches do not justify
+widening a session's write scope.
 
 ### Explicit plan-store write roots
 

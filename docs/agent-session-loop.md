@@ -2111,42 +2111,37 @@ question, the ruling on it, and the notice are never shed.
 
 Opting out is the only way to run no checks at all. A run that stays enabled but
 resolves no independent role, spends either attempt budget, draws a harness that
-cannot enforce the read-only profile, or catches its auditor mutating the
-workspace still publishes whatever the deterministic checks proved, under an
+cannot enforce the read-only profile, or observes workspace activity during
+the audit still publishes whatever the deterministic checks proved, under an
 `unavailable` verdict for the semantic half that went missing.
 
-"Mutating the workspace" is judged on a private checkout, not on the live tree.
-Before the first audit turn ASL reads the `head_after` each registered
-repository's `commit-*/result.json` recorded (the highest `commit_index` wins),
-checks each of those commits out with `git worktree add --detach` under a
-temporary root outside the run directory, and fingerprints *that* on both sides
-of every turn. The live workspace has other writers — a concurrent `asl run`, or
-an operator with an editor open — and a comparison over it reports their work as
-the auditor's, which is the false `audit-read-only-mutation` this replaces. A
-pinned checkout has no writer but the audit turn, so a difference across it is
-evidence again. Linked worktrees are not enumerated for a pinned root, because
-from inside one Git lists the very live trees the pin exists to stay out of. The
-checkouts and their registrations in the origin repositories are always removed
-afterwards. Pinning is all-or-nothing and fails open: if any registered
-repository has no recorded commit, or its commit cannot be checked out, the
-whole pin is abandoned and the check falls back to comparing the live workspace
-exactly as before. Falling back is what keeps the boundary enforceable at all: a
-pinned tree is one the auditor cannot reach, so a run judged only on a pin can
-never observe an auditor that escaped its read-only profile and wrote the live
-workspace. `supervisor-audit-mutation.json` records which tree the verdict was
-reached over under `comparison.workspace` (`pinned`, `root`, `commits`, and a
-`reason` of `not-requested`, `no-recorded-commit`, or `checkout-failed`). The
-evidence bundle is still collected against the live workspace root, and the
-auditor's read roots are unchanged: it never had read access to either tree.
+The snapshot comparison is a workspace-consistency check, not writer attribution.
+Every audit attempt fingerprints the live registered repositories and their linked
+worktrees before and after the turn, even when the run recorded commits. A
+changed, added, or removed repository makes the audit `unavailable` with outcome
+`workspace-changed` and reason `workspace-changed-during-audit`; the auditor's
+answer is discarded and the attempt is not automatically retried. Missing or
+unprobeable registered evidence also fails closed. Changes confined to
+`refs/remotes/` remain excluded because they update a cache without changing
+workspace files, local branches, or commits. Native read-only harness profiles
+remain unchanged.
 
-One thing the pin cannot isolate is the ref store. A linked worktree gets its
-own `HEAD`, index, and working tree, but shares its origin repository's refs, so
-a remote-tracking ref moves under the auditor's feet whenever anything else
-fetches. A change confined to `refs/remotes/` is therefore dropped from the
-mutation reading, and a repository left with no other difference is dropped with
-it: the pin that makes every other difference attributable does not make that
-one attributable, and the move changes no file, no local branch, and no commit
-besides. `refs/heads` and `refs/tags` stay mutations.
+Snapshots prove activity, never who caused it: an escaped auditor write and a
+concurrent operator edit look the same. ASL records the comparison in
+`supervisor-audit-workspace-change.json`, explicitly marked `unattributed`, and
+in the attempt's `outcome.json`. Artifact recording is best effort and cannot
+make an invalidated audit usable. The ordinary medium-severity availability
+issue records this degradation; snapshot activity never appends or reopens the
+critical `audit-read-only-mutation` identity. Critical auditor-breach findings
+require independent writer-specific evidence, which this comparison does not
+collect. Historical mutation outcomes, artifacts, and ledger records remain
+readable and are not rewritten; replaying a snapshot artifact alone does not
+establish a critical guard failure.
+
+Private pin-based grading is removed. The auditor cannot reach a pinned tree,
+so checking it misses writes escaping into the live workspace. Auditing no
+longer creates temporary Git worktrees or their registrations; historical
+`supervisor-audit-cleanup.json` reports remain evidence of earlier cleanup.
 
 Registry identity in the audit is anchored to the same resolved objects the
 runner used. A registry row's `path` remains the workspace-relative declaration
