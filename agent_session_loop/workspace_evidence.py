@@ -29,7 +29,9 @@ It owns four things that the run loop used to hold inline:
   :func:`_workspace_scope_repair_is_fresh` decides whether the operator actually
   re-expanded since that violation,
   :func:`_workspace_scope_repair_still_unauthorized` decides whether the aliases
-  that violation named are still outside the scope now on disk, and
+  that violation named are still outside the scope now on disk,
+  :func:`_workspace_scope_repair_restored` proves the unauthorized writes match
+  their original evidence again without widening scope, and
   :func:`_workspace_scope_repair_comparison` acknowledges the topology a
   registry repair legitimately moved.
 
@@ -629,6 +631,73 @@ def _workspace_scope_repair_still_unauthorized(
         not isinstance(entry.get("alias"), str) or entry["alias"] not in writable
         for entry in violations
     )
+
+
+def _workspace_scope_repair_restored(
+    record: Mapping[str, Any],
+    current: repository_evidence.WorkspaceSnapshot,
+    *,
+    workspace: workspaces.ResolvedWorkspace,
+    scope: plans.SessionScope | None,
+    exclude: tuple[str, ...] = (),
+    include_ignored: bool = False,
+) -> bool:
+    """Prove the rejected writes were restored without expanding authority.
+
+    Compare complete fingerprints, including refs and index state, rather than
+    cleanliness or HEAD alone. In-scope work may remain, but every repository
+    the original violations name must match its pre-turn evidence exactly and
+    the fresh vector must contain no new unauthorized change.
+    """
+    prior = record.get("snapshot_before")
+    violations = record.get("violations")
+    registered = [
+        {"alias": repo.alias, "path": repo.repository.path}
+        for repo in workspace.repositories
+    ]
+    if (
+        scope is None
+        or record.get("unavailable")
+        or record.get("read_aliases") != list(scope.reads)
+        or record.get("write_aliases") != list(scope.writes)
+        or record.get("excluded") != list(exclude)
+        or record.get("include_ignored") is not include_ignored
+        or record.get("registered_repositories") != registered
+        or not isinstance(prior, Mapping)
+        or not prior
+        or prior.keys() != current.keys()
+        or not isinstance(violations, list)
+        or not violations
+        or any(not isinstance(value, Mapping) for value in prior.values())
+    ):
+        return False
+    required = tuple(repo.repository.path for repo in workspace.repositories)
+    if _workspace_snapshot_unavailable(
+        prior, required_repository_paths=required
+    ) or _workspace_snapshot_unavailable(current, required_repository_paths=required):
+        return False
+    aliases = {repo.alias: repo.repository.path for repo in workspace.repositories}
+    for violation in violations:
+        if not isinstance(violation, Mapping):
+            return False
+        repository = violation.get("repository")
+        alias = violation.get("alias")
+        if (
+            not isinstance(alias, str)
+            or not isinstance(repository, str)
+            or aliases.get(alias) != repository
+            or repository not in prior
+            or prior[repository] != current[repository]
+        ):
+            return False
+    evidence = _workspace_write_guard_evidence(
+        workspace=workspace,
+        scope=scope,
+        comparison=repository_evidence.compare_workspace_snapshots(prior, current),
+        exclude=exclude,
+        include_ignored=include_ignored,
+    )
+    return evidence["passed"] is True
 
 
 def _workspace_scope_repair_is_fresh(

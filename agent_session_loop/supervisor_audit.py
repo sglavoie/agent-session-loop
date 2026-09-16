@@ -7021,8 +7021,15 @@ Rules the answer must satisfy:
 - A verification with `passed: false` is never a pass. It may carry an explicit
   `findings-defer-broad-failures` acceptance only when every deferred check is a
   `broad:*` replay under a valid findings verdict. Treat that deferral as
-  accounted for only if the recorded review cycles then materialize repairs and
-  a later review reaches all-clear; otherwise report the contradiction.
+  resolved only when a later review reaches all-clear. A valid deferral on a
+  paused or still in-flight run is provisional, even if repair materialization
+  failed or its budget was exhausted. If `required-checks-incomplete` preserves
+  the failed checks and withholds run success, that is the terminal gate working:
+  report the unresolved verification as `unavailable`, not as a contradiction
+  merely because the review session's status is complete. A finished run that
+  leaves the deferral unredeemed, a success claim despite outstanding failures,
+  or a malformed acceptance (wrong session, non-broad checks, or checks that
+  never failed) remains a defect. A pause never excuses malformed acceptance.
 - A `failure_diagnostic` of `null` on a check ASL did not generate is the
   content boundary working, not a lost diagnostic. Only a gate the runner
   rendered itself may promote its last stderr line into control-plane text, so

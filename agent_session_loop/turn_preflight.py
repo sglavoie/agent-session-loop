@@ -2,9 +2,11 @@
 
 Preparation settles what a *selected session* needs; this boundary settles what
 *this turn* is and what it will be judged against, in the last window where
-nothing has been spent yet. Everything here happens after the prompt exists and
-before the harness process does, which is why a refusal at this point costs the
-run nothing.
+nothing has been spent yet. Turn preparation happens after the prompt exists
+and before the harness process does, which is why a refusal at this point costs
+the run nothing. :func:`retained_scope_restored` also captures startup evidence
+before a historical scope violation can block readiness repair; that proof is
+repeated against the turn's own baseline before the incident is cleared.
 
 Three steps, in the order the loop takes them:
 
@@ -57,8 +59,8 @@ Six invariants survive the move:
 * **A retained repair is judged against the scope every other reader read.** The
   durable child file was widened before preflight, the packet and the prompt, so
   the comparison here is against that same widened scope — and it must also be
-  backed by a *fresh* expansion, because a scope that is clean only because
-  nobody re-ran expansion is not proof.
+  backed by a *fresh* expansion when authority changes. Exact restoration under
+  the original scope and observation policy needs no new expansion.
 * **The exception guard is armed before the harness exists.** It is the only
   thing that lets a crash reach a write-guard verdict, so it is bound after the
   baselines are known to be usable and before anything can raise. A legacy
@@ -150,6 +152,37 @@ class RunContext(Protocol):
 # ---------------------------------------------------------------------------
 # What a resumed repair child retained
 # ---------------------------------------------------------------------------
+
+
+def retained_scope_restored(
+    *,
+    record: Mapping[str, Any],
+    workspace: workspaces.ResolvedWorkspace | None,
+    plan_dir: Path,
+    scope: plans.SessionScope | None,
+    exclude: tuple[str, ...],
+    include_ignored: bool,
+) -> bool:
+    """Recheck restoration before a retained violation blocks readiness repair."""
+    if workspace is None:
+        return False
+    try:
+        current = handoff_guards._capture_workspace_write_guard_snapshot(
+            workspace=workspace,
+            plan_dir=plan_dir,
+            exclude=exclude,
+            include_ignored=include_ignored,
+        )
+    except repository_evidence.RepositoryEvidenceError:
+        return False
+    return workspace_evidence._workspace_scope_repair_restored(
+        record,
+        current,
+        workspace=workspace,
+        scope=scope,
+        exclude=exclude,
+        include_ignored=include_ignored,
+    )
 
 
 def resolve_retained_scope_repair(
@@ -471,26 +504,36 @@ def capture_turn_baselines(
                 snapshot.plan_dir, session_id
             )
             prior_expansion = retained_scope_repair.get("expansion_before_repair")
+            restored = workspace_evidence._workspace_scope_repair_restored(
+                retained_scope_repair,
+                workspace_snapshot_before,
+                workspace=workspace,
+                scope=session_scope,
+                exclude=review_guard_excludes,
+                include_ignored=review_guard_include_ignored,
+            )
             expansion_fresh = isinstance(
                 prior_expansion, Mapping
             ) and workspace_evidence._workspace_scope_repair_is_fresh(
                 prior_expansion, current_expansion
             )
-            if not repair_evidence["passed"] or not expansion_fresh:
+            if not repair_evidence["passed"] or not (expansion_fresh or restored):
                 repair_record = {
                     **retained_scope_repair,
                     "phase": "repair-check",
                     "current_scope_evidence": repair_evidence,
                     "current_expansion": current_expansion,
                     "expansion_fresh": expansion_fresh,
+                    "restored": restored,
                 }
                 ctx.record_final_snapshot(snapshot)
                 ctx.pause(
                     reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
                     message=f"{session_label} still has retained changes "
                     "outside its durable write scope or lacks a "
-                    "fresh expansion; repair scope and rerun "
-                    "expansion/preflight before continuing",
+                    "fresh expansion; restore the unauthorized changes to the "
+                    "recorded pre-turn state, or explicitly authorize a scope "
+                    "change and rerun expansion/preflight before continuing",
                     details={
                         **session_details,
                         "workspace_write_guard": repair_record,
@@ -507,6 +550,7 @@ def capture_turn_baselines(
                         "session_id": session_id,
                         "workspace_write_guard": repair_evidence,
                         "expansion": current_expansion,
+                        "restored": restored,
                     },
                 },
             )

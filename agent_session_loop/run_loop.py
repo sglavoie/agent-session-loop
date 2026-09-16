@@ -1800,9 +1800,22 @@ def run_locked(
         and snapshot.next_pending is not None
         else None
     )
+    initial_scope_restored = (
+        turn_preflight.retained_scope_restored(
+            record=initial_workspace_scope_repair,
+            workspace=ctx.verification_context.workspace,
+            plan_dir=snapshot.plan_dir,
+            scope=_current_session_scope_or_none(ctx, snapshot.next_pending),
+            exclude=review_guard_excludes,
+            include_ignored=review_guard_include_ignored,
+        )
+        if initial_workspace_scope_repair is not None and not ctx.gate_passed
+        else False
+    )
     if (
         initial_workspace_scope_repair is not None
         and not ctx.gate_passed
+        and not initial_scope_restored
         and workspace_evidence._workspace_scope_repair_still_unauthorized(
             initial_workspace_scope_repair,
             _current_session_scope_or_none(ctx, snapshot.next_pending),
@@ -1818,8 +1831,9 @@ def run_locked(
         ctx.pause(
             reason=events.PAUSE_REASON_WORKSPACE_WRITE_SCOPE_VIOLATION,
             message=f"{plans.session_label(session_id)} has retained changes to "
-            "registered repositories outside its write aliases; repair "
-            "its durable repository scope and rerun expansion plus "
+            "registered repositories outside its write aliases; restore the "
+            "unauthorized changes to the recorded pre-turn state, or explicitly "
+            "authorize a durable scope change and rerun expansion plus "
             "preflight before continuing",
             details=details,
         )

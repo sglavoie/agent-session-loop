@@ -5213,6 +5213,67 @@ class RepairScopeRegenerationIntegrationTests(_GeneratedRepairDispatchFixture):
     #: the turn-level repair check that also pauses on this reason.
     RUN_START_REFUSAL = "has retained changes to registered repositories"
 
+    def test_restoring_a_read_only_branch_clears_recovery_without_scope_expansion(
+        self,
+    ) -> None:
+        self._stamp_ready()
+
+        def create_branch(name: str, **kwargs: Any) -> harnesses.HarnessResult:
+            self._git("OWL", "branch", "unauthorized")
+            (self.repositories["OAK"] / "notes.md").write_text(
+                "retained authorized work\n", encoding="utf-8"
+            )
+            self.child.write_text(
+                self.child.read_text(encoding="utf-8").replace(
+                    "- **Status**: pending", "- **Status**: complete", 1
+                ),
+                encoding="utf-8",
+            )
+            return self._record_prompt(name, **kwargs)
+
+        _exit_code, first = self._run("retained-ref", create_branch)
+        self.assertEqual("workspace-write-scope-violation", first["pause_reason"])
+        expansion_before = workspace_evidence._session_expansion_evidence(
+            self.plan_dir, "2.1"
+        )
+        self._git("OWL", "branch", "-D", "unauthorized")
+        self.prompts.clear()
+
+        _exit_code, second = self._run("restored-ref", self._record_prompt)
+
+        self.assertTrue(self.prompts, second.get("pause_message"))
+        self.assertEqual("SVC, OAK", self._write_scope(self.child))
+        self.assertEqual(
+            expansion_before,
+            workspace_evidence._session_expansion_evidence(self.plan_dir, "2.1"),
+        )
+        repairs = [
+            record
+            for record in read_jsonl(self._event_path())
+            if record["name"] == events.WORKSPACE_WRITE_SCOPE_REPAIR_EVENT
+        ]
+        self.assertEqual(1, len(repairs))
+        self.assertTrue(repairs[0]["payload"]["details"]["restored"])
+        self.assertIsNone(
+            workspace_evidence._latest_workspace_scope_repair_requirement(
+                self._event_path(), "2.1"
+            )
+        )
+
+    def test_a_retained_branch_still_requires_recovery_with_read_only_scope(
+        self,
+    ) -> None:
+        self._retain_a_violation()
+        (self.repositories["OWL"] / "notes.md").unlink()
+        self._git("OWL", "branch", "unauthorized")
+
+        exit_code, payload = self._run("retained-ref-still-present", self._refuse)
+
+        self.assertEqual(1, exit_code)
+        self.assertIn(self.RUN_START_REFUSAL, payload["pause_message"])
+        self.assertIn("restore the unauthorized changes", payload["pause_message"])
+        self.assertEqual("SVC, OAK", self._write_scope(self.child))
+
     def test_a_red_gate_refuses_a_violation_the_durable_scope_still_excludes(
         self,
     ) -> None:

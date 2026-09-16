@@ -8348,6 +8348,9 @@ class AgentAuditEngineTests(_RunHistoryFixture, unittest.TestCase):
             self.assertIn("requested default beside a resolved", prompt)
             self.assertIn("`findings-defer-broad-failures`", prompt)
             self.assertIn("later review reaches all-clear", prompt)
+            self.assertIn("paused or still in-flight run is provisional", prompt)
+            self.assertIn("`required-checks-incomplete` preserves", prompt)
+            self.assertIn("A pause never excuses malformed acceptance", prompt)
             for lane in RUBRIC_LANES:
                 self.assertIn(f"- {lane}", prompt)
             for root in supervisor_audit.LOCALIZATION_ROOTS:

@@ -59,9 +59,9 @@ from .support import assert_no_runner_import, write_plan
 RUN_ID = "run-preflight-1"
 SESSION_ID = "1"
 
-#: The three entry points the run loop is allowed to reach here. A fourth would
-#: be work the loop kept that this boundary was supposed to take.
+#: Capture entry points owned here, including startup restoration evidence.
 ENTRY_POINTS = (
+    "turn_preflight.retained_scope_restored",
     "turn_preflight.resolve_retained_scope_repair",
     "turn_preflight.build_active_turn",
     "turn_preflight.capture_turn_baselines",
@@ -348,7 +348,7 @@ class RunLoopDelegationTests(unittest.TestCase):
     def loop_source(self) -> str:
         return Path(run_loop.__file__ or "").read_text(encoding="utf-8")
 
-    def test_the_loop_reaches_exactly_the_three_entry_points(self) -> None:
+    def test_the_loop_reaches_exactly_the_declared_entry_points(self) -> None:
         calls = {
             ast.unparse(node.func)
             for node in ast.walk(ast.parse(self.loop_source()))
